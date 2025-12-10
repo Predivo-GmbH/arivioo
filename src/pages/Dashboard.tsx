@@ -1,16 +1,27 @@
 import { useState, useEffect } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
-import { Search, LogOut, History, Sparkles } from "lucide-react";
+import { Search, LogOut, History, Sparkles, Clock, ExternalLink, TrendingDown } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
+
+interface SearchHistory {
+  id: string;
+  airbnb_url: string;
+  airbnb_title: string | null;
+  airbnb_price: number | null;
+  status: string;
+  created_at: string;
+}
 
 export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [searches, setSearches] = useState<SearchHistory[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -33,6 +44,27 @@ export default function Dashboard() {
 
     return () => subscription.unsubscribe();
   }, [navigate]);
+
+  // Fetch search history
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchSearches = async () => {
+      const { data, error } = await supabase
+        .from("searches")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      if (!error && data) {
+        setSearches(data);
+      }
+      setLoadingHistory(false);
+    };
+
+    fetchSearches();
+  }, [user]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,6 +89,16 @@ export default function Dashboard() {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     navigate("/");
+  };
+
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString("en-US", { 
+      month: "short", 
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit"
+    });
   };
 
   if (!user) return null;
@@ -109,14 +151,52 @@ export default function Dashboard() {
             </div>
           </form>
 
-          <div className="bg-card rounded-2xl border border-border p-8">
+          <div className="bg-card rounded-2xl border border-border p-6 text-left">
             <div className="flex items-center gap-3 mb-4">
               <History className="w-5 h-5 text-muted-foreground" />
               <h2 className="font-semibold text-foreground">Recent Searches</h2>
             </div>
-            <p className="text-muted-foreground text-sm">
-              Your search history will appear here once you start searching.
-            </p>
+            
+            {loadingHistory ? (
+              <p className="text-muted-foreground text-sm">Loading...</p>
+            ) : searches.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                Your search history will appear here once you start searching.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {searches.map((search) => (
+                  <Link
+                    key={search.id}
+                    to={`/search/${search.id}`}
+                    className="flex items-center gap-4 p-3 rounded-xl hover:bg-muted/50 transition-colors group"
+                  >
+                    <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                      <TrendingDown className="w-5 h-5 text-primary" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-foreground line-clamp-1 group-hover:text-primary transition-colors">
+                        {search.airbnb_title || "Vacation Rental"}
+                      </p>
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Clock className="w-3 h-3" />
+                        <span>{formatDate(search.created_at)}</span>
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                          search.status === "completed" 
+                            ? "bg-green-500/10 text-green-600 dark:text-green-400"
+                            : search.status === "error"
+                            ? "bg-destructive/10 text-destructive"
+                            : "bg-primary/10 text-primary"
+                        }`}>
+                          {search.status === "completed" ? "Done" : search.status === "error" ? "Failed" : "Pending"}
+                        </span>
+                      </div>
+                    </div>
+                    <ExternalLink className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </Link>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </main>
