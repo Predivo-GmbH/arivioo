@@ -68,6 +68,44 @@ serve(async (req) => {
   }
 
   try {
+    // Extract and verify JWT token
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Authentication required" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const serpApiKey = Deno.env.get("SERPAPI_API_KEY");
+
+    if (!serpApiKey) {
+      return new Response(
+        JSON.stringify({ error: "Search service temporarily unavailable" }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create a user-scoped client to verify the user
+    const userClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } }
+    });
+
+    // Get authenticated user
+    const { data: { user }, error: userError } = await userClient.auth.getUser();
+    if (userError || !user) {
+      console.error("Auth error:", userError?.message);
+      return new Response(
+        JSON.stringify({ error: "Invalid authentication token" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    console.log("Authenticated user:", user.id);
+
     let body;
     try {
       body = await req.json();
@@ -95,19 +133,10 @@ serve(async (req) => {
       );
     }
 
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const serpApiKey = Deno.env.get("SERPAPI_API_KEY");
-
-    if (!serpApiKey) {
-      return new Response(
-        JSON.stringify({ error: "SerpAPI key not configured" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
+    // Use service role client for database operations (needed for INSERT on search_results)
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+    // Fetch the search and verify ownership
     const { data: search, error: searchError } = await supabase
       .from("searches")
       .select("*")
@@ -118,6 +147,15 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({ error: "Search not found" }),
         { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // CRITICAL: Verify the search belongs to the authenticated user
+    if (search.user_id !== user.id) {
+      console.error("User", user.id, "attempted to access search owned by", search.user_id);
+      return new Response(
+        JSON.stringify({ error: "Access denied" }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
