@@ -46,17 +46,51 @@ function isBookingPlatform(url: string): boolean {
   return platforms.some(p => lowercaseUrl.includes(p));
 }
 
+// UUID v4 validation regex
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// Validate Airbnb URL format
+function isValidAirbnbUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      (parsed.hostname.includes("airbnb.") || parsed.hostname === "airbnb.com") &&
+      parsed.pathname.includes("/rooms/")
+    );
+  } catch {
+    return false;
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { searchId } = await req.json();
+    let body;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Invalid request body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    
+    const { searchId } = body;
     
     if (!searchId) {
       return new Response(
         JSON.stringify({ error: "Search ID is required" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate searchId is a valid UUID
+    if (typeof searchId !== "string" || !UUID_REGEX.test(searchId)) {
+      return new Response(
+        JSON.stringify({ error: "Invalid search ID format" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -84,6 +118,15 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({ error: "Search not found" }),
         { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate the Airbnb URL from the database
+    if (!search.airbnb_url || !isValidAirbnbUrl(search.airbnb_url)) {
+      console.error("Invalid Airbnb URL in database:", search.airbnb_url);
+      return new Response(
+        JSON.stringify({ error: "Invalid Airbnb URL" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
