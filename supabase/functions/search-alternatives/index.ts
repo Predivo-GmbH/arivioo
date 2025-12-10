@@ -33,8 +33,10 @@ function getPlatformName(url: string): string {
   if (lowercaseUrl.includes("wimdu.com")) return "Wimdu";
   if (lowercaseUrl.includes("interhome.com")) return "Interhome";
   if (lowercaseUrl.includes("flipkey.com")) return "FlipKey";
+  if (lowercaseUrl.includes("holidu.com")) return "Holidu";
+  if (lowercaseUrl.includes("atraveo.com")) return "Atraveo";
+  if (lowercaseUrl.includes("fewo-direkt.de")) return "FeWo-direkt";
   
-  // Try to extract domain name
   try {
     const domain = new URL(url).hostname.replace("www.", "");
     return domain.split(".")[0].charAt(0).toUpperCase() + domain.split(".")[0].slice(1);
@@ -43,14 +45,31 @@ function getPlatformName(url: string): string {
   }
 }
 
-// Check if URL is a booking platform (not a generic site)
+// Check if URL is a specific property listing (not a homepage or category page)
+function isSpecificListing(url: string): boolean {
+  const lowercaseUrl = url.toLowerCase();
+  
+  // Exclude homepage URLs
+  if (lowercaseUrl.match(/^https?:\/\/[^\/]+\/?$/)) return false;
+  
+  // Exclude category/search pages
+  if (lowercaseUrl.includes("/vacation-rentals/") && !lowercaseUrl.match(/\/\d+/)) return false;
+  if (lowercaseUrl.includes("/holiday-homes/country/")) return false;
+  if (lowercaseUrl.includes("/search")) return false;
+  
+  // Look for property ID patterns
+  const hasPropertyId = lowercaseUrl.match(/\/(\d{5,})|\/p\/|\/property\/|\/rental\/|\/listing\//);
+  return !!hasPropertyId;
+}
+
+// Check if URL is a booking platform
 function isBookingPlatform(url: string): boolean {
   const lowercaseUrl = url.toLowerCase();
   const bookingPlatforms = [
     "vrbo.com", "booking.com", "expedia.com", "hotels.com", "tripadvisor.com",
     "homeaway.com", "vacasa.com", "evolve.com", "marriott.com", "agoda.com",
-    "kayak.com", "hometogo.com", "wimdu.com", "interhome.com", "flipkey.com",
-    "stayz.com.au", "abritel.fr", "fewo-direkt.de", "homelidays.com"
+    "hometogo.com", "wimdu.com", "interhome.com", "flipkey.com",
+    "holidu.com", "atraveo.com", "fewo-direkt.de", "stayz.com"
   ];
   return bookingPlatforms.some(platform => lowercaseUrl.includes(platform));
 }
@@ -72,7 +91,6 @@ serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const firecrawlKey = Deno.env.get("FIRECRAWL_API_KEY");
     const serpApiKey = Deno.env.get("SERPAPI_API_KEY");
     const lovableKey = Deno.env.get("LOVABLE_API_KEY");
 
@@ -80,14 +98,6 @@ serve(async (req) => {
       console.error("SERPAPI_API_KEY not configured");
       return new Response(
         JSON.stringify({ error: "SerpAPI key not configured" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    if (!lovableKey) {
-      console.error("LOVABLE_API_KEY not configured");
-      return new Response(
-        JSON.stringify({ error: "AI service not configured" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -116,268 +126,209 @@ serve(async (req) => {
     const roomId = roomIdMatch ? roomIdMatch[1] : null;
     console.log("Airbnb room ID:", roomId);
 
-    // Step 1: Get Airbnb listing images using Firecrawl
-    let imageUrls: string[] = [];
-    let airbnbTitle = "Vacation Rental";
-    let airbnbPrice: number | null = null;
-
-    if (firecrawlKey) {
-      console.log("Attempting to scrape Airbnb listing for images...");
-      try {
-        const scrapeResponse = await fetch("https://api.firecrawl.dev/v1/scrape", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${firecrawlKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            url: search.airbnb_url,
-            formats: ["html", "links"],
-            onlyMainContent: false,
-            waitFor: 8000,
-            timeout: 45000,
-          }),
-        });
-
-        const scrapeData = await scrapeResponse.json();
-        
-        if (scrapeResponse.ok && scrapeData.success) {
-          console.log("Scrape successful, extracting images...");
-          
-          // Extract title
-          airbnbTitle = scrapeData.metadata?.title || "Vacation Rental";
-          airbnbTitle = airbnbTitle.replace(" - Airbnb", "").replace(" · ", " - ");
-          
-          // Extract images from HTML content - look for Airbnb image CDN URLs
-          const html = scrapeData.html || "";
-          
-          // Airbnb uses various image URL patterns
-          const imagePatterns = [
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/[^"'\s]+/g,
-            /https:\/\/a0\.muscache\.com\/[^"'\s]+\.jpg/g,
-            /https:\/\/images\.rentals-united\.com\/[^"'\s]+/g,
-          ];
-          
-          for (const pattern of imagePatterns) {
-            const matches = html.match(pattern) || [];
-            imageUrls.push(...matches);
-          }
-          
-          // Also check links array
-          if (scrapeData.links) {
-            const imageLinks = scrapeData.links.filter((link: string) => 
-              link.includes("muscache.com") && (link.includes(".jpg") || link.includes("pictures"))
-            );
-            imageUrls.push(...imageLinks);
-          }
-          
-          // Remove duplicates and limit
-          imageUrls = [...new Set(imageUrls)].slice(0, 5);
-          console.log(`Found ${imageUrls.length} unique images`);
-          
-          // Try to extract price
-          const priceMatch = html.match(/\$(\d{1,5})\s*(per night|\/night|night)/i);
-          if (priceMatch) {
-            airbnbPrice = parseInt(priceMatch[1]);
-          }
-        } else {
-          console.log("Scraping failed:", scrapeData.error || "Unknown error");
-        }
-      } catch (e) {
-        console.log("Scraping error:", e);
-      }
-    }
-
-    // If no images found from scraping, try to construct Airbnb image URL from room ID
-    if (imageUrls.length === 0 && roomId) {
-      console.log("No images from scraping, using Airbnb API approach...");
-      // Try a different approach - search for the listing images via text search
-    }
-
     // Update search status
     await supabase.from("searches").update({
-      airbnb_title: airbnbTitle,
-      airbnb_price: airbnbPrice,
       status: "searching_alternatives"
     }).eq("id", searchId);
 
-    // Step 2: Use reverse image search with SerpAPI
     const alternatives: SearchResult[] = [];
     const foundUrls = new Set<string>();
+    let airbnbTitle = "Vacation Rental";
+    let airbnbPrice: number | null = null;
 
-    if (imageUrls.length > 0) {
-      console.log("Performing reverse image search on", imageUrls.length, "images...");
+    // Step 1: Use SerpAPI Google Images to find the Airbnb listing images
+    console.log("Step 1: Searching Google Images for Airbnb listing...");
+    
+    let imageUrls: string[] = [];
+    
+    try {
+      // Search for images of this specific Airbnb listing
+      const imageSearchQuery = `site:airbnb.com rooms/${roomId}`;
+      console.log("Image search query:", imageSearchQuery);
       
-      for (const imageUrl of imageUrls.slice(0, 3)) { // Limit to 3 images for speed
+      const imageSearchResponse = await fetch(
+        `https://serpapi.com/search.json?engine=google_images&q=${encodeURIComponent(imageSearchQuery)}&api_key=${serpApiKey}`
+      );
+      
+      if (imageSearchResponse.ok) {
+        const imageSearchData = await imageSearchResponse.json();
+        const imagesResults = imageSearchData.images_results || [];
+        
+        console.log(`Found ${imagesResults.length} images from Google Images search`);
+        
+        // Get the first few image URLs (these are the Airbnb listing photos)
+        for (const img of imagesResults.slice(0, 5)) {
+          if (img.original) {
+            imageUrls.push(img.original);
+            console.log("Found image:", img.original.slice(0, 80) + "...");
+          }
+        }
+        
+        // Also try to get title from the search
+        if (imagesResults[0]?.title) {
+          airbnbTitle = imagesResults[0].title.replace(" - Airbnb", "");
+        }
+      }
+    } catch (e) {
+      console.error("Image search error:", e);
+    }
+
+    // Step 2: Reverse image search each image to find it on other platforms
+    if (imageUrls.length > 0) {
+      console.log(`Step 2: Reverse image searching ${imageUrls.length} images...`);
+      
+      for (const imageUrl of imageUrls.slice(0, 3)) {
         try {
-          console.log("Reverse searching image:", imageUrl.slice(0, 100) + "...");
+          console.log("Reverse searching:", imageUrl.slice(0, 60) + "...");
           
-          const serpResponse = await fetch(
+          const reverseResponse = await fetch(
             `https://serpapi.com/search.json?engine=google_reverse_image&image_url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`
           );
           
-          if (!serpResponse.ok) {
-            console.log("SerpAPI error:", serpResponse.status);
+          if (!reverseResponse.ok) {
+            console.log("Reverse search failed:", reverseResponse.status);
             continue;
           }
           
-          const serpData = await serpResponse.json();
+          const reverseData = await reverseResponse.json();
           
-          // Process image results
-          const imageResults = serpData.image_results || [];
-          const inlineImages = serpData.inline_images || [];
+          // Check image_results (pages with this exact image)
+          const imageResults = reverseData.image_results || [];
+          console.log(`Reverse search found ${imageResults.length} image results`);
           
-          console.log(`Found ${imageResults.length} image results, ${inlineImages.length} inline images`);
-          
-          for (const result of [...imageResults, ...inlineImages]) {
-            const url = result.link || result.source || result.original;
-            if (!url) continue;
-            
-            // Skip Airbnb and duplicates
-            if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
-            
-            // Check if it's a booking platform
-            if (isBookingPlatform(url)) {
-              foundUrls.add(url);
-              
-              alternatives.push({
-                platform_name: getPlatformName(url),
-                listing_url: url,
-                listing_title: result.title || result.snippet || null,
-                price: null, // Will try to extract later
-                confidence_score: 0.9, // High confidence - same image found
-              });
-              
-              console.log("Found match on:", getPlatformName(url), url.slice(0, 80));
-            }
-          }
-          
-          // Also check organic/text results that mention the same property
-          const organicResults = serpData.organic_results || [];
-          for (const result of organicResults) {
+          for (const result of imageResults) {
             const url = result.link;
             if (!url) continue;
             if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
             
             if (isBookingPlatform(url)) {
               foundUrls.add(url);
+              const isSpecific = isSpecificListing(url);
               
               alternatives.push({
                 platform_name: getPlatformName(url),
                 listing_url: url,
                 listing_title: result.title || null,
                 price: null,
-                confidence_score: 0.75, // Slightly lower - text result, not direct image
+                confidence_score: isSpecific ? 0.95 : 0.7, // Higher confidence for specific listings
               });
               
+              console.log("Found match:", getPlatformName(url), isSpecific ? "(specific listing)" : "(category page)");
+            }
+          }
+          
+          // Also check inline_images for visually similar
+          const inlineImages = reverseData.inline_images || [];
+          for (const img of inlineImages) {
+            const url = img.source;
+            if (!url) continue;
+            if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
+            
+            if (isBookingPlatform(url)) {
+              foundUrls.add(url);
+              alternatives.push({
+                platform_name: getPlatformName(url),
+                listing_url: url,
+                listing_title: img.title || null,
+                price: null,
+                confidence_score: 0.85,
+              });
+              console.log("Found similar image on:", getPlatformName(url));
+            }
+          }
+          
+          // Check organic results too
+          const organicResults = reverseData.organic_results || [];
+          for (const result of organicResults) {
+            const url = result.link;
+            if (!url) continue;
+            if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
+            
+            if (isBookingPlatform(url) && isSpecificListing(url)) {
+              foundUrls.add(url);
+              alternatives.push({
+                platform_name: getPlatformName(url),
+                listing_url: url,
+                listing_title: result.title || null,
+                price: null,
+                confidence_score: 0.75,
+              });
+              console.log("Found organic match on:", getPlatformName(url));
+            }
+          }
+        } catch (e) {
+          console.error("Reverse search error:", e);
+        }
+      }
+    } else {
+      console.log("No images found from Google Images search");
+    }
+
+    // Step 3: Also do a direct text search for the property on other platforms
+    console.log("Step 3: Text search for property on booking platforms...");
+    
+    const textSearchQueries = [
+      `"${roomId}" vrbo OR booking.com -airbnb`,
+      `airbnb ${roomId} site:vrbo.com OR site:booking.com`,
+    ];
+    
+    for (const query of textSearchQueries) {
+      try {
+        console.log("Text search:", query);
+        
+        const textResponse = await fetch(
+          `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${serpApiKey}&num=10`
+        );
+        
+        if (textResponse.ok) {
+          const textData = await textResponse.json();
+          const results = textData.organic_results || [];
+          
+          for (const result of results) {
+            const url = result.link;
+            if (!url) continue;
+            if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
+            
+            if (isBookingPlatform(url) && isSpecificListing(url)) {
+              foundUrls.add(url);
+              alternatives.push({
+                platform_name: getPlatformName(url),
+                listing_url: url,
+                listing_title: result.title || null,
+                price: null,
+                confidence_score: 0.6,
+              });
               console.log("Found text match on:", getPlatformName(url));
             }
           }
-        } catch (e) {
-          console.error("Reverse image search error:", e);
         }
+      } catch (e) {
+        console.error("Text search error:", e);
       }
     }
 
-    // Step 3: Fallback - text-based search if no image results
-    if (alternatives.length === 0 && firecrawlKey) {
-      console.log("No image matches, trying text search...");
+    console.log(`Total alternatives found: ${alternatives.length}`);
+
+    // Step 4: Try to extract prices using AI
+    if (alternatives.length > 0 && lovableKey) {
+      console.log("Step 4: Extracting prices...");
       
-      const searchQueries = [
-        roomId ? `"${roomId}" vacation rental -airbnb` : null,
-        `${airbnbTitle} vrbo booking.com`,
-      ].filter(Boolean) as string[];
-      
-      for (const query of searchQueries) {
+      for (const alt of alternatives.slice(0, 5)) {
         try {
-          const searchResponse = await fetch("https://api.firecrawl.dev/v1/search", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              query,
-              limit: 10,
-            }),
-          });
-
-          const searchData = await searchResponse.json();
-          if (searchData.success && searchData.data) {
-            for (const result of searchData.data) {
-              const url = result.url;
-              if (!url || url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
-              
-              if (isBookingPlatform(url)) {
-                foundUrls.add(url);
-                alternatives.push({
-                  platform_name: getPlatformName(url),
-                  listing_url: url,
-                  listing_title: result.title || null,
-                  price: null,
-                  confidence_score: 0.5, // Lower confidence - text search only
-                });
-              }
-            }
-          }
-        } catch (e) {
-          console.error("Text search error:", e);
-        }
-      }
-    }
-
-    // Step 4: Try to extract prices from found listings
-    console.log(`Found ${alternatives.length} alternatives, extracting prices...`);
-    
-    for (const alt of alternatives.slice(0, 5)) {
-      if (firecrawlKey) {
-        try {
-          const priceResponse = await fetch("https://api.firecrawl.dev/v1/scrape", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${firecrawlKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              url: alt.listing_url,
-              formats: ["markdown"],
-              onlyMainContent: true,
-              timeout: 15000,
-            }),
-          });
-
-          const priceData = await priceResponse.json();
-          if (priceData.success && priceData.markdown) {
-            // Extract price using AI
-            const priceAiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${lovableKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                model: "google/gemini-2.5-flash",
-                messages: [
-                  {
-                    role: "system",
-                    content: "Extract the nightly price from this vacation rental listing. Return ONLY a number (no currency symbols). If you can't find a clear nightly price, return 'null'."
-                  },
-                  {
-                    role: "user",
-                    content: priceData.markdown.slice(0, 3000)
-                  }
-                ],
-              }),
-            });
-
-            if (priceAiResponse.ok) {
-              const priceAiData = await priceAiResponse.json();
-              const priceStr = priceAiData.choices?.[0]?.message?.content?.trim();
-              const extractedPrice = parseFloat(priceStr);
-              if (!isNaN(extractedPrice) && extractedPrice > 0 && extractedPrice < 10000) {
-                alt.price = extractedPrice;
-                console.log(`Extracted price ${extractedPrice} for ${alt.platform_name}`);
-              }
+          // Use SerpAPI to get page snippet for price extraction
+          const pageResponse = await fetch(
+            `https://serpapi.com/search.json?engine=google&q=site:${new URL(alt.listing_url).hostname} "${new URL(alt.listing_url).pathname}"&api_key=${serpApiKey}`
+          );
+          
+          if (pageResponse.ok) {
+            const pageData = await pageResponse.json();
+            const snippet = pageData.organic_results?.[0]?.snippet || "";
+            
+            // Look for price patterns in snippet
+            const priceMatch = snippet.match(/[\$€£CHF]\s*(\d{2,4})|\b(\d{2,4})\s*(?:per night|\/night|night)/i);
+            if (priceMatch) {
+              alt.price = parseInt(priceMatch[1] || priceMatch[2]);
+              console.log(`Found price ${alt.price} for ${alt.platform_name}`);
             }
           }
         } catch (e) {
@@ -386,9 +337,11 @@ serve(async (req) => {
       }
     }
 
-    // Sort by confidence and limit
+    // Sort by confidence and filter to specific listings
     alternatives.sort((a, b) => b.confidence_score - a.confidence_score);
-    const topAlternatives = alternatives.slice(0, 5);
+    const topAlternatives = alternatives
+      .filter(a => a.confidence_score >= 0.5)
+      .slice(0, 5);
 
     // Calculate savings
     const resultsWithSavings = topAlternatives.map(alt => ({
@@ -424,6 +377,7 @@ serve(async (req) => {
     // Update search status
     await supabase.from("searches").update({ 
       status: "completed",
+      airbnb_title: airbnbTitle,
       airbnb_price: airbnbPrice,
     }).eq("id", searchId);
 
