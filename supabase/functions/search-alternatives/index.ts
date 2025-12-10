@@ -70,78 +70,130 @@ serve(async (req) => {
 
     console.log("Processing search for URL:", search.airbnb_url);
 
-    // Step 1: Scrape the Airbnb listing using Firecrawl
-    console.log("Scraping Airbnb listing...");
-    const scrapeResponse = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${firecrawlKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: search.airbnb_url,
-        formats: ["markdown"],
-        onlyMainContent: true,
-        waitFor: 3000,
-      }),
-    });
+    // Extract room ID from Airbnb URL for reference
+    const roomIdMatch = search.airbnb_url.match(/rooms\/(\d+)/);
+    const roomId = roomIdMatch ? roomIdMatch[1] : null;
+    console.log("Airbnb room ID:", roomId);
 
-    const scrapeData = await scrapeResponse.json();
-    
-    if (!scrapeResponse.ok || !scrapeData.success) {
-      console.error("Failed to scrape Airbnb listing:", scrapeData);
-      await supabase.from("searches").update({ status: "error" }).eq("id", searchId);
-      return new Response(
-        JSON.stringify({ error: "Failed to scrape Airbnb listing" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    let airbnbContent = "";
+    let airbnbTitle = "Vacation Rental";
+    let scrapingSucceeded = false;
 
-    const airbnbContent = scrapeData.markdown || "";
-    const airbnbTitle = scrapeData.metadata?.title || "Vacation Rental";
-    
-    console.log("Scraped Airbnb listing, title:", airbnbTitle);
-
-    // Step 2: Use AI to extract property details
-    console.log("Extracting property details with AI...");
-    const extractionResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${lovableKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          {
-            role: "system",
-            content: `You are a property details extractor. Extract key identifying information from vacation rental listings. Return a JSON object with: property_name, location (city, country), property_type (apartment, house, villa, etc.), bedrooms, bathrooms, max_guests, amenities (array of key amenities), and estimated_nightly_price (number only, no currency symbol). If you can't determine a value, use null.`
-          },
-          {
-            role: "user",
-            content: `Extract property details from this Airbnb listing:\n\n${airbnbContent.slice(0, 8000)}`
-          }
-        ],
-      }),
-    });
-
-    if (!extractionResponse.ok) {
-      console.error("AI extraction failed:", await extractionResponse.text());
-    }
-
-    let propertyDetails: any = {};
+    // Step 1: Try to scrape the Airbnb listing using Firecrawl
+    console.log("Attempting to scrape Airbnb listing...");
     try {
-      const extractionData = await extractionResponse.json();
-      const content = extractionData.choices?.[0]?.message?.content || "{}";
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        propertyDetails = JSON.parse(jsonMatch[0]);
+      const scrapeResponse = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${firecrawlKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: search.airbnb_url,
+          formats: ["markdown"],
+          onlyMainContent: true,
+          waitFor: 5000,
+          timeout: 30000,
+        }),
+      });
+
+      const scrapeData = await scrapeResponse.json();
+      
+      if (scrapeResponse.ok && scrapeData.success && scrapeData.markdown) {
+        airbnbContent = scrapeData.markdown;
+        airbnbTitle = scrapeData.metadata?.title || "Vacation Rental";
+        scrapingSucceeded = true;
+        console.log("Successfully scraped Airbnb listing, title:", airbnbTitle);
+      } else {
+        console.log("Scraping failed, will use fallback approach:", scrapeData.error || "Unknown error");
       }
     } catch (e) {
-      console.error("Failed to parse extraction:", e);
+      console.log("Scraping error, will use fallback:", e);
     }
 
-    console.log("Extracted property details:", propertyDetails);
+    // Step 2: Use AI to extract/generate property details
+    let propertyDetails: any = {};
+    
+    if (scrapingSucceeded && airbnbContent) {
+      // Extract from scraped content
+      console.log("Extracting property details from scraped content...");
+      try {
+        const extractionResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${lovableKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "google/gemini-2.5-flash",
+            messages: [
+              {
+                role: "system",
+                content: `You are a property details extractor. Extract key identifying information from vacation rental listings. Return a JSON object with: property_name, location (as a string like "City, Country"), property_type (apartment, house, villa, etc.), bedrooms, bathrooms, max_guests, amenities (array of key amenities), and estimated_nightly_price (number only, no currency symbol). If you can't determine a value, use null.`
+              },
+              {
+                role: "user",
+                content: `Extract property details from this Airbnb listing:\n\n${airbnbContent.slice(0, 8000)}`
+              }
+            ],
+          }),
+        });
+
+        if (extractionResponse.ok) {
+          const extractionData = await extractionResponse.json();
+          const content = extractionData.choices?.[0]?.message?.content || "{}";
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            propertyDetails = JSON.parse(jsonMatch[0]);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to extract details:", e);
+      }
+    } else {
+      // Fallback: Generate search terms from URL and AI
+      console.log("Using fallback approach - generating search terms from URL...");
+      try {
+        const extractionResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${lovableKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "google/gemini-2.5-flash",
+            messages: [
+              {
+                role: "system",
+                content: `You help generate search terms to find vacation rentals. Given an Airbnb URL, extract any location hints from the URL path or parameters and suggest general vacation rental search terms. Return a JSON object with: property_name (null if unknown), location (string - guess from URL if possible, or use "vacation rental"), property_type ("vacation rental"), estimated_nightly_price (null). Be creative with location guessing from URL patterns like /rooms/123?city=paris or locale hints.`
+              },
+              {
+                role: "user",
+                content: `Generate search terms for this Airbnb URL: ${search.airbnb_url}`
+              }
+            ],
+          }),
+        });
+
+        if (extractionResponse.ok) {
+          const extractionData = await extractionResponse.json();
+          const content = extractionData.choices?.[0]?.message?.content || "{}";
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            propertyDetails = JSON.parse(jsonMatch[0]);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to generate fallback details:", e);
+      }
+    }
+
+    // Ensure location is a string
+    const locationStr = typeof propertyDetails.location === 'object' 
+      ? `${propertyDetails.location?.city || ''} ${propertyDetails.location?.country || ''}`.trim()
+      : (propertyDetails.location || '');
+
+    console.log("Property details:", propertyDetails);
 
     // Update search with Airbnb info
     await supabase.from("searches").update({
@@ -151,11 +203,16 @@ serve(async (req) => {
     }).eq("id", searchId);
 
     // Step 3: Search for alternatives using Firecrawl search
+    const propertyName = propertyDetails.property_name || airbnbTitle;
+    const bedroomCount = propertyDetails.bedrooms ? `${propertyDetails.bedrooms} bedroom` : '';
+    const propertyType = propertyDetails.property_type || "vacation rental";
+    
     const searchQueries = [
-      `${propertyDetails.property_name || airbnbTitle} ${propertyDetails.location || ""} vacation rental`,
-      `${propertyDetails.location || ""} ${propertyDetails.property_type || "vacation rental"} ${propertyDetails.bedrooms || ""} bedroom booking`,
-      `${propertyDetails.property_name || airbnbTitle} vrbo booking.com`,
-    ];
+      `${propertyName} ${locationStr} vacation rental`.trim(),
+      `${locationStr} ${propertyType} ${bedroomCount} booking`.trim(),
+      `${propertyName} vrbo booking.com`.trim(),
+      roomId ? `airbnb ${roomId} alternative booking` : null,
+    ].filter(Boolean) as string[];
 
     console.log("Searching for alternatives with queries:", searchQueries);
 
@@ -231,13 +288,14 @@ Focus on: exact location match, property name similarity, number of bedrooms/bat
                 content: `ORIGINAL AIRBNB LISTING:
 Title: ${airbnbTitle}
 Details: ${JSON.stringify(propertyDetails)}
-Content snippet: ${airbnbContent.slice(0, 2000)}
+Location: ${locationStr || "Unknown"}
+${airbnbContent ? `Content snippet: ${airbnbContent.slice(0, 1500)}` : "No content available - match based on details above"}
 
 POTENTIAL MATCH:
 URL: ${result.url}
 Title: ${result.title || "Unknown"}
 Description: ${result.description || ""}
-Content: ${(result.markdown || "").slice(0, 2000)}
+Content: ${(result.markdown || "").slice(0, 1500)}
 
 Are these the same property or similar? Analyze and return JSON.`
               }
