@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -9,16 +9,17 @@ import {
   ExternalLink, 
   Search, 
   Sparkles, 
-  CheckCircle2, 
   AlertCircle,
   TrendingDown,
-  Loader2,
   ImageIcon,
   Calendar,
   Info,
-  Check,
   Shield,
-  Lock
+  Lock,
+  Camera,
+  Globe,
+  DollarSign,
+  Check
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
@@ -48,12 +49,29 @@ interface SearchData {
   created_at: string;
 }
 
-const loadingMessages = [
-  "Extracting property photos from Airbnb...",
-  "Running reverse image search across the web...",
-  "Checking Vrbo, Booking.com, and direct sites...",
-  "Verifying matches with location data...",
-  "Comparing prices for your dates...",
+// Step-based loading messages that progress linearly
+const loadingSteps = [
+  {
+    id: "extracting",
+    icon: Camera,
+    title: "Extracting Property Photos",
+    description: "Downloading clean property images from the Airbnb listing...",
+    statuses: ["searching", "pending", "extracting_photos"]
+  },
+  {
+    id: "searching",
+    icon: Globe,
+    title: "Searching Across Platforms",
+    description: "Running reverse image search on Booking.com, Vrbo, Agoda, and 10+ other sites...",
+    statuses: ["searching_platforms"]
+  },
+  {
+    id: "comparing",
+    icon: DollarSign,
+    title: "Comparing Prices",
+    description: "Analyzing prices and calculating potential savings for your dates...",
+    statuses: ["comparing_prices"]
+  }
 ];
 
 // Helper to convert Json to string array
@@ -91,6 +109,16 @@ const calculateNights = (checkIn: string, checkOut: string): number => {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
+// Get current step index based on status
+const getCurrentStepIndex = (status: string): number => {
+  for (let i = loadingSteps.length - 1; i >= 0; i--) {
+    if (loadingSteps[i].statuses.includes(status)) {
+      return i;
+    }
+  }
+  return 0;
+};
+
 export default function SearchResults() {
   const { searchId } = useParams();
   const navigate = useNavigate();
@@ -100,8 +128,8 @@ export default function SearchResults() {
   const [search, setSearch] = useState<SearchData | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchStarted, setSearchStarted] = useState(false);
-  const [messageIndex, setMessageIndex] = useState(0);
+  const [currentStep, setCurrentStep] = useState(0);
+  const searchTriggeredRef = useRef(false);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -117,20 +145,14 @@ export default function SearchResults() {
     return () => subscription.unsubscribe();
   }, [navigate]);
 
-  // Rotate loading messages
-  useEffect(() => {
-    if (!loading || !searchStarted) return;
-    const interval = setInterval(() => {
-      setMessageIndex(i => (i + 1) % loadingMessages.length);
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [loading, searchStarted]);
-
   // Fetch search data and trigger search
   useEffect(() => {
     if (!searchId || !user) return;
+    if (searchTriggeredRef.current) return;
 
     const fetchAndSearch = async () => {
+      searchTriggeredRef.current = true;
+      
       // Fetch search record
       const { data: searchData, error: searchError } = await supabase
         .from("searches")
@@ -145,6 +167,7 @@ export default function SearchResults() {
       }
 
       setSearch(searchData as SearchData);
+      setCurrentStep(getCurrentStepIndex(searchData.status));
 
       // If search is already completed, fetch results
       if (searchData.status === "completed") {
@@ -161,10 +184,22 @@ export default function SearchResults() {
 
       // If status is 'searching' or 'pending', trigger the search
       if (searchData.status === "searching" || searchData.status === "pending") {
-        setSearchStarted(true);
-        
         try {
           const { data: { session } } = await supabase.auth.getSession();
+          
+          // Poll for status updates during search
+          const pollInterval = setInterval(async () => {
+            const { data: updatedSearch } = await supabase
+              .from("searches")
+              .select("status")
+              .eq("id", searchId)
+              .single();
+            
+            if (updatedSearch) {
+              const newStep = getCurrentStepIndex(updatedSearch.status);
+              setCurrentStep(prev => Math.max(prev, newStep)); // Only move forward, never back
+            }
+          }, 2000);
           
           const response = await fetch(
             `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
@@ -178,11 +213,19 @@ export default function SearchResults() {
             }
           );
 
+          clearInterval(pollInterval);
+          
           const data = await response.json();
 
           if (!response.ok) {
             throw new Error(data.error || "Search failed");
           }
+
+          // Ensure we're at the final step before showing results
+          setCurrentStep(loadingSteps.length - 1);
+          
+          // Small delay to show final step
+          await new Promise(r => setTimeout(r, 1000));
 
           // Refresh search and results
           const { data: updatedSearch } = await supabase
@@ -250,36 +293,76 @@ export default function SearchResults() {
 
       <main className="container px-4 py-8 md:py-12">
         {loading ? (
-          <div className="max-w-xl mx-auto text-center py-16">
-            <div className="relative mb-8">
-              <div className="w-24 h-24 mx-auto rounded-full bg-primary/10 flex items-center justify-center">
-                <Loader2 className="w-12 h-12 text-primary animate-spin" />
-              </div>
-              <div className="absolute inset-0 w-24 h-24 mx-auto rounded-full border-4 border-primary/20 animate-ping" />
+          <div className="max-w-xl mx-auto py-12">
+            {/* Step Progress Indicator */}
+            <div className="mb-12">
+              {loadingSteps.map((step, index) => {
+                const StepIcon = step.icon;
+                const isActive = index === currentStep;
+                const isCompleted = index < currentStep;
+                
+                return (
+                  <div key={step.id} className="relative">
+                    {/* Connector line */}
+                    {index < loadingSteps.length - 1 && (
+                      <div 
+                        className={`absolute left-6 top-14 w-0.5 h-12 transition-colors duration-500 ${
+                          isCompleted ? 'bg-primary' : 'bg-muted'
+                        }`}
+                      />
+                    )}
+                    
+                    <div className={`flex items-start gap-4 p-4 rounded-xl transition-all duration-500 ${
+                      isActive ? 'bg-primary/5 border border-primary/20' : ''
+                    }`}>
+                      {/* Step Icon */}
+                      <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-500 ${
+                        isCompleted 
+                          ? 'bg-primary text-primary-foreground' 
+                          : isActive 
+                          ? 'bg-primary/10 text-primary border-2 border-primary' 
+                          : 'bg-muted text-muted-foreground'
+                      }`}>
+                        {isCompleted ? (
+                          <Check className="w-5 h-5" />
+                        ) : isActive ? (
+                          <div className="relative">
+                            <StepIcon className="w-5 h-5" />
+                            <div className="absolute inset-0 animate-ping">
+                              <StepIcon className="w-5 h-5 opacity-50" />
+                            </div>
+                          </div>
+                        ) : (
+                          <StepIcon className="w-5 h-5" />
+                        )}
+                      </div>
+                      
+                      {/* Step Content */}
+                      <div className="flex-1 pt-1">
+                        <h3 className={`font-semibold mb-1 transition-colors ${
+                          isActive ? 'text-foreground' : isCompleted ? 'text-foreground' : 'text-muted-foreground'
+                        }`}>
+                          {step.title}
+                          {isCompleted && <span className="text-primary ml-2 text-sm">✓</span>}
+                        </h3>
+                        <p className={`text-sm transition-colors ${
+                          isActive ? 'text-muted-foreground' : 'text-muted-foreground/60'
+                        }`}>
+                          {step.description}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            
-            <h2 className="text-2xl font-bold text-foreground mb-4">
-              Finding Better Deals
-            </h2>
-            
-            <p className="text-muted-foreground mb-8 h-6">
-              {loadingMessages[messageIndex]}
-            </p>
 
-            <div className="flex justify-center gap-2 mb-8">
-              {loadingMessages.map((_, i) => (
-                <div 
-                  key={i}
-                  className={`w-2 h-2 rounded-full transition-all duration-300 ${
-                    i === messageIndex ? "bg-primary w-6" : "bg-muted"
-                  }`}
-                />
-              ))}
+            {/* Time estimate */}
+            <div className="text-center">
+              <p className="text-sm text-muted-foreground">
+                This usually takes 30-60 seconds as we search across multiple platforms...
+              </p>
             </div>
-
-            <p className="text-sm text-muted-foreground">
-              This usually takes 30-60 seconds as we search across multiple platforms...
-            </p>
           </div>
         ) : (
           <>
@@ -396,6 +479,9 @@ export default function SearchResults() {
                     We couldn't find this property on Booking.com, Vrbo, or other platforms using photo matching and property details. 
                     It might be exclusive to Airbnb or listed under a different name elsewhere.
                   </p>
+                  <p className="text-sm text-muted-foreground mb-6">
+                    This means Airbnb is likely your best option for this property!
+                  </p>
                   <Button asChild>
                     <Link to="/dashboard">
                       <Search className="w-4 h-4 mr-2" />
@@ -413,7 +499,7 @@ export default function SearchResults() {
                           <tr className="bg-muted/30 border-b border-border">
                             <th className="text-left py-4 px-4 font-semibold text-foreground">Platform</th>
                             <th className="text-left py-4 px-4 font-semibold text-foreground">Property</th>
-                            <th className="text-center py-4 px-4 font-semibold text-foreground">Trust Score</th>
+                            <th className="text-center py-4 px-4 font-semibold text-foreground">Match Score</th>
                             <th className="text-right py-4 px-4 font-semibold text-foreground">Price</th>
                             <th className="text-center py-4 px-4 font-semibold text-foreground">Action</th>
                           </tr>
@@ -422,6 +508,7 @@ export default function SearchResults() {
                           {results.map((result, index) => {
                             const resultImages = toStringArray(result.images);
                             const isTopResult = index === 0 && result.savings_percentage && result.savings_percentage > 0;
+                            const isDirect = result.platform_name.includes("(Direct)");
                             
                             return (
                               <tr 
@@ -432,12 +519,19 @@ export default function SearchResults() {
                               >
                                 <td className="py-4 px-4">
                                   <div className="flex items-center gap-2">
-                                    <span className={`w-2 h-2 rounded-full ${isTopResult ? 'bg-success' : 'bg-primary'}`} />
+                                    <span className={`w-2 h-2 rounded-full ${
+                                      isDirect ? 'bg-amber-500' : isTopResult ? 'bg-success' : 'bg-primary'
+                                    }`} />
                                     <span className="font-medium text-foreground">{result.platform_name}</span>
                                     {isTopResult && (
                                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
                                         <Sparkles className="w-3 h-3" />
                                         Best Deal
+                                      </span>
+                                    )}
+                                    {isDirect && (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs font-medium">
+                                        No Fees
                                       </span>
                                     )}
                                   </div>
@@ -547,6 +641,7 @@ export default function SearchResults() {
                     {results.map((result, index) => {
                       const resultImages = toStringArray(result.images);
                       const isTopResult = index === 0 && result.savings_percentage && result.savings_percentage > 0;
+                      const isDirect = result.platform_name.includes("(Direct)");
                       
                       return (
                         <div 
@@ -572,7 +667,7 @@ export default function SearchResults() {
                                     <ImageIcon className="w-6 h-6 text-primary" />
                                   </div>
                                 )}
-                                {/* Trust Score Badge */}
+                                {/* Match Score Badge */}
                                 {result.confidence_score && (
                                   <div className={`absolute bottom-1 right-1 px-1.5 py-0.5 rounded text-xs font-medium flex items-center gap-0.5 ${
                                     result.confidence_score >= 0.9 
@@ -589,7 +684,11 @@ export default function SearchResults() {
                               
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-1 flex-wrap">
-                                  <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-primary/10 text-primary">
+                                  <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                                    isDirect 
+                                      ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                                      : 'bg-primary/10 text-primary'
+                                  }`}>
                                     {result.platform_name}
                                   </span>
                                   {isTopResult && (
@@ -656,10 +755,13 @@ export default function SearchResults() {
               <div className="bg-muted/30 rounded-xl p-4 flex items-start gap-3 mb-8">
                 <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
                 <div className="text-xs text-muted-foreground">
-                  <strong className="text-foreground">How we found these:</strong> We extracted property photos from the Airbnb listing 
-                  and ran reverse image searches to find the same property on other platforms. 
+                  <strong className="text-foreground">How we found these:</strong> We extracted clean property photos from the Airbnb listing 
+                  (no logos or UI elements) and ran reverse image searches across Booking.com, Vrbo, Agoda, HolidayCheck, and 10+ other platforms. 
                   Matches are verified using image similarity and location data. 
-                  Always confirm details directly with the host before booking.
+                  {hasValidDates && (
+                    <span> All prices shown are for {formatDate(dates.checkIn!)} – {formatDate(dates.checkOut!)}.</span>
+                  )}
+                  {' '}Always confirm details directly with the host before booking.
                 </div>
               </div>
 
