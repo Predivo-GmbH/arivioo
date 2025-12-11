@@ -17,6 +17,7 @@ interface SearchResult {
   images: string[];
 }
 
+// Expanded platform list for better coverage
 function getPlatformName(url: string): string {
   const lowercaseUrl = url.toLowerCase();
   if (lowercaseUrl.includes("vrbo.com")) return "Vrbo";
@@ -29,29 +30,66 @@ function getPlatformName(url: string): string {
   if (lowercaseUrl.includes("agoda.com")) return "Agoda";
   if (lowercaseUrl.includes("hometogo.com")) return "HomeToGo";
   if (lowercaseUrl.includes("holidu.com")) return "Holidu";
+  if (lowercaseUrl.includes("holidaycheck.")) return "HolidayCheck";
+  if (lowercaseUrl.includes("hrs.de") || lowercaseUrl.includes("hrs.com")) return "HRS";
+  if (lowercaseUrl.includes("hostelworld.com")) return "Hostelworld";
+  if (lowercaseUrl.includes("interhome.")) return "Interhome";
+  if (lowercaseUrl.includes("flipkey.com")) return "FlipKey";
+  if (lowercaseUrl.includes("atraveo.")) return "Atraveo";
+  if (lowercaseUrl.includes("fewo-direkt.")) return "FeWo-direkt";
+  if (lowercaseUrl.includes("traum-ferienwohnungen.")) return "Traum-Ferienwohnungen";
+  if (lowercaseUrl.includes("casamundo.")) return "Casamundo";
+  if (lowercaseUrl.includes("facebook.com")) return "Facebook";
   
   try {
     const domain = new URL(url).hostname.replace("www.", "");
-    return domain.split(".")[0].charAt(0).toUpperCase() + domain.split(".")[0].slice(1);
+    const name = domain.split(".")[0];
+    return name.charAt(0).toUpperCase() + name.slice(1);
   } catch {
     return "Other Platform";
   }
 }
 
+// Expanded booking platform check
 function isBookingPlatform(url: string): boolean {
   const lowercaseUrl = url.toLowerCase();
   const platforms = [
     "vrbo.com", "booking.com", "expedia.com", "hotels.com", "tripadvisor.com",
     "homeaway.com", "vacasa.com", "agoda.com", "hometogo.com", "holidu.com",
-    "interhome.com", "flipkey.com", "atraveo.com"
+    "interhome.com", "interhome.de", "interhome.ch", "flipkey.com", 
+    "atraveo.com", "atraveo.de", "holidaycheck.de", "holidaycheck.com",
+    "hrs.de", "hrs.com", "hostelworld.com", "fewo-direkt.de",
+    "traum-ferienwohnungen.de", "casamundo.de", "casamundo.com"
   ];
   return platforms.some(p => lowercaseUrl.includes(p));
+}
+
+// Check if URL is a direct property website (not a major platform)
+function isDirectPropertySite(url: string): boolean {
+  const lowercaseUrl = url.toLowerCase();
+  // Exclude major platforms, social media, and generic sites
+  const excludePatterns = [
+    "airbnb.", "google.", "facebook.", "instagram.", "twitter.", "pinterest.",
+    "youtube.", "wikipedia.", "tripadvisor.", "yelp.", "maps.", "cloudflare.",
+    ".gov", ".edu", "amazon.", "ebay.", "craigslist."
+  ];
+  
+  if (excludePatterns.some(p => lowercaseUrl.includes(p))) return false;
+  
+  // Look for property-related keywords in URL
+  const propertyKeywords = [
+    "villa", "cottage", "cabin", "chalet", "apartment", "flat", "house",
+    "rental", "holiday", "vacation", "stay", "lodge", "guest", "bnb",
+    "ferienwohnung", "ferienhaus", "gite", "chambre", "pension"
+  ];
+  
+  return propertyKeywords.some(k => lowercaseUrl.includes(k));
 }
 
 // UUID v4 validation regex
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// Validate Airbnb URL format
+// Validate Airbnb URL format (supports all locales)
 function isValidAirbnbUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -62,6 +100,66 @@ function isValidAirbnbUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+// Check if an image URL is a valid property photo (not logo/favicon)
+function isValidPropertyImage(url: string): boolean {
+  const lowercaseUrl = url.toLowerCase();
+  
+  // Exclude favicons, logos, and platform assets
+  const excludePatterns = [
+    "favicon", "logo", "icon", "brand", "platform-assets",
+    "airbnbplatformassets", "airbnb-platform-assets",
+    "sprite", "button", "arrow", "avatar", "profile",
+    "social", "badge", "marker", "pin", "placeholder"
+  ];
+  
+  if (excludePatterns.some(p => lowercaseUrl.includes(p))) {
+    return false;
+  }
+  
+  // Must be a muscache CDN image with reasonable size
+  if (!url.includes("muscache.com")) return false;
+  
+  // Must be in pictures folder (not assets)
+  if (!url.includes("/pictures/") && !url.includes("/im/pictures/")) return false;
+  
+  // Prefer hosting/miso format images (actual property photos)
+  const preferredPatterns = [
+    "/hosting/", "/miso/", "/BnbProperty/", "Hosting-"
+  ];
+  
+  return preferredPatterns.some(p => url.includes(p)) || 
+         // Or general property images with proper extensions
+         (/\.(jpg|jpeg|png|webp)/i.test(url) && url.length > 100);
+}
+
+// Extract dates from Airbnb URL
+function extractDatesFromUrl(url: string): { checkIn: string | null; checkOut: string | null } {
+  try {
+    const urlObj = new URL(url);
+    return {
+      checkIn: urlObj.searchParams.get('check_in'),
+      checkOut: urlObj.searchParams.get('check_out')
+    };
+  } catch {
+    return { checkIn: null, checkOut: null };
+  }
+}
+
+// Generate default dates (2 weeks from now, 3 nights)
+function generateDefaultDates(): { checkIn: string; checkOut: string } {
+  const today = new Date();
+  const checkIn = new Date(today);
+  checkIn.setDate(today.getDate() + 14);
+  
+  const checkOut = new Date(checkIn);
+  checkOut.setDate(checkIn.getDate() + 3);
+  
+  return {
+    checkIn: checkIn.toISOString().split('T')[0],
+    checkOut: checkOut.toISOString().split('T')[0]
+  };
 }
 
 serve(async (req) => {
@@ -135,7 +233,7 @@ serve(async (req) => {
       );
     }
 
-    // Use service role client for database operations (needed for INSERT on search_results)
+    // Use service role client for database operations
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Fetch the search and verify ownership
@@ -176,15 +274,29 @@ serve(async (req) => {
     const roomId = roomIdMatch ? roomIdMatch[1] : null;
     console.log("Airbnb room ID:", roomId);
 
-    await supabase.from("searches").update({ status: "searching_alternatives" }).eq("id", searchId);
+    // Extract dates from URL or generate defaults
+    let { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
+    if (!checkIn || !checkOut) {
+      const defaults = generateDefaultDates();
+      checkIn = defaults.checkIn;
+      checkOut = defaults.checkOut;
+      console.log("Using default dates:", checkIn, "to", checkOut);
+    } else {
+      console.log("Using URL dates:", checkIn, "to", checkOut);
+    }
+
+    // Update status to step 1
+    await supabase.from("searches").update({ 
+      status: "extracting_photos" 
+    }).eq("id", searchId);
 
     const alternatives: SearchResult[] = [];
     const foundUrls = new Set<string>();
     let airbnbTitle = "Vacation Rental";
     let airbnbPrice: number | null = null;
 
-    // Step 1: Fetch Airbnb page directly and extract image URLs
-    console.log("Step 1: Fetching Airbnb page to extract image URLs...");
+    // Step 1: Fetch Airbnb page and extract CLEAN property images
+    console.log("Step 1: Extracting clean property photos from Airbnb...");
     
     let imageUrls: string[] = [];
     
@@ -204,30 +316,34 @@ serve(async (req) => {
         // Extract title
         const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
         if (titleMatch) {
-          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "");
+          airbnbTitle = titleMatch[1]
+            .replace(" - Airbnb", "")
+            .replace(" · Airbnb", "")
+            .replace(/\s*-\s*(Houses|Apartments|Homes|Villas|Cabins|Cottages|Condos)?\s*(for Rent|to Rent|zur Miete|in)?\s*.*$/i, "")
+            .trim();
           console.log("Extracted title:", airbnbTitle);
         }
         
-        // Look for muscache.com image URLs in various patterns
+        // Look for muscache.com image URLs - prioritize actual property photos
         const imagePatterns = [
-          // Direct image URLs
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/[^"'\s\)]+\.(?:jpg|jpeg|png|webp)/gi,
+          // Hosting format (most reliable for property photos)
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
+          // miso format (also good quality property photos)
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
           // BnbProperty format
           /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-          // Hosting format  
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/[^"'\s\)]+/gi,
-          // miso format
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-          // General pictures format
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9-]+\.(?:jpg|jpeg|png|webp)/gi,
-          // With im_w parameter
-          /https:\/\/a0\.muscache\.com[^"'\s\)]+im_w=\d+/gi,
+          // prohost-api format
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
+          // General UUID format images (property photos)
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
         ];
+        
+        let allImageUrls: string[] = [];
         
         for (const pattern of imagePatterns) {
           const matches = html.match(pattern) || [];
-          console.log(`Pattern ${pattern.source.slice(0, 40)}... found ${matches.length} matches`);
-          imageUrls.push(...matches);
+          console.log(`Pattern found ${matches.length} matches`);
+          allImageUrls.push(...matches);
         }
         
         // Also look in JSON data embedded in page
@@ -235,24 +351,36 @@ serve(async (req) => {
         for (const match of jsonMatches) {
           const urlMatch = match.match(/"pictureUrl"\s*:\s*"([^"]+)"/);
           if (urlMatch && urlMatch[1]) {
-            imageUrls.push(urlMatch[1]);
+            allImageUrls.push(urlMatch[1].replace(/\\u002F/g, '/'));
           }
         }
         
-        // Look for og:image
-        const ogImageMatch = html.match(/property="og:image"\s+content="([^"]+)"/);
-        if (ogImageMatch && ogImageMatch[1]) {
-          imageUrls.push(ogImageMatch[1]);
-          console.log("Found og:image:", ogImageMatch[1].slice(0, 80));
+        // Extract price if possible
+        const pricePatterns = [
+          /\$(\d{1,5})\s*(?:per night|\/night|night)/i,
+          /"priceString"\s*:\s*"\$(\d+)"/,
+          /"price"\s*:\s*(\d+)/,
+          /CHF\s*(\d{1,5})/,
+          /€\s*(\d{1,5})/,
+        ];
+        
+        for (const pattern of pricePatterns) {
+          const priceMatch = html.match(pattern);
+          if (priceMatch) {
+            airbnbPrice = parseInt(priceMatch[1]);
+            console.log("Extracted price:", airbnbPrice);
+            break;
+          }
         }
         
-        // Extract price if possible
-        const priceMatch = html.match(/\$(\d{1,5})\s*(?:per night|\/night|night)/i) ||
-                          html.match(/"priceString"\s*:\s*"\$(\d+)"/);
-        if (priceMatch) {
-          airbnbPrice = parseInt(priceMatch[1]);
-          console.log("Extracted price:", airbnbPrice);
-        }
+        // Clean, dedupe, and filter images - NO LOGOS OR FAVICONS
+        imageUrls = [...new Set(allImageUrls)]
+          .map(url => url.replace(/\\u002F/g, '/').replace(/\\/g, ''))
+          .filter(isValidPropertyImage)
+          .slice(0, 5);
+        
+        console.log(`Found ${imageUrls.length} clean property images (filtered out logos/favicons)`);
+        imageUrls.forEach((url, i) => console.log(`Image ${i + 1}:`, url.slice(0, 120)));
       } else {
         console.log("Failed to fetch Airbnb page:", airbnbResponse.status);
       }
@@ -260,18 +388,14 @@ serve(async (req) => {
       console.error("Error fetching Airbnb page:", e);
     }
 
-    // Clean and dedupe image URLs
-    imageUrls = [...new Set(imageUrls)]
-      .map(url => url.replace(/\\u002F/g, '/').replace(/\\/g, ''))
-      .filter(url => url.includes('muscache.com') && url.length > 50)
-      .slice(0, 5);
-    
-    console.log(`Found ${imageUrls.length} unique image URLs`);
-    imageUrls.forEach((url, i) => console.log(`Image ${i + 1}:`, url.slice(0, 100)));
+    // Update status to step 2
+    await supabase.from("searches").update({ 
+      status: "searching_platforms" 
+    }).eq("id", searchId);
 
     // Step 2: Reverse image search each image
     if (imageUrls.length > 0) {
-      console.log("Step 2: Reverse image searching...");
+      console.log("Step 2: Running reverse image search across platforms...");
       
       for (const imageUrl of imageUrls) {
         try {
@@ -287,9 +411,9 @@ serve(async (req) => {
           }
           
           const reverseData = await reverseResponse.json();
-          console.log("Reverse search results - image_results:", reverseData.image_results?.length || 0);
-          console.log("Reverse search results - inline_images:", reverseData.inline_images?.length || 0);
-          console.log("Reverse search results - organic_results:", reverseData.organic_results?.length || 0);
+          console.log("Results - image:", reverseData.image_results?.length || 0, 
+                      "inline:", reverseData.inline_images?.length || 0,
+                      "organic:", reverseData.organic_results?.length || 0);
           
           // Check all result types
           const allResults = [
@@ -303,9 +427,9 @@ serve(async (req) => {
             if (!url) continue;
             if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
             
+            // Check if it's a known booking platform
             if (isBookingPlatform(url)) {
               foundUrls.add(url);
-              // Collect multiple images from the result
               const resultImages: string[] = [];
               if (result.thumbnail) resultImages.push(result.thumbnail);
               if (result.original) resultImages.push(result.original);
@@ -319,7 +443,25 @@ serve(async (req) => {
                 image_url: resultImages[0] || null,
                 images: resultImages.slice(0, 5),
               });
-              console.log("FOUND MATCH:", getPlatformName(url), url.slice(0, 80));
+              console.log("FOUND on platform:", getPlatformName(url), url.slice(0, 80));
+            }
+            // Also check for direct property websites
+            else if (isDirectPropertySite(url)) {
+              foundUrls.add(url);
+              const resultImages: string[] = [];
+              if (result.thumbnail) resultImages.push(result.thumbnail);
+              if (result.original) resultImages.push(result.original);
+              
+              alternatives.push({
+                platform_name: getPlatformName(url) + " (Direct)",
+                listing_url: url,
+                listing_title: result.title || result.snippet || null,
+                price: null,
+                confidence_score: 0.85,
+                image_url: resultImages[0] || null,
+                images: resultImages.slice(0, 5),
+              });
+              console.log("FOUND direct site:", url.slice(0, 80));
             }
           }
           
@@ -331,17 +473,28 @@ serve(async (req) => {
       }
     }
 
-    // Step 3: Text search fallback
+    // Update status to step 3
+    await supabase.from("searches").update({ 
+      status: "comparing_prices" 
+    }).eq("id", searchId);
+
+    // Step 3: Text search fallback if no image matches
     if (alternatives.length === 0) {
       console.log("Step 3: Text search fallback...");
       
-      // Search using the title
-      const searchQuery = `"${airbnbTitle}" booking OR vrbo -airbnb`;
+      // Clean up the title for better search
+      const cleanTitle = airbnbTitle
+        .replace(/[^\w\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 60);
+      
+      const searchQuery = `"${cleanTitle}" (booking.com OR vrbo OR hotels.com OR agoda OR holidaycheck) -airbnb -pinterest`;
       console.log("Text search query:", searchQuery);
       
       try {
         const textResponse = await fetch(
-          `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(searchQuery)}&api_key=${serpApiKey}&num=20`
+          `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(searchQuery)}&api_key=${serpApiKey}&num=30`
         );
         
         if (textResponse.ok) {
@@ -375,11 +528,11 @@ serve(async (req) => {
 
     console.log(`Total alternatives found: ${alternatives.length}`);
 
-    // Sort and limit results
+    // Sort by confidence and limit results
     alternatives.sort((a, b) => b.confidence_score - a.confidence_score);
-    const topAlternatives = alternatives.slice(0, 5);
+    const topAlternatives = alternatives.slice(0, 8);
 
-    // Store all Airbnb images (up to 5)
+    // Use filtered property images (no logos)
     const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
     const airbnbImages = imageUrls.slice(0, 5);
 
@@ -422,7 +575,14 @@ serve(async (req) => {
       JSON.stringify({ 
         success: true, 
         results: resultsWithSavings,
-        airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, imageUrl: airbnbImageUrl, images: airbnbImages }
+        airbnb: { 
+          title: airbnbTitle, 
+          price: airbnbPrice, 
+          url: search.airbnb_url, 
+          imageUrl: airbnbImageUrl, 
+          images: airbnbImages 
+        },
+        dates: { checkIn, checkOut }
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
