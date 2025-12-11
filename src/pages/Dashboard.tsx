@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { Search, LogOut, History, Sparkles, Clock, ExternalLink, TrendingDown, ImageIcon } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
+import type { Json } from "@/integrations/supabase/types";
 
 interface SearchHistory {
   id: string;
@@ -13,9 +14,19 @@ interface SearchHistory {
   airbnb_title: string | null;
   airbnb_price: number | null;
   airbnb_image_url: string | null;
+  airbnb_images: Json;
   status: string;
   created_at: string;
 }
+
+// Helper to get first image from Json array
+const getFirstImage = (json: Json | null | undefined): string | null => {
+  if (!json) return null;
+  if (Array.isArray(json) && json.length > 0 && typeof json[0] === 'string') {
+    return json[0];
+  }
+  return null;
+};
 
 export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
@@ -59,7 +70,7 @@ export default function Dashboard() {
         .limit(10);
 
       if (!error && data) {
-        setSearches(data);
+        setSearches(data as SearchHistory[]);
       }
       setLoadingHistory(false);
     };
@@ -166,52 +177,59 @@ export default function Dashboard() {
               </p>
             ) : (
               <div className="space-y-3">
-                {searches.map((search) => (
-                  <Link
-                    key={search.id}
-                    to={`/search/${search.id}`}
-                    className="flex items-center gap-4 p-3 rounded-xl hover:bg-muted/50 transition-colors group"
-                  >
-                    {/* Property Image Thumbnail */}
-                    <div className="w-14 h-14 rounded-lg overflow-hidden flex-shrink-0 bg-muted">
-                      {search.airbnb_image_url ? (
-                        <img 
-                          src={search.airbnb_image_url} 
-                          alt={search.airbnb_title || "Property"} 
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            const target = e.target as HTMLImageElement;
-                            target.style.display = 'none';
-                            target.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center"><svg class="w-5 h-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>';
-                          }}
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center">
-                          <ImageIcon className="w-5 h-5 text-muted-foreground" />
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-foreground line-clamp-1 group-hover:text-primary transition-colors">
-                        {search.airbnb_title || "Vacation Rental"}
-                      </p>
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Clock className="w-3 h-3" />
-                        <span>{formatDate(search.created_at)}</span>
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          search.status === "completed" 
-                            ? "bg-green-500/10 text-green-600 dark:text-green-400"
-                            : search.status === "error"
-                            ? "bg-destructive/10 text-destructive"
-                            : "bg-primary/10 text-primary"
-                        }`}>
-                          {search.status === "completed" ? "Done" : search.status === "error" ? "Failed" : "Pending"}
-                        </span>
+                {searches.map((search) => {
+                  // Get image - prefer first from array, fallback to single image
+                  const imageUrl = getFirstImage(search.airbnb_images) || search.airbnb_image_url;
+                  
+                  return (
+                    <Link
+                      key={search.id}
+                      to={`/search/${search.id}`}
+                      className="flex items-center gap-4 p-3 rounded-xl hover:bg-muted/50 transition-colors group"
+                    >
+                      {/* Property Image Thumbnail */}
+                      <div className="w-14 h-14 rounded-lg overflow-hidden flex-shrink-0 bg-muted">
+                        {imageUrl ? (
+                          <img 
+                            src={imageUrl} 
+                            alt={search.airbnb_title || "Property"} 
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.style.display = 'none';
+                              if (target.parentElement) {
+                                target.parentElement.innerHTML = '<div class="w-full h-full flex items-center justify-center"><svg class="w-5 h-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>';
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <ImageIcon className="w-5 h-5 text-muted-foreground" />
+                          </div>
+                        )}
                       </div>
-                    </div>
-                    <ExternalLink className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-                  </Link>
-                ))}
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-foreground line-clamp-1 group-hover:text-primary transition-colors">
+                          {search.airbnb_title || "Vacation Rental"}
+                        </p>
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                          <Clock className="w-3 h-3" />
+                          <span>{formatDate(search.created_at)}</span>
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                            search.status === "completed" 
+                              ? "bg-green-500/10 text-green-600 dark:text-green-400"
+                              : search.status === "error"
+                              ? "bg-destructive/10 text-destructive"
+                              : "bg-primary/10 text-primary"
+                          }`}>
+                            {search.status === "completed" ? "Done" : search.status === "error" ? "Failed" : "Pending"}
+                          </span>
+                        </div>
+                      </div>
+                      <ExternalLink className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </Link>
+                  );
+                })}
               </div>
             )}
           </div>

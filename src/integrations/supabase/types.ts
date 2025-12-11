@@ -47,6 +47,7 @@ export type Database = {
           created_at: string
           id: string
           image_url: string | null
+          images: Json | null
           listing_title: string | null
           listing_url: string
           original_price: number | null
@@ -61,6 +62,7 @@ export type Database = {
           created_at?: string
           id?: string
           image_url?: string | null
+          images?: Json | null
           listing_title?: string | null
           listing_url: string
           original_price?: number | null
@@ -75,6 +77,7 @@ export type Database = {
           created_at?: string
           id?: string
           image_url?: string | null
+          images?: Json | null
           listing_title?: string | null
           listing_url?: string
           original_price?: number | null
@@ -97,6 +100,7 @@ export type Database = {
       searches: {
         Row: {
           airbnb_image_url: string | null
+          airbnb_images: Json | null
           airbnb_price: number | null
           airbnb_title: string | null
           airbnb_url: string
@@ -108,6 +112,7 @@ export type Database = {
         }
         Insert: {
           airbnb_image_url?: string | null
+          airbnb_images?: Json | null
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url: string
@@ -119,6 +124,7 @@ export type Database = {
         }
         Update: {
           airbnb_image_url?: string | null
+          airbnb_images?: Json | null
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url?: string

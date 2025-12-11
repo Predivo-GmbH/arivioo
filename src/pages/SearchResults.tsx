@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
+import { ImageCarousel } from "@/components/ImageCarousel";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -15,6 +16,7 @@ import {
   ImageIcon
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
+import type { Json } from "@/integrations/supabase/types";
 
 interface SearchResult {
   id: string;
@@ -27,6 +29,7 @@ interface SearchResult {
   savings_percentage: number | null;
   confidence_score: number | null;
   image_url: string | null;
+  images: Json;
 }
 
 interface SearchData {
@@ -35,6 +38,7 @@ interface SearchData {
   airbnb_title: string | null;
   airbnb_price: number | null;
   airbnb_image_url: string | null;
+  airbnb_images: Json;
   status: string;
   created_at: string;
 }
@@ -46,6 +50,15 @@ const loadingMessages = [
   "Finding the best deals for you...",
   "Almost there, crunching the numbers...",
 ];
+
+// Helper to convert Json to string array
+const toStringArray = (json: Json | null | undefined): string[] => {
+  if (!json) return [];
+  if (Array.isArray(json)) {
+    return json.filter((item): item is string => typeof item === 'string');
+  }
+  return [];
+};
 
 export default function SearchResults() {
   const { searchId } = useParams();
@@ -100,7 +113,7 @@ export default function SearchResults() {
         return;
       }
 
-      setSearch(searchData);
+      setSearch(searchData as SearchData);
 
       // If search is already completed, fetch results
       if (searchData.status === "completed") {
@@ -110,7 +123,7 @@ export default function SearchResults() {
           .eq("search_id", searchId)
           .order("savings_percentage", { ascending: false, nullsFirst: false });
 
-        setResults(resultsData || []);
+        setResults((resultsData || []) as SearchResult[]);
         setLoading(false);
         return;
       }
@@ -153,8 +166,8 @@ export default function SearchResults() {
             .eq("search_id", searchId)
             .order("savings_percentage", { ascending: false, nullsFirst: false });
 
-          setSearch(updatedSearch);
-          setResults(resultsData || []);
+          setSearch(updatedSearch as SearchData);
+          setResults((resultsData || []) as SearchResult[]);
         } catch (error: any) {
           console.error("Search error:", error);
           toast({ 
@@ -176,6 +189,9 @@ export default function SearchResults() {
   const bestSavings = results.length > 0 
     ? Math.max(...results.map(r => r.savings_percentage || 0))
     : 0;
+
+  // Get images arrays
+  const airbnbImages = toStringArray(search?.airbnb_images);
 
   return (
     <div className="min-h-screen bg-background">
@@ -251,41 +267,38 @@ export default function SearchResults() {
                 )}
               </div>
 
-              {/* Original Listing Card */}
+              {/* Original Listing Card with Image Carousel */}
               <div className="bg-card rounded-2xl border border-border p-6 mb-8">
-                <div className="flex items-start gap-4">
-                  {/* Airbnb Image */}
-                  <div className="w-24 h-24 md:w-32 md:h-32 rounded-xl overflow-hidden flex-shrink-0 bg-muted">
-                    {search?.airbnb_image_url ? (
-                      <img 
-                        src={search.airbnb_image_url} 
-                        alt={search.airbnb_title || "Property"} 
-                        className="w-full h-full object-cover"
-                        onError={(e) => {
-                          const target = e.target as HTMLImageElement;
-                          target.style.display = 'none';
-                          target.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center bg-[#FF5A5F]/10"><svg class="w-8 h-8 text-[#FF5A5F]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>';
-                        }}
+                <div className="flex flex-col md:flex-row items-start gap-6">
+                  {/* Airbnb Image Carousel */}
+                  <div className="w-full md:w-48 lg:w-64 flex-shrink-0">
+                    {airbnbImages.length > 0 ? (
+                      <ImageCarousel 
+                        images={airbnbImages}
+                        alt={search?.airbnb_title || "Property"}
+                        aspectRatio="video"
+                        fallbackColor="bg-[#FF5A5F]/10"
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center bg-[#FF5A5F]/10">
+                      <div className="aspect-video rounded-xl bg-[#FF5A5F]/10 flex items-center justify-center">
                         <ImageIcon className="w-8 h-8 text-[#FF5A5F]" />
                       </div>
                     )}
                   </div>
+                  
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-2">
                       <span className="text-sm font-medium text-muted-foreground">Original Listing</span>
                       <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-[#FF5A5F]/10 text-[#FF5A5F]">
                         Airbnb
                       </span>
                     </div>
-                    <h3 className="font-semibold text-foreground mb-2 line-clamp-2">
+                    <h3 className="font-semibold text-lg text-foreground mb-3 line-clamp-2">
                       {search?.airbnb_title || "Vacation Rental"}
                     </h3>
                     <div className="flex flex-wrap items-center gap-4">
                       {search?.airbnb_price && (
-                        <span className="text-lg font-bold text-foreground">
+                        <span className="text-xl font-bold text-foreground">
                           ${search.airbnb_price}/night
                         </span>
                       )}
@@ -331,90 +344,89 @@ export default function SearchResults() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {results.map((result, index) => (
-                    <div 
-                      key={result.id}
-                      className={`bg-card rounded-2xl border transition-all hover:shadow-medium ${
-                        index === 0 && result.savings_percentage && result.savings_percentage > 0
-                          ? "border-green-500/50 ring-1 ring-green-500/20"
-                          : "border-border"
-                      }`}
-                    >
-                      <div className="p-6">
-                        <div className="flex flex-col md:flex-row md:items-center gap-4">
-                          {/* Result Image */}
-                          <div className="w-20 h-20 md:w-24 md:h-24 rounded-xl overflow-hidden flex-shrink-0 bg-muted">
-                            {result.image_url ? (
-                              <img 
-                                src={result.image_url} 
-                                alt={result.listing_title || "Property"} 
-                                className="w-full h-full object-cover"
-                                onError={(e) => {
-                                  const target = e.target as HTMLImageElement;
-                                  target.style.display = 'none';
-                                  target.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center bg-primary/10"><svg class="w-6 h-6 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>';
-                                }}
-                              />
-                            ) : (
-                              <div className="w-full h-full flex items-center justify-center bg-primary/10">
-                                <ImageIcon className="w-6 h-6 text-primary" />
-                              </div>
-                            )}
-                          </div>
-                          
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-2">
-                              <span className="px-3 py-1 text-sm font-medium rounded-full bg-primary/10 text-primary">
-                                {result.platform_name}
-                              </span>
-                              {result.confidence_score && result.confidence_score > 0.7 && (
-                                <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
-                                  <CheckCircle2 className="w-3 h-3" />
-                                  High Match
-                                </span>
+                  {results.map((result, index) => {
+                    const resultImages = toStringArray(result.images);
+                    
+                    return (
+                      <div 
+                        key={result.id}
+                        className={`bg-card rounded-2xl border transition-all hover:shadow-medium ${
+                          index === 0 && result.savings_percentage && result.savings_percentage > 0
+                            ? "border-green-500/50 ring-1 ring-green-500/20"
+                            : "border-border"
+                        }`}
+                      >
+                        <div className="p-6">
+                          <div className="flex flex-col md:flex-row md:items-center gap-4">
+                            {/* Result Image Carousel */}
+                            <div className="w-full md:w-32 lg:w-40 flex-shrink-0">
+                              {resultImages.length > 0 || result.image_url ? (
+                                <ImageCarousel 
+                                  images={resultImages.length > 0 ? resultImages : (result.image_url ? [result.image_url] : [])}
+                                  alt={result.listing_title || "Property"}
+                                  aspectRatio="video"
+                                />
+                              ) : (
+                                <div className="aspect-video rounded-xl bg-primary/10 flex items-center justify-center">
+                                  <ImageIcon className="w-6 h-6 text-primary" />
+                                </div>
                               )}
                             </div>
                             
-                            <h3 className="font-semibold text-foreground mb-2 line-clamp-2">
-                              {result.listing_title || "Vacation Rental"}
-                            </h3>
-
-                            <div className="flex flex-wrap items-center gap-4">
-                              {result.price ? (
-                                <div className="flex items-baseline gap-2">
-                                  <span className="text-2xl font-bold text-foreground">
-                                    ${result.price}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-2">
+                                <span className="px-3 py-1 text-sm font-medium rounded-full bg-primary/10 text-primary">
+                                  {result.platform_name}
+                                </span>
+                                {result.confidence_score && result.confidence_score > 0.7 && (
+                                  <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    High Match
                                   </span>
-                                  <span className="text-muted-foreground">/night</span>
-                                </div>
-                              ) : (
-                                <span className="text-muted-foreground">Price not available</span>
-                              )}
+                                )}
+                              </div>
+                              
+                              <h3 className="font-semibold text-foreground mb-2 line-clamp-2">
+                                {result.listing_title || "Vacation Rental"}
+                              </h3>
 
-                              {result.savings_percentage && result.savings_percentage > 0 && (
-                                <div className="flex items-center gap-1 px-3 py-1 rounded-full bg-green-500/10 text-green-600 dark:text-green-400">
-                                  <TrendingDown className="w-4 h-4" />
-                                  <span className="font-semibold">Save {result.savings_percentage}%</span>
-                                  {result.savings_amount && (
-                                    <span className="text-sm">(${result.savings_amount}/night)</span>
-                                  )}
-                                </div>
-                              )}
+                              <div className="flex flex-wrap items-center gap-4">
+                                {result.price ? (
+                                  <div className="flex items-baseline gap-2">
+                                    <span className="text-2xl font-bold text-foreground">
+                                      ${result.price}
+                                    </span>
+                                    <span className="text-muted-foreground">/night</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-muted-foreground">Price not available</span>
+                                )}
+
+                                {result.savings_percentage && result.savings_percentage > 0 && (
+                                  <div className="flex items-center gap-1 px-3 py-1 rounded-full bg-green-500/10 text-green-600 dark:text-green-400">
+                                    <TrendingDown className="w-4 h-4" />
+                                    <span className="font-semibold">Save {result.savings_percentage}%</span>
+                                    {result.savings_amount && (
+                                      <span className="text-sm">(${result.savings_amount}/night)</span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                          </div>
 
-                          <div className="flex-shrink-0">
-                            <Button asChild className="w-full md:w-auto bg-gradient-primary hover:opacity-90">
-                              <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                View & Book
-                                <ExternalLink className="w-4 h-4 ml-2" />
-                              </a>
-                            </Button>
+                            <div className="flex-shrink-0">
+                              <Button asChild className="w-full md:w-auto bg-gradient-primary hover:opacity-90">
+                                <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                  View & Book
+                                  <ExternalLink className="w-4 h-4 ml-2" />
+                                </a>
+                              </Button>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
