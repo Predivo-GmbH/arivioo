@@ -11,7 +11,7 @@ const steps = [
     icon: Image,
     title: "AI Image Recognition",
     description: "We extract distinctive property photos and run reverse image searches across the web to find the same property on other platforms.",
-    detail: "Uses Google Lens & visual matching"
+    detail: "Visual matching technology"
   },
   {
     icon: Search,
