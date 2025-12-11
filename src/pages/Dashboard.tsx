@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
-import { Search, LogOut, History, Sparkles, Clock, ExternalLink, TrendingDown, ImageIcon } from "lucide-react";
+import { Search, LogOut, History, Sparkles, Clock, ExternalLink, TrendingDown, ImageIcon, Loader2 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
 
@@ -32,27 +32,22 @@ export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [autoSearching, setAutoSearching] = useState(false);
   const [searches, setSearches] = useState<SearchHistory[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Auto-submit search if URL is provided
-  useEffect(() => {
-    const urlFromParams = searchParams.get("url");
-    if (urlFromParams) {
-      setUrl(urlFromParams);
-    }
-  }, [searchParams]);
+  const urlFromParams = searchParams.get("url");
 
   // Auto-trigger search when URL is set from params and user is ready
   useEffect(() => {
-    const urlFromParams = searchParams.get("url");
-    if (urlFromParams && user && !loading) {
-      // Auto-submit the search
+    if (urlFromParams && user && !autoSearching && !loading) {
+      setAutoSearching(true);
+      setUrl(urlFromParams);
+      
       const autoSearch = async () => {
-        setLoading(true);
         try {
           const { data, error } = await supabase.from("searches").insert({
             user_id: user.id,
@@ -61,15 +56,19 @@ export default function Dashboard() {
           }).select().single();
 
           if (error) throw error;
+          
+          // Clear the URL param before navigating
+          setSearchParams({});
           navigate(`/search/${data.id}`);
         } catch (error: any) {
           toast({ title: "Error", description: error.message, variant: "destructive" });
-          setLoading(false);
+          setAutoSearching(false);
+          setSearchParams({});
         }
       };
       autoSearch();
     }
-  }, [user, searchParams, navigate, toast, loading]);
+  }, [user, urlFromParams, autoSearching, loading, navigate, toast, setSearchParams]);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -142,6 +141,21 @@ export default function Dashboard() {
   };
 
   if (!user) return null;
+
+  // Show loading overlay when auto-searching from URL
+  if (autoSearching) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 bg-gradient-primary rounded-2xl flex items-center justify-center mx-auto mb-6">
+            <Loader2 className="w-8 h-8 text-white animate-spin" />
+          </div>
+          <h2 className="text-2xl font-bold text-foreground mb-2">Starting your search...</h2>
+          <p className="text-muted-foreground">Finding cheaper alternatives for your listing</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
