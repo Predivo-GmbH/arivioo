@@ -561,31 +561,40 @@ export default function SearchResults() {
                                   </div>
                                 </td>
                                 <td className="py-4 px-4 text-center">
-                                  {result.confidence_score ? (
+                                  {result.confidence_score !== null && result.confidence_score !== undefined ? (
                                     <div className="flex flex-col items-center gap-1">
                                       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
                                         result.confidence_score >= 0.9 
                                           ? 'bg-success/20 text-success' 
-                                          : result.confidence_score >= 0.7 
+                                          : result.confidence_score >= 0.8 
                                           ? 'bg-primary/20 text-primary'
+                                          : result.confidence_score >= 0.7
+                                          ? 'bg-blue-500/20 text-blue-600 dark:text-blue-400'
                                           : 'bg-muted text-muted-foreground'
                                       }`}>
                                         <Shield className="w-3 h-3" />
                                         {Math.round(result.confidence_score * 100)}%
                                       </span>
                                       <span className="text-xs text-muted-foreground">
-                                        {result.confidence_score >= 0.9 
-                                          ? 'Excellent' 
-                                          : result.confidence_score >= 0.7 
-                                          ? 'Good'
-                                          : 'Likely'}
+                                        {result.confidence_score >= 0.95 
+                                          ? 'Verified Match' 
+                                          : result.confidence_score >= 0.85 
+                                          ? 'High Confidence'
+                                          : result.confidence_score >= 0.7
+                                          ? 'Good Match'
+                                          : 'Possible Match'}
                                       </span>
                                     </div>
                                   ) : (
-                                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs">
-                                      <Shield className="w-3 h-3" />
-                                      Pending
-                                    </span>
+                                    <div className="flex flex-col items-center gap-1">
+                                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
+                                        <Info className="w-3 h-3" />
+                                        Text Only
+                                      </span>
+                                      <span className="text-xs text-muted-foreground">
+                                        Not visually verified
+                                      </span>
+                                    </div>
                                   )}
                                 </td>
                                 <td className="py-4 px-4 text-right">
@@ -667,17 +676,24 @@ export default function SearchResults() {
                                     <ImageIcon className="w-6 h-6 text-primary" />
                                   </div>
                                 )}
-                                {/* Match Score Badge */}
-                                {result.confidence_score && (
+                                {/* Match Score Badge - only show for visual matches with confidence */}
+                                {result.confidence_score !== null && result.confidence_score !== undefined ? (
                                   <div className={`absolute bottom-1 right-1 px-1.5 py-0.5 rounded text-xs font-medium flex items-center gap-0.5 ${
                                     result.confidence_score >= 0.9 
                                       ? 'bg-success text-white' 
-                                      : result.confidence_score >= 0.7 
+                                      : result.confidence_score >= 0.8 
                                       ? 'bg-primary text-white'
+                                      : result.confidence_score >= 0.7
+                                      ? 'bg-blue-500 text-white'
                                       : 'bg-muted text-muted-foreground'
                                   }`}>
                                     <Shield className="w-2.5 h-2.5" />
                                     {Math.round(result.confidence_score * 100)}%
+                                  </div>
+                                ) : (
+                                  <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded text-xs font-medium flex items-center gap-0.5 bg-amber-500/80 text-white">
+                                    <Info className="w-2.5 h-2.5" />
+                                    ?
                                   </div>
                                 )}
                               </div>

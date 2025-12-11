@@ -12,9 +12,10 @@ interface SearchResult {
   listing_url: string;
   listing_title: string | null;
   price: number | null;
-  confidence_score: number;
+  confidence_score: number | null; // null for text-only matches (no visual confirmation)
   image_url: string | null;
   images: string[];
+  match_type: 'visual' | 'text'; // Track how match was found
 }
 
 // Expanded platform list for better coverage - including international variants
@@ -62,20 +63,51 @@ function getPlatformName(url: string): string {
   }
 }
 
-// Expanded booking platform check with all international TLDs
+// Expanded booking platform check with all international TLDs - comprehensive list
 function isBookingPlatform(url: string): boolean {
   const lowercaseUrl = url.toLowerCase();
   const platforms = [
+    // Major global platforms
     "vrbo.com", "booking.com", "expedia.", "hotels.com", 
-    "tripadvisor.", // covers .com, .ch, .de, .fr, .it, etc.
+    "tripadvisor.", // covers .com, .ch, .de, .fr, .it, .co.za, etc.
     "homeaway.", "vacasa.com", "agoda.", "hometogo.", "holidu.",
-    "interhome.", "flipkey.", "atraveo.", "holidaycheck.",
-    "hrs.", "hostelworld.", "fewo-direkt.", "traum-ferienwohnungen.",
+    // European platforms
+    "interhome.", "flipkey.", "atraveo.", "holidaycheck.", 
+    "hrs.", "hrs.com", "hrs.de", // HRS variations
+    "hostelworld.", "fewo-direkt.", "traum-ferienwohnungen.",
     "casamundo.", "kayak.", "trivago.", "trip.com", "makemytrip.",
     "priceline.", "travelocity.", "orbitz.", "hotwire.", "cheaptickets.",
-    "hotelstonight.", "getaroom."
+    "hotelstonight.", "getaroom.",
+    // Additional international platforms
+    "hotel.de", "hotel.info", "hotel-mix.",
+    "easyjet.com/en/hotels", "lastminute.",
+    "laterooms.", "opodo.", "edreams.", "destinia.",
+    "centraldereservas.", "logitravel.",
+    // Regional South Africa platforms
+    "safarinow.", "lekkeslaap.", "nightsbridge.",
+    "sa-venues.", "wheretostay.", "travelground.",
+    // Metasearch that show direct links
+    "skyscanner.", "momondo.", "cheapflights.",
+    // Direct hotel booking aggregators
+    "-hotels-", "hotels-", // Pattern for regional hotel sites like "capetown-hotels-za.com"
   ];
   return platforms.some(p => lowercaseUrl.includes(p));
+}
+
+// Additional check for regional hotel booking domains (like maison-b.capetown-hotels-za.com)
+function isRegionalHotelSite(url: string): boolean {
+  const lowercaseUrl = url.toLowerCase();
+  // Pattern: property-name.location-hotels-countrycode.com
+  const hotelDomainPattern = /[a-z0-9-]+\.[a-z]+-hotels-[a-z]{2}\.com/;
+  if (hotelDomainPattern.test(lowercaseUrl)) return true;
+  
+  // Other regional booking patterns
+  const regionalPatterns = [
+    /[a-z]+\.hotels-[a-z]+\.com/,
+    /book[a-z]*\.[a-z]+\.com/,
+    /reserve\.[a-z]+\.com/,
+  ];
+  return regionalPatterns.some(p => p.test(lowercaseUrl));
 }
 
 // Enhanced direct property site detection - more permissive for hotel/guesthouse sites
@@ -496,7 +528,7 @@ serve(async (req) => {
                       "knowledge_graph:", lensData.knowledge_graph ? "yes" : "no",
                       "text_results:", lensData.text_results?.length || 0);
           
-          // Process visual matches - these are the key results
+          // Process visual matches - these are the key results with VISUAL CONFIRMATION
           const visualMatches = lensData.visual_matches || [];
           for (const match of visualMatches) {
             const url = match.link;
@@ -505,8 +537,12 @@ serve(async (req) => {
             
             console.log("Checking visual match:", url.slice(0, 100));
             
-            // Check if it's a known booking platform
-            if (isBookingPlatform(url)) {
+            // Calculate confidence based on match position (earlier = more confident)
+            const matchIndex = visualMatches.indexOf(match);
+            const baseConfidence = Math.max(0.70, 0.98 - (matchIndex * 0.03)); // 98% for first, decreasing
+            
+            // Check if it's a known booking platform OR regional hotel site
+            if (isBookingPlatform(url) || isRegionalHotelSite(url)) {
               foundUrls.add(url);
               const resultImages: string[] = [];
               if (match.thumbnail) resultImages.push(match.thumbnail);
@@ -516,11 +552,12 @@ serve(async (req) => {
                 listing_url: url,
                 listing_title: match.title || match.source || null,
                 price: null,
-                confidence_score: 0.95, // Lens matches are very reliable
+                confidence_score: baseConfidence, // Visual match confidence based on position
                 image_url: match.thumbnail || null,
                 images: resultImages.slice(0, 5),
+                match_type: 'visual',
               });
-              console.log("FOUND via Lens on platform:", getPlatformName(url), url.slice(0, 80));
+              console.log("FOUND via Lens on platform:", getPlatformName(url), "confidence:", baseConfidence.toFixed(2), url.slice(0, 80));
             }
             // Also check for direct property websites
             else if (isDirectPropertySite(url)) {
@@ -533,28 +570,30 @@ serve(async (req) => {
                 listing_url: url,
                 listing_title: match.title || match.source || null,
                 price: null,
-                confidence_score: 0.90,
+                confidence_score: Math.max(0.65, baseConfidence - 0.05), // Slightly lower for direct sites
                 image_url: match.thumbnail || null,
                 images: resultImages.slice(0, 5),
+                match_type: 'visual',
               });
               console.log("FOUND direct site via Lens:", url.slice(0, 80));
             }
           }
           
-          // Also check knowledge graph for additional context
+          // Also check knowledge graph for additional context - high confidence visual match
           if (lensData.knowledge_graph?.source?.link) {
             const kgUrl = lensData.knowledge_graph.source.link;
             if (!kgUrl.toLowerCase().includes("airbnb.") && !foundUrls.has(kgUrl)) {
-              if (isBookingPlatform(kgUrl) || isDirectPropertySite(kgUrl)) {
+              if (isBookingPlatform(kgUrl) || isDirectPropertySite(kgUrl) || isRegionalHotelSite(kgUrl)) {
                 foundUrls.add(kgUrl);
                 alternatives.push({
                   platform_name: getPlatformName(kgUrl),
                   listing_url: kgUrl,
                   listing_title: lensData.knowledge_graph.title || null,
                   price: null,
-                  confidence_score: 0.92,
+                  confidence_score: 0.95, // Knowledge graph = very high confidence visual match
                   image_url: lensData.knowledge_graph.thumbnail || null,
                   images: lensData.knowledge_graph.thumbnail ? [lensData.knowledge_graph.thumbnail] : [],
+                  match_type: 'visual',
                 });
                 console.log("FOUND via Lens knowledge graph:", kgUrl.slice(0, 80));
               }
@@ -596,16 +635,17 @@ serve(async (req) => {
               if (!url) continue;
               if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
               
-              if (isBookingPlatform(url) || isDirectPropertySite(url)) {
+              if (isBookingPlatform(url) || isDirectPropertySite(url) || isRegionalHotelSite(url)) {
                 foundUrls.add(url);
                 alternatives.push({
-                  platform_name: isBookingPlatform(url) ? getPlatformName(url) : getPlatformName(url) + " (Direct)",
+                  platform_name: isBookingPlatform(url) || isRegionalHotelSite(url) ? getPlatformName(url) : getPlatformName(url) + " (Direct)",
                   listing_url: url,
                   listing_title: result.title || result.snippet || null,
                   price: null,
-                  confidence_score: isBookingPlatform(url) ? 0.85 : 0.80,
+                  confidence_score: 0.85, // Reverse image = visual confirmation
                   image_url: result.thumbnail || result.original || null,
                   images: [result.thumbnail, result.original].filter(Boolean).slice(0, 5),
+                  match_type: 'visual',
                 });
                 console.log("FOUND via reverse image:", url.slice(0, 80));
               }
@@ -638,20 +678,23 @@ serve(async (req) => {
         .replace(/\s+/g, ' ')
         .trim();
       
-      // Multiple search strategies
+      // Multiple search strategies - expanded for better coverage
       const searchStrategies = [
-        // Strategy 1: Exact property name + booking sites
-        `"${cleanTitle.slice(0, 40)}" (booking.com OR tripadvisor OR holidaycheck OR agoda) -airbnb`,
-        // Strategy 2: Property name + location if available
-        location.city ? `"${cleanTitle.slice(0, 30)}" ${location.city} hotel guesthouse -airbnb` : null,
-        // Strategy 3: Broader search with just key terms
-        `${cleanTitle.slice(0, 25)} ${location.city || ''} vacation rental booking -airbnb -pinterest`,
-        // Strategy 4: Direct site search for the property
-        location.city ? `${cleanTitle.slice(0, 20)} ${location.city} site:booking.com OR site:tripadvisor.com OR site:holidaycheck.de` : null,
+        // Strategy 1: Exact property name + booking sites (including HolidayCheck explicitly)
+        `"${cleanTitle.slice(0, 40)}" (booking.com OR tripadvisor OR holidaycheck OR agoda OR hrs) -airbnb`,
+        // Strategy 2: Property name + location with broader hotel/guesthouse terms
+        location.city ? `"${cleanTitle.slice(0, 30)}" ${location.city} (hotel OR guesthouse OR pension) -airbnb` : null,
+        // Strategy 3: Site-specific searches for key platforms
+        `${cleanTitle.slice(0, 30)} site:holidaycheck.de OR site:holidaycheck.com`,
+        `${cleanTitle.slice(0, 30)} site:tripadvisor.com OR site:tripadvisor.ch OR site:tripadvisor.de`,
+        // Strategy 4: Location + property type for regional sites
+        location.city ? `${location.city} "${cleanTitle.slice(0, 25)}" (reviews OR booking) -airbnb -pinterest` : null,
+        // Strategy 5: Direct site search across multiple platforms
+        location.city ? `${cleanTitle.slice(0, 20)} ${location.city} site:booking.com OR site:hrs.de OR site:hotel.de` : null,
       ].filter(Boolean) as string[];
       
       for (const searchQuery of searchStrategies) {
-        if (alternatives.length >= 8) break; // Stop if we have enough
+        if (alternatives.length >= 10) break; // Stop if we have enough
         
         console.log("Text search:", searchQuery);
         
@@ -669,18 +712,19 @@ serve(async (req) => {
             const url = result.link;
             if (!url || url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
             
-            if (isBookingPlatform(url)) {
+            if (isBookingPlatform(url) || isRegionalHotelSite(url)) {
               foundUrls.add(url);
               alternatives.push({
                 platform_name: getPlatformName(url),
                 listing_url: url,
                 listing_title: result.title || null,
                 price: null,
-                confidence_score: 0.65,
+                confidence_score: null, // TEXT MATCH = NO VISUAL CONFIRMATION = NO TRUST SCORE
                 image_url: result.thumbnail || null,
                 images: result.thumbnail ? [result.thumbnail] : [],
+                match_type: 'text',
               });
-              console.log("Text match found:", getPlatformName(url));
+              console.log("Text match found (no visual confirmation):", getPlatformName(url));
             } else if (isDirectPropertySite(url)) {
               foundUrls.add(url);
               alternatives.push({
@@ -688,11 +732,12 @@ serve(async (req) => {
                 listing_url: url,
                 listing_title: result.title || null,
                 price: null,
-                confidence_score: 0.60,
+                confidence_score: null, // TEXT MATCH = NO VISUAL CONFIRMATION = NO TRUST SCORE
                 image_url: result.thumbnail || null,
                 images: result.thumbnail ? [result.thumbnail] : [],
+                match_type: 'text',
               });
-              console.log("Direct site text match:", url.slice(0, 80));
+              console.log("Direct site text match (no visual confirmation):", url.slice(0, 80));
             }
           }
           
@@ -705,13 +750,25 @@ serve(async (req) => {
 
     console.log(`Total alternatives found: ${alternatives.length}`);
 
-    // Sort by confidence and limit results
-    alternatives.sort((a, b) => b.confidence_score - a.confidence_score);
+    // Sort by confidence (visual matches first, then by score) and limit results
+    // Visual matches with high confidence come first, text matches (null confidence) come last
+    alternatives.sort((a, b) => {
+      // Visual matches always before text matches
+      if (a.match_type === 'visual' && b.match_type === 'text') return -1;
+      if (a.match_type === 'text' && b.match_type === 'visual') return 1;
+      // Within same type, sort by confidence (null = lowest)
+      const scoreA = a.confidence_score ?? 0;
+      const scoreB = b.confidence_score ?? 0;
+      return scoreB - scoreA;
+    });
     const topAlternatives = alternatives.slice(0, 10);
 
     // Use filtered property images (no logos)
     const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
     const airbnbImages = imageUrls.slice(0, 5);
+
+    console.log("Results breakdown - Visual matches:", alternatives.filter(a => a.match_type === 'visual').length,
+                "Text matches:", alternatives.filter(a => a.match_type === 'text').length);
 
     const resultsWithSavings = topAlternatives.map(alt => ({
       ...alt,
