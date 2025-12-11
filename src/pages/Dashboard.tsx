@@ -38,10 +38,38 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const { toast } = useToast();
 
+  // Auto-submit search if URL is provided
   useEffect(() => {
     const urlFromParams = searchParams.get("url");
-    if (urlFromParams) setUrl(urlFromParams);
+    if (urlFromParams) {
+      setUrl(urlFromParams);
+    }
   }, [searchParams]);
+
+  // Auto-trigger search when URL is set from params and user is ready
+  useEffect(() => {
+    const urlFromParams = searchParams.get("url");
+    if (urlFromParams && user && !loading) {
+      // Auto-submit the search
+      const autoSearch = async () => {
+        setLoading(true);
+        try {
+          const { data, error } = await supabase.from("searches").insert({
+            user_id: user.id,
+            airbnb_url: urlFromParams,
+            status: "searching"
+          }).select().single();
+
+          if (error) throw error;
+          navigate(`/search/${data.id}`);
+        } catch (error: any) {
+          toast({ title: "Error", description: error.message, variant: "destructive" });
+          setLoading(false);
+        }
+      };
+      autoSearch();
+    }
+  }, [user, searchParams, navigate, toast, loading]);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
