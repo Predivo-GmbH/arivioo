@@ -32,10 +32,15 @@ const platforms = [
   "Vrbo",
   "Expedia",
   "Hotels.com",
-  "HomeAway",
   "TripAdvisor",
+  "HolidayCheck",
   "Agoda",
-  "Direct Sites"
+  "Hostelworld",
+  "HRS",
+  "HomeAway",
+  "Trivago",
+  "Kayak",
+  "Direct Owner Sites",
 ];
 
 export function HowItWorks() {
