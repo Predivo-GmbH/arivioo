@@ -11,11 +11,16 @@ export function Navbar() {
       <div className="container px-4">
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
-          <Link to="/" className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-lg">A</span>
+          <Link to="/" className="flex items-center gap-2.5">
+            <div className="w-8 h-8 bg-gradient-primary rounded-xl flex items-center justify-center shadow-soft">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" className="text-white">
+                <path d="M12 2L4 7V17L12 22L20 17V7L12 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M12 22V12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M12 12L4 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M12 12L20 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
             </div>
-            <span className="font-bold text-xl text-foreground">Arivioo</span>
+            <span className="font-bold text-xl text-foreground tracking-tight">Arivioo</span>
           </Link>
 
           {/* Desktop Navigation */}
