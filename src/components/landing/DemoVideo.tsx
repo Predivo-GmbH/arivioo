@@ -1,6 +1,8 @@
-import { useState } from "react";
-import { Play, Pause, Search, CheckCircle2, ExternalLink } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Play, Pause, Search, CheckCircle2, ExternalLink, Sparkles, Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import vacationHome1 from "@/assets/vacation-home-1.jpg";
+import vacationHome3 from "@/assets/vacation-home-3.jpg";
 
 const steps = [
   {
@@ -10,19 +12,19 @@ const steps = [
     icon: Search,
   },
   {
-    time: "0:05",
+    time: "0:03",
     label: "AI Searches",
     description: "We scan the web for matches",
     icon: Search,
   },
   {
-    time: "0:35",
+    time: "0:08",
     label: "Compare",
     description: "See side-by-side pricing",
     icon: CheckCircle2,
   },
   {
-    time: "0:40",
+    time: "0:12",
     label: "Book Direct",
     description: "One click to the best deal",
     icon: ExternalLink,
@@ -37,8 +39,8 @@ export function DemoVideo() {
     setIsPlaying(true);
     setCurrentStep(0);
     
-    // Simulate video progress through steps
-    const stepDurations = [5000, 30000, 5000, 5000];
+    // Faster demo - total ~12 seconds
+    const stepDurations = [3000, 5000, 4000, 4000];
     let stepIndex = 0;
     
     const advanceStep = () => {
@@ -47,7 +49,7 @@ export function DemoVideo() {
         setCurrentStep(stepIndex);
         setTimeout(advanceStep, stepDurations[stepIndex]);
       } else {
-        setIsPlaying(false);
+        setTimeout(() => setIsPlaying(false), stepDurations[stepIndex]);
       }
     };
     
@@ -74,13 +76,52 @@ export function DemoVideo() {
               {/* Animated Demo Content */}
               <div className="absolute inset-0 flex items-center justify-center">
                 {!isPlaying ? (
-                  <Button
-                    size="lg"
-                    onClick={handlePlay}
-                    className="w-20 h-20 rounded-full bg-gradient-primary hover:opacity-90 shadow-large"
-                  >
-                    <Play className="w-8 h-8 ml-1" fill="white" />
-                  </Button>
+                  /* Enhanced Start Screen CTA */
+                  <div className="w-full h-full flex flex-col items-center justify-center p-8 relative">
+                    {/* Background property image */}
+                    <div className="absolute inset-0">
+                      <img 
+                        src={vacationHome3} 
+                        alt="Beautiful vacation property"
+                        className="w-full h-full object-cover opacity-30"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent" />
+                    </div>
+                    
+                    <div className="relative z-10 text-center">
+                      <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/20 text-primary mb-6">
+                        <Sparkles className="w-4 h-4" />
+                        <span className="text-sm font-medium">Watch the Demo</span>
+                      </div>
+                      
+                      <h3 className="text-xl md:text-2xl font-bold text-foreground mb-3">
+                        See How You Can Save Up to 30%
+                      </h3>
+                      <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+                        Find your Airbnb listing cheaper on other platforms in seconds
+                      </p>
+                      
+                      <Button
+                        size="lg"
+                        onClick={handlePlay}
+                        className="h-16 px-10 rounded-full bg-gradient-primary hover:opacity-90 shadow-large text-lg font-semibold gap-3"
+                      >
+                        <Play className="w-6 h-6" fill="white" />
+                        Play Demo (15 sec)
+                      </Button>
+                      
+                      <div className="flex items-center justify-center gap-6 mt-6 text-sm text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <CheckCircle2 className="w-4 h-4 text-success" />
+                          Free to try
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <Shield className="w-4 h-4 text-primary" />
+                          No signup needed
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 ) : (
                   <div className="w-full h-full p-8 flex flex-col items-center justify-center">
                     {/* Animated Search Demo */}
@@ -126,11 +167,24 @@ export function DemoVideo() {
                         <div className="animate-fade-in">
                           <div className="grid grid-cols-2 gap-4">
                             <div className="bg-card rounded-xl p-4 border border-border">
-                              <div className="text-xs text-muted-foreground mb-2">Airbnb</div>
+                              <div className="aspect-video rounded-lg mb-2 overflow-hidden">
+                                <img src={vacationHome1} alt="Airbnb listing" className="w-full h-full object-cover" />
+                              </div>
+                              <div className="text-xs text-muted-foreground mb-1">Airbnb</div>
                               <div className="text-xl font-bold text-foreground">$245/night</div>
                             </div>
                             <div className="bg-success/10 rounded-xl p-4 border-2 border-success">
-                              <div className="text-xs text-success mb-2">Direct Booking</div>
+                              <div className="aspect-video rounded-lg mb-2 overflow-hidden">
+                                <img src={vacationHome1} alt="Direct booking" className="w-full h-full object-cover" />
+                              </div>
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-xs text-success">Direct Booking</span>
+                                {/* Trust Score */}
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-success/20 text-success text-xs font-medium">
+                                  <Shield className="w-3 h-3" />
+                                  98%
+                                </span>
+                              </div>
                               <div className="text-xl font-bold text-success">$189/night</div>
                             </div>
                           </div>
@@ -207,7 +261,7 @@ export function DemoVideo() {
 
           {/* Caption */}
           <p className="text-center text-muted-foreground text-sm mt-4">
-            Average search time: 30-45 seconds
+            Average search time: 30-60 seconds
           </p>
         </div>
       </div>

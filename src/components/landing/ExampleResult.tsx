@@ -1,5 +1,7 @@
-import { ExternalLink, Sparkles, Check, Calendar, Info } from "lucide-react";
+import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import vacationHome1 from "@/assets/vacation-home-1.jpg";
+import vacationInterior from "@/assets/vacation-interior-1.jpg";
 
 export function ExampleResult() {
   return (
@@ -33,12 +35,31 @@ export function ExampleResult() {
             </div>
 
             <div className="p-6 md:p-8">
+              {/* Property Preview */}
+              <div className="grid md:grid-cols-3 gap-4 mb-8">
+                <div className="md:col-span-2 aspect-video rounded-xl overflow-hidden">
+                  <img 
+                    src={vacationHome1} 
+                    alt="Luxury vacation home exterior"
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+                <div className="aspect-video rounded-xl overflow-hidden">
+                  <img 
+                    src={vacationInterior} 
+                    alt="Modern interior"
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+              </div>
+
               {/* Comparison Table */}
               <div className="overflow-x-auto mb-8">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border">
                       <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
+                      <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
                       <th className="text-right py-3 px-4 font-semibold text-foreground">Total (3 nights)</th>
                       <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
                       <th className="text-left py-3 px-4 font-semibold text-foreground">Key Differences</th>
@@ -53,6 +74,12 @@ export function ExampleResult() {
                           <span className="font-medium text-foreground">Airbnb</span>
                           <span className="text-xs text-muted-foreground">(Original)</span>
                         </div>
+                      </td>
+                      <td className="py-4 px-4 text-center">
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs font-medium">
+                          <Shield className="w-3 h-3" />
+                          Baseline
+                        </span>
                       </td>
                       <td className="py-4 px-4 text-right font-semibold text-foreground">$540</td>
                       <td className="py-4 px-4 text-right text-muted-foreground">$180/night</td>
@@ -70,13 +97,19 @@ export function ExampleResult() {
                           <span className="font-medium text-foreground">Booking.com</span>
                         </div>
                       </td>
+                      <td className="py-4 px-4 text-center">
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-success/20 text-success text-xs font-medium">
+                          <Shield className="w-3 h-3" />
+                          94%
+                        </span>
+                      </td>
                       <td className="py-4 px-4 text-right font-semibold text-foreground">$495</td>
                       <td className="py-4 px-4 text-right text-muted-foreground">$165/night</td>
                       <td className="py-4 px-4 text-muted-foreground">
                         <span className="text-xs">Free cancellation until 5 days before, breakfast included</span>
                       </td>
                       <td className="py-4 px-4 text-center">
-                        <Button variant="outline" size="sm">View</Button>
+                        <Button variant="outline" size="sm">View Free</Button>
                       </td>
                     </tr>
                     <tr className="bg-success/5 border-2 border-success/30">
@@ -90,6 +123,12 @@ export function ExampleResult() {
                           </span>
                         </div>
                       </td>
+                      <td className="py-4 px-4 text-center">
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-success/20 text-success text-xs font-medium">
+                          <Shield className="w-3 h-3" />
+                          98%
+                        </span>
+                      </td>
                       <td className="py-4 px-4 text-right font-bold text-success text-lg">$399</td>
                       <td className="py-4 px-4 text-right text-success font-medium">$133/night</td>
                       <td className="py-4 px-4">
@@ -100,7 +139,8 @@ export function ExampleResult() {
                       </td>
                       <td className="py-4 px-4 text-center">
                         <Button size="sm" className="bg-success hover:bg-success/90">
-                          Book Now
+                          <Lock className="w-3 h-3 mr-1" />
+                          Unlock
                           <ExternalLink className="w-3 h-3 ml-1" />
                         </Button>
                       </td>
@@ -116,8 +156,11 @@ export function ExampleResult() {
                   <p className="text-4xl font-bold text-success">$141</p>
                   <span className="text-success text-lg font-semibold">(26% off)</span>
                 </div>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-sm text-muted-foreground mb-3">
                   Same property, same dates — just without the platform fees
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  <strong>Unlock fee:</strong> $14.10 (10% of your savings) — Only pay when you save
                 </p>
               </div>
 
@@ -126,7 +169,7 @@ export function ExampleResult() {
                 <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-muted-foreground">
                   <strong>Fair comparison methodology:</strong> All prices shown include total costs with fees and taxes for identical dates. 
-                  We verify listings using photo matching and location data. Always confirm details directly with the host before booking.
+                  Trust scores are based on image matching accuracy. We verify listings using photo matching and location data. Always confirm details directly with the host before booking.
                 </p>
               </div>
             </div>

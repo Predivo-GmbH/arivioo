@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRight, Sparkles } from "lucide-react";
+import { ArrowRight, Sparkles, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useNavigate } from "react-router-dom";
@@ -59,9 +59,20 @@ export function FinalCTA() {
             </div>
           </form>
 
-          <p className="mt-6 text-sm text-white/70">
-            Free to use • No credit card required • Results in seconds
-          </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-4 text-sm text-white/80">
+            <span className="flex items-center gap-1">
+              <CheckCircle2 className="w-4 h-4" />
+              Free to compare
+            </span>
+            <span className="flex items-center gap-1">
+              <CheckCircle2 className="w-4 h-4" />
+              No credit card required
+            </span>
+            <span className="flex items-center gap-1">
+              <CheckCircle2 className="w-4 h-4" />
+              Pay only when you save
+            </span>
+          </div>
         </div>
       </div>
     </section>

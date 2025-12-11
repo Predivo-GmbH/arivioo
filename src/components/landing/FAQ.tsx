@@ -16,11 +16,11 @@ const faqs = [
   },
   {
     question: "Can I trust the alternate listings?",
-    answer: "Absolutely. If Arivioo shows you a listing on another site, it's the same property you saw on Airbnb, just on a different platform. We might direct you to well-known vacation rental sites or the property's official booking page. It's the same host/owner, just without the Airbnb middleman."
+    answer: "Absolutely. If Arivioo shows you a listing on another site, it's the same property you saw on Airbnb, just on a different platform. We show a trust score based on image matching accuracy. We might direct you to well-known vacation rental sites or the property's official booking page. It's the same host/owner, just without the Airbnb middleman."
   },
   {
-    question: "Does Arivioo take a cut or charge me?",
-    answer: "No. Arivioo doesn't charge you anything, and we don't take a commission on bookings. Our service is free to use. We simply show you where you can get a better price, and you book it directly. There are no markups and no hidden fees from Arivioo."
+    question: "Is Arivioo free to use?",
+    answer: "Arivioo is free to search and compare prices across platforms. We show you all alternatives for free. If you want to access the cheapest option (the best deal), we charge a small fee of 10% of the savings you'll make. For example, if you save $100 by booking direct, our fee is just $10. All other alternatives remain completely free to access. This way, you only pay when you actually save money."
   },
   {
     question: "What if the same listing isn't found elsewhere?",

@@ -3,6 +3,8 @@ import { ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useNavigate } from "react-router-dom";
+import vacationHome1 from "@/assets/vacation-home-1.jpg";
+import vacationHome2 from "@/assets/vacation-home-2.jpg";
 
 export function Hero() {
   const [url, setUrl] = useState("");
@@ -76,15 +78,19 @@ export function Hero() {
             See how it works ↓
           </button>
 
-          {/* Mockup Preview */}
+          {/* Mockup Preview with Real Images */}
           <div className="mt-16 animate-fade-in" style={{ animationDelay: "0.5s" }}>
             <div className="relative max-w-3xl mx-auto">
               <div className="bg-card rounded-2xl shadow-large border border-border p-6 md:p-8">
                 <div className="grid md:grid-cols-2 gap-6">
                   {/* Airbnb Card */}
                   <div className="bg-secondary/50 rounded-xl p-4">
-                    <div className="aspect-video bg-muted rounded-lg mb-4 flex items-center justify-center">
-                      <span className="text-muted-foreground text-sm">Airbnb Listing</span>
+                    <div className="aspect-video rounded-lg mb-4 overflow-hidden">
+                      <img 
+                        src={vacationHome1} 
+                        alt="Luxury vacation home exterior"
+                        className="w-full h-full object-cover"
+                      />
                     </div>
                     <h3 className="font-semibold text-foreground mb-1">Cozy Lakeside Cottage</h3>
                     <p className="text-2xl font-bold text-foreground">$180<span className="text-sm font-normal text-muted-foreground">/night</span></p>
@@ -93,8 +99,12 @@ export function Hero() {
 
                   {/* Direct Booking Card */}
                   <div className="bg-success/10 rounded-xl p-4 ring-2 ring-success/30">
-                    <div className="aspect-video bg-success/20 rounded-lg mb-4 flex items-center justify-center">
-                      <span className="text-success text-sm font-medium">Direct Booking</span>
+                    <div className="aspect-video rounded-lg mb-4 overflow-hidden">
+                      <img 
+                        src={vacationHome2} 
+                        alt="Modern vacation home"
+                        className="w-full h-full object-cover"
+                      />
                     </div>
                     <h3 className="font-semibold text-foreground mb-1">Cozy Lakeside Cottage</h3>
                     <p className="text-2xl font-bold text-success">$145<span className="text-sm font-normal text-muted-foreground">/night</span></p>

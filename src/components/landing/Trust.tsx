@@ -1,4 +1,4 @@
-import { Shield, Lock, Eye } from "lucide-react";
+import { Shield, Lock, Percent } from "lucide-react";
 
 export function Trust() {
   return (
@@ -37,11 +37,11 @@ export function Trust() {
 
             <div className="bg-card rounded-2xl p-6 shadow-soft border border-border text-center">
               <div className="w-14 h-14 bg-primary/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                <Eye className="w-7 h-7 text-primary" />
+                <Percent className="w-7 h-7 text-primary" />
               </div>
-              <h3 className="text-lg font-bold text-foreground mb-2">No Hidden Fees</h3>
+              <h3 className="text-lg font-bold text-foreground mb-2">Fair Pricing</h3>
               <p className="text-sm text-muted-foreground">
-                Arivioo doesn't charge you anything and takes no commission on bookings. If you save $100, you keep all of it.
+                Arivioo is free to use for comparing prices. We only charge 10% of your savings if you want the cheapest option — you save, we share in the success.
               </p>
             </div>
           </div>
