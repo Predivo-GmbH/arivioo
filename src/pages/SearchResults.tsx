@@ -3,9 +3,7 @@ import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { ImageCarousel } from "@/components/ImageCarousel";
 import { ImageComparison } from "@/components/ImageComparison";
-import { PhotoComparisonButton } from "@/components/PhotoComparisonButton";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -13,7 +11,6 @@ import {
   Sparkles, 
   AlertCircle,
   TrendingDown,
-  ImageIcon,
   Calendar,
   Info,
   Shield,
@@ -441,6 +438,23 @@ export default function SearchResults() {
                   {search?.airbnb_title || "Price Comparison Results"}
                 </h1>
 
+                {/* Date Range Notice */}
+                {hasValidDates && (
+                  <div className="mb-6 p-4 bg-primary/5 border border-primary/20 rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <Calendar className="w-5 h-5 text-primary flex-shrink-0" />
+                      <div>
+                        <p className="font-medium text-foreground">
+                          Prices compared for: {formatDate(checkIn!)} – {formatDate(checkOut!)}
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          {nights} {nights === 1 ? 'night' : 'nights'} • Same dates used across all platforms for fair comparison
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {results.length === 0 ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
@@ -469,14 +483,14 @@ export default function SearchResults() {
                     <div className="overflow-x-auto mb-8">
                       <table className="w-full text-sm">
                         <thead>
-                          <tr className="border-b border-border">
+                          <tr className="border-b border-border bg-muted/30">
                             <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
-                            <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
+                            <th className="text-center py-3 px-4 font-semibold text-foreground">Match</th>
                             <th className="text-right py-3 px-4 font-semibold text-foreground">
-                              {nights ? `Total (${nights} nights)` : 'Per Night'}
+                              Total{nights ? ` (${nights} nights)` : ''}
                             </th>
                             <th className="text-right py-3 px-4 font-semibold text-foreground hidden md:table-cell">Per Night</th>
-                            <th className="text-center py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Compare</th>
+                            <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Notes</th>
                             <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
                           </tr>
                         </thead>
@@ -485,9 +499,11 @@ export default function SearchResults() {
                           <tr className="border-b border-border bg-[#FF5A5F]/5">
                             <td className="py-4 px-4">
                               <div className="flex items-center gap-2">
-                                <span className="w-2 h-2 rounded-full bg-[#FF5A5F]" />
-                                <span className="font-medium text-foreground">Airbnb</span>
-                                <span className="text-xs text-muted-foreground">(Original)</span>
+                                <span className="w-3 h-3 rounded-full bg-[#FF5A5F]" />
+                                <div>
+                                  <span className="font-medium text-foreground">Airbnb</span>
+                                  <span className="text-xs text-muted-foreground ml-1">(Original)</span>
+                                </div>
                               </div>
                             </td>
                             <td className="py-4 px-4 text-center">
@@ -496,14 +512,21 @@ export default function SearchResults() {
                                 Baseline
                               </span>
                             </td>
-                            <td className="py-4 px-4 text-right font-semibold text-foreground">
-                              {airbnbGrandTotal ? `$${airbnbGrandTotal}` : search?.airbnb_price ? `$${search.airbnb_price}/night` : '—'}
+                            <td className="py-4 px-4 text-right">
+                              <div className="font-semibold text-foreground">
+                                {airbnbGrandTotal ? `$${airbnbGrandTotal}` : search?.airbnb_price ? `$${search.airbnb_price * (nights || 1)}` : '—'}
+                              </div>
+                              {estimatedServiceFee && (
+                                <div className="text-xs text-muted-foreground">
+                                  incl. ~${estimatedServiceFee} service fee
+                                </div>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-right text-muted-foreground hidden md:table-cell">
-                              {search?.airbnb_price ? `$${search.airbnb_price}/night` : '—'}
+                              {search?.airbnb_price ? `$${search.airbnb_price}` : '—'}
                             </td>
-                            <td className="py-4 px-4 text-center hidden lg:table-cell">
-                              <span className="text-xs text-muted-foreground">—</span>
+                            <td className="py-4 px-4 hidden lg:table-cell">
+                              <span className="text-xs text-muted-foreground">AirCover protection, cleaning included</span>
                             </td>
                             <td className="py-4 px-4 text-center">
                               <Button variant="outline" size="sm" asChild>
@@ -521,24 +544,25 @@ export default function SearchResults() {
                             const isDirect = result.platform_name.includes("(Direct)");
                             const totalPrice = result.price && nights ? result.price * nights : null;
                             const isExpanded = expandedComparison === result.id;
+                            const savingsVsAirbnb = airbnbGrandTotal && totalPrice ? airbnbGrandTotal - totalPrice : null;
                             
                             return (
                               <React.Fragment key={result.id}>
                                 <tr 
-                                  className={`border-b border-border ${
+                                  className={`border-b border-border transition-colors ${
                                     isTopResult 
-                                      ? 'bg-success/5 border-2 border-success/30' 
-                                      : 'hover:bg-muted/20'
+                                      ? 'bg-success/5 border-l-4 border-l-success' 
+                                      : 'hover:bg-muted/30'
                                   }`}
                                 >
                                   <td className="py-4 px-4">
-                                    <div className="flex items-center gap-2">
-                                      <span className={`w-2 h-2 rounded-full ${
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className={`w-3 h-3 rounded-full ${
                                         isTopResult ? 'bg-success' : isDirect ? 'bg-amber-500' : 'bg-primary'
                                       }`} />
                                       <span className="font-medium text-foreground">{result.platform_name}</span>
                                       {isTopResult && (
-                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-semibold">
                                           <Sparkles className="w-3 h-3" />
                                           Best Deal
                                         </span>
@@ -549,6 +573,14 @@ export default function SearchResults() {
                                         </span>
                                       )}
                                     </div>
+                                    {/* Mobile: Show compare button inline */}
+                                    <button
+                                      onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                      className="lg:hidden mt-2 text-xs text-primary hover:underline flex items-center gap-1"
+                                    >
+                                      <ArrowLeftRight className="w-3 h-3" />
+                                      {isExpanded ? 'Hide photos' : 'Compare photos'}
+                                    </button>
                                   </td>
                                   <td className="py-4 px-4 text-center">
                                     {result.confidence_score !== null && result.confidence_score !== undefined ? (
@@ -565,38 +597,56 @@ export default function SearchResults() {
                                     ) : (
                                       <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
                                         <Info className="w-3 h-3" />
-                                        Text Only
+                                        Text
                                       </span>
                                     )}
                                   </td>
-                                  <td className={`py-4 px-4 text-right ${isTopResult ? 'text-success font-bold text-lg' : 'font-semibold text-foreground'}`}>
-                                    {totalPrice ? `$${totalPrice}` : result.price ? `$${result.price}/night` : 'See listing'}
-                                    {result.savings_percentage && result.savings_percentage > 0 && (
-                                      <div className="text-xs text-success font-normal">
-                                        Save {result.savings_percentage}%
+                                  <td className="py-4 px-4 text-right">
+                                    <div className={`${isTopResult ? 'text-success font-bold text-lg' : 'font-semibold text-foreground'}`}>
+                                      {totalPrice ? `$${totalPrice}` : result.price ? `$${result.price}` : 'See listing'}
+                                    </div>
+                                    {savingsVsAirbnb && savingsVsAirbnb > 0 && (
+                                      <div className="text-xs text-success font-medium flex items-center gap-1 justify-end">
+                                        <TrendingDown className="w-3 h-3" />
+                                        Save ${savingsVsAirbnb}
                                       </div>
                                     )}
                                   </td>
                                   <td className={`py-4 px-4 text-right hidden md:table-cell ${isTopResult ? 'text-success font-medium' : 'text-muted-foreground'}`}>
-                                    {result.price ? `$${result.price}/night` : '—'}
+                                    {result.price ? `$${result.price}` : '—'}
                                   </td>
-                                  <td className="py-4 px-4 text-center hidden lg:table-cell">
-                                    <PhotoComparisonButton 
-                                      isExpanded={isExpanded}
-                                      onToggle={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                      hasImages={airbnbImages.length > 0 || resultImages.length > 0}
-                                    />
+                                  <td className="py-4 px-4 hidden lg:table-cell">
+                                    <div className="flex flex-col gap-1">
+                                      {isDirect && (
+                                        <span className="text-xs text-success flex items-center gap-1">
+                                          <Check className="w-3 h-3" />
+                                          No platform fees
+                                        </span>
+                                      )}
+                                      {result.match_type === 'visual' && (
+                                        <span className="text-xs text-muted-foreground flex items-center gap-1">
+                                          <Camera className="w-3 h-3" />
+                                          Photo verified
+                                        </span>
+                                      )}
+                                      <button
+                                        onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                        className="text-xs text-primary hover:underline flex items-center gap-1 mt-1"
+                                      >
+                                        <ArrowLeftRight className="w-3 h-3" />
+                                        {isExpanded ? 'Hide comparison' : 'Compare photos'}
+                                      </button>
+                                    </div>
                                   </td>
                                   <td className="py-4 px-4 text-center">
                                     {isTopResult ? (
                                       <Button 
                                         size="sm" 
-                                        className="bg-success hover:bg-success/90"
+                                        className="bg-success hover:bg-success/90 shadow-md"
                                         onClick={() => window.open(result.listing_url, '_blank')}
                                       >
                                         <Lock className="w-3 h-3 mr-1" />
                                         Unlock
-                                        <ExternalLink className="w-3 h-3 ml-1" />
                                       </Button>
                                     ) : (
                                       <Button 
@@ -606,24 +656,25 @@ export default function SearchResults() {
                                       >
                                         <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
                                           View Free
-                                          <ExternalLink className="w-3 h-3 ml-1" />
                                         </a>
                                       </Button>
                                     )}
                                   </td>
                                 </tr>
                                 
-                                {/* Image Comparison Row */}
+                                {/* Image Comparison Row - Expandable */}
                                 {isExpanded && (
-                                  <tr>
-                                    <td colSpan={6} className="p-4 bg-muted/10">
-                                      <ImageComparison
-                                        airbnbImages={airbnbImages}
-                                        alternativeImages={resultImages}
-                                        airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                        alternativeTitle={result.listing_title || "Alternative Listing"}
-                                        platformName={result.platform_name}
-                                      />
+                                  <tr className="animate-fade-in">
+                                    <td colSpan={6} className="p-0">
+                                      <div className="p-4 md:p-6 bg-muted/20 border-t border-border">
+                                        <ImageComparison
+                                          airbnbImages={airbnbImages}
+                                          alternativeImages={resultImages}
+                                          airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                          alternativeTitle={result.listing_title || "Alternative Listing"}
+                                          platformName={result.platform_name}
+                                        />
+                                      </div>
                                     </td>
                                   </tr>
                                 )}
@@ -634,62 +685,63 @@ export default function SearchResults() {
                       </table>
                     </div>
 
-                    {/* Mobile Card View - visible on lg and below for comparison button */}
-                    <div className="lg:hidden space-y-2 mb-8">
-                      {results.map((result) => {
-                        const resultImages = toStringArray(result.images);
-                        const isExpanded = expandedComparison === result.id;
-                        const hasImages = airbnbImages.length > 0 || resultImages.length > 0;
-                        
-                        if (!hasImages) return null;
-                        
-                        return (
-                          <div key={`mobile-compare-${result.id}`}>
-                            <button
-                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                              className="w-full flex items-center justify-between p-3 bg-muted/30 rounded-lg hover:bg-muted/50 transition-colors"
-                            >
-                              <div className="flex items-center gap-2">
-                                <ArrowLeftRight className="w-4 h-4 text-primary" />
-                                <span className="text-sm font-medium">Compare photos with {result.platform_name}</span>
-                              </div>
-                              <span className="text-xs text-muted-foreground">
-                                {isExpanded ? 'Hide' : 'Show'}
-                              </span>
-                            </button>
-                            
-                            {isExpanded && (
-                              <div className="mt-2">
-                                <ImageComparison
-                                  airbnbImages={airbnbImages}
-                                  alternativeImages={resultImages}
-                                  airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                  alternativeTitle={result.listing_title || "Alternative Listing"}
-                                  platformName={result.platform_name}
-                                />
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
 
-                    {/* Savings Summary */}
+                    {/* Savings Summary - Best Deal Highlight */}
                     {bestResult && bestSavings > 0 && (
-                      <div className="bg-success/10 rounded-2xl p-6 text-center mb-8">
-                        <p className="text-muted-foreground mb-2">Your potential savings by booking on {bestResult.platform_name}</p>
-                        <div className="flex items-center justify-center gap-4 mb-2">
-                          <p className="text-4xl font-bold text-success">
-                            ${bestSavingsAmount * (nights || 1)}
-                          </p>
-                          <span className="text-success text-lg font-semibold">({bestSavings}% off)</span>
+                      <div className="bg-gradient-to-br from-success/15 via-success/10 to-success/5 rounded-2xl p-6 md:p-8 border-2 border-success/30 mb-8">
+                        <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                          <div className="text-center md:text-left">
+                            <div className="flex items-center gap-2 justify-center md:justify-start mb-2">
+                              <Sparkles className="w-5 h-5 text-success" />
+                              <span className="text-sm font-semibold text-success uppercase tracking-wide">Best Deal Found</span>
+                            </div>
+                            <p className="text-muted-foreground mb-1">
+                              Save by booking on <span className="font-semibold text-foreground">{bestResult.platform_name}</span>
+                            </p>
+                            <div className="flex items-baseline gap-3 justify-center md:justify-start">
+                              <p className="text-4xl md:text-5xl font-bold text-success">
+                                ${bestSavingsAmount * (nights || 1)}
+                              </p>
+                              <span className="text-success text-xl font-semibold">({bestSavings}% off)</span>
+                            </div>
+                            <p className="text-sm text-muted-foreground mt-2">
+                              Same property • {hasValidDates ? `${formatDate(checkIn!)} – ${formatDate(checkOut!)}` : 'Same dates'}
+                            </p>
+                          </div>
+                          
+                          <div className="flex flex-col items-center gap-3">
+                            <Button 
+                              size="lg"
+                              className="bg-success hover:bg-success/90 text-lg px-8 py-6 h-auto shadow-lg"
+                              onClick={() => window.open(bestResult.listing_url, '_blank')}
+                            >
+                              <Lock className="w-5 h-5 mr-2" />
+                              Unlock This Deal
+                              <ExternalLink className="w-5 h-5 ml-2" />
+                            </Button>
+                            <p className="text-xs text-muted-foreground text-center">
+                              <strong>Fee:</strong> ${Math.round(bestSavingsAmount * (nights || 1) * 0.1)} (10% of savings)
+                            </p>
+                          </div>
                         </div>
-                        <p className="text-sm text-muted-foreground mb-3">
-                          Same property, same dates — just without the platform fees
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          <strong>Unlock fee:</strong> ${Math.round(bestSavingsAmount * (nights || 1) * 0.1)} (10% of your savings) — Only pay when you save
-                        </p>
+                        
+                        {/* Visual comparison of prices */}
+                        <div className="mt-6 pt-6 border-t border-success/20">
+                          <div className="grid grid-cols-2 gap-4 text-center">
+                            <div className="bg-background/50 rounded-xl p-4">
+                              <p className="text-sm text-muted-foreground mb-1">Airbnb Price</p>
+                              <p className="text-xl font-semibold text-foreground line-through opacity-60">
+                                {airbnbGrandTotal ? `$${airbnbGrandTotal}` : `$${(search?.airbnb_price || 0) * (nights || 1)}`}
+                              </p>
+                            </div>
+                            <div className="bg-success/10 rounded-xl p-4 border border-success/30">
+                              <p className="text-sm text-success font-medium mb-1">{bestResult.platform_name}</p>
+                              <p className="text-xl font-bold text-success">
+                                ${(bestResult.price || 0) * (nights || 1)}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     )}
 
