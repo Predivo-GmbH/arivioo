@@ -14,6 +14,7 @@ interface SearchResult {
   price: number | null;
   confidence_score: number;
   image_url: string | null;
+  images: string[];
 }
 
 function getPlatformName(url: string): string {
@@ -304,13 +305,19 @@ serve(async (req) => {
             
             if (isBookingPlatform(url)) {
               foundUrls.add(url);
+              // Collect multiple images from the result
+              const resultImages: string[] = [];
+              if (result.thumbnail) resultImages.push(result.thumbnail);
+              if (result.original) resultImages.push(result.original);
+              
               alternatives.push({
                 platform_name: getPlatformName(url),
                 listing_url: url,
                 listing_title: result.title || result.snippet || null,
                 price: null,
                 confidence_score: 0.9,
-                image_url: result.thumbnail || result.original || null,
+                image_url: resultImages[0] || null,
+                images: resultImages.slice(0, 5),
               });
               console.log("FOUND MATCH:", getPlatformName(url), url.slice(0, 80));
             }
@@ -347,6 +354,7 @@ serve(async (req) => {
             
             if (isBookingPlatform(url)) {
               foundUrls.add(url);
+              const resultImages: string[] = result.thumbnail ? [result.thumbnail] : [];
               alternatives.push({
                 platform_name: getPlatformName(url),
                 listing_url: url,
@@ -354,6 +362,7 @@ serve(async (req) => {
                 price: null,
                 confidence_score: 0.6,
                 image_url: result.thumbnail || null,
+                images: resultImages,
               });
               console.log("Text match found:", getPlatformName(url));
             }
@@ -370,8 +379,9 @@ serve(async (req) => {
     alternatives.sort((a, b) => b.confidence_score - a.confidence_score);
     const topAlternatives = alternatives.slice(0, 5);
 
-    // Get the first Airbnb image for the original listing
+    // Store all Airbnb images (up to 5)
     const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
+    const airbnbImages = imageUrls.slice(0, 5);
 
     const resultsWithSavings = topAlternatives.map(alt => ({
       ...alt,
@@ -393,6 +403,7 @@ serve(async (req) => {
           savings_percentage: r.savings_percentage,
           confidence_score: r.confidence_score,
           image_url: r.image_url,
+          images: r.images,
         }))
       );
     }
@@ -402,6 +413,7 @@ serve(async (req) => {
       airbnb_title: airbnbTitle,
       airbnb_price: airbnbPrice,
       airbnb_image_url: airbnbImageUrl,
+      airbnb_images: airbnbImages,
     }).eq("id", searchId);
 
     console.log("Search completed with", resultsWithSavings.length, "results");
@@ -410,7 +422,7 @@ serve(async (req) => {
       JSON.stringify({ 
         success: true, 
         results: resultsWithSavings,
-        airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, imageUrl: airbnbImageUrl }
+        airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, imageUrl: airbnbImageUrl, images: airbnbImages }
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
