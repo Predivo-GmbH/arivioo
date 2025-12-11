@@ -13,7 +13,7 @@ export function Hero() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (url.trim()) {
-      navigate(`/auth?redirect=/search&url=${encodeURIComponent(url)}`);
+      navigate(`/auth?redirect=/dashboard&url=${encodeURIComponent(url)}`);
     }
   };
 
