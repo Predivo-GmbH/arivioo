@@ -13,7 +13,10 @@ import {
   AlertCircle,
   TrendingDown,
   Loader2,
-  ImageIcon
+  ImageIcon,
+  Calendar,
+  Info,
+  Check
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
@@ -44,11 +47,11 @@ interface SearchData {
 }
 
 const loadingMessages = [
-  "Scanning the web for your property...",
-  "Checking Vrbo, Booking.com and more...",
-  "Comparing prices across platforms...",
-  "Finding the best deals for you...",
-  "Almost there, crunching the numbers...",
+  "Extracting property photos from Airbnb...",
+  "Running reverse image search across the web...",
+  "Checking Vrbo, Booking.com, and direct sites...",
+  "Verifying matches with location data...",
+  "Comparing prices for your dates...",
 ];
 
 // Helper to convert Json to string array
@@ -58,6 +61,32 @@ const toStringArray = (json: Json | null | undefined): string[] => {
     return json.filter((item): item is string => typeof item === 'string');
   }
   return [];
+};
+
+// Extract dates from Airbnb URL if present
+const extractDatesFromUrl = (url: string): { checkIn: string | null; checkOut: string | null } => {
+  try {
+    const urlObj = new URL(url);
+    const checkIn = urlObj.searchParams.get('check_in');
+    const checkOut = urlObj.searchParams.get('check_out');
+    return { checkIn, checkOut };
+  } catch {
+    return { checkIn: null, checkOut: null };
+  }
+};
+
+// Format date for display
+const formatDate = (dateStr: string): string => {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+// Calculate nights between dates
+const calculateNights = (checkIn: string, checkOut: string): number => {
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
+  const diffTime = Math.abs(end.getTime() - start.getTime());
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
 export default function SearchResults() {
@@ -193,6 +222,11 @@ export default function SearchResults() {
   // Get images arrays
   const airbnbImages = toStringArray(search?.airbnb_images);
 
+  // Extract dates from URL
+  const dates = search?.airbnb_url ? extractDatesFromUrl(search.airbnb_url) : { checkIn: null, checkOut: null };
+  const hasValidDates = dates.checkIn && dates.checkOut;
+  const nights = hasValidDates ? calculateNights(dates.checkIn!, dates.checkOut!) : null;
+
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b border-border bg-card">
@@ -223,7 +257,7 @@ export default function SearchResults() {
             </div>
             
             <h2 className="text-2xl font-bold text-foreground mb-4">
-              Searching for Better Deals
+              Finding Better Deals
             </h2>
             
             <p className="text-muted-foreground mb-8 h-6">
@@ -231,7 +265,7 @@ export default function SearchResults() {
             </p>
 
             <div className="flex justify-center gap-2 mb-8">
-              {[0, 1, 2, 3, 4].map(i => (
+              {loadingMessages.map((_, i) => (
                 <div 
                   key={i}
                   className={`w-2 h-2 rounded-full transition-all duration-300 ${
@@ -242,75 +276,99 @@ export default function SearchResults() {
             </div>
 
             <p className="text-sm text-muted-foreground">
-              This usually takes 30-60 seconds...
+              This usually takes 30-60 seconds as we search across multiple platforms...
             </p>
           </div>
         ) : (
           <>
             {/* Results Header */}
-            <div className="max-w-4xl mx-auto mb-8">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-                <div>
+            <div className="max-w-5xl mx-auto mb-8">
+              <div className="flex flex-col md:flex-row md:items-start justify-between gap-4 mb-6">
+                <div className="flex-1">
                   <h1 className="text-2xl md:text-3xl font-bold text-foreground mb-2">
-                    Search Results
+                    Price Comparison Results
                   </h1>
-                  <p className="text-muted-foreground line-clamp-1">
+                  <p className="text-muted-foreground line-clamp-2">
                     {search?.airbnb_title || "Vacation Rental"}
                   </p>
                 </div>
 
-                {bestSavings > 0 && (
-                  <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-green-500/10 text-green-600 dark:text-green-400">
-                    <TrendingDown className="w-5 h-5" />
-                    <span className="font-semibold">Up to {bestSavings}% savings found!</span>
+                {hasValidDates && (
+                  <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-muted/50 text-muted-foreground flex-shrink-0">
+                    <Calendar className="w-4 h-4" />
+                    <span className="text-sm">
+                      {formatDate(dates.checkIn!)} – {formatDate(dates.checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})
+                    </span>
                   </div>
                 )}
               </div>
 
+              {bestSavings > 0 && (
+                <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-green-500/10 text-green-600 dark:text-green-400 mb-6">
+                  <TrendingDown className="w-5 h-5" />
+                  <span className="font-semibold">Great news! We found up to {bestSavings}% savings on alternative platforms.</span>
+                </div>
+              )}
+
               {/* Original Listing Card with Image Carousel */}
-              <div className="bg-card rounded-2xl border border-border p-6 mb-8">
-                <div className="flex flex-col md:flex-row items-start gap-6">
-                  {/* Airbnb Image Carousel */}
-                  <div className="w-full md:w-48 lg:w-64 flex-shrink-0">
-                    {airbnbImages.length > 0 ? (
-                      <ImageCarousel 
-                        images={airbnbImages}
-                        alt={search?.airbnb_title || "Property"}
-                        aspectRatio="video"
-                        fallbackColor="bg-[#FF5A5F]/10"
-                      />
-                    ) : (
-                      <div className="aspect-video rounded-xl bg-[#FF5A5F]/10 flex items-center justify-center">
-                        <ImageIcon className="w-8 h-8 text-[#FF5A5F]" />
-                      </div>
-                    )}
+              <div className="bg-card rounded-2xl border border-border overflow-hidden mb-8">
+                <div className="bg-[#FF5A5F]/5 px-6 py-3 border-b border-border flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-[#FF5A5F]" />
+                    <span className="font-semibold text-foreground">Original Airbnb Listing</span>
                   </div>
-                  
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="text-sm font-medium text-muted-foreground">Original Listing</span>
-                      <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-[#FF5A5F]/10 text-[#FF5A5F]">
-                        Airbnb
-                      </span>
-                    </div>
-                    <h3 className="font-semibold text-lg text-foreground mb-3 line-clamp-2">
-                      {search?.airbnb_title || "Vacation Rental"}
-                    </h3>
-                    <div className="flex flex-wrap items-center gap-4">
-                      {search?.airbnb_price && (
-                        <span className="text-xl font-bold text-foreground">
-                          ${search.airbnb_price}/night
-                        </span>
+                  {search?.airbnb_price && (
+                    <span className="text-lg font-bold text-foreground">
+                      ${search.airbnb_price}/night
+                    </span>
+                  )}
+                </div>
+                <div className="p-6">
+                  <div className="flex flex-col md:flex-row items-start gap-6">
+                    {/* Airbnb Image Carousel */}
+                    <div className="w-full md:w-56 lg:w-72 flex-shrink-0">
+                      {airbnbImages.length > 0 ? (
+                        <ImageCarousel 
+                          images={airbnbImages}
+                          alt={search?.airbnb_title || "Property"}
+                          aspectRatio="video"
+                          fallbackColor="bg-[#FF5A5F]/10"
+                        />
+                      ) : (
+                        <div className="aspect-video rounded-xl bg-[#FF5A5F]/10 flex items-center justify-center">
+                          <ImageIcon className="w-8 h-8 text-[#FF5A5F]" />
+                        </div>
                       )}
-                      <a 
-                        href={search?.airbnb_url} 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="text-sm text-primary hover:underline flex items-center gap-1"
-                      >
-                        View on Airbnb
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
+                    </div>
+                    
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-semibold text-lg text-foreground mb-3 line-clamp-2">
+                        {search?.airbnb_title || "Vacation Rental"}
+                      </h3>
+                      
+                      {hasValidDates && search?.airbnb_price && nights && (
+                        <div className="space-y-2 text-sm mb-4">
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">${search.airbnb_price} × {nights} nights</span>
+                            <span className="text-foreground">${search.airbnb_price * nights}</span>
+                          </div>
+                          <div className="flex justify-between text-muted-foreground">
+                            <span>+ Cleaning fee (est.)</span>
+                            <span>Varies</span>
+                          </div>
+                          <div className="flex justify-between text-destructive/80">
+                            <span>+ Service fee (~14%)</span>
+                            <span>~${Math.round(search.airbnb_price * nights * 0.14)}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      <Button asChild variant="outline" size="sm">
+                        <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
+                          View on Airbnb
+                          <ExternalLink className="w-3 h-3 ml-2" />
+                        </a>
+                      </Button>
                     </div>
                   </div>
                 </div>
@@ -318,10 +376,10 @@ export default function SearchResults() {
             </div>
 
             {/* Alternatives */}
-            <div className="max-w-4xl mx-auto">
+            <div className="max-w-5xl mx-auto">
               <h2 className="text-xl font-semibold text-foreground mb-4 flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-primary" />
-                Alternative Listings Found
+                Alternative Listings Found ({results.length})
               </h2>
 
               {results.length === 0 ? (
@@ -330,10 +388,11 @@ export default function SearchResults() {
                     <AlertCircle className="w-8 h-8 text-muted-foreground" />
                   </div>
                   <h3 className="text-xl font-semibold text-foreground mb-2">
-                    No Alternatives Found
+                    No Alternative Listings Found
                   </h3>
                   <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                    We couldn't find this exact property on other platforms. This might be an Airbnb-exclusive listing, or the property uses different names elsewhere.
+                    We couldn't find this property on Booking.com, Vrbo, or other platforms using photo matching and property details. 
+                    It might be exclusive to Airbnb or listed under a different name elsewhere.
                   </p>
                   <Button asChild>
                     <Link to="/dashboard">
@@ -343,95 +402,207 @@ export default function SearchResults() {
                   </Button>
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {results.map((result, index) => {
-                    const resultImages = toStringArray(result.images);
-                    
-                    return (
-                      <div 
-                        key={result.id}
-                        className={`bg-card rounded-2xl border transition-all hover:shadow-medium ${
-                          index === 0 && result.savings_percentage && result.savings_percentage > 0
-                            ? "border-green-500/50 ring-1 ring-green-500/20"
-                            : "border-border"
-                        }`}
-                      >
-                        <div className="p-6">
-                          <div className="flex flex-col md:flex-row md:items-center gap-4">
-                            {/* Result Image Carousel */}
-                            <div className="w-full md:w-32 lg:w-40 flex-shrink-0">
-                              {resultImages.length > 0 || result.image_url ? (
-                                <ImageCarousel 
-                                  images={resultImages.length > 0 ? resultImages : (result.image_url ? [result.image_url] : [])}
-                                  alt={result.listing_title || "Property"}
-                                  aspectRatio="video"
-                                />
-                              ) : (
-                                <div className="aspect-video rounded-xl bg-primary/10 flex items-center justify-center">
-                                  <ImageIcon className="w-6 h-6 text-primary" />
-                                </div>
-                              )}
-                            </div>
+                <>
+                  {/* Comparison Table for larger screens */}
+                  <div className="hidden md:block bg-card rounded-2xl border border-border overflow-hidden mb-6">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="bg-muted/30 border-b border-border">
+                            <th className="text-left py-4 px-4 font-semibold text-foreground">Platform</th>
+                            <th className="text-left py-4 px-4 font-semibold text-foreground">Property</th>
+                            <th className="text-center py-4 px-4 font-semibold text-foreground">Match</th>
+                            <th className="text-right py-4 px-4 font-semibold text-foreground">Price</th>
+                            <th className="text-center py-4 px-4 font-semibold text-foreground">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {results.map((result, index) => {
+                            const resultImages = toStringArray(result.images);
+                            const isTopResult = index === 0 && result.savings_percentage && result.savings_percentage > 0;
                             
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-2">
-                                <span className="px-3 py-1 text-sm font-medium rounded-full bg-primary/10 text-primary">
-                                  {result.platform_name}
-                                </span>
-                                {result.confidence_score && result.confidence_score > 0.7 && (
-                                  <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
-                                    <CheckCircle2 className="w-3 h-3" />
-                                    High Match
-                                  </span>
+                            return (
+                              <tr 
+                                key={result.id}
+                                className={`border-b border-border last:border-0 ${
+                                  isTopResult ? 'bg-green-500/5' : 'hover:bg-muted/20'
+                                }`}
+                              >
+                                <td className="py-4 px-4">
+                                  <div className="flex items-center gap-2">
+                                    <span className={`w-2 h-2 rounded-full ${isTopResult ? 'bg-success' : 'bg-primary'}`} />
+                                    <span className="font-medium text-foreground">{result.platform_name}</span>
+                                    {isTopResult && (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
+                                        <Sparkles className="w-3 h-3" />
+                                        Best Deal
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="py-4 px-4">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-12 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-muted">
+                                      {resultImages.length > 0 || result.image_url ? (
+                                        <img 
+                                          src={resultImages[0] || result.image_url || ''} 
+                                          alt={result.listing_title || 'Property'}
+                                          className="w-full h-full object-cover"
+                                          onError={(e) => {
+                                            const target = e.target as HTMLImageElement;
+                                            target.style.display = 'none';
+                                          }}
+                                        />
+                                      ) : (
+                                        <div className="w-full h-full flex items-center justify-center">
+                                          <ImageIcon className="w-4 h-4 text-muted-foreground" />
+                                        </div>
+                                      )}
+                                    </div>
+                                    <span className="text-foreground line-clamp-2 text-sm">
+                                      {result.listing_title || "Vacation Rental"}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td className="py-4 px-4 text-center">
+                                  {result.confidence_score && result.confidence_score > 0.7 ? (
+                                    <span className="inline-flex items-center gap-1 text-xs text-success">
+                                      <CheckCircle2 className="w-4 h-4" />
+                                      High
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground">Likely</span>
+                                  )}
+                                </td>
+                                <td className="py-4 px-4 text-right">
+                                  {result.price ? (
+                                    <div>
+                                      <span className={`font-bold ${isTopResult ? 'text-success text-lg' : 'text-foreground'}`}>
+                                        ${result.price}
+                                      </span>
+                                      <span className="text-muted-foreground text-xs">/night</span>
+                                      {result.savings_percentage && result.savings_percentage > 0 && (
+                                        <div className="text-xs text-success mt-1">
+                                          Save {result.savings_percentage}%
+                                        </div>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-muted-foreground text-xs">See listing</span>
+                                  )}
+                                </td>
+                                <td className="py-4 px-4 text-center">
+                                  <Button 
+                                    asChild 
+                                    size="sm" 
+                                    className={isTopResult ? "bg-success hover:bg-success/90" : "bg-gradient-primary hover:opacity-90"}
+                                  >
+                                    <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                      View
+                                      <ExternalLink className="w-3 h-3 ml-1" />
+                                    </a>
+                                  </Button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Card view for mobile */}
+                  <div className="md:hidden space-y-4 mb-6">
+                    {results.map((result, index) => {
+                      const resultImages = toStringArray(result.images);
+                      const isTopResult = index === 0 && result.savings_percentage && result.savings_percentage > 0;
+                      
+                      return (
+                        <div 
+                          key={result.id}
+                          className={`bg-card rounded-2xl border transition-all ${
+                            isTopResult
+                              ? "border-green-500/50 ring-1 ring-green-500/20"
+                              : "border-border"
+                          }`}
+                        >
+                          <div className="p-4">
+                            <div className="flex items-start gap-4">
+                              {/* Image */}
+                              <div className="w-20 h-20 rounded-xl overflow-hidden flex-shrink-0 bg-muted">
+                                {resultImages.length > 0 || result.image_url ? (
+                                  <img 
+                                    src={resultImages[0] || result.image_url || ''} 
+                                    alt={result.listing_title || 'Property'}
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center bg-primary/10">
+                                    <ImageIcon className="w-6 h-6 text-primary" />
+                                  </div>
                                 )}
                               </div>
                               
-                              <h3 className="font-semibold text-foreground mb-2 line-clamp-2">
-                                {result.listing_title || "Vacation Rental"}
-                              </h3>
-
-                              <div className="flex flex-wrap items-center gap-4">
-                                {result.price ? (
-                                  <div className="flex items-baseline gap-2">
-                                    <span className="text-2xl font-bold text-foreground">
-                                      ${result.price}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-primary/10 text-primary">
+                                    {result.platform_name}
+                                  </span>
+                                  {isTopResult && (
+                                    <span className="flex items-center gap-1 text-xs text-success">
+                                      <Sparkles className="w-3 h-3" />
+                                      Best
                                     </span>
-                                    <span className="text-muted-foreground">/night</span>
-                                  </div>
-                                ) : (
-                                  <span className="text-muted-foreground">Price not available</span>
-                                )}
+                                  )}
+                                </div>
+                                
+                                <h3 className="font-medium text-foreground mb-2 text-sm line-clamp-2">
+                                  {result.listing_title || "Vacation Rental"}
+                                </h3>
 
-                                {result.savings_percentage && result.savings_percentage > 0 && (
-                                  <div className="flex items-center gap-1 px-3 py-1 rounded-full bg-green-500/10 text-green-600 dark:text-green-400">
-                                    <TrendingDown className="w-4 h-4" />
-                                    <span className="font-semibold">Save {result.savings_percentage}%</span>
-                                    {result.savings_amount && (
-                                      <span className="text-sm">(${result.savings_amount}/night)</span>
-                                    )}
-                                  </div>
-                                )}
+                                <div className="flex items-center justify-between">
+                                  {result.price ? (
+                                    <span className={`font-bold ${isTopResult ? 'text-success' : 'text-foreground'}`}>
+                                      ${result.price}/night
+                                    </span>
+                                  ) : (
+                                    <span className="text-muted-foreground text-sm">See listing</span>
+                                  )}
+
+                                  <Button 
+                                    asChild 
+                                    size="sm" 
+                                    className={isTopResult ? "bg-success hover:bg-success/90" : "bg-gradient-primary hover:opacity-90"}
+                                  >
+                                    <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                      View
+                                      <ExternalLink className="w-3 h-3 ml-1" />
+                                    </a>
+                                  </Button>
+                                </div>
                               </div>
-                            </div>
-
-                            <div className="flex-shrink-0">
-                              <Button asChild className="w-full md:w-auto bg-gradient-primary hover:opacity-90">
-                                <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                  View & Book
-                                  <ExternalLink className="w-4 h-4 ml-2" />
-                                </a>
-                              </Button>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+                </>
               )}
 
+              {/* Methodology note */}
+              <div className="bg-muted/30 rounded-xl p-4 flex items-start gap-3 mb-8">
+                <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
+                <div className="text-xs text-muted-foreground">
+                  <strong className="text-foreground">How we found these:</strong> We extracted property photos from the Airbnb listing 
+                  and ran reverse image searches to find the same property on other platforms. 
+                  Matches are verified using image similarity and location data. 
+                  Always confirm details directly with the host before booking.
+                </div>
+              </div>
+
               {/* Try another search */}
-              <div className="mt-8 text-center">
+              <div className="text-center">
                 <Button variant="outline" asChild>
                   <Link to="/dashboard">
                     <Search className="w-4 h-4 mr-2" />
