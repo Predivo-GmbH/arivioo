@@ -46,6 +46,7 @@ export type Database = {
           confidence_score: number | null
           created_at: string
           id: string
+          image_url: string | null
           listing_title: string | null
           listing_url: string
           original_price: number | null
@@ -59,6 +60,7 @@ export type Database = {
           confidence_score?: number | null
           created_at?: string
           id?: string
+          image_url?: string | null
           listing_title?: string | null
           listing_url: string
           original_price?: number | null
@@ -72,6 +74,7 @@ export type Database = {
           confidence_score?: number | null
           created_at?: string
           id?: string
+          image_url?: string | null
           listing_title?: string | null
           listing_url?: string
           original_price?: number | null
@@ -93,6 +96,7 @@ export type Database = {
       }
       searches: {
         Row: {
+          airbnb_image_url: string | null
           airbnb_price: number | null
           airbnb_title: string | null
           airbnb_url: string
@@ -103,6 +107,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          airbnb_image_url?: string | null
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url: string
@@ -113,6 +118,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          airbnb_image_url?: string | null
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url?: string

@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
-import { Search, LogOut, History, Sparkles, Clock, ExternalLink, TrendingDown } from "lucide-react";
+import { Search, LogOut, History, Sparkles, Clock, ExternalLink, TrendingDown, ImageIcon } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 
 interface SearchHistory {
@@ -12,6 +12,7 @@ interface SearchHistory {
   airbnb_url: string;
   airbnb_title: string | null;
   airbnb_price: number | null;
+  airbnb_image_url: string | null;
   status: string;
   created_at: string;
 }
@@ -171,8 +172,24 @@ export default function Dashboard() {
                     to={`/search/${search.id}`}
                     className="flex items-center gap-4 p-3 rounded-xl hover:bg-muted/50 transition-colors group"
                   >
-                    <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
-                      <TrendingDown className="w-5 h-5 text-primary" />
+                    {/* Property Image Thumbnail */}
+                    <div className="w-14 h-14 rounded-lg overflow-hidden flex-shrink-0 bg-muted">
+                      {search.airbnb_image_url ? (
+                        <img 
+                          src={search.airbnb_image_url} 
+                          alt={search.airbnb_title || "Property"} 
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            const target = e.target as HTMLImageElement;
+                            target.style.display = 'none';
+                            target.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center"><svg class="w-5 h-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>';
+                          }}
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <ImageIcon className="w-5 h-5 text-muted-foreground" />
+                        </div>
+                      )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-foreground line-clamp-1 group-hover:text-primary transition-colors">
