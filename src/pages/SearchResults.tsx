@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { ImageCarousel } from "@/components/ImageCarousel";
+import { ImageComparison } from "@/components/ImageComparison";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -19,7 +20,8 @@ import {
   Camera,
   Globe,
   DollarSign,
-  Check
+  Check,
+  Eye
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
@@ -36,6 +38,7 @@ interface SearchResult {
   confidence_score: number | null;
   image_url: string | null;
   images: Json;
+  match_type?: string;
 }
 
 interface SearchData {
@@ -47,6 +50,9 @@ interface SearchData {
   airbnb_images: Json;
   status: string;
   created_at: string;
+  check_in_date?: string | null;
+  check_out_date?: string | null;
+  nights_count?: number | null;
 }
 
 // Step-based loading messages that progress linearly
@@ -267,10 +273,22 @@ export default function SearchResults() {
   // Get images arrays
   const airbnbImages = toStringArray(search?.airbnb_images);
 
-  // Extract dates from URL
-  const dates = search?.airbnb_url ? extractDatesFromUrl(search.airbnb_url) : { checkIn: null, checkOut: null };
-  const hasValidDates = dates.checkIn && dates.checkOut;
-  const nights = hasValidDates ? calculateNights(dates.checkIn!, dates.checkOut!) : null;
+  // Use dates from database first (these are the actual comparison dates used)
+  // Fall back to URL extraction for display consistency
+  const dbCheckIn = search?.check_in_date;
+  const dbCheckOut = search?.check_out_date;
+  const dbNights = search?.nights_count;
+  
+  // If DB has dates, use those (these are the dates actually used for comparison)
+  // Otherwise extract from URL for legacy data
+  const urlDates = search?.airbnb_url ? extractDatesFromUrl(search.airbnb_url) : { checkIn: null, checkOut: null };
+  const checkIn = dbCheckIn || urlDates.checkIn;
+  const checkOut = dbCheckOut || urlDates.checkOut;
+  const hasValidDates = checkIn && checkOut;
+  const nights = dbNights || (hasValidDates ? calculateNights(checkIn!, checkOut!) : null);
+  
+  // State for visual comparison expansion
+  const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
 
   return (
     <div className="min-h-screen bg-background">
@@ -382,7 +400,7 @@ export default function SearchResults() {
                   <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-muted/50 text-muted-foreground flex-shrink-0">
                     <Calendar className="w-4 h-4" />
                     <span className="text-sm">
-                      {formatDate(dates.checkIn!)} – {formatDate(dates.checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})
+                      {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})
                     </span>
                   </div>
                 )}
@@ -511,133 +529,155 @@ export default function SearchResults() {
                             const isDirect = result.platform_name.includes("(Direct)");
                             
                             return (
-                              <tr 
-                                key={result.id}
-                                className={`border-b border-border last:border-0 ${
-                                  isTopResult ? 'bg-green-500/5' : 'hover:bg-muted/20'
-                                }`}
-                              >
-                                <td className="py-4 px-4">
-                                  <div className="flex items-center gap-2">
-                                    <span className={`w-2 h-2 rounded-full ${
-                                      isDirect ? 'bg-amber-500' : isTopResult ? 'bg-success' : 'bg-primary'
-                                    }`} />
-                                    <span className="font-medium text-foreground">{result.platform_name}</span>
-                                    {isTopResult && (
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
-                                        <Sparkles className="w-3 h-3" />
-                                        Best Deal
-                                      </span>
-                                    )}
-                                    {isDirect && (
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs font-medium">
-                                        No Fees
-                                      </span>
-                                    )}
-                                  </div>
-                                </td>
-                                <td className="py-4 px-4">
-                                  <div className="flex items-center gap-3">
-                                    <div className="w-12 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-muted">
-                                      {resultImages.length > 0 || result.image_url ? (
-                                        <img 
-                                          src={resultImages[0] || result.image_url || ''} 
-                                          alt={result.listing_title || 'Property'}
-                                          className="w-full h-full object-cover"
-                                          onError={(e) => {
-                                            const target = e.target as HTMLImageElement;
-                                            target.style.display = 'none';
-                                          }}
-                                        />
-                                      ) : (
-                                        <div className="w-full h-full flex items-center justify-center">
-                                          <ImageIcon className="w-4 h-4 text-muted-foreground" />
-                                        </div>
+                              <React.Fragment key={result.id}>
+                                <tr 
+                                  className={`border-b border-border last:border-0 ${
+                                    isTopResult ? 'bg-green-500/5' : 'hover:bg-muted/20'
+                                  }`}
+                                >
+                                  <td className="py-4 px-4">
+                                    <div className="flex items-center gap-2">
+                                      <span className={`w-2 h-2 rounded-full ${
+                                        isDirect ? 'bg-amber-500' : isTopResult ? 'bg-success' : 'bg-primary'
+                                      }`} />
+                                      <span className="font-medium text-foreground">{result.platform_name}</span>
+                                      {isTopResult && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
+                                          <Sparkles className="w-3 h-3" />
+                                          Best Deal
+                                        </span>
+                                      )}
+                                      {isDirect && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs font-medium">
+                                          No Fees
+                                        </span>
                                       )}
                                     </div>
-                                    <span className="text-foreground line-clamp-2 text-sm">
-                                      {result.listing_title || "Vacation Rental"}
-                                    </span>
-                                  </div>
-                                </td>
-                                <td className="py-4 px-4 text-center">
-                                  {result.confidence_score !== null && result.confidence_score !== undefined ? (
-                                    <div className="flex flex-col items-center gap-1">
-                                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                                        result.confidence_score >= 0.9 
-                                          ? 'bg-success/20 text-success' 
-                                          : result.confidence_score >= 0.8 
-                                          ? 'bg-primary/20 text-primary'
-                                          : result.confidence_score >= 0.7
-                                          ? 'bg-blue-500/20 text-blue-600 dark:text-blue-400'
-                                          : 'bg-muted text-muted-foreground'
-                                      }`}>
-                                        <Shield className="w-3 h-3" />
-                                        {Math.round(result.confidence_score * 100)}%
-                                      </span>
-                                      <span className="text-xs text-muted-foreground">
-                                        {result.confidence_score >= 0.95 
-                                          ? 'Verified Match' 
-                                          : result.confidence_score >= 0.85 
-                                          ? 'High Confidence'
-                                          : result.confidence_score >= 0.7
-                                          ? 'Good Match'
-                                          : 'Possible Match'}
-                                      </span>
-                                    </div>
-                                  ) : (
-                                    <div className="flex flex-col items-center gap-1">
-                                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
-                                        <Info className="w-3 h-3" />
-                                        Text Only
-                                      </span>
-                                      <span className="text-xs text-muted-foreground">
-                                        Not visually verified
-                                      </span>
-                                    </div>
-                                  )}
-                                </td>
-                                <td className="py-4 px-4 text-right">
-                                  {result.price ? (
-                                    <div>
-                                      <span className={`font-bold ${isTopResult ? 'text-success text-lg' : 'text-foreground'}`}>
-                                        ${result.price}
-                                      </span>
-                                      <span className="text-muted-foreground text-xs">/night</span>
-                                      {result.savings_percentage && result.savings_percentage > 0 && (
-                                        <div className="text-xs text-success mt-1">
-                                          Save {result.savings_percentage}%
+                                  </td>
+                                  <td className="py-4 px-4">
+                                    <div className="flex items-center gap-3">
+                                      <button
+                                        onClick={() => setExpandedComparison(expandedComparison === result.id ? null : result.id)}
+                                        className="w-12 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-muted relative group cursor-pointer"
+                                        title="Compare photos"
+                                      >
+                                        {resultImages.length > 0 || result.image_url ? (
+                                          <img 
+                                            src={resultImages[0] || result.image_url || ''} 
+                                            alt={result.listing_title || 'Property'}
+                                            className="w-full h-full object-cover"
+                                            onError={(e) => {
+                                              const target = e.target as HTMLImageElement;
+                                              target.style.display = 'none';
+                                            }}
+                                          />
+                                        ) : (
+                                          <div className="w-full h-full flex items-center justify-center">
+                                            <ImageIcon className="w-4 h-4 text-muted-foreground" />
+                                          </div>
+                                        )}
+                                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                          <Eye className="w-4 h-4 text-white" />
                                         </div>
-                                      )}
+                                      </button>
+                                      <span className="text-foreground line-clamp-2 text-sm">
+                                        {result.listing_title || "Vacation Rental"}
+                                      </span>
                                     </div>
-                                  ) : (
-                                    <span className="text-muted-foreground text-xs">See listing</span>
-                                  )}
-                                </td>
-                                <td className="py-4 px-4 text-center">
-                                  {isTopResult ? (
-                                    <Button 
-                                      size="sm" 
-                                      className="bg-success hover:bg-success/90"
-                                      onClick={() => window.open(result.listing_url, '_blank')}
-                                    >
-                                      <Lock className="w-3 h-3 mr-1" />
-                                      Unlock
-                                    </Button>
-                                  ) : (
-                                    <Button 
-                                      asChild 
-                                      size="sm" 
-                                      variant="outline"
-                                    >
-                                      <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                        View Free
-                                        <ExternalLink className="w-3 h-3 ml-1" />
-                                      </a>
-                                    </Button>
-                                  )}
-                                </td>
-                              </tr>
+                                  </td>
+                                  <td className="py-4 px-4 text-center">
+                                    {result.confidence_score !== null && result.confidence_score !== undefined ? (
+                                      <div className="flex flex-col items-center gap-1">
+                                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                                          result.confidence_score >= 0.9 
+                                            ? 'bg-success/20 text-success' 
+                                            : result.confidence_score >= 0.8 
+                                            ? 'bg-primary/20 text-primary'
+                                            : result.confidence_score >= 0.7
+                                            ? 'bg-blue-500/20 text-blue-600 dark:text-blue-400'
+                                            : 'bg-muted text-muted-foreground'
+                                        }`}>
+                                          <Shield className="w-3 h-3" />
+                                          {Math.round(result.confidence_score * 100)}%
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                          {result.confidence_score >= 0.95 
+                                            ? 'Verified Match' 
+                                            : result.confidence_score >= 0.85 
+                                            ? 'High Confidence'
+                                            : result.confidence_score >= 0.7
+                                            ? 'Good Match'
+                                            : 'Possible Match'}
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <div className="flex flex-col items-center gap-1">
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
+                                          <Info className="w-3 h-3" />
+                                          Text Only
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                          Not visually verified
+                                        </span>
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-4 px-4 text-right">
+                                    {result.price ? (
+                                      <div>
+                                        <span className={`font-bold ${isTopResult ? 'text-success text-lg' : 'text-foreground'}`}>
+                                          ${result.price}
+                                        </span>
+                                        <span className="text-muted-foreground text-xs">/night</span>
+                                        {result.savings_percentage && result.savings_percentage > 0 && (
+                                          <div className="text-xs text-success mt-1">
+                                            Save {result.savings_percentage}%
+                                          </div>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <span className="text-muted-foreground text-xs">See listing</span>
+                                    )}
+                                  </td>
+                                  <td className="py-4 px-4 text-center">
+                                    {isTopResult ? (
+                                      <Button 
+                                        size="sm" 
+                                        className="bg-success hover:bg-success/90"
+                                        onClick={() => window.open(result.listing_url, '_blank')}
+                                      >
+                                        <Lock className="w-3 h-3 mr-1" />
+                                        Unlock
+                                      </Button>
+                                    ) : (
+                                      <Button 
+                                        asChild 
+                                        size="sm" 
+                                        variant="outline"
+                                      >
+                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                          View Free
+                                          <ExternalLink className="w-3 h-3 ml-1" />
+                                        </a>
+                                      </Button>
+                                    )}
+                                  </td>
+                                </tr>
+                                {/* Visual Comparison Row */}
+                                {expandedComparison === result.id && (
+                                  <tr>
+                                    <td colSpan={5} className="p-4 bg-muted/20">
+                                      <ImageComparison
+                                        airbnbImages={airbnbImages}
+                                        alternativeImages={resultImages}
+                                        airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                        alternativeTitle={result.listing_title || "Alternative Listing"}
+                                        platformName={result.platform_name}
+                                      />
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
                             );
                           })}
                         </tbody>
@@ -775,7 +815,7 @@ export default function SearchResults() {
                   (no logos or UI elements) and ran reverse image searches across Booking.com, Vrbo, Agoda, HolidayCheck, and 10+ other platforms. 
                   Matches are verified using image similarity and location data. 
                   {hasValidDates && (
-                    <span> All prices shown are for {formatDate(dates.checkIn!)} – {formatDate(dates.checkOut!)}.</span>
+                    <span> All prices shown are for {formatDate(checkIn!)} – {formatDate(checkOut!)}.</span>
                   )}
                   {' '}Always confirm details directly with the host before booking.
                 </div>

@@ -16,6 +16,8 @@ interface SearchResult {
   image_url: string | null;
   images: string[];
   match_type: 'visual' | 'text'; // Track how match was found
+  total_price?: number | null;
+  per_night_rate?: number | null;
 }
 
 // Expanded platform list for better coverage - including international variants
@@ -235,6 +237,155 @@ function generateDefaultDates(): { checkIn: string; checkOut: string } {
   };
 }
 
+// Calculate nights between dates
+function calculateNights(checkIn: string, checkOut: string): number {
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
+  const diffTime = Math.abs(end.getTime() - start.getTime());
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
+
+// Format dates for different platforms
+function formatDateForPlatform(date: string, platform: string): string {
+  const d = new Date(date);
+  // Most platforms use YYYY-MM-DD
+  return d.toISOString().split('T')[0];
+}
+
+// Add date parameters to a URL for a given platform
+function addDatesToUrl(url: string, checkIn: string, checkOut: string): string {
+  try {
+    const urlObj = new URL(url);
+    const lowercaseUrl = url.toLowerCase();
+    
+    // Platform-specific date parameter names
+    if (lowercaseUrl.includes("booking.com")) {
+      urlObj.searchParams.set('checkin', checkIn);
+      urlObj.searchParams.set('checkout', checkOut);
+    } else if (lowercaseUrl.includes("vrbo.com") || lowercaseUrl.includes("homeaway.")) {
+      urlObj.searchParams.set('arrival', checkIn);
+      urlObj.searchParams.set('departure', checkOut);
+    } else if (lowercaseUrl.includes("expedia.")) {
+      urlObj.searchParams.set('chkin', checkIn);
+      urlObj.searchParams.set('chkout', checkOut);
+    } else if (lowercaseUrl.includes("hotels.com")) {
+      urlObj.searchParams.set('checkIn', checkIn);
+      urlObj.searchParams.set('checkOut', checkOut);
+    } else if (lowercaseUrl.includes("agoda.")) {
+      urlObj.searchParams.set('checkIn', checkIn);
+      urlObj.searchParams.set('checkOut', checkOut);
+    } else if (lowercaseUrl.includes("tripadvisor.")) {
+      // TripAdvisor uses different format
+      urlObj.searchParams.set('checkin', checkIn);
+      urlObj.searchParams.set('checkout', checkOut);
+    } else if (lowercaseUrl.includes("holidaycheck.")) {
+      urlObj.searchParams.set('checkin', checkIn);
+      urlObj.searchParams.set('checkout', checkOut);
+    } else {
+      // Generic - try common parameter names
+      urlObj.searchParams.set('checkin', checkIn);
+      urlObj.searchParams.set('checkout', checkOut);
+    }
+    
+    return urlObj.toString();
+  } catch {
+    return url;
+  }
+}
+
+// Scrape price from a listing page using Firecrawl
+async function scrapePriceFromListing(url: string, checkIn: string, checkOut: string, firecrawlApiKey: string): Promise<{ price: number | null; totalPrice: number | null; perNightRate: number | null }> {
+  try {
+    // Add dates to URL for price lookup
+    const urlWithDates = addDatesToUrl(url, checkIn, checkOut);
+    console.log("Scraping price from:", urlWithDates.slice(0, 100));
+    
+    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: urlWithDates,
+        formats: ['markdown'],
+        onlyMainContent: true,
+        waitFor: 3000, // Wait for dynamic content
+      }),
+    });
+    
+    if (!response.ok) {
+      console.log("Firecrawl request failed:", response.status);
+      return { price: null, totalPrice: null, perNightRate: null };
+    }
+    
+    const data = await response.json();
+    const content = data.data?.markdown || data.markdown || '';
+    
+    if (!content) {
+      console.log("No content from Firecrawl");
+      return { price: null, totalPrice: null, perNightRate: null };
+    }
+    
+    // Extract price patterns from the content
+    const pricePatterns = [
+      // Total price patterns
+      /total[:\s]*[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i,
+      /[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*total/i,
+      // Per night patterns
+      /[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:per night|\/night|night)/i,
+      /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*[\$€£CHF]?\s*(?:per night|\/night)/i,
+      // Generic price pattern
+      /price[:\s]*[\$€£CHF]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i,
+      /[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*)/,
+    ];
+    
+    let extractedPrice: number | null = null;
+    let isPerNight = false;
+    
+    for (const pattern of pricePatterns) {
+      const match = content.match(pattern);
+      if (match) {
+        const priceStr = match[1].replace(/,/g, '');
+        extractedPrice = parseFloat(priceStr);
+        
+        // Check if this is a per-night price
+        if (pattern.toString().includes('night')) {
+          isPerNight = true;
+        }
+        
+        if (extractedPrice && extractedPrice > 0 && extractedPrice < 50000) {
+          console.log("Extracted price:", extractedPrice, isPerNight ? "(per night)" : "(total)");
+          break;
+        }
+      }
+    }
+    
+    if (!extractedPrice) {
+      return { price: null, totalPrice: null, perNightRate: null };
+    }
+    
+    const nights = calculateNights(checkIn, checkOut);
+    
+    if (isPerNight) {
+      return {
+        price: extractedPrice,
+        totalPrice: extractedPrice * nights,
+        perNightRate: extractedPrice,
+      };
+    } else {
+      return {
+        price: Math.round(extractedPrice / nights),
+        totalPrice: extractedPrice,
+        perNightRate: Math.round(extractedPrice / nights),
+      };
+    }
+  } catch (error) {
+    console.error("Price scraping error:", error);
+    return { price: null, totalPrice: null, perNightRate: null };
+  }
+}
+
 // Extract location info from title/URL
 function extractLocationFromTitle(title: string): { city: string | null; country: string | null } {
   // Common location patterns in Airbnb titles
@@ -288,6 +439,7 @@ serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const serpApiKey = Deno.env.get("SERPAPI_API_KEY");
+    const firecrawlApiKey = Deno.env.get("FIRECRAWL_API_KEY");
 
     if (!serpApiKey) {
       return new Response(
@@ -295,6 +447,8 @@ serve(async (req) => {
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+    
+    console.log("Firecrawl API available:", !!firecrawlApiKey);
 
     // Create a user-scoped client to verify the user
     const userClient = createClient(supabaseUrl, supabaseAnonKey, {
@@ -770,12 +924,72 @@ serve(async (req) => {
     console.log("Results breakdown - Visual matches:", alternatives.filter(a => a.match_type === 'visual').length,
                 "Text matches:", alternatives.filter(a => a.match_type === 'text').length);
 
-    const resultsWithSavings = topAlternatives.map(alt => ({
-      ...alt,
-      original_price: airbnbPrice,
-      savings_amount: null,
-      savings_percentage: null,
-    }));
+    // Calculate nights for price comparison
+    const nights = calculateNights(checkIn, checkOut);
+    console.log(`Comparing prices for ${nights} nights: ${checkIn} to ${checkOut}`);
+
+    // Step 4: Scrape prices from alternatives using Firecrawl (if available)
+    let resultsWithPrices = topAlternatives;
+    
+    if (firecrawlApiKey && topAlternatives.length > 0) {
+      console.log("Step 4: Scraping prices from alternatives...");
+      
+      // Scrape up to 5 top results for pricing (to avoid rate limits)
+      const priceScrapePromises = topAlternatives.slice(0, 5).map(async (alt) => {
+        const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
+        return {
+          ...alt,
+          price: priceData.perNightRate,
+          total_price: priceData.totalPrice,
+          per_night_rate: priceData.perNightRate,
+        };
+      });
+      
+      const pricedResults = await Promise.all(priceScrapePromises);
+      
+      // Merge priced results with remaining unpriced ones
+      resultsWithPrices = [
+        ...pricedResults,
+        ...topAlternatives.slice(5),
+      ];
+      
+      console.log("Price scraping complete. Results with prices:", pricedResults.filter(r => r.price).length);
+    }
+
+    // Calculate savings based on Airbnb price
+    const resultsWithSavings = resultsWithPrices.map(alt => {
+      let savingsAmount: number | null = null;
+      let savingsPercentage: number | null = null;
+      
+      if (airbnbPrice && alt.price && alt.price < airbnbPrice) {
+        savingsAmount = airbnbPrice - alt.price;
+        savingsPercentage = Math.round((savingsAmount / airbnbPrice) * 100);
+      }
+      
+      return {
+        ...alt,
+        original_price: airbnbPrice,
+        savings_amount: savingsAmount,
+        savings_percentage: savingsPercentage,
+      };
+    });
+
+    // Sort by savings (best deals first), then by confidence
+    resultsWithSavings.sort((a, b) => {
+      // First, prioritize results with actual savings
+      const savingsA = a.savings_percentage ?? 0;
+      const savingsB = b.savings_percentage ?? 0;
+      if (savingsA !== savingsB) return savingsB - savingsA;
+      
+      // Then by match type (visual first)
+      if (a.match_type === 'visual' && b.match_type === 'text') return -1;
+      if (a.match_type === 'text' && b.match_type === 'visual') return 1;
+      
+      // Finally by confidence
+      const scoreA = a.confidence_score ?? 0;
+      const scoreB = b.confidence_score ?? 0;
+      return scoreB - scoreA;
+    });
 
     if (resultsWithSavings.length > 0) {
       await supabase.from("search_results").insert(
@@ -791,6 +1005,7 @@ serve(async (req) => {
           confidence_score: r.confidence_score,
           image_url: r.image_url,
           images: r.images,
+          match_type: r.match_type,
         }))
       );
     }
@@ -801,6 +1016,9 @@ serve(async (req) => {
       airbnb_price: airbnbPrice,
       airbnb_image_url: airbnbImageUrl,
       airbnb_images: airbnbImages,
+      check_in_date: checkIn,
+      check_out_date: checkOut,
+      nights_count: nights,
     }).eq("id", searchId);
 
     console.log("Search completed with", resultsWithSavings.length, "results");
@@ -816,7 +1034,7 @@ serve(async (req) => {
           imageUrl: airbnbImageUrl, 
           images: airbnbImages 
         },
-        dates: { checkIn, checkOut }
+        dates: { checkIn, checkOut, nights }
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
