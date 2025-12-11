@@ -50,6 +50,7 @@ export type Database = {
           images: Json | null
           listing_title: string | null
           listing_url: string
+          match_type: string | null
           original_price: number | null
           platform_name: string
           price: number | null
@@ -65,6 +66,7 @@ export type Database = {
           images?: Json | null
           listing_title?: string | null
           listing_url: string
+          match_type?: string | null
           original_price?: number | null
           platform_name: string
           price?: number | null
@@ -80,6 +82,7 @@ export type Database = {
           images?: Json | null
           listing_title?: string | null
           listing_url?: string
+          match_type?: string | null
           original_price?: number | null
           platform_name?: string
           price?: number | null
@@ -104,8 +107,11 @@ export type Database = {
           airbnb_price: number | null
           airbnb_title: string | null
           airbnb_url: string
+          check_in_date: string | null
+          check_out_date: string | null
           created_at: string
           id: string
+          nights_count: number | null
           status: string
           updated_at: string
           user_id: string
@@ -116,8 +122,11 @@ export type Database = {
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url: string
+          check_in_date?: string | null
+          check_out_date?: string | null
           created_at?: string
           id?: string
+          nights_count?: number | null
           status?: string
           updated_at?: string
           user_id: string
@@ -128,8 +137,11 @@ export type Database = {
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url?: string
+          check_in_date?: string | null
+          check_out_date?: string | null
           created_at?: string
           id?: string
+          nights_count?: number | null
           status?: string
           updated_at?: string
           user_id?: string
