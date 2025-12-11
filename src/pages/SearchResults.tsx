@@ -135,6 +135,7 @@ export default function SearchResults() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentStep, setCurrentStep] = useState(0);
+  const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const searchTriggeredRef = useRef(false);
 
   useEffect(() => {
@@ -286,9 +287,6 @@ export default function SearchResults() {
   const checkOut = dbCheckOut || urlDates.checkOut;
   const hasValidDates = checkIn && checkOut;
   const nights = dbNights || (hasValidDates ? calculateNights(checkIn!, checkOut!) : null);
-  
-  // State for visual comparison expansion
-  const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
 
   return (
     <div className="min-h-screen bg-background">
