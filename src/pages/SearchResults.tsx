@@ -16,7 +16,9 @@ import {
   ImageIcon,
   Calendar,
   Info,
-  Check
+  Check,
+  Shield,
+  Lock
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
@@ -411,7 +413,7 @@ export default function SearchResults() {
                           <tr className="bg-muted/30 border-b border-border">
                             <th className="text-left py-4 px-4 font-semibold text-foreground">Platform</th>
                             <th className="text-left py-4 px-4 font-semibold text-foreground">Property</th>
-                            <th className="text-center py-4 px-4 font-semibold text-foreground">Match</th>
+                            <th className="text-center py-4 px-4 font-semibold text-foreground">Trust Score</th>
                             <th className="text-right py-4 px-4 font-semibold text-foreground">Price</th>
                             <th className="text-center py-4 px-4 font-semibold text-foreground">Action</th>
                           </tr>
@@ -465,13 +467,31 @@ export default function SearchResults() {
                                   </div>
                                 </td>
                                 <td className="py-4 px-4 text-center">
-                                  {result.confidence_score && result.confidence_score > 0.7 ? (
-                                    <span className="inline-flex items-center gap-1 text-xs text-success">
-                                      <CheckCircle2 className="w-4 h-4" />
-                                      High
-                                    </span>
+                                  {result.confidence_score ? (
+                                    <div className="flex flex-col items-center gap-1">
+                                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                                        result.confidence_score >= 0.9 
+                                          ? 'bg-success/20 text-success' 
+                                          : result.confidence_score >= 0.7 
+                                          ? 'bg-primary/20 text-primary'
+                                          : 'bg-muted text-muted-foreground'
+                                      }`}>
+                                        <Shield className="w-3 h-3" />
+                                        {Math.round(result.confidence_score * 100)}%
+                                      </span>
+                                      <span className="text-xs text-muted-foreground">
+                                        {result.confidence_score >= 0.9 
+                                          ? 'Excellent' 
+                                          : result.confidence_score >= 0.7 
+                                          ? 'Good'
+                                          : 'Likely'}
+                                      </span>
+                                    </div>
                                   ) : (
-                                    <span className="text-xs text-muted-foreground">Likely</span>
+                                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs">
+                                      <Shield className="w-3 h-3" />
+                                      Pending
+                                    </span>
                                   )}
                                 </td>
                                 <td className="py-4 px-4 text-right">
@@ -492,16 +512,27 @@ export default function SearchResults() {
                                   )}
                                 </td>
                                 <td className="py-4 px-4 text-center">
-                                  <Button 
-                                    asChild 
-                                    size="sm" 
-                                    className={isTopResult ? "bg-success hover:bg-success/90" : "bg-gradient-primary hover:opacity-90"}
-                                  >
-                                    <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                      View
-                                      <ExternalLink className="w-3 h-3 ml-1" />
-                                    </a>
-                                  </Button>
+                                  {isTopResult ? (
+                                    <Button 
+                                      size="sm" 
+                                      className="bg-success hover:bg-success/90"
+                                      onClick={() => window.open(result.listing_url, '_blank')}
+                                    >
+                                      <Lock className="w-3 h-3 mr-1" />
+                                      Unlock
+                                    </Button>
+                                  ) : (
+                                    <Button 
+                                      asChild 
+                                      size="sm" 
+                                      variant="outline"
+                                    >
+                                      <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                        View Free
+                                        <ExternalLink className="w-3 h-3 ml-1" />
+                                      </a>
+                                    </Button>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -529,7 +560,7 @@ export default function SearchResults() {
                           <div className="p-4">
                             <div className="flex items-start gap-4">
                               {/* Image */}
-                              <div className="w-20 h-20 rounded-xl overflow-hidden flex-shrink-0 bg-muted">
+                              <div className="w-20 h-20 rounded-xl overflow-hidden flex-shrink-0 bg-muted relative">
                                 {resultImages.length > 0 || result.image_url ? (
                                   <img 
                                     src={resultImages[0] || result.image_url || ''} 
@@ -541,17 +572,30 @@ export default function SearchResults() {
                                     <ImageIcon className="w-6 h-6 text-primary" />
                                   </div>
                                 )}
+                                {/* Trust Score Badge */}
+                                {result.confidence_score && (
+                                  <div className={`absolute bottom-1 right-1 px-1.5 py-0.5 rounded text-xs font-medium flex items-center gap-0.5 ${
+                                    result.confidence_score >= 0.9 
+                                      ? 'bg-success text-white' 
+                                      : result.confidence_score >= 0.7 
+                                      ? 'bg-primary text-white'
+                                      : 'bg-muted text-muted-foreground'
+                                  }`}>
+                                    <Shield className="w-2.5 h-2.5" />
+                                    {Math.round(result.confidence_score * 100)}%
+                                  </div>
+                                )}
                               </div>
                               
                               <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-1">
+                                <div className="flex items-center gap-2 mb-1 flex-wrap">
                                   <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-primary/10 text-primary">
                                     {result.platform_name}
                                   </span>
                                   {isTopResult && (
                                     <span className="flex items-center gap-1 text-xs text-success">
                                       <Sparkles className="w-3 h-3" />
-                                      Best
+                                      Best Deal
                                     </span>
                                   )}
                                 </div>
@@ -561,24 +605,42 @@ export default function SearchResults() {
                                 </h3>
 
                                 <div className="flex items-center justify-between">
-                                  {result.price ? (
-                                    <span className={`font-bold ${isTopResult ? 'text-success' : 'text-foreground'}`}>
-                                      ${result.price}/night
-                                    </span>
-                                  ) : (
-                                    <span className="text-muted-foreground text-sm">See listing</span>
-                                  )}
+                                  <div>
+                                    {result.price ? (
+                                      <span className={`font-bold ${isTopResult ? 'text-success' : 'text-foreground'}`}>
+                                        ${result.price}/night
+                                      </span>
+                                    ) : (
+                                      <span className="text-muted-foreground text-sm">See listing</span>
+                                    )}
+                                    {result.savings_percentage && result.savings_percentage > 0 && (
+                                      <span className="text-xs text-success ml-2">
+                                        Save {result.savings_percentage}%
+                                      </span>
+                                    )}
+                                  </div>
 
-                                  <Button 
-                                    asChild 
-                                    size="sm" 
-                                    className={isTopResult ? "bg-success hover:bg-success/90" : "bg-gradient-primary hover:opacity-90"}
-                                  >
-                                    <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                      View
-                                      <ExternalLink className="w-3 h-3 ml-1" />
-                                    </a>
-                                  </Button>
+                                  {isTopResult ? (
+                                    <Button 
+                                      size="sm" 
+                                      className="bg-success hover:bg-success/90"
+                                      onClick={() => window.open(result.listing_url, '_blank')}
+                                    >
+                                      <Lock className="w-3 h-3 mr-1" />
+                                      Unlock
+                                    </Button>
+                                  ) : (
+                                    <Button 
+                                      asChild 
+                                      size="sm" 
+                                      variant="outline"
+                                    >
+                                      <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                        View
+                                        <ExternalLink className="w-3 h-3 ml-1" />
+                                      </a>
+                                    </Button>
+                                  )}
                                 </div>
                               </div>
                             </div>
