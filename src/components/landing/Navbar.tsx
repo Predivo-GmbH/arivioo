@@ -32,6 +32,9 @@ export function Navbar() {
             >
               Why Arivioo
             </button>
+            <Link to="/pricing" className="text-muted-foreground hover:text-foreground transition-colors">
+              Pricing
+            </Link>
             <Link to="/auth" className="text-muted-foreground hover:text-foreground transition-colors">
               Log In
             </Link>
@@ -71,6 +74,13 @@ export function Navbar() {
               >
                 Why Arivioo
               </button>
+              <Link 
+                to="/pricing" 
+                className="text-muted-foreground hover:text-foreground transition-colors"
+                onClick={() => setIsOpen(false)}
+              >
+                Pricing
+              </Link>
               <Link 
                 to="/auth" 
                 className="text-muted-foreground hover:text-foreground transition-colors"
