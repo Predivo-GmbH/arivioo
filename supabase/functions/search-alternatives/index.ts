@@ -13,6 +13,7 @@ interface SearchResult {
   listing_title: string | null;
   price: number | null;
   confidence_score: number;
+  image_url: string | null;
 }
 
 function getPlatformName(url: string): string {
@@ -309,6 +310,7 @@ serve(async (req) => {
                 listing_title: result.title || result.snippet || null,
                 price: null,
                 confidence_score: 0.9,
+                image_url: result.thumbnail || result.original || null,
               });
               console.log("FOUND MATCH:", getPlatformName(url), url.slice(0, 80));
             }
@@ -351,6 +353,7 @@ serve(async (req) => {
                 listing_title: result.title || null,
                 price: null,
                 confidence_score: 0.6,
+                image_url: result.thumbnail || null,
               });
               console.log("Text match found:", getPlatformName(url));
             }
@@ -366,6 +369,9 @@ serve(async (req) => {
     // Sort and limit results
     alternatives.sort((a, b) => b.confidence_score - a.confidence_score);
     const topAlternatives = alternatives.slice(0, 5);
+
+    // Get the first Airbnb image for the original listing
+    const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
 
     const resultsWithSavings = topAlternatives.map(alt => ({
       ...alt,
@@ -386,6 +392,7 @@ serve(async (req) => {
           savings_amount: r.savings_amount,
           savings_percentage: r.savings_percentage,
           confidence_score: r.confidence_score,
+          image_url: r.image_url,
         }))
       );
     }
@@ -394,6 +401,7 @@ serve(async (req) => {
       status: "completed",
       airbnb_title: airbnbTitle,
       airbnb_price: airbnbPrice,
+      airbnb_image_url: airbnbImageUrl,
     }).eq("id", searchId);
 
     console.log("Search completed with", resultsWithSavings.length, "results");
@@ -402,7 +410,7 @@ serve(async (req) => {
       JSON.stringify({ 
         success: true, 
         results: resultsWithSavings,
-        airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url }
+        airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, imageUrl: airbnbImageUrl }
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

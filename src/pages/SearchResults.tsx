@@ -11,8 +11,8 @@ import {
   CheckCircle2, 
   AlertCircle,
   TrendingDown,
-  Building2,
-  Loader2
+  Loader2,
+  ImageIcon
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 
@@ -26,6 +26,7 @@ interface SearchResult {
   savings_amount: number | null;
   savings_percentage: number | null;
   confidence_score: number | null;
+  image_url: string | null;
 }
 
 interface SearchData {
@@ -33,6 +34,7 @@ interface SearchData {
   airbnb_url: string;
   airbnb_title: string | null;
   airbnb_price: number | null;
+  airbnb_image_url: string | null;
   status: string;
   created_at: string;
 }
@@ -118,13 +120,15 @@ export default function SearchResults() {
         setSearchStarted(true);
         
         try {
+          const { data: { session } } = await supabase.auth.getSession();
+          
           const response = await fetch(
             `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
             {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+                "Authorization": `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
               },
               body: JSON.stringify({ searchId }),
             }
@@ -250,8 +254,24 @@ export default function SearchResults() {
               {/* Original Listing Card */}
               <div className="bg-card rounded-2xl border border-border p-6 mb-8">
                 <div className="flex items-start gap-4">
-                  <div className="w-12 h-12 rounded-xl bg-[#FF5A5F]/10 flex items-center justify-center flex-shrink-0">
-                    <Building2 className="w-6 h-6 text-[#FF5A5F]" />
+                  {/* Airbnb Image */}
+                  <div className="w-24 h-24 md:w-32 md:h-32 rounded-xl overflow-hidden flex-shrink-0 bg-muted">
+                    {search?.airbnb_image_url ? (
+                      <img 
+                        src={search.airbnb_image_url} 
+                        alt={search.airbnb_title || "Property"} 
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          const target = e.target as HTMLImageElement;
+                          target.style.display = 'none';
+                          target.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center bg-[#FF5A5F]/10"><svg class="w-8 h-8 text-[#FF5A5F]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>';
+                        }}
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center bg-[#FF5A5F]/10">
+                        <ImageIcon className="w-8 h-8 text-[#FF5A5F]" />
+                      </div>
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
@@ -260,7 +280,7 @@ export default function SearchResults() {
                         Airbnb
                       </span>
                     </div>
-                    <h3 className="font-semibold text-foreground mb-2 line-clamp-1">
+                    <h3 className="font-semibold text-foreground mb-2 line-clamp-2">
                       {search?.airbnb_title || "Vacation Rental"}
                     </h3>
                     <div className="flex flex-wrap items-center gap-4">
@@ -322,6 +342,26 @@ export default function SearchResults() {
                     >
                       <div className="p-6">
                         <div className="flex flex-col md:flex-row md:items-center gap-4">
+                          {/* Result Image */}
+                          <div className="w-20 h-20 md:w-24 md:h-24 rounded-xl overflow-hidden flex-shrink-0 bg-muted">
+                            {result.image_url ? (
+                              <img 
+                                src={result.image_url} 
+                                alt={result.listing_title || "Property"} 
+                                className="w-full h-full object-cover"
+                                onError={(e) => {
+                                  const target = e.target as HTMLImageElement;
+                                  target.style.display = 'none';
+                                  target.parentElement!.innerHTML = '<div class="w-full h-full flex items-center justify-center bg-primary/10"><svg class="w-6 h-6 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></div>';
+                                }}
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center bg-primary/10">
+                                <ImageIcon className="w-6 h-6 text-primary" />
+                              </div>
+                            )}
+                          </div>
+                          
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-2">
                               <span className="px-3 py-1 text-sm font-medium rounded-full bg-primary/10 text-primary">
