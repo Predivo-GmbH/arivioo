@@ -296,17 +296,30 @@ export default function SearchResults() {
   const hasValidDates = checkIn && checkOut;
   const nights = dbNights || (hasValidDates ? calculateNights(checkIn!, checkOut!) : null);
 
-  // Calculate totals
-  const airbnbTotal = search?.airbnb_price && nights ? search.airbnb_price * nights : null;
+  // Calculate totals - use original_price from results if airbnb_price not available
+  const referencePrice = search?.airbnb_price || (results.length > 0 ? results[0].original_price : null);
+  const airbnbTotal = referencePrice && nights ? referencePrice * nights : null;
   const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
-  // Filter and sort results: limit to 4, sorted by price (most expensive first, cheapest last)
-  // Filter out unreasonable prices (less than 10% of Airbnb price is likely an error)
-  const minReasonablePrice = airbnbGrandTotal ? airbnbGrandTotal * 0.1 : 10;
+  // Filter and sort results with strict price validation
+  // 1. Must have a valid price (> 0)
+  // 2. If we have Airbnb baseline, filter out prices below 20% (likely parsing errors like €7 vs €700)
+  // 3. Also filter out prices above 200% of baseline (likely different property)
   const validResults = results.filter(r => {
-    const totalPrice = r.price && nights ? r.price * nights : r.price;
-    return totalPrice && totalPrice >= minReasonablePrice;
+    if (!r.price || r.price <= 0) return false;
+    
+    const totalPrice = nights ? r.price * nights : r.price;
+    
+    // If we have a reference price, validate against it
+    if (airbnbGrandTotal) {
+      const minReasonable = airbnbGrandTotal * 0.20; // At least 20% of Airbnb price
+      const maxReasonable = airbnbGrandTotal * 2.0;  // At most 200% of Airbnb price
+      return totalPrice >= minReasonable && totalPrice <= maxReasonable;
+    }
+    
+    // Without reference, just ensure price is reasonable (> €10 per night)
+    return r.price >= 10;
   });
   
   // Sort by price descending (most expensive first), then take specific positions
@@ -337,6 +350,7 @@ export default function SearchResults() {
   // Calculate potential savings
   const cheapestTotalPrice = cheapestResult?.price && nights ? cheapestResult.price * nights : null;
   const potentialSavings = airbnbGrandTotal && cheapestTotalPrice ? airbnbGrandTotal - cheapestTotalPrice : null;
+
 
   // Helper to generate key differences based on platform
   const getKeyDifferences = (result: SearchResult): string[] => {
@@ -520,7 +534,7 @@ export default function SearchResults() {
                           </tr>
                         </thead>
                         <tbody>
-                          {/* Airbnb Original Row */}
+                          {/* Airbnb Original Row - Show estimated price when actual not available */}
                           <tr className="border-b border-border bg-[#FF5A5F]/5">
                             <td className="py-4 px-4">
                               <div className="flex items-center gap-2">
@@ -536,10 +550,14 @@ export default function SearchResults() {
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-foreground">
-                              €{airbnbGrandTotal || (search?.airbnb_price ? search.airbnb_price * (nights || 1) : '—')}
+                              {search?.airbnb_price ? (
+                                `€${Math.round(search.airbnb_price * (nights || 1) * 1.14)}`
+                              ) : (
+                                <span className="text-muted-foreground">Price varies</span>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-right text-muted-foreground">
-                              €{search?.airbnb_price}/night
+                              {search?.airbnb_price ? `€${search.airbnb_price}/night` : '—'}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
                               <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
@@ -557,72 +575,104 @@ export default function SearchResults() {
                             const isDirect = result.platform_name.includes("(Direct)");
                             const totalPrice = result.price && nights ? result.price * nights : null;
                             const keyDiffs = getKeyDifferences(result);
+                            const resultImages = toStringArray(result.images);
+                            const isExpanded = expandedComparison === result.id;
                             
                             return (
-                              <tr 
-                                key={result.id} 
-                                className={isCheapest 
-                                  ? 'bg-success/5 border-2 border-success/30' 
-                                  : 'border-b border-border hover:bg-muted/50'
-                                }
-                              >
-                                <td className="py-4 px-4">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className={`w-2 h-2 rounded-full ${
-                                      isCheapest ? 'bg-success' : isDirect ? 'bg-amber-500' : 'bg-blue-500'
-                                    }`} />
-                                    <span className="font-medium text-foreground">{result.platform_name}</span>
-                                    {isCheapest && (
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
-                                        <Sparkles className="w-3 h-3" />
-                                        Best Deal
+                              <React.Fragment key={result.id}>
+                                <tr 
+                                  className={isCheapest 
+                                    ? 'bg-success/5 border-2 border-success/30' 
+                                    : 'border-b border-border hover:bg-muted/50'
+                                  }
+                                >
+                                  <td className="py-4 px-4">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className={`w-2 h-2 rounded-full ${
+                                        isCheapest ? 'bg-success' : isDirect ? 'bg-amber-500' : 'bg-blue-500'
+                                      }`} />
+                                      <span className="font-medium text-foreground">{result.platform_name}</span>
+                                      {isCheapest && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
+                                          <Sparkles className="w-3 h-3" />
+                                          Best Deal
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="py-4 px-4 text-center">
+                                    {result.confidence_score !== null && result.confidence_score !== undefined ? (
+                                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                                        result.confidence_score >= 0.9 
+                                          ? 'bg-success/20 text-success' 
+                                          : 'bg-primary/20 text-primary'
+                                      }`}>
+                                        <Shield className="w-3 h-3" />
+                                        {Math.round(result.confidence_score * 100)}%
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
+                                        <Info className="w-3 h-3" />
+                                        Text
                                       </span>
                                     )}
-                                  </div>
-                                </td>
-                                <td className="py-4 px-4 text-center">
-                                  {result.confidence_score !== null && result.confidence_score !== undefined ? (
-                                    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                                      result.confidence_score >= 0.9 
-                                        ? 'bg-success/20 text-success' 
-                                        : 'bg-primary/20 text-primary'
-                                    }`}>
-                                      <Shield className="w-3 h-3" />
-                                      {Math.round(result.confidence_score * 100)}%
+                                  </td>
+                                  <td className={`py-4 px-4 text-right font-semibold ${isCheapest ? 'text-success text-lg' : 'text-foreground'}`}>
+                                    {totalPrice ? `€${totalPrice}` : result.price ? `€${result.price}` : '—'}
+                                  </td>
+                                  <td className={`py-4 px-4 text-right ${isCheapest ? 'text-success font-medium' : 'text-muted-foreground'}`}>
+                                    {result.price ? `€${result.price}/night` : '—'}
+                                  </td>
+                                  <td className="py-4 px-4 hidden lg:table-cell">
+                                    <span className={`text-xs ${isCheapest ? 'text-success flex items-center gap-1' : 'text-muted-foreground'}`}>
+                                      {isCheapest && <Check className="w-3 h-3" />}
+                                      {keyDiffs.slice(0, 2).join(', ')}
                                     </span>
-                                  ) : (
-                                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
-                                      <Info className="w-3 h-3" />
-                                      Text
-                                    </span>
-                                  )}
-                                </td>
-                                <td className={`py-4 px-4 text-right font-semibold ${isCheapest ? 'text-success text-lg' : 'text-foreground'}`}>
-                                  {totalPrice ? `€${totalPrice}` : result.price ? `€${result.price}` : '—'}
-                                </td>
-                                <td className={`py-4 px-4 text-right ${isCheapest ? 'text-success font-medium' : 'text-muted-foreground'}`}>
-                                  {result.price ? `€${result.price}/night` : '—'}
-                                </td>
-                                <td className="py-4 px-4 hidden lg:table-cell">
-                                  <span className={`text-xs ${isCheapest ? 'text-success flex items-center gap-1' : 'text-muted-foreground'}`}>
-                                    {isCheapest && <Check className="w-3 h-3" />}
-                                    {keyDiffs.slice(0, 2).join(', ')}
-                                  </span>
-                                </td>
-                                <td className="py-4 px-4 text-center">
-                                  {isCheapest ? (
-                                    <Button size="sm" className="bg-success hover:bg-success/90">
-                                      <Lock className="w-3 h-3 mr-1" />
-                                      Unlock
-                                      <ExternalLink className="w-3 h-3 ml-1" />
-                                    </Button>
-                                  ) : (
-                                    <Button variant="outline" size="sm" asChild>
-                                      <a href={result.listing_url} target="_blank" rel="noopener noreferrer">View Free</a>
-                                    </Button>
-                                  )}
-                                </td>
-                              </tr>
+                                  </td>
+                                  <td className="py-4 px-4 text-center">
+                                    <div className="flex flex-col gap-1.5 items-center">
+                                      {isCheapest ? (
+                                        <Button size="sm" className="bg-success hover:bg-success/90">
+                                          <Lock className="w-3 h-3 mr-1" />
+                                          Unlock
+                                          <ExternalLink className="w-3 h-3 ml-1" />
+                                        </Button>
+                                      ) : (
+                                        <Button variant="outline" size="sm" asChild>
+                                          <a href={result.listing_url} target="_blank" rel="noopener noreferrer">View Free</a>
+                                        </Button>
+                                      )}
+                                      {resultImages.length > 0 && airbnbImages.length > 0 && (
+                                        <button
+                                          onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                          className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                                            isExpanded 
+                                              ? 'bg-primary/10 text-primary' 
+                                              : 'text-muted-foreground hover:text-primary'
+                                          }`}
+                                        >
+                                          <ArrowLeftRight className="w-3 h-3" />
+                                          {isExpanded ? 'Hide' : 'Photos'}
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                                {/* Inline Photo Comparison - appears directly below the row */}
+                                {isExpanded && resultImages.length > 0 && (
+                                  <tr className="border-b border-border">
+                                    <td colSpan={6} className="p-4 bg-muted/30">
+                                      <ImageComparison
+                                        airbnbImages={airbnbImages}
+                                        alternativeImages={resultImages}
+                                        airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                        alternativeTitle={result.listing_title || "Alternative Listing"}
+                                        platformName={result.platform_name}
+                                      />
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
                             );
                           })}
                         </tbody>
@@ -677,63 +727,32 @@ export default function SearchResults() {
                       })}
                     </div>
 
-                    {/* Desktop Photo Comparison - Expandable per row */}
-                    {displayResults.map((result) => {
-                      const resultImages = toStringArray(result.images);
-                      const isExpanded = expandedComparison === result.id;
-                      
-                      if (!isExpanded) return null;
-                      
-                      return (
-                        <div key={`comparison-${result.id}`} className="hidden lg:block mb-8 animate-fade-in">
-                          <ImageComparison
-                            airbnbImages={airbnbImages}
-                            alternativeImages={resultImages}
-                            airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                            alternativeTitle={result.listing_title || "Alternative Listing"}
-                            platformName={result.platform_name}
-                          />
-                        </div>
-                      );
-                    })}
-
-                    {/* Desktop: Add Compare Photos buttons to table */}
-                    <div className="hidden lg:flex flex-wrap gap-2 mb-8">
-                      {displayResults.map((result) => {
-                        const isExpanded = expandedComparison === result.id;
-                        return (
-                          <button
-                            key={`toggle-${result.id}`}
-                            onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                            className={`text-sm px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
-                              isExpanded 
-                                ? 'bg-primary text-primary-foreground border-primary' 
-                                : 'bg-muted/50 text-muted-foreground border-border hover:border-primary hover:text-primary'
-                            }`}
-                          >
-                            <ArrowLeftRight className="w-3.5 h-3.5" />
-                            {isExpanded ? `Hide ${result.platform_name} photos` : `Compare ${result.platform_name} photos`}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {/* Savings Summary - Matching ExampleResult exactly */}
-                    {potentialSavings && potentialSavings > 0 && cheapestResult && (
+                    {/* Savings Summary - Show when we have price comparison data */}
+                    {cheapestResult && cheapestResult.price && (
                       <div className="bg-success/10 rounded-2xl p-6 text-center mb-8">
                         <p className="text-muted-foreground mb-2">Your potential savings by booking direct</p>
                         <div className="flex items-center justify-center gap-4 mb-2">
-                          <p className="text-4xl font-bold text-success">€{potentialSavings}</p>
-                          <span className="text-success text-lg font-semibold">
-                            ({airbnbGrandTotal ? Math.round((potentialSavings / airbnbGrandTotal) * 100) : 0}% off)
-                          </span>
+                          {potentialSavings && potentialSavings > 0 ? (
+                            <>
+                              <p className="text-4xl font-bold text-success">€{Math.round(potentialSavings)}</p>
+                              <span className="text-success text-lg font-semibold">
+                                ({airbnbGrandTotal ? Math.round((potentialSavings / airbnbGrandTotal) * 100) : '~'}% off)
+                              </span>
+                            </>
+                          ) : (
+                            <p className="text-2xl font-bold text-success">
+                              Best price: €{cheapestResult.price && nights ? cheapestResult.price * nights : cheapestResult.price}/total
+                            </p>
+                          )}
                         </div>
                         <p className="text-sm text-muted-foreground mb-3">
                           Same property, same dates — just without the platform fees
                         </p>
-                        <p className="text-xs text-muted-foreground">
-                          <strong>Unlock fee:</strong> €{Math.round(potentialSavings * 0.1 * 100) / 100} (10% of your savings) — Only pay when you save
-                        </p>
+                        {potentialSavings && potentialSavings > 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            <strong>Unlock fee:</strong> €{(potentialSavings * 0.1).toFixed(2)} (10% of your savings) — Only pay when you save
+                          </p>
+                        )}
                       </div>
                     )}
 
