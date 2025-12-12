@@ -453,7 +453,7 @@ export default function SearchResults() {
           </div>
         ) : (
           <div className="max-w-5xl mx-auto">
-            {/* Clean Results Container - No browser mockup */}
+            {/* Clean Results Container */}
             <div className="bg-card rounded-2xl shadow-large border border-border overflow-hidden">
               <div className="p-6 md:p-8">
                 {/* Single Hero Image */}
@@ -476,48 +476,11 @@ export default function SearchResults() {
 
                 {/* Date Range Notice */}
                 {hasValidDates && (
-                  <div className="mb-6 p-4 bg-primary/5 border border-primary/20 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <Calendar className="w-5 h-5 text-primary flex-shrink-0" />
-                      <div>
-                        <p className="font-medium text-foreground">
-                          Prices compared for: {formatDate(checkIn!)} – {formatDate(checkOut!)}
-                        </p>
-                        <p className="text-sm text-muted-foreground">
-                          {nights} {nights === 1 ? 'night' : 'nights'} • Same dates used across all platforms
-                        </p>
-                      </div>
-                    </div>
+                  <div className="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+                    <Calendar className="w-4 h-4" />
+                    <span>Comparing prices for {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})</span>
                   </div>
                 )}
-
-                {/* Airbnb Baseline Price Card */}
-                <div className="mb-6 p-5 bg-[#FF5A5F]/5 border border-[#FF5A5F]/20 rounded-xl">
-                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <span className="w-4 h-4 rounded-full bg-[#FF5A5F]" />
-                      <div>
-                        <p className="font-semibold text-foreground">Airbnb Original Price</p>
-                        <p className="text-sm text-muted-foreground">Your baseline for comparison</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-2xl font-bold text-foreground">
-                        {airbnbGrandTotal ? `€${airbnbGrandTotal}` : search?.airbnb_price ? `€${search.airbnb_price * (nights || 1)}` : '—'}
-                      </p>
-                      <div className="text-sm text-muted-foreground space-y-0.5">
-                        {search?.airbnb_price && <p>€{search.airbnb_price}/night × {nights || 1} nights</p>}
-                        {estimatedServiceFee && <p>+ ~€{estimatedServiceFee} service fee</p>}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-3 pt-3 border-t border-[#FF5A5F]/10">
-                    <p className="text-xs text-muted-foreground flex items-center gap-1">
-                      <Shield className="w-3 h-3" />
-                      Includes AirCover protection • Cleaning fee may apply
-                    </p>
-                  </div>
-                </div>
 
                 {results.length === 0 ? (
                   <div className="py-12 text-center">
@@ -543,169 +506,161 @@ export default function SearchResults() {
                   </div>
                 ) : (
                   <>
-                    {/* Comparison Cards */}
-                    <div className="space-y-4 mb-8">
-                      {/* Airbnb Original Card */}
-                      <div className="border border-border rounded-xl p-4 bg-[#FF5A5F]/5">
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                          <div className="flex items-center gap-3">
-                            <span className="w-4 h-4 rounded-full bg-[#FF5A5F]" />
-                            <div>
-                              <span className="font-semibold text-foreground">Airbnb</span>
-                              <span className="text-xs text-muted-foreground ml-2">(Original)</span>
-                            </div>
-                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs font-medium">
-                              <Shield className="w-3 h-3" />
-                              Baseline
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-4">
-                            <div className="text-right">
-                              <div className="font-bold text-lg text-foreground">
-                                €{airbnbGrandTotal || (search?.airbnb_price ? search.airbnb_price * (nights || 1) : '—')}
+                    {/* Comparison Table - Matching ExampleResult layout */}
+                    <div className="overflow-x-auto mb-8">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-border">
+                            <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
+                            <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
+                            <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights || 1} nights)</th>
+                            <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
+                            <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Key Differences</th>
+                            <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {/* Airbnb Original Row */}
+                          <tr className="border-b border-border bg-[#FF5A5F]/5">
+                            <td className="py-4 px-4">
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-[#FF5A5F]" />
+                                <span className="font-medium text-foreground">Airbnb</span>
+                                <span className="text-xs text-muted-foreground">(Original)</span>
                               </div>
-                              <div className="text-xs text-muted-foreground">
-                                €{search?.airbnb_price}/night
-                              </div>
-                            </div>
-                            <Button variant="outline" size="sm" asChild>
-                              <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
-                                View
-                              </a>
-                            </Button>
-                          </div>
-                        </div>
-                        {/* Key Differences for Airbnb */}
-                        <div className="mt-3 pt-3 border-t border-[#FF5A5F]/20">
-                          <p className="text-xs font-medium text-muted-foreground mb-1">Key Differences:</p>
-                          <div className="flex flex-wrap gap-2">
-                            <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">AirCover protection</span>
-                            <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">~14% service fee included</span>
-                            <span className="text-xs text-muted-foreground bg-muted px-2 py-1 rounded">Host reviews visible</span>
-                          </div>
-                        </div>
-                      </div>
+                            </td>
+                            <td className="py-4 px-4 text-center">
+                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs font-medium">
+                                <Shield className="w-3 h-3" />
+                                Baseline
+                              </span>
+                            </td>
+                            <td className="py-4 px-4 text-right font-semibold text-foreground">
+                              €{airbnbGrandTotal || (search?.airbnb_price ? search.airbnb_price * (nights || 1) : '—')}
+                            </td>
+                            <td className="py-4 px-4 text-right text-muted-foreground">
+                              €{search?.airbnb_price}/night
+                            </td>
+                            <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
+                              <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
+                            </td>
+                            <td className="py-4 px-4 text-center">
+                              <Button variant="outline" size="sm" asChild>
+                                <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">View</a>
+                              </Button>
+                            </td>
+                          </tr>
 
-                      {/* Alternative Results */}
-                      {displayResults.map((result, index) => {
+                          {/* Alternative Results */}
+                          {displayResults.map((result) => {
+                            const isCheapest = cheapestResult && result.id === cheapestResult.id;
+                            const isDirect = result.platform_name.includes("(Direct)");
+                            const totalPrice = result.price && nights ? result.price * nights : null;
+                            const keyDiffs = getKeyDifferences(result);
+                            
+                            return (
+                              <tr 
+                                key={result.id} 
+                                className={isCheapest 
+                                  ? 'bg-success/5 border-2 border-success/30' 
+                                  : 'border-b border-border hover:bg-muted/50'
+                                }
+                              >
+                                <td className="py-4 px-4">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className={`w-2 h-2 rounded-full ${
+                                      isCheapest ? 'bg-success' : isDirect ? 'bg-amber-500' : 'bg-blue-500'
+                                    }`} />
+                                    <span className="font-medium text-foreground">{result.platform_name}</span>
+                                    {isCheapest && (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
+                                        <Sparkles className="w-3 h-3" />
+                                        Best Deal
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="py-4 px-4 text-center">
+                                  {result.confidence_score !== null && result.confidence_score !== undefined ? (
+                                    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
+                                      result.confidence_score >= 0.9 
+                                        ? 'bg-success/20 text-success' 
+                                        : 'bg-primary/20 text-primary'
+                                    }`}>
+                                      <Shield className="w-3 h-3" />
+                                      {Math.round(result.confidence_score * 100)}%
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
+                                      <Info className="w-3 h-3" />
+                                      Text
+                                    </span>
+                                  )}
+                                </td>
+                                <td className={`py-4 px-4 text-right font-semibold ${isCheapest ? 'text-success text-lg' : 'text-foreground'}`}>
+                                  {totalPrice ? `€${totalPrice}` : result.price ? `€${result.price}` : '—'}
+                                </td>
+                                <td className={`py-4 px-4 text-right ${isCheapest ? 'text-success font-medium' : 'text-muted-foreground'}`}>
+                                  {result.price ? `€${result.price}/night` : '—'}
+                                </td>
+                                <td className="py-4 px-4 hidden lg:table-cell">
+                                  <span className={`text-xs ${isCheapest ? 'text-success flex items-center gap-1' : 'text-muted-foreground'}`}>
+                                    {isCheapest && <Check className="w-3 h-3" />}
+                                    {keyDiffs.slice(0, 2).join(', ')}
+                                  </span>
+                                </td>
+                                <td className="py-4 px-4 text-center">
+                                  {isCheapest ? (
+                                    <Button size="sm" className="bg-success hover:bg-success/90">
+                                      <Lock className="w-3 h-3 mr-1" />
+                                      Unlock
+                                      <ExternalLink className="w-3 h-3 ml-1" />
+                                    </Button>
+                                  ) : (
+                                    <Button variant="outline" size="sm" asChild>
+                                      <a href={result.listing_url} target="_blank" rel="noopener noreferrer">View Free</a>
+                                    </Button>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Mobile Cards View for Key Differences */}
+                    <div className="lg:hidden space-y-4 mb-8">
+                      {displayResults.map((result) => {
                         const resultImages = toStringArray(result.images);
                         const isCheapest = cheapestResult && result.id === cheapestResult.id;
-                        const isDirect = result.platform_name.includes("(Direct)");
-                        const totalPrice = result.price && nights ? result.price * nights : null;
                         const isExpanded = expandedComparison === result.id;
-                        const savingsVsAirbnb = airbnbGrandTotal && totalPrice ? airbnbGrandTotal - totalPrice : null;
                         const keyDiffs = getKeyDifferences(result);
                         
                         return (
-                          <div key={result.id} className={`border rounded-xl p-4 transition-all ${
-                            isCheapest 
-                              ? 'border-success/50 bg-success/5 ring-2 ring-success/20' 
-                              : 'border-border hover:border-primary/30'
+                          <div key={`mobile-${result.id}`} className={`border rounded-xl p-4 ${
+                            isCheapest ? 'border-success/50 bg-success/5' : 'border-border'
                           }`}>
-                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                              <div className="flex items-center gap-3 flex-wrap">
-                                <span className={`w-4 h-4 rounded-full ${
-                                  isCheapest ? 'bg-success' : isDirect ? 'bg-amber-500' : 'bg-primary'
-                                }`} />
-                                <span className="font-semibold text-foreground">{result.platform_name}</span>
-                                
-                                {/* Trust Score Badge */}
-                                {result.confidence_score !== null && result.confidence_score !== undefined ? (
-                                  <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                                    result.confidence_score >= 0.9 
-                                      ? 'bg-success/20 text-success' 
-                                      : result.confidence_score >= 0.8 
-                                      ? 'bg-primary/20 text-primary'
-                                      : 'bg-blue-500/20 text-blue-600 dark:text-blue-400'
-                                  }`}>
-                                    <Shield className="w-3 h-3" />
-                                    {Math.round(result.confidence_score * 100)}% match
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
-                                    <Info className="w-3 h-3" />
-                                    Text match
-                                  </span>
-                                )}
-                                
-                                {isCheapest && (
-                                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-success/20 text-success text-xs font-semibold">
-                                    <Sparkles className="w-3 h-3" />
-                                    Best Deal
-                                  </span>
-                                )}
-                                {isDirect && !isCheapest && (
-                                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 text-xs font-medium">
-                                    No Fees
-                                  </span>
-                                )}
-                              </div>
-                              
-                              <div className="flex items-center gap-4">
-                                <div className="text-right">
-                                  <div className={`font-bold text-lg ${isCheapest ? 'text-success' : 'text-foreground'}`}>
-                                    {totalPrice ? `€${totalPrice}` : result.price ? `€${result.price}` : 'See listing'}
-                                  </div>
-                                  {savingsVsAirbnb && savingsVsAirbnb > 0 && (
-                                    <div className="text-xs text-success font-medium flex items-center gap-1 justify-end">
-                                      <TrendingDown className="w-3 h-3" />
-                                      Save €{savingsVsAirbnb}
-                                    </div>
-                                  )}
-                                  {result.price && (
-                                    <div className="text-xs text-muted-foreground">€{result.price}/night</div>
-                                  )}
-                                </div>
-                                
-                                {isCheapest ? (
-                                  <Button 
-                                    size="sm" 
-                                    className="bg-success hover:bg-success/90 shadow-md"
-                                    onClick={() => window.open(result.listing_url, '_blank')}
-                                  >
-                                    <Lock className="w-3 h-3 mr-1" />
-                                    Unlock Deal
-                                  </Button>
-                                ) : (
-                                  <Button 
-                                    asChild 
-                                    size="sm" 
-                                    variant="outline"
-                                  >
-                                    <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                      View Free
-                                    </a>
-                                  </Button>
-                                )}
-                              </div>
-                            </div>
-                            
-                            {/* Key Differences Section */}
-                            <div className="mt-3 pt-3 border-t border-border/50">
-                              <p className="text-xs font-medium text-muted-foreground mb-1">Key Differences:</p>
-                              <div className="flex flex-wrap gap-2">
-                                {keyDiffs.map((diff, i) => (
-                                  <span key={i} className={`text-xs px-2 py-1 rounded ${
-                                    diff.startsWith('✓') ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'
-                                  }`}>
-                                    {diff}
-                                  </span>
-                                ))}
-                              </div>
+                            <p className="text-xs font-medium text-muted-foreground mb-2">Key Differences:</p>
+                            <div className="flex flex-wrap gap-2 mb-3">
+                              {keyDiffs.map((diff, i) => (
+                                <span key={i} className={`text-xs px-2 py-1 rounded ${
+                                  diff.startsWith('✓') ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'
+                                }`}>
+                                  {diff}
+                                </span>
+                              ))}
                             </div>
                             
                             {/* Photo Comparison Toggle */}
-                            <div className="mt-3">
-                              <button
-                                onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                className="text-sm text-primary hover:underline flex items-center gap-1"
-                              >
-                                <ArrowLeftRight className="w-4 h-4" />
-                                {isExpanded ? 'Hide photo comparison' : 'Compare photos side-by-side'}
-                              </button>
-                            </div>
+                            <button
+                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                              className="text-sm text-primary hover:underline flex items-center gap-1"
+                            >
+                              <ArrowLeftRight className="w-4 h-4" />
+                              {isExpanded ? 'Hide photo comparison' : 'Compare photos'}
+                            </button>
                             
-                            {/* Image Comparison - Expandable */}
                             {isExpanded && (
                               <div className="mt-4 pt-4 border-t border-border animate-fade-in">
                                 <ImageComparison
@@ -722,63 +677,63 @@ export default function SearchResults() {
                       })}
                     </div>
 
+                    {/* Desktop Photo Comparison - Expandable per row */}
+                    {displayResults.map((result) => {
+                      const resultImages = toStringArray(result.images);
+                      const isExpanded = expandedComparison === result.id;
+                      
+                      if (!isExpanded) return null;
+                      
+                      return (
+                        <div key={`comparison-${result.id}`} className="hidden lg:block mb-8 animate-fade-in">
+                          <ImageComparison
+                            airbnbImages={airbnbImages}
+                            alternativeImages={resultImages}
+                            airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                            alternativeTitle={result.listing_title || "Alternative Listing"}
+                            platformName={result.platform_name}
+                          />
+                        </div>
+                      );
+                    })}
 
-                    {/* Potential Savings Banner */}
+                    {/* Desktop: Add Compare Photos buttons to table */}
+                    <div className="hidden lg:flex flex-wrap gap-2 mb-8">
+                      {displayResults.map((result) => {
+                        const isExpanded = expandedComparison === result.id;
+                        return (
+                          <button
+                            key={`toggle-${result.id}`}
+                            onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                            className={`text-sm px-3 py-1.5 rounded-full border transition-colors flex items-center gap-1.5 ${
+                              isExpanded 
+                                ? 'bg-primary text-primary-foreground border-primary' 
+                                : 'bg-muted/50 text-muted-foreground border-border hover:border-primary hover:text-primary'
+                            }`}
+                          >
+                            <ArrowLeftRight className="w-3.5 h-3.5" />
+                            {isExpanded ? `Hide ${result.platform_name} photos` : `Compare ${result.platform_name} photos`}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Savings Summary - Matching ExampleResult exactly */}
                     {potentialSavings && potentialSavings > 0 && cheapestResult && (
-                      <div className="bg-gradient-to-br from-success/15 via-success/10 to-success/5 rounded-2xl p-6 md:p-8 border-2 border-success/30 mb-8">
-                        <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-                          <div className="text-center md:text-left">
-                            <div className="flex items-center gap-2 justify-center md:justify-start mb-2">
-                              <Sparkles className="w-5 h-5 text-success" />
-                              <span className="text-sm font-semibold text-success uppercase tracking-wide">Your Potential Savings</span>
-                            </div>
-                            <p className="text-muted-foreground mb-1">
-                              By booking on <span className="font-semibold text-foreground">{cheapestResult.platform_name}</span>
-                            </p>
-                            <div className="flex items-baseline gap-3 justify-center md:justify-start">
-                              <p className="text-4xl md:text-5xl font-bold text-success">
-                                €{potentialSavings}
-                              </p>
-                              <span className="text-success text-xl font-semibold">saved</span>
-                            </div>
-                            <p className="text-sm text-muted-foreground mt-2">
-                              Same property • {hasValidDates ? `${formatDate(checkIn!)} – ${formatDate(checkOut!)}` : 'Same dates'}
-                            </p>
-                          </div>
-                          
-                          <div className="flex flex-col items-center gap-3">
-                            <Button 
-                              size="lg"
-                              className="bg-success hover:bg-success/90 text-lg px-8 py-6 h-auto shadow-lg"
-                              onClick={() => window.open(cheapestResult.listing_url, '_blank')}
-                            >
-                              <Lock className="w-5 h-5 mr-2" />
-                              Unlock This Deal
-                              <ExternalLink className="w-5 h-5 ml-2" />
-                            </Button>
-                            <p className="text-xs text-muted-foreground text-center">
-                              <strong>Fee:</strong> €{Math.round(potentialSavings * 0.1)} (10% of savings)
-                            </p>
-                          </div>
+                      <div className="bg-success/10 rounded-2xl p-6 text-center mb-8">
+                        <p className="text-muted-foreground mb-2">Your potential savings by booking direct</p>
+                        <div className="flex items-center justify-center gap-4 mb-2">
+                          <p className="text-4xl font-bold text-success">€{potentialSavings}</p>
+                          <span className="text-success text-lg font-semibold">
+                            ({airbnbGrandTotal ? Math.round((potentialSavings / airbnbGrandTotal) * 100) : 0}% off)
+                          </span>
                         </div>
-                        
-                        {/* Visual comparison of prices */}
-                        <div className="mt-6 pt-6 border-t border-success/20">
-                          <div className="grid grid-cols-2 gap-4 text-center">
-                            <div className="bg-background/50 rounded-xl p-4">
-                              <p className="text-sm text-muted-foreground mb-1">Airbnb Price</p>
-                              <p className="text-xl font-semibold text-foreground line-through opacity-60">
-                                €{airbnbGrandTotal || (search?.airbnb_price || 0) * (nights || 1)}
-                              </p>
-                            </div>
-                            <div className="bg-success/10 rounded-xl p-4 border border-success/30">
-                              <p className="text-sm text-success font-medium mb-1">{cheapestResult.platform_name}</p>
-                              <p className="text-xl font-bold text-success">
-                                €{cheapestTotalPrice}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          Same property, same dates — just without the platform fees
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          <strong>Unlock fee:</strong> €{Math.round(potentialSavings * 0.1 * 100) / 100} (10% of your savings) — Only pay when you save
+                        </p>
                       </div>
                     )}
 
@@ -786,7 +741,7 @@ export default function SearchResults() {
                     <div className="flex items-start gap-3 p-4 bg-muted/30 rounded-xl">
                       <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
                       <p className="text-xs text-muted-foreground">
-                        <strong>Fair comparison methodology:</strong> All prices shown include total costs for identical dates. 
+                        <strong>Fair comparison methodology:</strong> All prices shown include total costs with fees and taxes for identical dates. 
                         Trust scores are based on image matching accuracy. We verify listings using photo matching and location data. 
                         Always confirm details directly with the host before booking.
                       </p>
