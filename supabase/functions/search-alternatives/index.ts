@@ -39,7 +39,7 @@ Return ONLY a single number representing the price per night in the listing's cu
 If you cannot find a clear nightly price, return "null".
 Do not include currency symbols or units - just the number.`;
 
-    const response = await fetch("https://api.lovable.dev/v1/chat/completions", {
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${lovableApiKey}`,
@@ -857,9 +857,32 @@ serve(async (req) => {
       }
     }
     
-    // Log final price status
+    // Log final price status and abort comparison if missing
     if (!airbnbPrice) {
-      console.warn("WARNING: Could not extract Airbnb price - comparisons will lack baseline");
+      console.warn("FATAL: Could not extract Airbnb price - aborting comparison");
+      const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
+      const airbnbImages = imageUrls.slice(0, 5);
+      const nights = calculateNights(checkIn, checkOut);
+
+      await supabase.from("searches").update({
+        status: "price_unavailable",
+        airbnb_title: airbnbTitle,
+        airbnb_price: null,
+        airbnb_image_url: airbnbImageUrl,
+        airbnb_images: airbnbImages,
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        nights_count: nights,
+      }).eq("id", searchId);
+
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: "AIRBNB_PRICE_UNAVAILABLE",
+          message: "Could not extract Airbnb price for the selected dates, so we cannot compare alternatives.",
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     } else {
       console.log("SUCCESS: Airbnb price extracted:", airbnbPrice, "per night");
     }
