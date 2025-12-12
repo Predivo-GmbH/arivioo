@@ -496,7 +496,30 @@ export default function SearchResults() {
                   </div>
                 )}
 
-                {results.length === 0 ? (
+                {/* Show error if no Airbnb price could be extracted */}
+                {!search?.airbnb_price && results.length > 0 ? (
+                  <div className="py-12 text-center">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
+                      <AlertCircle className="w-8 h-8 text-amber-500" />
+                    </div>
+                    <h3 className="text-xl font-semibold text-foreground mb-2">
+                      Price Comparison Unavailable
+                    </h3>
+                    <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+                      We found alternative listings but couldn't extract the Airbnb price for your dates. 
+                      Without the baseline price, we can't show you accurate savings.
+                    </p>
+                    <p className="text-sm text-muted-foreground mb-6">
+                      Please try refreshing or searching with different dates.
+                    </p>
+                    <Button asChild>
+                      <Link to="/dashboard">
+                        <Search className="w-4 h-4 mr-2" />
+                        Try Another Search
+                      </Link>
+                    </Button>
+                  </div>
+                ) : results.length === 0 ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-muted-foreground" />

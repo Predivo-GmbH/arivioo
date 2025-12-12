@@ -556,97 +556,214 @@ serve(async (req) => {
     let airbnbTitle = "Vacation Rental";
     let airbnbPrice: number | null = null;
 
-    // Step 1: Fetch Airbnb page and extract CLEAN property images
-    console.log("Step 1: Extracting clean property photos from Airbnb...");
+    // Step 1: Fetch Airbnb page and extract property data using Firecrawl for JS rendering
+    console.log("Step 1: Extracting property data from Airbnb...");
     
     let imageUrls: string[] = [];
     
-    try {
-      const airbnbResponse = await fetch(search.airbnb_url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-        },
-      });
-      
-      if (airbnbResponse.ok) {
-        const html = await airbnbResponse.text();
-        console.log("Fetched Airbnb page, length:", html.length);
+    // Use Firecrawl if available (handles JS-rendered content like prices)
+    if (firecrawlApiKey) {
+      console.log("Using Firecrawl to scrape Airbnb (with JS rendering)...");
+      try {
+        const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${firecrawlApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            url: search.airbnb_url,
+            formats: ['markdown', 'html'],
+            onlyMainContent: false,
+            waitFor: 5000, // Wait for dynamic price content to load
+          }),
+        });
         
-        // Extract title
-        const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch) {
-          airbnbTitle = titleMatch[1]
-            .replace(" - Airbnb", "")
-            .replace(" · Airbnb", "")
-            .replace(/\s*-\s*(Houses|Apartments|Homes|Villas|Cabins|Cottages|Condos)?\s*(for Rent|to Rent|zur Miete|in)?\s*.*$/i, "")
-            .trim();
-          console.log("Extracted title:", airbnbTitle);
-        }
-        
-        // Look for muscache.com image URLs - prioritize actual property photos
-        const imagePatterns = [
-          // Hosting format (most reliable for property photos)
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-          // miso format (also good quality property photos)
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-          // BnbProperty format
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-          // prohost-api format
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
-          // General UUID format images (property photos)
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
-        ];
-        
-        let allImageUrls: string[] = [];
-        
-        for (const pattern of imagePatterns) {
-          const matches = html.match(pattern) || [];
-          console.log(`Pattern found ${matches.length} matches`);
-          allImageUrls.push(...matches);
-        }
-        
-        // Also look in JSON data embedded in page
-        const jsonMatches = html.match(/"pictureUrl"\s*:\s*"([^"]+)"/g) || [];
-        for (const match of jsonMatches) {
-          const urlMatch = match.match(/"pictureUrl"\s*:\s*"([^"]+)"/);
-          if (urlMatch && urlMatch[1]) {
-            allImageUrls.push(urlMatch[1].replace(/\\u002F/g, '/'));
+        if (firecrawlResponse.ok) {
+          const firecrawlData = await firecrawlResponse.json();
+          const markdown = firecrawlData.data?.markdown || '';
+          const html = firecrawlData.data?.html || '';
+          const rawHtml = firecrawlData.data?.rawHtml || html;
+          
+          console.log("Firecrawl response - markdown length:", markdown.length, "html length:", html.length);
+          
+          // Extract title from metadata or content
+          const metaTitle = firecrawlData.data?.metadata?.title;
+          if (metaTitle) {
+            airbnbTitle = metaTitle
+              .replace(" - Airbnb", "")
+              .replace(" · Airbnb", "")
+              .replace(/\s*-\s*(Houses|Apartments|Homes|Villas|Cabins|Cottages|Condos)?\s*(for Rent|to Rent|zur Miete|in)?\s*.*$/i, "")
+              .trim();
+            console.log("Extracted title from metadata:", airbnbTitle);
           }
-        }
-        
-        // Extract price if possible
-        const pricePatterns = [
-          /\$(\d{1,5})\s*(?:per night|\/night|night)/i,
-          /"priceString"\s*:\s*"\$(\d+)"/,
-          /"price"\s*:\s*(\d+)/,
-          /CHF\s*(\d{1,5})/,
-          /€\s*(\d{1,5})/,
-        ];
-        
-        for (const pattern of pricePatterns) {
-          const priceMatch = html.match(pattern);
-          if (priceMatch) {
-            airbnbPrice = parseInt(priceMatch[1]);
-            console.log("Extracted price:", airbnbPrice);
-            break;
+          
+          // Extract price from Firecrawl content - multiple patterns for different currencies
+          const pricePatterns = [
+            // Total price patterns (most reliable)
+            /total[:\s]*€\s*(\d{1,5}(?:,\d{3})*)/i,
+            /total[:\s]*\$\s*(\d{1,5}(?:,\d{3})*)/i,
+            /total[:\s]*CHF\s*(\d{1,5}(?:,\d{3})*)/i,
+            /gesamt[:\s]*€\s*(\d{1,5}(?:,\d{3})*)/i,
+            // Per night patterns
+            /€\s*(\d{1,5}(?:,\d{3})*)\s*(?:per night|\/night|night|pro nacht)/i,
+            /\$\s*(\d{1,5}(?:,\d{3})*)\s*(?:per night|\/night|night)/i,
+            /CHF\s*(\d{1,5}(?:,\d{3})*)\s*(?:per night|\/night|night|pro nacht)/i,
+            // Generic price patterns
+            /€(\d{1,5}(?:,\d{3})*)\s*x\s*\d+\s*nights?/i,
+            /\$(\d{1,5}(?:,\d{3})*)\s*x\s*\d+\s*nights?/i,
+            // Fallback: any price-like number after currency
+            /€\s*(\d{2,4})/,
+            /\$\s*(\d{2,4})/,
+            /CHF\s*(\d{2,4})/,
+          ];
+          
+          // Try markdown first (cleaner), then HTML
+          const contentToSearch = markdown + ' ' + html;
+          
+          for (const pattern of pricePatterns) {
+            const priceMatch = contentToSearch.match(pattern);
+            if (priceMatch) {
+              const priceStr = priceMatch[1].replace(/,/g, '');
+              const extractedPrice = parseInt(priceStr);
+              // Validate price is reasonable (between 10 and 5000 per night)
+              if (extractedPrice >= 10 && extractedPrice <= 5000) {
+                airbnbPrice = extractedPrice;
+                console.log("Extracted Airbnb price from Firecrawl:", airbnbPrice);
+                break;
+              }
+            }
           }
+          
+          // Extract images from HTML content
+          const imagePatterns = [
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
+          ];
+          
+          let allImageUrls: string[] = [];
+          const htmlContent = rawHtml || html;
+          
+          for (const pattern of imagePatterns) {
+            const matches = htmlContent.match(pattern) || [];
+            allImageUrls.push(...matches);
+          }
+          
+          // Also check markdown for image URLs
+          const markdownImageMatches = markdown.match(/https:\/\/a0\.muscache\.com\/im\/pictures\/[^\s\)"\]]+/gi) || [];
+          allImageUrls.push(...markdownImageMatches);
+          
+          imageUrls = [...new Set(allImageUrls)]
+            .map(url => url.replace(/\\u002F/g, '/').replace(/\\/g, ''))
+            .filter(isValidPropertyImage)
+            .slice(0, 5);
+          
+          console.log(`Firecrawl found ${imageUrls.length} property images`);
+        } else {
+          console.log("Firecrawl request failed:", firecrawlResponse.status);
         }
-        
-        // Clean, dedupe, and filter images - NO LOGOS OR FAVICONS
-        imageUrls = [...new Set(allImageUrls)]
-          .map(url => url.replace(/\\u002F/g, '/').replace(/\\/g, ''))
-          .filter(isValidPropertyImage)
-          .slice(0, 5);
-        
-        console.log(`Found ${imageUrls.length} clean property images (filtered out logos/favicons)`);
-        imageUrls.forEach((url, i) => console.log(`Image ${i + 1}:`, url.slice(0, 120)));
-      } else {
-        console.log("Failed to fetch Airbnb page:", airbnbResponse.status);
+      } catch (e) {
+        console.error("Firecrawl error:", e);
       }
-    } catch (e) {
-      console.error("Error fetching Airbnb page:", e);
+    }
+    
+    // Fallback: direct fetch if Firecrawl didn't work
+    if (imageUrls.length === 0 || !airbnbPrice) {
+      console.log("Fallback: Direct fetch for Airbnb page...");
+      try {
+        const airbnbResponse = await fetch(search.airbnb_url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+          },
+        });
+        
+        if (airbnbResponse.ok) {
+          const html = await airbnbResponse.text();
+          console.log("Fetched Airbnb page directly, length:", html.length);
+          
+          // Extract title if not already set
+          if (!airbnbTitle || airbnbTitle === "Vacation Rental") {
+            const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+            if (titleMatch) {
+              airbnbTitle = titleMatch[1]
+                .replace(" - Airbnb", "")
+                .replace(" · Airbnb", "")
+                .replace(/\s*-\s*(Houses|Apartments|Homes|Villas|Cabins|Cottages|Condos)?\s*(for Rent|to Rent|zur Miete|in)?\s*.*$/i, "")
+                .trim();
+            }
+          }
+          
+          // Extract images if not already found
+          if (imageUrls.length === 0) {
+            const imagePatterns = [
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
+            ];
+            
+            let allImageUrls: string[] = [];
+            
+            for (const pattern of imagePatterns) {
+              const matches = html.match(pattern) || [];
+              allImageUrls.push(...matches);
+            }
+            
+            const jsonMatches = html.match(/"pictureUrl"\s*:\s*"([^"]+)"/g) || [];
+            for (const match of jsonMatches) {
+              const urlMatch = match.match(/"pictureUrl"\s*:\s*"([^"]+)"/);
+              if (urlMatch && urlMatch[1]) {
+                allImageUrls.push(urlMatch[1].replace(/\\u002F/g, '/'));
+              }
+            }
+            
+            imageUrls = [...new Set(allImageUrls)]
+              .map(url => url.replace(/\\u002F/g, '/').replace(/\\/g, ''))
+              .filter(isValidPropertyImage)
+              .slice(0, 5);
+          }
+          
+          // Try to extract price from JSON data if not already found
+          if (!airbnbPrice) {
+            const pricePatterns = [
+              /"priceString"\s*:\s*"[€$CHF]\s*(\d+)"/,
+              /"price"\s*:\s*(\d+)/,
+              /"basePrice"\s*:\s*(\d+)/,
+              /"priceForDisplay"\s*:\s*"[€$CHF]?\s*(\d+)/,
+            ];
+            
+            for (const pattern of pricePatterns) {
+              const priceMatch = html.match(pattern);
+              if (priceMatch) {
+                const price = parseInt(priceMatch[1]);
+                if (price >= 10 && price <= 5000) {
+                  airbnbPrice = price;
+                  console.log("Extracted price from direct fetch:", airbnbPrice);
+                  break;
+                }
+              }
+            }
+          }
+          
+          console.log(`Direct fetch found ${imageUrls.length} images, price: ${airbnbPrice}`);
+        }
+      } catch (e) {
+        console.error("Error fetching Airbnb page directly:", e);
+      }
+    }
+    
+    // CRITICAL: If we still don't have a price, we cannot make a valid comparison
+    // Log this clearly for debugging
+    if (!airbnbPrice) {
+      console.warn("WARNING: Could not extract Airbnb price - comparisons will lack baseline");
+    } else {
+      console.log("SUCCESS: Airbnb price extracted:", airbnbPrice, "per night");
     }
 
     // Update status to step 2
