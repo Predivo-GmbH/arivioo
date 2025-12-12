@@ -37,6 +37,7 @@ interface SearchResult {
   image_url: string | null;
   images: Json;
   match_type?: string;
+  source_airbnb_image?: string | null; // The Airbnb image that matched this result
 }
 
 interface SearchData {
@@ -691,6 +692,7 @@ export default function SearchResults() {
                                         airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
                                         alternativeTitle={result.listing_title || "Alternative Listing"}
                                         platformName={result.platform_name}
+                                        sourceAirbnbImage={result.source_airbnb_image}
                                       />
                                     </td>
                                   </tr>
