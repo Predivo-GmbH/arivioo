@@ -8,6 +8,7 @@ interface ImageComparisonProps {
   airbnbTitle: string;
   alternativeTitle: string;
   platformName: string;
+  sourceAirbnbImage?: string | null; // The specific Airbnb image that matched this result
 }
 
 // Get context-aware helper text based on image characteristics
@@ -33,9 +34,10 @@ export function ImageComparison({
   airbnbTitle,
   alternativeTitle,
   platformName,
+  sourceAirbnbImage,
 }: ImageComparisonProps) {
-  // Always use the first Airbnb image as the fixed reference
-  const referenceImageIndex = 0;
+  // Use the source image that matched if available, otherwise fall back to first image
+  const referenceImage = sourceAirbnbImage || (airbnbImages.length > 0 ? airbnbImages[0] : null);
   const [altIndex, setAltIndex] = useState(0);
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
@@ -139,7 +141,7 @@ export function ImageComparison({
                 style={{ width: `${sliderPosition}%` }}
               >
                 <img
-                  src={airbnbImages[referenceImageIndex]}
+                  src={referenceImage || '/placeholder.svg'}
                   alt={`${airbnbTitle} - Airbnb`}
                   className="absolute inset-0 w-full h-full object-cover"
                   style={{ 
@@ -208,9 +210,9 @@ export function ImageComparison({
                   <span className="w-3 h-3 rounded-full bg-[#FF5A5F]" />
                   <span className="text-sm font-semibold text-foreground">Airbnb (Reference)</span>
                 </div>
-                {hasAirbnbImages && (
+                {referenceImage && (
                   <button
-                    onClick={() => setZoomedImage(airbnbImages[referenceImageIndex])}
+                    onClick={() => setZoomedImage(referenceImage)}
                     className="p-1.5 rounded-lg hover:bg-muted transition-colors"
                     title="Zoom in"
                   >
@@ -220,13 +222,13 @@ export function ImageComparison({
               </div>
               
               <div className="relative aspect-[4/3] rounded-xl overflow-hidden bg-muted shadow-soft group">
-                {hasAirbnbImages ? (
+                {referenceImage ? (
                   <>
                     <img
-                      src={airbnbImages[referenceImageIndex]}
+                      src={referenceImage}
                       alt={`${airbnbTitle} - Reference Photo`}
                       className="w-full h-full object-cover cursor-zoom-in transition-transform duration-300 group-hover:scale-105"
-                      onClick={() => setZoomedImage(airbnbImages[referenceImageIndex])}
+                      onClick={() => setZoomedImage(referenceImage)}
                       onError={(e) => {
                         const target = e.target as HTMLImageElement;
                         target.src = '/placeholder.svg';
@@ -324,11 +326,11 @@ export function ImageComparison({
         )}
 
         {/* Footer tip - Context-aware text */}
-        {hasAirbnbImages && hasAltImages && (
+        {referenceImage && hasAltImages && (
           <div className="mt-4 pt-4 border-t border-border flex items-center justify-center gap-2">
             <Check className="w-4 h-4 text-success" />
             <span className="text-sm text-muted-foreground">
-              {getComparisonHelperText(airbnbImages[referenceImageIndex])}
+              {getComparisonHelperText(referenceImage)}
             </span>
           </div>
         )}

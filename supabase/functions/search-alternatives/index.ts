@@ -1225,6 +1225,7 @@ serve(async (req) => {
           image_url: r.image_url,
           images: r.images,
           match_type: r.match_type,
+          source_airbnb_image: r.source_airbnb_image || null,
         }))
       );
     }

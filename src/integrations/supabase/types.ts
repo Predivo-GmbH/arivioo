@@ -57,6 +57,7 @@ export type Database = {
           savings_amount: number | null
           savings_percentage: number | null
           search_id: string
+          source_airbnb_image: string | null
         }
         Insert: {
           confidence_score?: number | null
@@ -73,6 +74,7 @@ export type Database = {
           savings_amount?: number | null
           savings_percentage?: number | null
           search_id: string
+          source_airbnb_image?: string | null
         }
         Update: {
           confidence_score?: number | null
@@ -89,6 +91,7 @@ export type Database = {
           savings_amount?: number | null
           savings_percentage?: number | null
           search_id?: string
+          source_airbnb_image?: string | null
         }
         Relationships: [
           {
