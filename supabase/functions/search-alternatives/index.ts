@@ -18,6 +18,68 @@ interface SearchResult {
   match_type: 'visual' | 'text'; // Track how match was found
   total_price?: number | null;
   per_night_rate?: number | null;
+  source_airbnb_image?: string | null; // The Airbnb image that was used for this match
+}
+
+// Use Lovable AI to extract Airbnb price from scraped content
+async function extractAirbnbPriceWithAI(content: string, nights: number): Promise<number | null> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!lovableApiKey) {
+    console.log("LOVABLE_API_KEY not available for AI price extraction");
+    return null;
+  }
+  
+  try {
+    const prompt = `Extract the nightly price from this Airbnb listing content. Look for the price per night (not total).
+    
+Content:
+${content.slice(0, 8000)}
+
+Return ONLY a single number representing the price per night in the listing's currency (e.g., "125" for €125/night). 
+If you cannot find a clear nightly price, return "null".
+Do not include currency symbols or units - just the number.`;
+
+    const response = await fetch("https://api.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${lovableApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        messages: [
+          { role: "user", content: prompt }
+        ],
+        max_tokens: 50,
+      }),
+    });
+    
+    if (!response.ok) {
+      console.error("Lovable AI request failed:", response.status);
+      return null;
+    }
+    
+    const data = await response.json();
+    const priceText = data.choices?.[0]?.message?.content?.trim();
+    
+    if (!priceText || priceText.toLowerCase() === "null") {
+      console.log("AI could not extract price");
+      return null;
+    }
+    
+    // Parse the price
+    const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
+    if (isNaN(price) || price < 10 || price > 5000) {
+      console.log("AI returned invalid price:", priceText);
+      return null;
+    }
+    
+    console.log("AI extracted price:", price, "per night");
+    return price;
+  } catch (error) {
+    console.error("AI price extraction error:", error);
+    return null;
+  }
 }
 
 // Expanded platform list for better coverage - including international variants
@@ -758,8 +820,44 @@ serve(async (req) => {
       }
     }
     
-    // CRITICAL: If we still don't have a price, we cannot make a valid comparison
-    // Log this clearly for debugging
+    // CRITICAL: If we still don't have a price, try AI extraction as last resort
+    if (!airbnbPrice) {
+      console.log("Attempting AI-based price extraction...");
+      
+      // Try to get content for AI extraction
+      let contentForAI = "";
+      if (firecrawlApiKey) {
+        try {
+          const aiScrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${firecrawlApiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              url: search.airbnb_url,
+              formats: ['markdown'],
+              onlyMainContent: true,
+              waitFor: 5000,
+            }),
+          });
+          
+          if (aiScrapeResponse.ok) {
+            const aiData = await aiScrapeResponse.json();
+            contentForAI = aiData.data?.markdown || '';
+          }
+        } catch (e) {
+          console.error("Error fetching content for AI:", e);
+        }
+      }
+      
+      if (contentForAI) {
+        const nights = calculateNights(checkIn, checkOut);
+        airbnbPrice = await extractAirbnbPriceWithAI(contentForAI, nights);
+      }
+    }
+    
+    // Log final price status
     if (!airbnbPrice) {
       console.warn("WARNING: Could not extract Airbnb price - comparisons will lack baseline");
     } else {
@@ -827,6 +925,7 @@ serve(async (req) => {
                 image_url: match.thumbnail || null,
                 images: resultImages.slice(0, 5),
                 match_type: 'visual',
+                source_airbnb_image: imageUrl, // Store the Airbnb image that matched
               });
               console.log("FOUND via Lens on platform:", getPlatformName(url), "confidence:", baseConfidence.toFixed(2), url.slice(0, 80));
             }
@@ -845,6 +944,7 @@ serve(async (req) => {
                 image_url: match.thumbnail || null,
                 images: resultImages.slice(0, 5),
                 match_type: 'visual',
+                source_airbnb_image: imageUrl, // Store the Airbnb image that matched
               });
               console.log("FOUND direct site via Lens:", url.slice(0, 80));
             }
@@ -865,6 +965,7 @@ serve(async (req) => {
                   image_url: lensData.knowledge_graph.thumbnail || null,
                   images: lensData.knowledge_graph.thumbnail ? [lensData.knowledge_graph.thumbnail] : [],
                   match_type: 'visual',
+                  source_airbnb_image: imageUrl, // Store the Airbnb image that matched
                 });
                 console.log("FOUND via Lens knowledge graph:", kgUrl.slice(0, 80));
               }
@@ -917,6 +1018,7 @@ serve(async (req) => {
                   image_url: result.thumbnail || result.original || null,
                   images: [result.thumbnail, result.original].filter(Boolean).slice(0, 5),
                   match_type: 'visual',
+                  source_airbnb_image: imageUrl, // Store the Airbnb image that matched
                 });
                 console.log("FOUND via reverse image:", url.slice(0, 80));
               }
