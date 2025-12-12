@@ -10,6 +10,23 @@ interface ImageComparisonProps {
   platformName: string;
 }
 
+// Get context-aware helper text based on image characteristics
+const getComparisonHelperText = (imageUrl: string): string => {
+  const url = imageUrl.toLowerCase();
+  // Check for common exterior/outdoor indicators
+  if (url.includes('exterior') || url.includes('outside') || url.includes('facade') || url.includes('building')) {
+    return "Compare exterior architecture, windows, and building details to confirm it's the same property";
+  }
+  if (url.includes('pool') || url.includes('garden') || url.includes('terrace') || url.includes('balcony')) {
+    return "Compare outdoor features like landscaping, pool shape, and terrace layout";
+  }
+  if (url.includes('view') || url.includes('landscape')) {
+    return "Compare the view and surrounding landscape to verify the location";
+  }
+  // Default for interior shots
+  return "Compare room layouts, furniture placement, and unique fixtures to confirm it's the same property";
+};
+
 export function ImageComparison({
   airbnbImages,
   alternativeImages,
@@ -17,7 +34,8 @@ export function ImageComparison({
   alternativeTitle,
   platformName,
 }: ImageComparisonProps) {
-  const [airbnbIndex, setAirbnbIndex] = useState(0);
+  // Always use the first Airbnb image as the fixed reference
+  const referenceImageIndex = 0;
   const [altIndex, setAltIndex] = useState(0);
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
@@ -115,13 +133,13 @@ export function ImageComparison({
                 }}
               />
               
-              {/* Airbnb image (top layer, clipped) */}
+              {/* Airbnb image (top layer, clipped) - Always use first reference image */}
               <div 
                 className="absolute inset-0 overflow-hidden"
                 style={{ width: `${sliderPosition}%` }}
               >
                 <img
-                  src={airbnbImages[airbnbIndex]}
+                  src={airbnbImages[referenceImageIndex]}
                   alt={`${airbnbTitle} - Airbnb`}
                   className="absolute inset-0 w-full h-full object-cover"
                   style={{ 
@@ -162,24 +180,10 @@ export function ImageComparison({
               </div>
             </div>
             
-            {/* Image navigation */}
-            <div className="flex justify-between gap-4">
+            {/* Image navigation - only for alternative images */}
+            <div className="flex justify-center gap-4">
               <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">Airbnb:</span>
-                <div className="flex gap-1">
-                  {airbnbImages.map((_, i) => (
-                    <button
-                      key={i}
-                      onClick={() => setAirbnbIndex(i)}
-                      className={`w-2 h-2 rounded-full transition-colors ${
-                        i === airbnbIndex ? 'bg-[#FF5A5F]' : 'bg-muted-foreground/30'
-                      }`}
-                    />
-                  ))}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">{platformName}:</span>
+                <span className="text-xs text-muted-foreground">{platformName} photos:</span>
                 <div className="flex gap-1">
                   {alternativeImages.map((_, i) => (
                     <button
@@ -195,18 +199,18 @@ export function ImageComparison({
             </div>
           </div>
         ) : (
-          // Side by Side View
+          // Side by Side View - Always use fixed reference image for Airbnb
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-            {/* Airbnb Side */}
+            {/* Airbnb Side - Fixed reference image */}
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-full bg-[#FF5A5F]" />
-                  <span className="text-sm font-semibold text-foreground">Airbnb (Original)</span>
+                  <span className="text-sm font-semibold text-foreground">Airbnb (Reference)</span>
                 </div>
                 {hasAirbnbImages && (
                   <button
-                    onClick={() => setZoomedImage(airbnbImages[airbnbIndex])}
+                    onClick={() => setZoomedImage(airbnbImages[referenceImageIndex])}
                     className="p-1.5 rounded-lg hover:bg-muted transition-colors"
                     title="Zoom in"
                   >
@@ -219,45 +223,19 @@ export function ImageComparison({
                 {hasAirbnbImages ? (
                   <>
                     <img
-                      src={airbnbImages[airbnbIndex]}
-                      alt={`${airbnbTitle} - Photo ${airbnbIndex + 1}`}
+                      src={airbnbImages[referenceImageIndex]}
+                      alt={`${airbnbTitle} - Reference Photo`}
                       className="w-full h-full object-cover cursor-zoom-in transition-transform duration-300 group-hover:scale-105"
-                      onClick={() => setZoomedImage(airbnbImages[airbnbIndex])}
+                      onClick={() => setZoomedImage(airbnbImages[referenceImageIndex])}
                       onError={(e) => {
                         const target = e.target as HTMLImageElement;
                         target.src = '/placeholder.svg';
                       }}
                     />
-                    
-                    {airbnbImages.length > 1 && (
-                      <>
-                        <button
-                          onClick={() => setAirbnbIndex((prev) => (prev === 0 ? airbnbImages.length - 1 : prev - 1))}
-                          className="absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-background/90 shadow-soft flex items-center justify-center hover:bg-background transition-colors opacity-0 group-hover:opacity-100"
-                        >
-                          <ChevronLeft className="w-5 h-5" />
-                        </button>
-                        <button
-                          onClick={() => setAirbnbIndex((prev) => (prev === airbnbImages.length - 1 ? 0 : prev + 1))}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-background/90 shadow-soft flex items-center justify-center hover:bg-background transition-colors opacity-0 group-hover:opacity-100"
-                        >
-                          <ChevronRight className="w-5 h-5" />
-                        </button>
-                        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5">
-                          {airbnbImages.map((_, i) => (
-                            <button
-                              key={i}
-                              onClick={() => setAirbnbIndex(i)}
-                              className={`w-2 h-2 rounded-full transition-all ${
-                                i === airbnbIndex 
-                                  ? 'bg-white scale-125' 
-                                  : 'bg-white/50 hover:bg-white/75'
-                              }`}
-                            />
-                          ))}
-                        </div>
-                      </>
-                    )}
+                    {/* Fixed reference indicator */}
+                    <div className="absolute bottom-2 left-2 px-2 py-1 rounded-full bg-[#FF5A5F]/90 text-white text-xs font-medium">
+                      Reference Image
+                    </div>
                   </>
                 ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center gap-2">
@@ -345,12 +323,12 @@ export function ImageComparison({
           </div>
         )}
 
-        {/* Footer tip */}
+        {/* Footer tip - Context-aware text */}
         {hasAirbnbImages && hasAltImages && (
           <div className="mt-4 pt-4 border-t border-border flex items-center justify-center gap-2">
             <Check className="w-4 h-4 text-success" />
             <span className="text-sm text-muted-foreground">
-              Look for matching room layouts, furniture, and views to confirm it's the same property
+              {getComparisonHelperText(airbnbImages[referenceImageIndex])}
             </span>
           </div>
         )}
