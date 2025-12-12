@@ -497,30 +497,8 @@ export default function SearchResults() {
                   </div>
                 )}
 
-                {/* Show error if no Airbnb price could be extracted */}
-                {!search?.airbnb_price && results.length > 0 ? (
-                  <div className="py-12 text-center">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
-                      <AlertCircle className="w-8 h-8 text-amber-500" />
-                    </div>
-                    <h3 className="text-xl font-semibold text-foreground mb-2">
-                      Price Comparison Unavailable
-                    </h3>
-                    <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                      We found alternative listings but couldn't extract the Airbnb price for your dates. 
-                      Without the baseline price, we can't show you accurate savings.
-                    </p>
-                    <p className="text-sm text-muted-foreground mb-6">
-                      Please try refreshing or searching with different dates.
-                    </p>
-                    <Button asChild>
-                      <Link to="/dashboard">
-                        <Search className="w-4 h-4 mr-2" />
-                        Try Another Search
-                      </Link>
-                    </Button>
-                  </div>
-                ) : results.length === 0 ? (
+                {/* Show results even without Airbnb price - just show skeletons for price columns */}
+                {results.length === 0 ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-muted-foreground" />
@@ -577,11 +555,19 @@ export default function SearchResults() {
                               {search?.airbnb_price ? (
                                 `€${Math.round(search.airbnb_price * (nights || 1) * 1.14)}`
                               ) : (
-                                <span className="text-muted-foreground">Price varies</span>
+                                <div className="flex justify-end">
+                                  <div className="h-5 w-16 bg-muted animate-pulse rounded" />
+                                </div>
                               )}
                             </td>
                             <td className="py-4 px-4 text-right text-muted-foreground">
-                              {search?.airbnb_price ? `€${search.airbnb_price}/night` : '—'}
+                              {search?.airbnb_price ? (
+                                `€${search.airbnb_price}/night`
+                              ) : (
+                                <div className="flex justify-end">
+                                  <div className="h-4 w-14 bg-muted animate-pulse rounded" />
+                                </div>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
                               <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
@@ -752,12 +738,17 @@ export default function SearchResults() {
                       })}
                     </div>
 
-                    {/* Savings Summary - Show when we have price comparison data */}
+                    {/* Savings Summary - Show skeleton when Airbnb price not available */}
                     {cheapestResult && cheapestResult.price && (
                       <div className="bg-success/10 rounded-2xl p-6 text-center mb-8">
                         <p className="text-muted-foreground mb-2">Your potential savings by booking direct</p>
                         <div className="flex items-center justify-center gap-4 mb-2">
-                          {potentialSavings && potentialSavings > 0 ? (
+                          {!search?.airbnb_price ? (
+                            <div className="flex items-center gap-3">
+                              <div className="h-10 w-24 bg-muted animate-pulse rounded" />
+                              <div className="h-6 w-16 bg-muted animate-pulse rounded" />
+                            </div>
+                          ) : potentialSavings && potentialSavings > 0 ? (
                             <>
                               <p className="text-4xl font-bold text-success">€{Math.round(potentialSavings)}</p>
                               <span className="text-success text-lg font-semibold">
@@ -771,9 +762,12 @@ export default function SearchResults() {
                           )}
                         </div>
                         <p className="text-sm text-muted-foreground mb-3">
-                          Same property, same dates — just without the platform fees
+                          {!search?.airbnb_price 
+                            ? "Calculating savings..."
+                            : "Same property, same dates — just without the platform fees"
+                          }
                         </p>
-                        {potentialSavings && potentialSavings > 0 && (
+                        {search?.airbnb_price && potentialSavings && potentialSavings > 0 && (
                           <p className="text-xs text-muted-foreground">
                             <strong>Unlock fee:</strong> €{(potentialSavings * 0.1).toFixed(2)} (10% of your savings) — Only pay when you save
                           </p>
