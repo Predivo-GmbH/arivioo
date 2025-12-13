@@ -153,10 +153,11 @@ export default function SearchResults() {
   const [currentStep, setCurrentStep] = useState(0);
   const [stepProgress, setStepProgress] = useState(0); // Progress within current step (0-100)
   const [searchCompleted, setSearchCompleted] = useState(false);
+  const [actualDuration, setActualDuration] = useState<number | null>(null);
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const searchTriggeredRef = useRef(false);
-  const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const progressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const searchStartTimeRef = useRef<number>(0);
+  const animationFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -214,33 +215,35 @@ export default function SearchResults() {
         try {
           const { data: { session } } = await supabase.auth.getSession();
           
-          // Fake progress timer - each step takes ~20 seconds for equal UX
-          const STEP_DURATION = 20000; // 20 seconds per step (total ~60s)
-          const PROGRESS_INTERVAL = 200; // Update progress every 200ms
-
-          // Reset step state
+          // Reset step state and record start time
           setCurrentStep(0);
           setStepProgress(0);
           setSearchCompleted(false);
+          setActualDuration(null);
+          searchStartTimeRef.current = Date.now();
           
-          // Start progress animation within each step
-          progressTimerRef.current = setInterval(() => {
-            setStepProgress(prev => {
-              const increment = (100 / (STEP_DURATION / PROGRESS_INTERVAL));
-              return Math.min(prev + increment, 100);
-            });
-          }, PROGRESS_INTERVAL);
+          // Start with an estimated duration while search runs
+          // We'll use a slow initial pace that speeds up once we know actual duration
+          const ESTIMATED_TOTAL = 60000; // 60 second estimate
+          const STEP_COUNT = loadingSteps.length;
           
-          // Start step progression with equal timing
-          stepTimerRef.current = setInterval(() => {
-            setCurrentStep(prev => {
-              if (prev < loadingSteps.length - 1) {
-                setStepProgress(0); // Reset progress for new step
-                return prev + 1;
-              }
-              return prev;
-            });
-          }, STEP_DURATION);
+          // Animate progress based on elapsed time and estimated duration
+          const animateProgress = () => {
+            const elapsed = Date.now() - searchStartTimeRef.current;
+            const estimatedProgress = Math.min((elapsed / ESTIMATED_TOTAL) * 100, 95); // Cap at 95% until complete
+            
+            // Calculate which step we should be on and progress within that step
+            const totalProgress = estimatedProgress;
+            const stepIndex = Math.min(Math.floor((totalProgress / 100) * STEP_COUNT), STEP_COUNT - 1);
+            const progressInStep = ((totalProgress / 100) * STEP_COUNT - stepIndex) * 100;
+            
+            setCurrentStep(stepIndex);
+            setStepProgress(Math.min(progressInStep, 100));
+            
+            animationFrameRef.current = requestAnimationFrame(animateProgress);
+          };
+          
+          animationFrameRef.current = requestAnimationFrame(animateProgress);
           
           const response = await fetch(
             `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
@@ -254,13 +257,15 @@ export default function SearchResults() {
             }
           );
 
+          // Record actual duration
+          const duration = Date.now() - searchStartTimeRef.current;
+          setActualDuration(duration);
+
           const data = await response.json();
 
           if (!response.ok) {
             throw new Error(data.error || "Search failed");
           }
-
-          // Do not override step timers here - they keep animating independently
 
           // Refresh search and results
           const { data: updatedSearch } = await supabase
@@ -287,13 +292,9 @@ export default function SearchResults() {
           });
 
           // On error, stop loading immediately
-          if (stepTimerRef.current) {
-            clearInterval(stepTimerRef.current);
-            stepTimerRef.current = null;
-          }
-          if (progressTimerRef.current) {
-            clearInterval(progressTimerRef.current);
-            progressTimerRef.current = null;
+          if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+            animationFrameRef.current = null;
           }
           setLoading(false);
         }
@@ -303,21 +304,62 @@ export default function SearchResults() {
     fetchAndSearch();
   }, [searchId, user, navigate, toast]);
 
-  // When both the search and the visual steps are finished, hide the loader
+  // When search completes, animate remaining steps evenly based on actual duration
   useEffect(() => {
-    const isFinalStep = currentStep === loadingSteps.length - 1;
-    if (searchCompleted && isFinalStep && stepProgress >= 100 && loading) {
-      if (stepTimerRef.current) {
-        clearInterval(stepTimerRef.current);
-        stepTimerRef.current = null;
-      }
-      if (progressTimerRef.current) {
-        clearInterval(progressTimerRef.current);
-        progressTimerRef.current = null;
-      }
-      setLoading(false);
+    if (!searchCompleted || !actualDuration || !loading) return;
+    
+    // Stop the estimate-based animation
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
     }
-  }, [searchCompleted, currentStep, stepProgress, loading]);
+    
+    // Now animate from current position to 100% over a short completion animation
+    // Each step should take (actualDuration / 3) - but we'll complete remaining steps quickly
+    const STEP_COUNT = loadingSteps.length;
+    const completedSteps = currentStep;
+    const remainingSteps = STEP_COUNT - completedSteps;
+    
+    // Complete remaining animation in 2 seconds total (smooth finish)
+    const COMPLETION_DURATION = 2000;
+    const timePerStep = COMPLETION_DURATION / remainingSteps;
+    
+    let animatedStep = currentStep;
+    let animatedProgress = stepProgress;
+    const startTime = Date.now();
+    
+    const finishAnimation = () => {
+      const elapsed = Date.now() - startTime;
+      
+      // Calculate total progress from start of completion animation
+      const totalCompletionProgress = Math.min(elapsed / COMPLETION_DURATION, 1);
+      
+      // Map to steps and progress
+      const targetStep = completedSteps + (totalCompletionProgress * remainingSteps);
+      animatedStep = Math.min(Math.floor(targetStep), STEP_COUNT - 1);
+      animatedProgress = (targetStep - animatedStep) * 100;
+      
+      setCurrentStep(animatedStep);
+      setStepProgress(Math.min(animatedProgress, 100));
+      
+      if (totalCompletionProgress < 1) {
+        animationFrameRef.current = requestAnimationFrame(finishAnimation);
+      } else {
+        // Animation complete, show results
+        setCurrentStep(STEP_COUNT - 1);
+        setStepProgress(100);
+        setTimeout(() => setLoading(false), 300);
+      }
+    };
+    
+    animationFrameRef.current = requestAnimationFrame(finishAnimation);
+    
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [searchCompleted, actualDuration, loading, currentStep, stepProgress]);
 
   if (!user) return null;
   const airbnbImages = toStringArray(search?.airbnb_images);
