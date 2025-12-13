@@ -285,25 +285,38 @@ export default function SearchResults() {
     if (searchPhase !== 'animating') return;
     
     const STEP_COUNT = loadingSteps.length;
-    // Use actual duration divided evenly, minimum 1.5s per step for smooth feel
+    // Minimum 1.5s per step, use actual duration evenly split
     const timePerStep = Math.max(actualDurationRef.current / STEP_COUNT, 1500);
     const TOTAL_ANIMATION = timePerStep * STEP_COUNT;
     
     const startTime = Date.now();
-    setCurrentStep(0);
-    setStepProgress(0);
+    
+    // Use a ref to track animation state without causing re-renders
+    let currentAnimStep = 0;
+    let currentAnimProgress = 0;
     
     const animate = () => {
       const elapsed = Date.now() - startTime;
       const totalProgress = Math.min(elapsed / TOTAL_ANIMATION, 1);
       
-      // Calculate step and progress within step
-      const exactStep = totalProgress * STEP_COUNT;
-      const stepIndex = Math.min(Math.floor(exactStep), STEP_COUNT - 1);
-      const progressInStep = (exactStep - stepIndex) * 100;
+      // Calculate overall progress as a continuous value from 0 to 300 (for 3 steps)
+      const continuousProgress = totalProgress * STEP_COUNT * 100;
       
-      setCurrentStep(stepIndex);
-      setStepProgress(Math.min(progressInStep, 100));
+      // Determine which step we're on
+      const stepIndex = Math.min(Math.floor(continuousProgress / 100), STEP_COUNT - 1);
+      
+      // Calculate progress within current step (0-100)
+      const progressInStep = continuousProgress - (stepIndex * 100);
+      
+      // Only update state if values changed
+      if (stepIndex !== currentAnimStep) {
+        currentAnimStep = stepIndex;
+        setCurrentStep(stepIndex);
+      }
+      
+      // Update progress continuously for smooth animation
+      currentAnimProgress = Math.min(progressInStep, 100);
+      setStepProgress(currentAnimProgress);
       
       if (totalProgress < 1) {
         animationFrameRef.current = requestAnimationFrame(animate);
@@ -316,6 +329,9 @@ export default function SearchResults() {
       }
     };
     
+    // Start animation
+    setCurrentStep(0);
+    setStepProgress(0);
     animationFrameRef.current = requestAnimationFrame(animate);
     
     return () => {
