@@ -1,9 +1,45 @@
-import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock, Move } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import vacationHome1 from "@/assets/vacation-home-1.jpg";
-import vacationInterior from "@/assets/vacation-interior-1.jpg";
+import vacationHome2 from "@/assets/vacation-home-2.jpg";
 
 export function ExampleResult() {
+  const [sliderPosition, setSliderPosition] = useState(50);
+  const [isDragging, setIsDragging] = useState(false);
+  const sliderRef = useRef<HTMLDivElement>(null);
+
+  // Handle slider drag
+  const handleMouseMove = (e: MouseEvent | TouchEvent) => {
+    if (!isDragging || !sliderRef.current) return;
+    
+    const rect = sliderRef.current.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const x = clientX - rect.left;
+    const percentage = Math.min(Math.max((x / rect.width) * 100, 5), 95);
+    setSliderPosition(percentage);
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  useEffect(() => {
+    if (isDragging) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+      window.addEventListener('touchmove', handleMouseMove);
+      window.addEventListener('touchend', handleMouseUp);
+      
+      return () => {
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseup', handleMouseUp);
+        window.removeEventListener('touchmove', handleMouseMove);
+        window.removeEventListener('touchend', handleMouseUp);
+      };
+    }
+  }, [isDragging]);
+
   return (
     <section className="py-20 md:py-32 bg-card">
       <div className="container px-4">
@@ -35,21 +71,63 @@ export function ExampleResult() {
             </div>
 
             <div className="p-6 md:p-8">
-              {/* Property Preview */}
-              <div className="grid md:grid-cols-3 gap-4 mb-8">
-                <div className="md:col-span-2 aspect-video rounded-xl overflow-hidden">
-                  <img 
-                    src={vacationHome1} 
-                    alt="Luxury vacation home exterior"
-                    className="w-full h-full object-cover"
+              {/* Interactive Image Slider Comparison */}
+              <div className="mb-8">
+                <div 
+                  ref={sliderRef}
+                  className="relative aspect-[16/9] rounded-xl overflow-hidden cursor-ew-resize select-none bg-muted"
+                  onMouseDown={() => setIsDragging(true)}
+                  onTouchStart={() => setIsDragging(true)}
+                >
+                  {/* Alternative/Direct booking image (bottom layer) */}
+                  <img
+                    src={vacationHome2}
+                    alt="Direct booking view"
+                    className="absolute inset-0 w-full h-full object-cover"
+                    draggable={false}
                   />
-                </div>
-                <div className="aspect-video rounded-xl overflow-hidden">
-                  <img 
-                    src={vacationInterior} 
-                    alt="Modern interior"
-                    className="w-full h-full object-cover"
-                  />
+                  
+                  {/* Airbnb image (top layer, clipped) */}
+                  <div 
+                    className="absolute inset-0 overflow-hidden"
+                    style={{ width: `${sliderPosition}%` }}
+                  >
+                    <img
+                      src={vacationHome1}
+                      alt="Airbnb listing view"
+                      className="absolute inset-0 w-full h-full object-cover"
+                      style={{ 
+                        width: sliderRef.current ? `${sliderRef.current.offsetWidth}px` : '100%',
+                        maxWidth: 'none'
+                      }}
+                      draggable={false}
+                    />
+                  </div>
+                  
+                  {/* Slider handle */}
+                  <div 
+                    className="absolute top-0 bottom-0 w-1 bg-white shadow-lg cursor-ew-resize z-10"
+                    style={{ left: `${sliderPosition}%`, transform: 'translateX(-50%)' }}
+                  >
+                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-white shadow-lg flex items-center justify-center">
+                      <Move className="w-6 h-6 text-muted-foreground" />
+                    </div>
+                  </div>
+                  
+                  {/* Labels */}
+                  <div className="absolute top-4 left-4 px-4 py-2 rounded-full bg-[#FF5A5F] text-white text-sm font-medium shadow-md flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-white/80" />
+                    Airbnb - $540
+                  </div>
+                  <div className="absolute top-4 right-4 px-4 py-2 rounded-full bg-success text-white text-sm font-medium shadow-md flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-white/80" />
+                    Direct - $399
+                  </div>
+                  
+                  {/* Drag instruction */}
+                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-background/90 text-sm font-medium shadow-md backdrop-blur-sm">
+                    ↔ Drag to compare
+                  </div>
                 </div>
               </div>
 
@@ -150,24 +228,24 @@ export function ExampleResult() {
               </div>
 
               {/* Savings Summary */}
-              <div className="bg-success/10 rounded-2xl p-6 text-center">
-                <p className="text-muted-foreground mb-2">Your potential savings by booking direct</p>
-                <div className="flex items-center justify-center gap-4 mb-2">
-                  <p className="text-4xl font-bold text-success">$141</p>
-                  <span className="text-success text-lg font-semibold">(26% off)</span>
+              <div className="border-2 border-success/30 bg-success/5 rounded-2xl p-8 text-center">
+                <p className="text-muted-foreground mb-3 text-lg">Your potential savings by booking direct</p>
+                <div className="flex items-center justify-center gap-3 mb-3">
+                  <p className="text-5xl font-bold text-success">$141</p>
+                  <span className="text-success text-xl font-semibold">(26% off)</span>
                 </div>
-                <p className="text-sm text-muted-foreground mb-3">
+                <p className="text-muted-foreground mb-4">
                   Same property, same dates — just without the platform fees
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   <strong>Unlock fee:</strong> $14.10 (10% of your savings) — Only pay when you save
                 </p>
               </div>
 
               {/* Info note */}
-              <div className="mt-6 flex items-start gap-3 p-4 bg-muted/30 rounded-xl">
+              <div className="mt-6 flex items-start gap-3 p-5 bg-muted/30 rounded-2xl">
                 <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   <strong>Fair comparison methodology:</strong> All prices shown include total costs with fees and taxes for identical dates. 
                   Trust scores are based on image matching accuracy. We verify listings using photo matching and location data. Always confirm details directly with the host before booking.
                 </p>
