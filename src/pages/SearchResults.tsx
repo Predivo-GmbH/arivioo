@@ -151,9 +151,11 @@ export default function SearchResults() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentStep, setCurrentStep] = useState(0);
+  const [stepProgress, setStepProgress] = useState(0); // Progress within current step (0-100)
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const searchTriggeredRef = useRef(false);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const progressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -213,11 +215,21 @@ export default function SearchResults() {
           
           // Fake progress timer - each step takes ~15 seconds for equal UX
           const STEP_DURATION = 15000; // 15 seconds per step
+          const PROGRESS_INTERVAL = 150; // Update progress every 150ms
+          
+          // Start progress animation within each step
+          progressTimerRef.current = setInterval(() => {
+            setStepProgress(prev => {
+              const increment = (100 / (STEP_DURATION / PROGRESS_INTERVAL));
+              return Math.min(prev + increment, 100);
+            });
+          }, PROGRESS_INTERVAL);
           
           // Start step progression with equal timing
           stepTimerRef.current = setInterval(() => {
             setCurrentStep(prev => {
               if (prev < loadingSteps.length - 1) {
+                setStepProgress(0); // Reset progress for new step
                 return prev + 1;
               }
               return prev;
@@ -239,6 +251,10 @@ export default function SearchResults() {
           if (stepTimerRef.current) {
             clearInterval(stepTimerRef.current);
             stepTimerRef.current = null;
+          }
+          if (progressTimerRef.current) {
+            clearInterval(progressTimerRef.current);
+            progressTimerRef.current = null;
           }
           
           const data = await response.json();
@@ -411,19 +427,10 @@ export default function SearchResults() {
                 const isCompleted = index < currentStep;
                 
                 return (
-                  <div key={step.id} className="relative">
-                    {/* Connecting line between steps */}
-                    {index < loadingSteps.length - 1 && (
-                      <div 
-                        className={`absolute left-[1.5rem] top-[4.5rem] w-0.5 h-8 -translate-x-1/2 transition-colors duration-500 ${
-                          isCompleted ? 'bg-primary' : 'bg-muted'
-                        }`}
-                      />
-                    )}
-                    
-                    <div className={`flex items-start gap-4 p-4 rounded-xl transition-all duration-500 ${
-                      isActive ? 'bg-primary/5 border border-primary/20' : ''
-                    }`}>
+                  <div key={step.id} className="relative flex">
+                    {/* Left column with circle and line */}
+                    <div className="flex flex-col items-center mr-4">
+                      {/* Circle */}
                       <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-500 ${
                         isCompleted 
                           ? 'bg-primary text-primary-foreground' 
@@ -445,18 +452,47 @@ export default function SearchResults() {
                         )}
                       </div>
                       
-                      <div className="flex-1 pt-1">
+                      {/* Connecting line */}
+                      {index < loadingSteps.length - 1 && (
+                        <div className={`w-0.5 flex-1 min-h-[2rem] transition-colors duration-500 ${
+                          isCompleted ? 'bg-primary' : 'bg-muted'
+                        }`} />
+                      )}
+                    </div>
+                    
+                    {/* Right column with content */}
+                    <div className={`flex-1 pb-8 ${index === loadingSteps.length - 1 ? 'pb-0' : ''}`}>
+                      <div className={`p-4 rounded-xl transition-all duration-500 ${
+                        isActive ? 'bg-primary/5 border border-primary/20' : ''
+                      }`}>
                         <h3 className={`font-semibold mb-1 transition-colors ${
                           isActive ? 'text-foreground' : isCompleted ? 'text-foreground' : 'text-muted-foreground'
                         }`}>
                           {step.title}
                           {isCompleted && <span className="text-primary ml-2 text-sm">✓</span>}
                         </h3>
-                        <p className={`text-sm transition-colors ${
+                        <p className={`text-sm transition-colors mb-3 ${
                           isActive ? 'text-muted-foreground' : 'text-muted-foreground/60'
                         }`}>
                           {step.description}
                         </p>
+                        
+                        {/* Progress bar for active step */}
+                        {isActive && (
+                          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-primary rounded-full transition-all duration-150 ease-linear"
+                              style={{ width: `${stepProgress}%` }}
+                            />
+                          </div>
+                        )}
+                        
+                        {/* Completed progress bar */}
+                        {isCompleted && (
+                          <div className="h-1.5 bg-primary/20 rounded-full overflow-hidden">
+                            <div className="h-full bg-primary rounded-full w-full" />
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -763,37 +799,37 @@ export default function SearchResults() {
                       })}
                     </div>
 
-                    {/* Savings Summary - Show skeleton when Airbnb price not available */}
+                    {/* Savings Summary - Matching design reference */}
                     {cheapestResult && cheapestResult.price && (
-                      <div className="bg-success/10 rounded-2xl p-6 text-center mb-8">
-                        <p className="text-muted-foreground mb-2">Your potential savings by booking direct</p>
-                        <div className="flex items-center justify-center gap-4 mb-2">
+                      <div className="border-2 border-success/30 bg-success/5 rounded-2xl p-8 text-center mb-8">
+                        <p className="text-muted-foreground mb-3 text-lg">Your potential savings by booking direct</p>
+                        <div className="flex items-center justify-center gap-3 mb-3">
                           {!search?.airbnb_price ? (
                             <div className="flex items-center gap-3">
-                              <div className="h-10 w-24 bg-muted animate-pulse rounded" />
-                              <div className="h-6 w-16 bg-muted animate-pulse rounded" />
+                              <div className="h-12 w-28 bg-muted animate-pulse rounded" />
+                              <div className="h-8 w-20 bg-muted animate-pulse rounded" />
                             </div>
                           ) : potentialSavings && potentialSavings > 0 ? (
                             <>
-                              <p className="text-4xl font-bold text-success">€{Math.round(potentialSavings)}</p>
-                              <span className="text-success text-lg font-semibold">
+                              <p className="text-5xl font-bold text-success">€{Math.round(potentialSavings)}</p>
+                              <span className="text-success text-xl font-semibold">
                                 ({airbnbGrandTotal ? Math.round((potentialSavings / airbnbGrandTotal) * 100) : '~'}% off)
                               </span>
                             </>
                           ) : (
-                            <p className="text-2xl font-bold text-success">
+                            <p className="text-3xl font-bold text-success">
                               Best price: €{cheapestResult.price && nights ? cheapestResult.price * nights : cheapestResult.price}/total
                             </p>
                           )}
                         </div>
-                        <p className="text-sm text-muted-foreground mb-3">
+                        <p className="text-muted-foreground mb-4">
                           {!search?.airbnb_price 
                             ? "Calculating savings..."
                             : "Same property, same dates — just without the platform fees"
                           }
                         </p>
                         {search?.airbnb_price && potentialSavings && potentialSavings > 0 && (
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-sm text-muted-foreground">
                             <strong>Unlock fee:</strong> €{(potentialSavings * 0.1).toFixed(2)} (10% of your savings) — Only pay when you save
                           </p>
                         )}
@@ -801,9 +837,9 @@ export default function SearchResults() {
                     )}
 
                     {/* Methodology note */}
-                    <div className="flex items-start gap-3 p-4 bg-muted/30 rounded-xl">
+                    <div className="flex items-start gap-3 p-5 bg-muted/30 rounded-2xl">
                       <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-sm text-muted-foreground">
                         <strong>Fair comparison methodology:</strong> All prices shown include total costs with fees and taxes for identical dates. 
                         Trust scores are based on image matching accuracy. We verify listings using photo matching and location data. 
                         Always confirm details directly with the host before booking.
