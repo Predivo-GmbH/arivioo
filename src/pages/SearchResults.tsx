@@ -153,6 +153,7 @@ export default function SearchResults() {
   const [currentStep, setCurrentStep] = useState(0);
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const searchTriggeredRef = useRef(false);
+  const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -210,19 +211,18 @@ export default function SearchResults() {
         try {
           const { data: { session } } = await supabase.auth.getSession();
           
-          // Poll for status updates during search
-          const pollInterval = setInterval(async () => {
-            const { data: updatedSearch } = await supabase
-              .from("searches")
-              .select("status")
-              .eq("id", searchId)
-              .single();
-            
-            if (updatedSearch) {
-              const newStep = getCurrentStepIndex(updatedSearch.status);
-              setCurrentStep(prev => Math.max(prev, newStep));
-            }
-          }, 2000);
+          // Fake progress timer - each step takes ~15 seconds for equal UX
+          const STEP_DURATION = 15000; // 15 seconds per step
+          
+          // Start step progression with equal timing
+          stepTimerRef.current = setInterval(() => {
+            setCurrentStep(prev => {
+              if (prev < loadingSteps.length - 1) {
+                return prev + 1;
+              }
+              return prev;
+            });
+          }, STEP_DURATION);
           
           const response = await fetch(
             `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
@@ -236,7 +236,10 @@ export default function SearchResults() {
             }
           );
 
-          clearInterval(pollInterval);
+          if (stepTimerRef.current) {
+            clearInterval(stepTimerRef.current);
+            stepTimerRef.current = null;
+          }
           
           const data = await response.json();
 
@@ -409,9 +412,10 @@ export default function SearchResults() {
                 
                 return (
                   <div key={step.id} className="relative">
+                    {/* Connecting line between steps */}
                     {index < loadingSteps.length - 1 && (
                       <div 
-                        className={`absolute left-6 top-14 w-0.5 h-12 transition-colors duration-500 ${
+                        className={`absolute left-[1.5rem] top-[4.5rem] w-0.5 h-8 -translate-x-1/2 transition-colors duration-500 ${
                           isCompleted ? 'bg-primary' : 'bg-muted'
                         }`}
                       />
