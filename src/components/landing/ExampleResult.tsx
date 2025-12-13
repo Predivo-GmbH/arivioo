@@ -2,7 +2,6 @@ import { useState, useRef, useEffect } from "react";
 import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock, Move } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import vacationHome1 from "@/assets/vacation-home-1.jpg";
-import vacationHome2 from "@/assets/vacation-home-2.jpg";
 
 export function ExampleResult() {
   const [sliderPosition, setSliderPosition] = useState(50);
@@ -81,7 +80,7 @@ export function ExampleResult() {
                 >
                   {/* Alternative/Direct booking image (bottom layer) */}
                   <img
-                    src={vacationHome2}
+                    src={vacationHome1}
                     alt="Direct booking view"
                     className="absolute inset-0 w-full h-full object-cover"
                     draggable={false}
