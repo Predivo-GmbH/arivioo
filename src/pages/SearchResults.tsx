@@ -152,6 +152,7 @@ export default function SearchResults() {
   const [loading, setLoading] = useState(true);
   const [currentStep, setCurrentStep] = useState(0);
   const [stepProgress, setStepProgress] = useState(0); // Progress within current step (0-100)
+  const [searchCompleted, setSearchCompleted] = useState(false);
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const searchTriggeredRef = useRef(false);
   const stepTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -213,9 +214,14 @@ export default function SearchResults() {
         try {
           const { data: { session } } = await supabase.auth.getSession();
           
-          // Fake progress timer - each step takes ~15 seconds for equal UX
-          const STEP_DURATION = 15000; // 15 seconds per step
-          const PROGRESS_INTERVAL = 150; // Update progress every 150ms
+          // Fake progress timer - each step takes ~20 seconds for equal UX
+          const STEP_DURATION = 20000; // 20 seconds per step (total ~60s)
+          const PROGRESS_INTERVAL = 200; // Update progress every 200ms
+
+          // Reset step state
+          setCurrentStep(0);
+          setStepProgress(0);
+          setSearchCompleted(false);
           
           // Start progress animation within each step
           progressTimerRef.current = setInterval(() => {
@@ -248,26 +254,13 @@ export default function SearchResults() {
             }
           );
 
-          if (stepTimerRef.current) {
-            clearInterval(stepTimerRef.current);
-            stepTimerRef.current = null;
-          }
-          if (progressTimerRef.current) {
-            clearInterval(progressTimerRef.current);
-            progressTimerRef.current = null;
-          }
-          
           const data = await response.json();
 
           if (!response.ok) {
             throw new Error(data.error || "Search failed");
           }
 
-          // Ensure we're at the final step before showing results
-          setCurrentStep(loadingSteps.length - 1);
-          
-          // Small delay to show final step
-          await new Promise(r => setTimeout(r, 1000));
+          // Do not override step timers here - they keep animating independently
 
           // Refresh search and results
           const { data: updatedSearch } = await supabase
@@ -284,6 +277,7 @@ export default function SearchResults() {
 
           setSearch(updatedSearch as SearchData);
           setResults((resultsData || []) as SearchResult[]);
+          setSearchCompleted(true);
         } catch (error: any) {
           console.error("Search error:", error);
           toast({ 
@@ -291,18 +285,41 @@ export default function SearchResults() {
             description: error.message || "Failed to search for alternatives", 
             variant: "destructive" 
           });
+
+          // On error, stop loading immediately
+          if (stepTimerRef.current) {
+            clearInterval(stepTimerRef.current);
+            stepTimerRef.current = null;
+          }
+          if (progressTimerRef.current) {
+            clearInterval(progressTimerRef.current);
+            progressTimerRef.current = null;
+          }
+          setLoading(false);
         }
-        
-        setLoading(false);
       }
     };
 
     fetchAndSearch();
   }, [searchId, user, navigate, toast]);
 
-  if (!user) return null;
+  // When both the search and the visual steps are finished, hide the loader
+  useEffect(() => {
+    const isFinalStep = currentStep === loadingSteps.length - 1;
+    if (searchCompleted && isFinalStep && stepProgress >= 100 && loading) {
+      if (stepTimerRef.current) {
+        clearInterval(stepTimerRef.current);
+        stepTimerRef.current = null;
+      }
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current);
+        progressTimerRef.current = null;
+      }
+      setLoading(false);
+    }
+  }, [searchCompleted, currentStep, stepProgress, loading]);
 
-  // Get images arrays
+  if (!user) return null;
   const airbnbImages = toStringArray(search?.airbnb_images);
 
   // Use dates from database first (these are the actual comparison dates used)
