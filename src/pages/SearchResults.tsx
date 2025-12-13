@@ -150,13 +150,13 @@ export default function SearchResults() {
   const [search, setSearch] = useState<SearchData | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentStep, setCurrentStep] = useState(0);
-  const [stepProgress, setStepProgress] = useState(0); // Progress within current step (0-100)
-  const [searchCompleted, setSearchCompleted] = useState(false);
-  const [actualDuration, setActualDuration] = useState<number | null>(null);
+  const [searchPhase, setSearchPhase] = useState<'thinking' | 'animating' | 'done'>('thinking');
+  const [currentStep, setCurrentStep] = useState(-1); // -1 = thinking phase
+  const [stepProgress, setStepProgress] = useState(0);
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
+  const actualDurationRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -215,35 +215,11 @@ export default function SearchResults() {
         try {
           const { data: { session } } = await supabase.auth.getSession();
           
-          // Reset step state and record start time
-          setCurrentStep(0);
+          // Reset to thinking phase
+          setSearchPhase('thinking');
+          setCurrentStep(-1);
           setStepProgress(0);
-          setSearchCompleted(false);
-          setActualDuration(null);
           searchStartTimeRef.current = Date.now();
-          
-          // Start with an estimated duration while search runs
-          // We'll use a slow initial pace that speeds up once we know actual duration
-          const ESTIMATED_TOTAL = 60000; // 60 second estimate
-          const STEP_COUNT = loadingSteps.length;
-          
-          // Animate progress based on elapsed time and estimated duration
-          const animateProgress = () => {
-            const elapsed = Date.now() - searchStartTimeRef.current;
-            const estimatedProgress = Math.min((elapsed / ESTIMATED_TOTAL) * 100, 95); // Cap at 95% until complete
-            
-            // Calculate which step we should be on and progress within that step
-            const totalProgress = estimatedProgress;
-            const stepIndex = Math.min(Math.floor((totalProgress / 100) * STEP_COUNT), STEP_COUNT - 1);
-            const progressInStep = ((totalProgress / 100) * STEP_COUNT - stepIndex) * 100;
-            
-            setCurrentStep(stepIndex);
-            setStepProgress(Math.min(progressInStep, 100));
-            
-            animationFrameRef.current = requestAnimationFrame(animateProgress);
-          };
-          
-          animationFrameRef.current = requestAnimationFrame(animateProgress);
           
           const response = await fetch(
             `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
@@ -258,8 +234,7 @@ export default function SearchResults() {
           );
 
           // Record actual duration
-          const duration = Date.now() - searchStartTimeRef.current;
-          setActualDuration(duration);
+          actualDurationRef.current = Date.now() - searchStartTimeRef.current;
 
           const data = await response.json();
 
@@ -282,7 +257,9 @@ export default function SearchResults() {
 
           setSearch(updatedSearch as SearchData);
           setResults((resultsData || []) as SearchResult[]);
-          setSearchCompleted(true);
+          
+          // Now animate through steps evenly
+          setSearchPhase('animating');
         } catch (error: any) {
           console.error("Search error:", error);
           toast({ 
@@ -291,7 +268,6 @@ export default function SearchResults() {
             variant: "destructive" 
           });
 
-          // On error, stop loading immediately
           if (animationFrameRef.current) {
             cancelAnimationFrame(animationFrameRef.current);
             animationFrameRef.current = null;
@@ -304,62 +280,50 @@ export default function SearchResults() {
     fetchAndSearch();
   }, [searchId, user, navigate, toast]);
 
-  // When search completes, animate remaining steps evenly based on actual duration
+  // Animate through all steps evenly when search completes
   useEffect(() => {
-    if (!searchCompleted || !actualDuration || !loading) return;
+    if (searchPhase !== 'animating') return;
     
-    // Stop the estimate-based animation
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-    
-    // Now animate from current position to 100% over a short completion animation
-    // Each step should take (actualDuration / 3) - but we'll complete remaining steps quickly
     const STEP_COUNT = loadingSteps.length;
-    const completedSteps = currentStep;
-    const remainingSteps = STEP_COUNT - completedSteps;
+    // Use actual duration divided evenly, minimum 1.5s per step for smooth feel
+    const timePerStep = Math.max(actualDurationRef.current / STEP_COUNT, 1500);
+    const TOTAL_ANIMATION = timePerStep * STEP_COUNT;
     
-    // Complete remaining animation in 2 seconds total (smooth finish)
-    const COMPLETION_DURATION = 2000;
-    const timePerStep = COMPLETION_DURATION / remainingSteps;
-    
-    let animatedStep = currentStep;
-    let animatedProgress = stepProgress;
     const startTime = Date.now();
+    setCurrentStep(0);
+    setStepProgress(0);
     
-    const finishAnimation = () => {
+    const animate = () => {
       const elapsed = Date.now() - startTime;
+      const totalProgress = Math.min(elapsed / TOTAL_ANIMATION, 1);
       
-      // Calculate total progress from start of completion animation
-      const totalCompletionProgress = Math.min(elapsed / COMPLETION_DURATION, 1);
+      // Calculate step and progress within step
+      const exactStep = totalProgress * STEP_COUNT;
+      const stepIndex = Math.min(Math.floor(exactStep), STEP_COUNT - 1);
+      const progressInStep = (exactStep - stepIndex) * 100;
       
-      // Map to steps and progress
-      const targetStep = completedSteps + (totalCompletionProgress * remainingSteps);
-      animatedStep = Math.min(Math.floor(targetStep), STEP_COUNT - 1);
-      animatedProgress = (targetStep - animatedStep) * 100;
+      setCurrentStep(stepIndex);
+      setStepProgress(Math.min(progressInStep, 100));
       
-      setCurrentStep(animatedStep);
-      setStepProgress(Math.min(animatedProgress, 100));
-      
-      if (totalCompletionProgress < 1) {
-        animationFrameRef.current = requestAnimationFrame(finishAnimation);
+      if (totalProgress < 1) {
+        animationFrameRef.current = requestAnimationFrame(animate);
       } else {
-        // Animation complete, show results
+        // Complete
         setCurrentStep(STEP_COUNT - 1);
         setStepProgress(100);
-        setTimeout(() => setLoading(false), 300);
+        setSearchPhase('done');
+        setTimeout(() => setLoading(false), 400);
       }
     };
     
-    animationFrameRef.current = requestAnimationFrame(finishAnimation);
+    animationFrameRef.current = requestAnimationFrame(animate);
     
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [searchCompleted, actualDuration, loading, currentStep, stepProgress]);
+  }, [searchPhase]);
 
   if (!user) return null;
   const airbnbImages = toStringArray(search?.airbnb_images);
@@ -478,92 +442,117 @@ export default function SearchResults() {
       <main className="container px-4 py-8 md:py-12">
         {loading ? (
           <div className="max-w-xl mx-auto py-12">
-            {/* Step Progress Indicator */}
-            <div className="mb-12">
-              {loadingSteps.map((step, index) => {
-                const StepIcon = step.icon;
-                const isActive = index === currentStep;
-                const isCompleted = index < currentStep;
+            {/* Thinking Phase - Shows while search is running */}
+            {searchPhase === 'thinking' && (
+              <div className="text-center py-8 animate-fade-in">
+                <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-primary/10 flex items-center justify-center">
+                  <Sparkles className="w-10 h-10 text-primary animate-pulse" />
+                </div>
+                <h2 className="text-2xl font-bold text-foreground mb-3">
+                  Analyzing Your Listing
+                </h2>
+                <p className="text-muted-foreground mb-8 max-w-md mx-auto">
+                  Our AI is searching across 10+ platforms to find the best deals for your property...
+                </p>
                 
-                return (
-                  <div key={step.id} className="relative flex">
-                    {/* Left column with circle and line */}
-                    <div className="flex flex-col items-center mr-4">
-                      {/* Circle */}
-                      <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-500 ${
-                        isCompleted 
-                          ? 'bg-primary text-primary-foreground' 
-                          : isActive 
-                          ? 'bg-primary/10 text-primary border-2 border-primary' 
-                          : 'bg-muted text-muted-foreground'
-                      }`}>
-                        {isCompleted ? (
-                          <Check className="w-5 h-5" />
-                        ) : isActive ? (
-                          <div className="relative">
-                            <StepIcon className="w-5 h-5" />
-                            <div className="absolute inset-0 animate-ping">
-                              <StepIcon className="w-5 h-5 opacity-50" />
+                {/* Pulsing progress indicator */}
+                <div className="max-w-xs mx-auto">
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div className="h-full bg-primary/60 rounded-full animate-pulse" style={{ width: '100%' }} />
+                  </div>
+                </div>
+                
+                <p className="text-sm text-muted-foreground mt-6">
+                  This usually takes 30-60 seconds...
+                </p>
+              </div>
+            )}
+            
+            {/* Step Progress Indicator - Shows after search completes */}
+            {searchPhase === 'animating' && (
+              <div className="mb-12 animate-fade-in">
+                {loadingSteps.map((step, index) => {
+                  const StepIcon = step.icon;
+                  const isActive = index === currentStep;
+                  const isCompleted = index < currentStep;
+                  
+                  return (
+                    <div key={step.id} className="relative flex">
+                      {/* Left column with circle and line */}
+                      <div className="flex flex-col items-center mr-4">
+                        {/* Circle */}
+                        <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-300 ${
+                          isCompleted 
+                            ? 'bg-primary text-primary-foreground' 
+                            : isActive 
+                            ? 'bg-primary/10 text-primary border-2 border-primary' 
+                            : 'bg-muted text-muted-foreground'
+                        }`}>
+                          {isCompleted ? (
+                            <Check className="w-5 h-5" />
+                          ) : isActive ? (
+                            <div className="relative">
+                              <StepIcon className="w-5 h-5" />
                             </div>
-                          </div>
-                        ) : (
-                          <StepIcon className="w-5 h-5" />
+                          ) : (
+                            <StepIcon className="w-5 h-5" />
+                          )}
+                        </div>
+                        
+                        {/* Connecting line */}
+                        {index < loadingSteps.length - 1 && (
+                          <div className={`w-0.5 flex-1 min-h-[2rem] transition-colors duration-300 ${
+                            isCompleted ? 'bg-primary' : 'bg-muted'
+                          }`} />
                         )}
                       </div>
                       
-                      {/* Connecting line */}
-                      {index < loadingSteps.length - 1 && (
-                        <div className={`w-0.5 flex-1 min-h-[2rem] transition-colors duration-500 ${
-                          isCompleted ? 'bg-primary' : 'bg-muted'
-                        }`} />
-                      )}
-                    </div>
-                    
-                    {/* Right column with content */}
-                    <div className={`flex-1 pb-8 ${index === loadingSteps.length - 1 ? 'pb-0' : ''}`}>
-                      <div className={`p-4 rounded-xl transition-all duration-500 ${
-                        isActive ? 'bg-primary/5 border border-primary/20' : ''
-                      }`}>
-                        <h3 className={`font-semibold mb-1 transition-colors ${
-                          isActive ? 'text-foreground' : isCompleted ? 'text-foreground' : 'text-muted-foreground'
+                      {/* Right column with content */}
+                      <div className={`flex-1 pb-8 ${index === loadingSteps.length - 1 ? 'pb-0' : ''}`}>
+                        <div className={`p-4 rounded-xl transition-all duration-300 ${
+                          isActive ? 'bg-primary/5 border border-primary/20' : ''
                         }`}>
-                          {step.title}
-                          {isCompleted && <span className="text-primary ml-2 text-sm">✓</span>}
-                        </h3>
-                        <p className={`text-sm transition-colors mb-3 ${
-                          isActive ? 'text-muted-foreground' : 'text-muted-foreground/60'
-                        }`}>
-                          {step.description}
-                        </p>
-                        
-                        {/* Progress bar for active step */}
-                        {isActive && (
-                          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-primary rounded-full transition-all duration-150 ease-linear"
-                              style={{ width: `${stepProgress}%` }}
-                            />
-                          </div>
-                        )}
-                        
-                        {/* Completed progress bar */}
-                        {isCompleted && (
-                          <div className="h-1.5 bg-primary/20 rounded-full overflow-hidden">
-                            <div className="h-full bg-primary rounded-full w-full" />
-                          </div>
-                        )}
+                          <h3 className={`font-semibold mb-1 transition-colors ${
+                            isActive ? 'text-foreground' : isCompleted ? 'text-foreground' : 'text-muted-foreground'
+                          }`}>
+                            {step.title}
+                            {isCompleted && <span className="text-primary ml-2 text-sm">✓</span>}
+                          </h3>
+                          <p className={`text-sm transition-colors mb-3 ${
+                            isActive ? 'text-muted-foreground' : 'text-muted-foreground/60'
+                          }`}>
+                            {step.description}
+                          </p>
+                          
+                          {/* Progress bar for active step */}
+                          {isActive && (
+                            <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                              <div 
+                                className="h-full bg-primary rounded-full"
+                                style={{ width: `${stepProgress}%`, transition: 'width 50ms linear' }}
+                              />
+                            </div>
+                          )}
+                          
+                          {/* Completed progress bar */}
+                          {isCompleted && (
+                            <div className="h-1.5 bg-primary/20 rounded-full overflow-hidden">
+                              <div className="h-full bg-primary rounded-full w-full" />
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="text-center">
-              <p className="text-sm text-muted-foreground">
-                This usually takes 30-60 seconds as we search across multiple platforms...
-              </p>
-            </div>
+                  );
+                })}
+                
+                <div className="text-center mt-8">
+                  <p className="text-sm text-muted-foreground">
+                    Preparing your results...
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="max-w-5xl mx-auto">
