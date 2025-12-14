@@ -3,8 +3,8 @@ import { ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useNavigate } from "react-router-dom";
-import vacationHome1 from "@/assets/vacation-home-1.jpg";
-import vacationHome2 from "@/assets/vacation-home-2.jpg";
+import cottageView1 from "@/assets/cottage-view-1.jpg";
+import cottageView2 from "@/assets/cottage-view-2.jpg";
 
 export function Hero() {
   const [url, setUrl] = useState("");
@@ -87,7 +87,7 @@ export function Hero() {
                   <div className="bg-secondary/50 rounded-xl p-4">
                     <div className="aspect-video rounded-lg mb-4 overflow-hidden">
                       <img 
-                        src={vacationHome1} 
+                        src={cottageView1} 
                         alt="Airbnb listing photo - Cozy Lakeside Cottage"
                         className="w-full h-full object-cover"
                       />
@@ -105,7 +105,7 @@ export function Hero() {
                   <div className="bg-success/10 rounded-xl p-4 ring-2 ring-success/30">
                     <div className="aspect-video rounded-lg mb-4 overflow-hidden">
                       <img 
-                        src={vacationHome2} 
+                        src={cottageView2} 
                         alt="Same property from direct booking site - slightly different angle"
                         className="w-full h-full object-cover"
                       />
