@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock, Move } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import vacationHome1 from "@/assets/vacation-home-1.jpg";
+import vacationHome2 from "@/assets/vacation-home-2.jpg";
 
 export function ExampleResult() {
   const [sliderPosition, setSliderPosition] = useState(50);
@@ -78,15 +79,15 @@ export function ExampleResult() {
                   onMouseDown={() => setIsDragging(true)}
                   onTouchStart={() => setIsDragging(true)}
                 >
-                  {/* Alternative/Direct booking image (bottom layer) */}
+                  {/* Alternative/Direct booking image (bottom layer) - slightly different angle */}
                   <img
-                    src={vacationHome1}
-                    alt="Direct booking view"
+                    src={vacationHome2}
+                    alt="Direct booking view - same property, different angle"
                     className="absolute inset-0 w-full h-full object-cover"
                     draggable={false}
                   />
                   
-                  {/* Airbnb image (top layer, clipped) */}
+                  {/* Airbnb image (top layer, clipped) - original listing photo */}
                   <div 
                     className="absolute inset-0 overflow-hidden"
                     style={{ width: `${sliderPosition}%` }}
