@@ -30,14 +30,24 @@ async function extractAirbnbPriceWithAI(content: string, nights: number): Promis
   }
   
   try {
-    const prompt = `Extract the nightly price from this Airbnb listing content. Look for the price per night (not total).
-    
+    const prompt = `You are analyzing text scraped from an Airbnb listing page.
+The stay is for exactly ${nights} night(s).
+
+From the content below, determine the actual price PER NIGHT for the selected stay.
+
+Rules:
+- If the page directly shows a per-night amount (e.g. "€176 per night" or "176 CHF/night"), use that.
+- If only a total price for the entire stay is shown (e.g. "Total before taxes: €352" for ${nights} nights), compute the per-night price by dividing the total by ${nights}.
+- Ignore service fees, cleaning fees, taxes and security deposits when they are listed separately.
+- Ignore crossed-out / discounted "original" prices and use the final price actually charged.
+
 Content:
 ${content.slice(0, 8000)}
 
-Return ONLY a single number representing the price per night in the listing's currency (e.g., "125" for €125/night). 
-If you cannot find a clear nightly price, return "null".
+Return ONLY a single number representing the final price per night in the listing's currency (e.g., "125" for €125/night).
+If you cannot find a reliable per-night price, return "null".
 Do not include currency symbols or units - just the number.`;
+
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
@@ -617,6 +627,10 @@ serve(async (req) => {
     const foundUrls = new Set<string>();
     let airbnbTitle = "Vacation Rental";
     let airbnbPrice: number | null = null;
+    let firecrawlMarkdown = "";
+    let firecrawlHtml = "";
+    let directHtml = "";
+
 
     // Step 1: Fetch Airbnb page and extract property data using Firecrawl for JS rendering
     console.log("Step 1: Extracting property data from Airbnb...");
@@ -646,6 +660,11 @@ serve(async (req) => {
           const markdown = firecrawlData.data?.markdown || '';
           const html = firecrawlData.data?.html || '';
           const rawHtml = firecrawlData.data?.rawHtml || html;
+
+          // Keep copies for potential AI-based price extraction later
+          firecrawlMarkdown = markdown;
+          firecrawlHtml = rawHtml || html;
+
           
           console.log("Firecrawl response - markdown length:", markdown.length, "html length:", html.length);
           
@@ -746,6 +765,7 @@ serve(async (req) => {
         
         if (airbnbResponse.ok) {
           const html = await airbnbResponse.text();
+          directHtml = html;
           console.log("Fetched Airbnb page directly, length:", html.length);
           
           // Extract title if not already set
@@ -824,9 +844,15 @@ serve(async (req) => {
     if (!airbnbPrice) {
       console.log("Attempting AI-based price extraction...");
       
-      // Try to get content for AI extraction
+      // Prefer previously scraped content before making another network call
       let contentForAI = "";
-      if (firecrawlApiKey) {
+      if (firecrawlMarkdown) {
+        contentForAI = firecrawlMarkdown;
+      } else if (firecrawlHtml) {
+        contentForAI = firecrawlHtml;
+      } else if (directHtml) {
+        contentForAI = directHtml;
+      } else if (firecrawlApiKey) {
         try {
           const aiScrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
             method: 'POST',
@@ -856,6 +882,7 @@ serve(async (req) => {
         airbnbPrice = await extractAirbnbPriceWithAI(contentForAI, nights);
       }
     }
+
     
     // Log final price status and abort comparison if missing
     if (!airbnbPrice) {
