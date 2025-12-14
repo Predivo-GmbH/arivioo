@@ -88,10 +88,14 @@ export function Hero() {
                     <div className="aspect-video rounded-lg mb-4 overflow-hidden">
                       <img 
                         src={vacationHome1} 
-                        alt="Luxury vacation home exterior"
+                        alt="Airbnb listing photo - Cozy Lakeside Cottage"
                         className="w-full h-full object-cover"
                       />
                     </div>
+                    <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-[#FF5A5F]" />
+                      Airbnb listing
+                    </p>
                     <h3 className="font-semibold text-foreground mb-1">Cozy Lakeside Cottage</h3>
                     <p className="text-2xl font-bold text-foreground">$180<span className="text-sm font-normal text-muted-foreground">/night</span></p>
                     <p className="text-sm text-muted-foreground mt-1">+ $45 service fees</p>
@@ -102,10 +106,14 @@ export function Hero() {
                     <div className="aspect-video rounded-lg mb-4 overflow-hidden">
                       <img 
                         src={vacationHome2} 
-                        alt="Modern vacation home"
+                        alt="Same property from direct booking site - slightly different angle"
                         className="w-full h-full object-cover"
                       />
                     </div>
+                    <p className="text-xs text-success mb-2 flex items-center gap-1 font-medium">
+                      <span className="w-2 h-2 rounded-full bg-success" />
+                      Visual match found!
+                    </p>
                     <h3 className="font-semibold text-foreground mb-1">Cozy Lakeside Cottage</h3>
                     <p className="text-2xl font-bold text-success">$145<span className="text-sm font-normal text-muted-foreground">/night</span></p>
                     <p className="text-sm text-success mt-1 font-medium">No service fees!</p>
