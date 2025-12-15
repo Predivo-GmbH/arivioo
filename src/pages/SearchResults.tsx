@@ -602,7 +602,7 @@ export default function SearchResults() {
                 )}
 
                 {/* Require Airbnb baseline price before showing comparison */}
-                {!search?.airbnb_price || search?.status === "price_unavailable" ? (
+                {(search?.status === "price_unavailable") || (search?.status === "completed" && !search?.airbnb_price) ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-amber-500" />
