@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useNavigate } from "react-router-dom";
 import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
 import cottageView1 from "@/assets/cottage-view-1.jpg";
@@ -131,38 +132,62 @@ export function Hero() {
                 <div className="grid md:grid-cols-2 gap-6">
                   {/* Airbnb Card */}
                   <div className="bg-secondary/50 rounded-xl p-4">
-                    <div className="aspect-video rounded-lg mb-4 overflow-hidden">
-                      <img 
-                        src={airbnbImage} 
-                        alt={`Airbnb listing - ${title}`}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-[#FF5A5F]" />
-                      Airbnb listing
-                    </p>
-                    <h3 className="font-semibold text-foreground mb-1 truncate">{title}</h3>
-                    <p className="text-2xl font-bold text-foreground">${airbnbPrice}<span className="text-sm font-normal text-muted-foreground">/night</span></p>
-                    <p className="text-sm text-muted-foreground mt-1">+ ${serviceFee} service fees</p>
+                    {loading ? (
+                      <>
+                        <Skeleton className="aspect-video rounded-lg mb-4" />
+                        <Skeleton className="h-3 w-20 mb-2" />
+                        <Skeleton className="h-5 w-40 mb-1" />
+                        <Skeleton className="h-8 w-24" />
+                        <Skeleton className="h-4 w-28 mt-1" />
+                      </>
+                    ) : (
+                      <>
+                        <div className="aspect-video rounded-lg mb-4 overflow-hidden">
+                          <img 
+                            src={airbnbImage} 
+                            alt={`Airbnb listing - ${title}`}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                          <span className="w-2 h-2 rounded-full bg-[#FF5A5F]" />
+                          Airbnb listing
+                        </p>
+                        <h3 className="font-semibold text-foreground mb-1 truncate">{title}</h3>
+                        <p className="text-2xl font-bold text-foreground">${airbnbPrice}<span className="text-sm font-normal text-muted-foreground">/night</span></p>
+                        <p className="text-sm text-muted-foreground mt-1">+ ${serviceFee} service fees</p>
+                      </>
+                    )}
                   </div>
 
                   {/* Direct Booking Card */}
                   <div className="bg-success/10 rounded-xl p-4 ring-2 ring-success/30">
-                    <div className="aspect-video rounded-lg mb-4 overflow-hidden">
-                      <img 
-                        src={directImage} 
-                        alt={`Same property - visual match verified`}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <p className="text-xs text-success mb-2 flex items-center gap-1 font-medium">
-                      <span className="w-2 h-2 rounded-full bg-success" />
-                      AI-verified match!
-                    </p>
-                    <h3 className="font-semibold text-foreground mb-1 truncate">{title}</h3>
-                    <p className="text-2xl font-bold text-success">${directPrice}<span className="text-sm font-normal text-muted-foreground">/night</span></p>
-                    <p className="text-sm text-success mt-1 font-medium">No service fees!</p>
+                    {loading ? (
+                      <>
+                        <Skeleton className="aspect-video rounded-lg mb-4" />
+                        <Skeleton className="h-3 w-24 mb-2" />
+                        <Skeleton className="h-5 w-40 mb-1" />
+                        <Skeleton className="h-8 w-24" />
+                        <Skeleton className="h-4 w-20 mt-1" />
+                      </>
+                    ) : (
+                      <>
+                        <div className="aspect-video rounded-lg mb-4 overflow-hidden">
+                          <img 
+                            src={directImage} 
+                            alt={`Same property - visual match verified`}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <p className="text-xs text-success mb-2 flex items-center gap-1 font-medium">
+                          <span className="w-2 h-2 rounded-full bg-success" />
+                          AI-verified match!
+                        </p>
+                        <h3 className="font-semibold text-foreground mb-1 truncate">{title}</h3>
+                        <p className="text-2xl font-bold text-success">${directPrice}<span className="text-sm font-normal text-muted-foreground">/night</span></p>
+                        <p className="text-sm text-success mt-1 font-medium">No service fees!</p>
+                      </>
+                    )}
                   </div>
                 </div>
 
