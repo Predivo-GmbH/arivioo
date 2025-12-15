@@ -1,8 +1,10 @@
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock, Move } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
+import { useImageAlignment } from "@/hooks/useImageAlignment";
+import { getObjectPosition, getTransform } from "@/lib/imageAlignment";
 import cottageView1 from "@/assets/cottage-view-1.jpg";
 import cottageView2 from "@/assets/cottage-view-2.jpg";
 import type { Json } from "@/integrations/supabase/types";
@@ -42,6 +44,7 @@ export function ExampleResult() {
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
   const sliderRef = useRef<HTMLDivElement>(null);
+  const autoAlignTriggeredRef = useRef(false);
   
   const { data: dynamicData, loading } = useLastSuccessfulSearch();
 
@@ -78,6 +81,23 @@ export function ExampleResult() {
   const directImage = useDynamic && dynamicData.cheapestResult?.image_url
     ? dynamicData.cheapestResult.image_url
     : STATIC_DATA.directImage;
+
+  const { alignment, autoAlign } = useImageAlignment(airbnbImage, directImage);
+
+  useEffect(() => {
+    if (!useDynamic) return;
+    if (!airbnbImage || !directImage) return;
+    if (autoAlignTriggeredRef.current) return;
+
+    const isDefault = alignment.x === 0 && alignment.y === 0 && alignment.scale === 1;
+    if (!isDefault) {
+      autoAlignTriggeredRef.current = true;
+      return;
+    }
+
+    autoAlignTriggeredRef.current = true;
+    void autoAlign();
+  }, [useDynamic, airbnbImage, directImage, alignment.x, alignment.y, alignment.scale, autoAlign]);
   
   // Confidence score
   const confidenceScore = useDynamic && dynamicData.cheapestResult?.confidence_score
@@ -167,6 +187,11 @@ export function ExampleResult() {
                       src={directImage}
                       alt={`${directPlatform} - same property`}
                       className="absolute inset-0 w-full h-full object-cover"
+                      style={{
+                        objectPosition: getObjectPosition(alignment.x, alignment.y),
+                        transform: getTransform(alignment.x, alignment.y, alignment.scale),
+                        transformOrigin: "center",
+                      }}
                       draggable={false}
                     />
                     
