@@ -1015,6 +1015,40 @@ serve(async (req) => {
       console.log("SUCCESS: Airbnb price extracted:", airbnbPrice, "per night");
     }
 
+    // EARLY TERMINATION: If no images found, we can't do visual search - abort early
+    if (imageUrls.length === 0) {
+      console.warn("FATAL: No property images found - aborting comparison");
+      const nights = calculateNights(checkIn, checkOut);
+
+      await supabase.from("searches").update({
+        status: "completed",
+        airbnb_title: airbnbTitle,
+        airbnb_price: airbnbPrice,
+        airbnb_image_url: null,
+        airbnb_images: [],
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        nights_count: nights,
+      }).eq("id", searchId);
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          results: [],
+          airbnb: {
+            title: airbnbTitle,
+            price: airbnbPrice,
+            url: search.airbnb_url,
+            imageUrl: null,
+            images: [],
+          },
+          dates: { checkIn, checkOut, nights },
+          message: "Could not extract property images for visual search.",
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     // Update status to step 2
     await supabase.from("searches").update({ 
       status: "searching_platforms" 
@@ -1219,12 +1253,52 @@ serve(async (req) => {
       }
     }
 
+    // EARLY TERMINATION: If no visual matches found after image search, skip expensive text search
+    // Text matches are unverified anyway, so there's little value in showing them
+    const visualMatchCount = alternatives.filter(a => a.match_type === 'visual').length;
+    console.log(`Visual search complete: found ${visualMatchCount} AI-verified matches`);
+    
+    if (visualMatchCount === 0) {
+      console.log("No visual matches found - skipping text search and completing early");
+      
+      const nights = calculateNights(checkIn, checkOut);
+      const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
+      const airbnbImages = imageUrls.slice(0, 5);
+
+      await supabase.from("searches").update({
+        status: "completed",
+        airbnb_title: airbnbTitle,
+        airbnb_price: airbnbPrice,
+        airbnb_image_url: airbnbImageUrl,
+        airbnb_images: airbnbImages,
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        nights_count: nights,
+      }).eq("id", searchId);
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          results: [],
+          airbnb: {
+            title: airbnbTitle,
+            price: airbnbPrice,
+            url: search.airbnb_url,
+            imageUrl: airbnbImageUrl,
+            images: airbnbImages,
+          },
+          dates: { checkIn, checkOut, nights },
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     // Update status to step 3
     await supabase.from("searches").update({ 
       status: "comparing_prices" 
     }).eq("id", searchId);
 
-    // Step 3: Multi-strategy text search if we still need more results
+    // Step 3: Multi-strategy text search if we still need more results (only if we have some visual matches)
     if (alternatives.length < 5) {
       console.log("Step 3: Multi-strategy text search...");
       
