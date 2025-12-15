@@ -154,10 +154,13 @@ export default function SearchResults() {
   const [currentStep, setCurrentStep] = useState(-1); // -1 = thinking phase
   const [stepProgress, setStepProgress] = useState(0);
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
+  const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0);
+
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
   const actualDurationRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -219,8 +222,13 @@ export default function SearchResults() {
           setSearchPhase('thinking');
           setCurrentStep(-1);
           setStepProgress(0);
+          setThinkingElapsedMs(0);
+
+          // Start timer + allow cancel
           searchStartTimeRef.current = Date.now();
-          
+          abortControllerRef.current?.abort();
+          abortControllerRef.current = new AbortController();
+
           const response = await fetch(
             `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
             {
@@ -229,6 +237,7 @@ export default function SearchResults() {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
               },
+              signal: abortControllerRef.current.signal,
               body: JSON.stringify({ searchId }),
             }
           );
@@ -261,11 +270,18 @@ export default function SearchResults() {
           // Now animate through steps evenly
           setSearchPhase('animating');
         } catch (error: any) {
+          // User cancelled
+          if (error?.name === 'AbortError') {
+            toast({ title: "Search cancelled", description: "No worries — you can try again anytime." });
+            navigate("/dashboard");
+            return;
+          }
+
           console.error("Search error:", error);
-          toast({ 
-            title: "Search Error", 
-            description: error.message || "Failed to search for alternatives", 
-            variant: "destructive" 
+          toast({
+            title: "Search Error",
+            description: error.message || "Failed to search for alternatives",
+            variant: "destructive"
           });
 
           if (animationFrameRef.current) {
@@ -279,6 +295,18 @@ export default function SearchResults() {
 
     fetchAndSearch();
   }, [searchId, user, navigate, toast]);
+
+  // Thinking phase timer (improves UX + makes "stuck" feel less scary)
+  useEffect(() => {
+    if (!loading || searchPhase !== 'thinking') return;
+
+    const startedAt = searchStartTimeRef.current || Date.now();
+    const id = window.setInterval(() => {
+      setThinkingElapsedMs(Date.now() - startedAt);
+    }, 250);
+
+    return () => window.clearInterval(id);
+  }, [loading, searchPhase]);
 
   // Animate through all steps evenly when search completes
   useEffect(() => {
@@ -464,23 +492,61 @@ export default function SearchResults() {
                 <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-primary/10 flex items-center justify-center">
                   <Sparkles className="w-10 h-10 text-primary animate-pulse" />
                 </div>
-                <h2 className="text-2xl font-bold text-foreground mb-3">
+                <h2 className="text-2xl font-bold text-foreground mb-2">
                   Analyzing Your Listing
                 </h2>
-                <p className="text-muted-foreground mb-8 max-w-md mx-auto">
-                  Our AI is searching across 10+ platforms to find the best deals for your property...
+
+                <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+                  Searching across platforms and visually verifying matches with your photos.
                 </p>
-                
+
                 {/* Pulsing progress indicator */}
                 <div className="max-w-xs mx-auto">
                   <div className="h-2 bg-muted rounded-full overflow-hidden">
                     <div className="h-full bg-primary/60 rounded-full animate-pulse" style={{ width: '100%' }} />
                   </div>
                 </div>
-                
-                <p className="text-sm text-muted-foreground mt-6">
-                  This usually takes 30-60 seconds...
-                </p>
+
+                <div className="mt-6 space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    Elapsed: <span className="font-medium text-foreground">{Math.floor(thinkingElapsedMs / 1000)}s</span> · Typical: 30–60s
+                  </p>
+
+                  {thinkingElapsedMs >= 12000 && (
+                    <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-4 text-left">
+                      <p className="text-sm font-medium text-foreground mb-2">What we’re doing right now</p>
+                      <ul className="text-sm text-muted-foreground space-y-1 list-disc pl-5">
+                        <li>Extracting clean property photos</li>
+                        <li>Running reverse image searches across multiple sites</li>
+                        <li>Verifying matches (≥ 90% confidence)</li>
+                      </ul>
+                      {thinkingElapsedMs >= 45000 && (
+                        <p className="text-sm text-muted-foreground mt-3">
+                          If this feels stuck, you can cancel and try again.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-center gap-3">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        abortControllerRef.current?.abort();
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        toast({ title: "Still working", description: "We’ll keep searching — this can take up to a minute." });
+                      }}
+                    >
+                      Why is this taking time?
+                    </Button>
+                  </div>
+                </div>
               </div>
             )}
             
