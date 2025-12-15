@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useNavigate } from "react-router-dom";
 import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
+import { useImageAlignment } from "@/hooks/useImageAlignment";
+import { getObjectPosition, getTransform } from "@/lib/imageAlignment";
 import cottageView1 from "@/assets/cottage-view-1.jpg";
 import cottageView2 from "@/assets/cottage-view-2.jpg";
 import type { Json } from "@/integrations/supabase/types";
@@ -56,6 +58,28 @@ export function Hero() {
   const directImage = useDynamic && dynamicData.cheapestResult?.image_url
     ? dynamicData.cheapestResult.image_url
     : STATIC_DATA.directImage;
+
+  // Align the direct image to the Airbnb reference image (persisted per pair)
+  const { alignment, autoAlign, isAutoAligning } = useImageAlignment(airbnbImage, directImage);
+  const autoAlignTriggeredRef = useRef(false);
+
+  useEffect(() => {
+    // Only auto-align for real/dynamic examples (avoid AI calls for the static fallback)
+    if (!useDynamic) return;
+    if (!airbnbImage || !directImage) return;
+    if (autoAlignTriggeredRef.current) return;
+
+    // If user already adjusted alignment (persisted), alignment likely won't be default.
+    // Otherwise do a single auto-align attempt.
+    const isDefault = alignment.x === 0 && alignment.y === 0 && alignment.scale === 1;
+    if (!isDefault) {
+      autoAlignTriggeredRef.current = true;
+      return;
+    }
+
+    autoAlignTriggeredRef.current = true;
+    void autoAlign();
+  }, [useDynamic, airbnbImage, directImage, alignment.x, alignment.y, alignment.scale, autoAlign]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -177,6 +201,12 @@ export function Hero() {
                             src={directImage} 
                             alt={`Same property - visual match verified`}
                             className="w-full h-full object-cover"
+                            style={{
+                              objectPosition: getObjectPosition(alignment.x, alignment.y),
+                              transform: getTransform(alignment.x, alignment.y, alignment.scale),
+                              transformOrigin: "center",
+                              transition: isAutoAligning ? "none" : undefined,
+                            }}
                           />
                         </div>
                         <p className="text-xs text-success mb-2 flex items-center gap-1 font-medium">
