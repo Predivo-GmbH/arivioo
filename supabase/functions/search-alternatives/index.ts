@@ -1055,13 +1055,50 @@ serve(async (req) => {
     }).eq("id", searchId);
 
     // Step 2: Use Google Lens for visual matching (much better than reverse image search)
+    // CRITICAL: Track time and AI comparison budget to avoid timeout
+    const searchStartTime = Date.now();
+    const MAX_SEARCH_TIME_MS = 45000; // 45 second hard limit for search phase
+    const MAX_AI_COMPARISONS = 15; // Limit AI comparisons to avoid timeout
+    const TARGET_VISUAL_MATCHES = 3; // Stop early once we have enough matches
+    let aiComparisonCount = 0;
+
+    const isTimeBudgetExceeded = () => {
+      const elapsed = Date.now() - searchStartTime;
+      if (elapsed > MAX_SEARCH_TIME_MS) {
+        console.log(`TIME BUDGET EXCEEDED: ${elapsed}ms > ${MAX_SEARCH_TIME_MS}ms`);
+        return true;
+      }
+      return false;
+    };
+
+    const isAIBudgetExceeded = () => {
+      if (aiComparisonCount >= MAX_AI_COMPARISONS) {
+        console.log(`AI COMPARISON BUDGET EXCEEDED: ${aiComparisonCount} >= ${MAX_AI_COMPARISONS}`);
+        return true;
+      }
+      return false;
+    };
+
+    const hasEnoughMatches = () => {
+      const visualCount = alternatives.filter(a => a.match_type === 'visual').length;
+      if (visualCount >= TARGET_VISUAL_MATCHES) {
+        console.log(`ENOUGH MATCHES FOUND: ${visualCount} >= ${TARGET_VISUAL_MATCHES}`);
+        return true;
+      }
+      return false;
+    };
+
     if (imageUrls.length > 0) {
       console.log("Step 2: Running Google Lens visual matching...");
+      console.log(`Budget: ${MAX_AI_COMPARISONS} AI comparisons, ${MAX_SEARCH_TIME_MS}ms time, target ${TARGET_VISUAL_MATCHES} matches`);
       
       // Use only first 3 images for Lens (most distinctive ones)
       const lensImages = imageUrls.slice(0, 3);
       
       for (const imageUrl of lensImages) {
+        // Check budgets before starting new image
+        if (isTimeBudgetExceeded() || hasEnoughMatches()) break;
+
         try {
           console.log("Google Lens searching:", imageUrl.slice(0, 80));
           
@@ -1083,11 +1120,20 @@ serve(async (req) => {
                       "text_results:", lensData.text_results?.length || 0);
           
           // Process visual matches - these are the key results with VISUAL CONFIRMATION
-          const visualMatches = lensData.visual_matches || [];
+          // LIMIT to first 8 matches per image to avoid timeout
+          const visualMatches = (lensData.visual_matches || []).slice(0, 8);
           for (const match of visualMatches) {
+            // Check budgets before each comparison
+            if (isTimeBudgetExceeded() || isAIBudgetExceeded() || hasEnoughMatches()) break;
+
             const url = match.link;
             if (!url) continue;
             if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
+            
+            // Quick filter: only check booking platforms and direct sites
+            if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) {
+              continue;
+            }
             
             console.log("Checking visual match:", url.slice(0, 100));
             
@@ -1100,9 +1146,10 @@ serve(async (req) => {
             }
             
             // Use AI to compare images and get similarity score
-            console.log("Running AI image comparison...");
+            console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS}...`);
+            aiComparisonCount++;
             const aiComparison = await compareImagesWithAI(imageUrl, matchImageUrl);
-            console.log(`AI comparison result: score=${aiComparison.score}, isMatch=${aiComparison.isMatch}, reason: ${aiComparison.explanation}`);
+            console.log(`AI result: score=${aiComparison.score}, isMatch=${aiComparison.isMatch}, reason: ${aiComparison.explanation}`);
             
             // ONLY include matches with ≥90% AI confidence
             if (!aiComparison.isMatch) {
@@ -1130,7 +1177,7 @@ serve(async (req) => {
                 match_type: 'visual',
                 source_airbnb_image: imageUrl, // Store the Airbnb image that matched
               });
-              console.log("AI-VERIFIED match on platform:", getPlatformName(url), "confidence:", (verifiedConfidence * 100).toFixed(0) + "%");
+              console.log("✓ AI-VERIFIED match on platform:", getPlatformName(url), "confidence:", (verifiedConfidence * 100).toFixed(0) + "%");
             }
             // Also check for direct property websites
             else if (isDirectPropertySite(url)) {
@@ -1149,51 +1196,58 @@ serve(async (req) => {
                 match_type: 'visual',
                 source_airbnb_image: imageUrl, // Store the Airbnb image that matched
               });
-              console.log("AI-VERIFIED direct site match:", url.slice(0, 80));
+              console.log("✓ AI-VERIFIED direct site match:", url.slice(0, 80));
             }
           }
           
           // Also check knowledge graph for additional context - requires AI verification too
-          if (lensData.knowledge_graph?.source?.link) {
-            const kgUrl = lensData.knowledge_graph.source.link;
-            const kgImage = lensData.knowledge_graph.thumbnail;
-            
-            if (!kgUrl.toLowerCase().includes("airbnb.") && !foundUrls.has(kgUrl) && kgImage) {
-              if (isBookingPlatform(kgUrl) || isDirectPropertySite(kgUrl) || isRegionalHotelSite(kgUrl)) {
-                // AI verify knowledge graph match too
-                const kgComparison = await compareImagesWithAI(imageUrl, kgImage);
-                
-                if (kgComparison.isMatch) {
-                  foundUrls.add(kgUrl);
-                  alternatives.push({
-                    platform_name: getPlatformName(kgUrl),
-                    listing_url: kgUrl,
-                    listing_title: lensData.knowledge_graph.title || null,
-                    price: null,
-                    confidence_score: kgComparison.score / 100, // AI-verified
-                    image_url: kgImage,
-                    images: [kgImage],
-                    match_type: 'visual',
-                    source_airbnb_image: imageUrl,
-                  });
-                  console.log("AI-VERIFIED knowledge graph match:", kgUrl.slice(0, 80));
+          if (!isTimeBudgetExceeded() && !isAIBudgetExceeded() && !hasEnoughMatches()) {
+            if (lensData.knowledge_graph?.source?.link) {
+              const kgUrl = lensData.knowledge_graph.source.link;
+              const kgImage = lensData.knowledge_graph.thumbnail;
+              
+              if (!kgUrl.toLowerCase().includes("airbnb.") && !foundUrls.has(kgUrl) && kgImage) {
+                if (isBookingPlatform(kgUrl) || isDirectPropertySite(kgUrl) || isRegionalHotelSite(kgUrl)) {
+                  // AI verify knowledge graph match too
+                  console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (knowledge graph)...`);
+                  aiComparisonCount++;
+                  const kgComparison = await compareImagesWithAI(imageUrl, kgImage);
+                  
+                  if (kgComparison.isMatch) {
+                    foundUrls.add(kgUrl);
+                    alternatives.push({
+                      platform_name: getPlatformName(kgUrl),
+                      listing_url: kgUrl,
+                      listing_title: lensData.knowledge_graph.title || null,
+                      price: null,
+                      confidence_score: kgComparison.score / 100, // AI-verified
+                      image_url: kgImage,
+                      images: [kgImage],
+                      match_type: 'visual',
+                      source_airbnb_image: imageUrl,
+                    });
+                    console.log("✓ AI-VERIFIED knowledge graph match:", kgUrl.slice(0, 80));
+                  }
                 }
               }
             }
           }
           
           // Small delay between searches to avoid rate limiting
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 300));
         } catch (e) {
           console.error("Lens search error:", e);
         }
       }
       
-      // If Lens didn't find enough, also try reverse image search as backup
-      if (alternatives.length < 3) {
+      // If Lens didn't find enough and we still have budget, try reverse image search as backup
+      if (alternatives.length < 3 && !isTimeBudgetExceeded() && !isAIBudgetExceeded()) {
         console.log("Running reverse image search as backup...");
         
         for (const imageUrl of imageUrls.slice(0, 2)) {
+          // Check budgets before each image
+          if (isTimeBudgetExceeded() || isAIBudgetExceeded() || hasEnoughMatches()) break;
+
           try {
             console.log("Reverse searching:", imageUrl.slice(0, 80));
             
@@ -1206,13 +1260,17 @@ serve(async (req) => {
             const reverseData = await reverseResponse.json();
             console.log("Reverse results - image:", reverseData.image_results?.length || 0);
             
+            // LIMIT results to check
             const allResults = [
               ...(reverseData.image_results || []),
               ...(reverseData.inline_images || []),
               ...(reverseData.organic_results || []),
-            ];
+            ].slice(0, 8);
             
             for (const result of allResults) {
+              // Check budgets before each comparison
+              if (isTimeBudgetExceeded() || isAIBudgetExceeded() || hasEnoughMatches()) break;
+
               const url = result.link || result.source;
               if (!url) continue;
               if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
@@ -1222,6 +1280,8 @@ serve(async (req) => {
               
               if (isBookingPlatform(url) || isDirectPropertySite(url) || isRegionalHotelSite(url)) {
                 // AI verify reverse image match
+                console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (reverse)...`);
+                aiComparisonCount++;
                 const reverseComparison = await compareImagesWithAI(imageUrl, resultImage);
                 
                 if (!reverseComparison.isMatch) {
@@ -1241,17 +1301,19 @@ serve(async (req) => {
                   match_type: 'visual',
                   source_airbnb_image: imageUrl,
                 });
-                console.log("AI-VERIFIED reverse image match:", url.slice(0, 80));
+                console.log("✓ AI-VERIFIED reverse image match:", url.slice(0, 80));
               }
             }
             
-            await new Promise(r => setTimeout(r, 300));
+            await new Promise(r => setTimeout(r, 200));
           } catch (e) {
             console.error("Reverse search error:", e);
           }
         }
       }
     }
+
+    console.log(`Search phase complete. AI comparisons used: ${aiComparisonCount}/${MAX_AI_COMPARISONS}, Time: ${Date.now() - searchStartTime}ms`);
 
     // EARLY TERMINATION: If no visual matches found after image search, skip expensive text search
     // Text matches are unverified anyway, so there's little value in showing them
