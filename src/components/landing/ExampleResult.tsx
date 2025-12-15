@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock, Move } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
 import cottageView1 from "@/assets/cottage-view-1.jpg";
 import cottageView2 from "@/assets/cottage-view-2.jpg";
@@ -152,62 +153,66 @@ export function ExampleResult() {
             <div className="p-6 md:p-8">
               {/* Interactive Image Slider Comparison */}
               <div className="mb-8">
-                <div 
-                  ref={sliderRef}
-                  className="relative aspect-[16/9] rounded-xl overflow-hidden cursor-ew-resize select-none bg-muted"
-                  onMouseDown={() => setIsDragging(true)}
-                  onTouchStart={() => setIsDragging(true)}
-                >
-                  {/* Alternative/Direct booking image (bottom layer) */}
-                  <img
-                    src={directImage}
-                    alt={`${directPlatform} - same property`}
-                    className="absolute inset-0 w-full h-full object-cover"
-                    draggable={false}
-                  />
-                  
-                  {/* Airbnb image (top layer, clipped) */}
+                {loading ? (
+                  <Skeleton className="aspect-[16/9] rounded-xl" />
+                ) : (
                   <div 
-                    className="absolute inset-0 overflow-hidden"
-                    style={{ width: `${sliderPosition}%` }}
+                    ref={sliderRef}
+                    className="relative aspect-[16/9] rounded-xl overflow-hidden cursor-ew-resize select-none bg-muted"
+                    onMouseDown={() => setIsDragging(true)}
+                    onTouchStart={() => setIsDragging(true)}
                   >
+                    {/* Alternative/Direct booking image (bottom layer) */}
                     <img
-                      src={airbnbImage}
-                      alt="Airbnb listing view"
+                      src={directImage}
+                      alt={`${directPlatform} - same property`}
                       className="absolute inset-0 w-full h-full object-cover"
-                      style={{ 
-                        width: sliderRef.current ? `${sliderRef.current.offsetWidth}px` : '100%',
-                        maxWidth: 'none'
-                      }}
                       draggable={false}
                     />
-                  </div>
-                  
-                  {/* Slider handle */}
-                  <div 
-                    className="absolute top-0 bottom-0 w-1 bg-white shadow-lg cursor-ew-resize z-10"
-                    style={{ left: `${sliderPosition}%`, transform: 'translateX(-50%)' }}
-                  >
-                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-white shadow-lg flex items-center justify-center">
-                      <Move className="w-6 h-6 text-muted-foreground" />
+                    
+                    {/* Airbnb image (top layer, clipped) */}
+                    <div 
+                      className="absolute inset-0 overflow-hidden"
+                      style={{ width: `${sliderPosition}%` }}
+                    >
+                      <img
+                        src={airbnbImage}
+                        alt="Airbnb listing view"
+                        className="absolute inset-0 w-full h-full object-cover"
+                        style={{ 
+                          width: sliderRef.current ? `${sliderRef.current.offsetWidth}px` : '100%',
+                          maxWidth: 'none'
+                        }}
+                        draggable={false}
+                      />
+                    </div>
+                    
+                    {/* Slider handle */}
+                    <div 
+                      className="absolute top-0 bottom-0 w-1 bg-white shadow-lg cursor-ew-resize z-10"
+                      style={{ left: `${sliderPosition}%`, transform: 'translateX(-50%)' }}
+                    >
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 rounded-full bg-white shadow-lg flex items-center justify-center">
+                        <Move className="w-6 h-6 text-muted-foreground" />
+                      </div>
+                    </div>
+                    
+                    {/* Labels */}
+                    <div className="absolute top-4 left-4 px-4 py-2 rounded-full bg-[#FF5A5F] text-white text-sm font-medium shadow-md flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-white/80" />
+                      Airbnb - ${airbnbGrandTotal}
+                    </div>
+                    <div className="absolute top-4 right-4 px-4 py-2 rounded-full bg-success text-white text-sm font-medium shadow-md flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-white/80" />
+                      {directPlatform} - ${directTotal}
+                    </div>
+                    
+                    {/* Drag instruction */}
+                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-background/90 text-sm font-medium shadow-md backdrop-blur-sm">
+                      ↔ Drag to compare
                     </div>
                   </div>
-                  
-                  {/* Labels */}
-                  <div className="absolute top-4 left-4 px-4 py-2 rounded-full bg-[#FF5A5F] text-white text-sm font-medium shadow-md flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-white/80" />
-                    Airbnb - ${airbnbGrandTotal}
-                  </div>
-                  <div className="absolute top-4 right-4 px-4 py-2 rounded-full bg-success text-white text-sm font-medium shadow-md flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-white/80" />
-                    {directPlatform} - ${directTotal}
-                  </div>
-                  
-                  {/* Drag instruction */}
-                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-background/90 text-sm font-medium shadow-md backdrop-blur-sm">
-                    ↔ Drag to compare
-                  </div>
-                </div>
+                )}
               </div>
 
               {/* Comparison Table */}
