@@ -3,12 +3,58 @@ import { ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useNavigate } from "react-router-dom";
+import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
 import cottageView1 from "@/assets/cottage-view-1.jpg";
 import cottageView2 from "@/assets/cottage-view-2.jpg";
+import type { Json } from "@/integrations/supabase/types";
+
+// Convert JSON to string array
+const toStringArray = (json: Json | null | undefined): string[] => {
+  if (!json) return [];
+  if (Array.isArray(json)) {
+    return json.filter((item): item is string => typeof item === 'string');
+  }
+  return [];
+};
+
+// Static fallback data
+const STATIC_DATA = {
+  title: "Cozy Lakeside Cottage",
+  airbnbPrice: 180,
+  directPrice: 145,
+  serviceFee: 45,
+  savings: 80,
+  airbnbImage: cottageView1,
+  directImage: cottageView2,
+};
 
 export function Hero() {
   const [url, setUrl] = useState("");
   const navigate = useNavigate();
+  const { data: dynamicData, loading } = useLastSuccessfulSearch();
+
+  // Use dynamic data if available
+  const useDynamic = !loading && dynamicData !== null;
+
+  // Extract values
+  const title = useDynamic ? (dynamicData.airbnb_title || STATIC_DATA.title) : STATIC_DATA.title;
+  const airbnbPrice = useDynamic ? (dynamicData.airbnb_price || STATIC_DATA.airbnbPrice) : STATIC_DATA.airbnbPrice;
+  const directPrice = useDynamic && dynamicData.cheapestResult?.price 
+    ? dynamicData.cheapestResult.price 
+    : STATIC_DATA.directPrice;
+  const serviceFee = Math.round(airbnbPrice * 0.25); // Approx service fee for display
+  const savings = useDynamic && dynamicData.potentialSavings 
+    ? Math.round(dynamicData.potentialSavings / (dynamicData.nights_count || 1))
+    : STATIC_DATA.savings;
+
+  // Images
+  const airbnbImages = useDynamic ? toStringArray(dynamicData.airbnb_images) : [];
+  const airbnbImage = useDynamic && dynamicData.cheapestResult?.source_airbnb_image
+    ? dynamicData.cheapestResult.source_airbnb_image
+    : (airbnbImages[0] || STATIC_DATA.airbnbImage);
+  const directImage = useDynamic && dynamicData.cheapestResult?.image_url
+    ? dynamicData.cheapestResult.image_url
+    : STATIC_DATA.directImage;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -78,7 +124,7 @@ export function Hero() {
             See how it works ↓
           </button>
 
-          {/* Mockup Preview with Real Images */}
+          {/* Mockup Preview with Real/Dynamic Images */}
           <div className="mt-16 animate-fade-in" style={{ animationDelay: "0.5s" }}>
             <div className="relative max-w-3xl mx-auto">
               <div className="bg-card rounded-2xl shadow-large border border-border p-6 md:p-8">
@@ -87,8 +133,8 @@ export function Hero() {
                   <div className="bg-secondary/50 rounded-xl p-4">
                     <div className="aspect-video rounded-lg mb-4 overflow-hidden">
                       <img 
-                        src={cottageView1} 
-                        alt="Airbnb listing photo - Cozy Lakeside Cottage"
+                        src={airbnbImage} 
+                        alt={`Airbnb listing - ${title}`}
                         className="w-full h-full object-cover"
                       />
                     </div>
@@ -96,26 +142,26 @@ export function Hero() {
                       <span className="w-2 h-2 rounded-full bg-[#FF5A5F]" />
                       Airbnb listing
                     </p>
-                    <h3 className="font-semibold text-foreground mb-1">Cozy Lakeside Cottage</h3>
-                    <p className="text-2xl font-bold text-foreground">$180<span className="text-sm font-normal text-muted-foreground">/night</span></p>
-                    <p className="text-sm text-muted-foreground mt-1">+ $45 service fees</p>
+                    <h3 className="font-semibold text-foreground mb-1 truncate">{title}</h3>
+                    <p className="text-2xl font-bold text-foreground">${airbnbPrice}<span className="text-sm font-normal text-muted-foreground">/night</span></p>
+                    <p className="text-sm text-muted-foreground mt-1">+ ${serviceFee} service fees</p>
                   </div>
 
                   {/* Direct Booking Card */}
                   <div className="bg-success/10 rounded-xl p-4 ring-2 ring-success/30">
                     <div className="aspect-video rounded-lg mb-4 overflow-hidden">
                       <img 
-                        src={cottageView2} 
-                        alt="Same property from direct booking site - slightly different angle"
+                        src={directImage} 
+                        alt={`Same property - visual match verified`}
                         className="w-full h-full object-cover"
                       />
                     </div>
                     <p className="text-xs text-success mb-2 flex items-center gap-1 font-medium">
                       <span className="w-2 h-2 rounded-full bg-success" />
-                      Visual match found!
+                      AI-verified match!
                     </p>
-                    <h3 className="font-semibold text-foreground mb-1">Cozy Lakeside Cottage</h3>
-                    <p className="text-2xl font-bold text-success">$145<span className="text-sm font-normal text-muted-foreground">/night</span></p>
+                    <h3 className="font-semibold text-foreground mb-1 truncate">{title}</h3>
+                    <p className="text-2xl font-bold text-success">${directPrice}<span className="text-sm font-normal text-muted-foreground">/night</span></p>
                     <p className="text-sm text-success mt-1 font-medium">No service fees!</p>
                   </div>
                 </div>
@@ -124,7 +170,7 @@ export function Hero() {
                 <div className="mt-6 flex justify-center">
                   <div className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-success text-success-foreground rounded-full font-bold text-lg">
                     <Sparkles className="w-5 h-5" />
-                    Save $80 per night!
+                    Save ${savings} per night!
                   </div>
                 </div>
               </div>

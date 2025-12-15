@@ -21,6 +21,107 @@ interface SearchResult {
   source_airbnb_image?: string | null; // The Airbnb image that was used for this match
 }
 
+// Use Lovable AI to compare two images and return similarity score (0-100)
+async function compareImagesWithAI(
+  airbnbImageUrl: string, 
+  alternativeImageUrl: string
+): Promise<{ score: number; isMatch: boolean; explanation: string }> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!lovableApiKey) {
+    console.log("LOVABLE_API_KEY not available for AI image comparison");
+    return { score: 0, isMatch: false, explanation: "AI comparison unavailable" };
+  }
+  
+  try {
+    const prompt = `You are an expert at comparing property photos to determine if they show the SAME physical property (room, house, apartment).
+
+Compare these two property images and determine if they show the SAME property:
+
+Image 1 (Airbnb): ${airbnbImageUrl}
+Image 2 (Alternative): ${alternativeImageUrl}
+
+Analyze:
+1. Room layout and structure (walls, windows, doors, ceiling height)
+2. Furniture placement and style (beds, sofas, tables, chairs)
+3. Distinctive features (fireplaces, artwork, light fixtures, architectural details)
+4. View from windows (if visible)
+5. Floor type and pattern
+6. Color scheme and decor elements
+
+IMPORTANT RULES:
+- Focus on STRUCTURAL elements that don't change (layout, windows, built-in features)
+- Furniture position may vary slightly between photos
+- Lighting and angle may differ
+- Ignore watermarks, logos, or text overlays
+- Return a CONSERVATIVE score - only high scores if you're certain it's the same place
+
+Return a JSON response ONLY in this exact format:
+{"score": NUMBER_0_TO_100, "isMatch": BOOLEAN, "explanation": "Brief reason"}
+
+Where:
+- score: 0-100 (100 = definitely same property, 0 = definitely different)
+- isMatch: true only if score >= 90
+- explanation: 1-2 sentence reason for your assessment`;
+
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${lovableApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        messages: [
+          { 
+            role: "user", 
+            content: [
+              { type: "text", text: prompt },
+              { type: "image_url", image_url: { url: airbnbImageUrl } },
+              { type: "image_url", image_url: { url: alternativeImageUrl } }
+            ]
+          }
+        ],
+        max_tokens: 200,
+      }),
+    });
+    
+    if (!response.ok) {
+      console.error("Lovable AI image comparison failed:", response.status);
+      return { score: 0, isMatch: false, explanation: "AI comparison request failed" };
+    }
+    
+    const data = await response.json();
+    const resultText = data.choices?.[0]?.message?.content?.trim();
+    
+    if (!resultText) {
+      console.log("AI returned empty response for image comparison");
+      return { score: 0, isMatch: false, explanation: "Empty AI response" };
+    }
+    
+    // Parse JSON response
+    try {
+      // Extract JSON from response (may have markdown formatting)
+      const jsonMatch = resultText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const score = Number(parsed.score) || 0;
+        return {
+          score: Math.min(100, Math.max(0, score)),
+          isMatch: score >= 90,
+          explanation: parsed.explanation || "No explanation provided"
+        };
+      }
+    } catch (parseError) {
+      console.error("Failed to parse AI comparison response:", resultText);
+    }
+    
+    return { score: 0, isMatch: false, explanation: "Failed to parse AI response" };
+  } catch (error) {
+    console.error("AI image comparison error:", error);
+    return { score: 0, isMatch: false, explanation: "Comparison error" };
+  }
+}
+
 // Use Lovable AI to extract Airbnb price from scraped content
 async function extractAirbnbPriceWithAI(content: string, nights: number): Promise<number | null> {
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
@@ -956,9 +1057,27 @@ serve(async (req) => {
             
             console.log("Checking visual match:", url.slice(0, 100));
             
-            // Calculate confidence based on match position (earlier = more confident)
-            const matchIndex = visualMatches.indexOf(match);
-            const baseConfidence = Math.max(0.70, 0.98 - (matchIndex * 0.03)); // 98% for first, decreasing
+            // Get thumbnail/image URL from the match for AI comparison
+            const matchImageUrl = match.thumbnail || match.original || null;
+            
+            if (!matchImageUrl) {
+              console.log("No image available for AI comparison, skipping:", url.slice(0, 60));
+              continue;
+            }
+            
+            // Use AI to compare images and get similarity score
+            console.log("Running AI image comparison...");
+            const aiComparison = await compareImagesWithAI(imageUrl, matchImageUrl);
+            console.log(`AI comparison result: score=${aiComparison.score}, isMatch=${aiComparison.isMatch}, reason: ${aiComparison.explanation}`);
+            
+            // ONLY include matches with ≥90% AI confidence
+            if (!aiComparison.isMatch) {
+              console.log("AI rejected match (score < 90%):", url.slice(0, 60));
+              continue;
+            }
+            
+            // Use AI-verified confidence score (converted to 0-1 scale)
+            const verifiedConfidence = aiComparison.score / 100;
             
             // Check if it's a known booking platform OR regional hotel site
             if (isBookingPlatform(url) || isRegionalHotelSite(url)) {
@@ -971,13 +1090,13 @@ serve(async (req) => {
                 listing_url: url,
                 listing_title: match.title || match.source || null,
                 price: null,
-                confidence_score: baseConfidence, // Visual match confidence based on position
+                confidence_score: verifiedConfidence, // AI-verified confidence
                 image_url: match.thumbnail || null,
                 images: resultImages.slice(0, 5),
                 match_type: 'visual',
                 source_airbnb_image: imageUrl, // Store the Airbnb image that matched
               });
-              console.log("FOUND via Lens on platform:", getPlatformName(url), "confidence:", baseConfidence.toFixed(2), url.slice(0, 80));
+              console.log("AI-VERIFIED match on platform:", getPlatformName(url), "confidence:", (verifiedConfidence * 100).toFixed(0) + "%");
             }
             // Also check for direct property websites
             else if (isDirectPropertySite(url)) {
@@ -990,34 +1109,41 @@ serve(async (req) => {
                 listing_url: url,
                 listing_title: match.title || match.source || null,
                 price: null,
-                confidence_score: Math.max(0.65, baseConfidence - 0.05), // Slightly lower for direct sites
+                confidence_score: verifiedConfidence, // AI-verified confidence
                 image_url: match.thumbnail || null,
                 images: resultImages.slice(0, 5),
                 match_type: 'visual',
                 source_airbnb_image: imageUrl, // Store the Airbnb image that matched
               });
-              console.log("FOUND direct site via Lens:", url.slice(0, 80));
+              console.log("AI-VERIFIED direct site match:", url.slice(0, 80));
             }
           }
           
-          // Also check knowledge graph for additional context - high confidence visual match
+          // Also check knowledge graph for additional context - requires AI verification too
           if (lensData.knowledge_graph?.source?.link) {
             const kgUrl = lensData.knowledge_graph.source.link;
-            if (!kgUrl.toLowerCase().includes("airbnb.") && !foundUrls.has(kgUrl)) {
+            const kgImage = lensData.knowledge_graph.thumbnail;
+            
+            if (!kgUrl.toLowerCase().includes("airbnb.") && !foundUrls.has(kgUrl) && kgImage) {
               if (isBookingPlatform(kgUrl) || isDirectPropertySite(kgUrl) || isRegionalHotelSite(kgUrl)) {
-                foundUrls.add(kgUrl);
-                alternatives.push({
-                  platform_name: getPlatformName(kgUrl),
-                  listing_url: kgUrl,
-                  listing_title: lensData.knowledge_graph.title || null,
-                  price: null,
-                  confidence_score: 0.95, // Knowledge graph = very high confidence visual match
-                  image_url: lensData.knowledge_graph.thumbnail || null,
-                  images: lensData.knowledge_graph.thumbnail ? [lensData.knowledge_graph.thumbnail] : [],
-                  match_type: 'visual',
-                  source_airbnb_image: imageUrl, // Store the Airbnb image that matched
-                });
-                console.log("FOUND via Lens knowledge graph:", kgUrl.slice(0, 80));
+                // AI verify knowledge graph match too
+                const kgComparison = await compareImagesWithAI(imageUrl, kgImage);
+                
+                if (kgComparison.isMatch) {
+                  foundUrls.add(kgUrl);
+                  alternatives.push({
+                    platform_name: getPlatformName(kgUrl),
+                    listing_url: kgUrl,
+                    listing_title: lensData.knowledge_graph.title || null,
+                    price: null,
+                    confidence_score: kgComparison.score / 100, // AI-verified
+                    image_url: kgImage,
+                    images: [kgImage],
+                    match_type: 'visual',
+                    source_airbnb_image: imageUrl,
+                  });
+                  console.log("AI-VERIFIED knowledge graph match:", kgUrl.slice(0, 80));
+                }
               }
             }
           }
@@ -1057,20 +1183,31 @@ serve(async (req) => {
               if (!url) continue;
               if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
               
+              const resultImage = result.thumbnail || result.original;
+              if (!resultImage) continue;
+              
               if (isBookingPlatform(url) || isDirectPropertySite(url) || isRegionalHotelSite(url)) {
+                // AI verify reverse image match
+                const reverseComparison = await compareImagesWithAI(imageUrl, resultImage);
+                
+                if (!reverseComparison.isMatch) {
+                  console.log("AI rejected reverse image match (score < 90%):", url.slice(0, 60));
+                  continue;
+                }
+                
                 foundUrls.add(url);
                 alternatives.push({
                   platform_name: isBookingPlatform(url) || isRegionalHotelSite(url) ? getPlatformName(url) : getPlatformName(url) + " (Direct)",
                   listing_url: url,
                   listing_title: result.title || result.snippet || null,
                   price: null,
-                  confidence_score: 0.85, // Reverse image = visual confirmation
-                  image_url: result.thumbnail || result.original || null,
+                  confidence_score: reverseComparison.score / 100, // AI-verified confidence
+                  image_url: resultImage,
                   images: [result.thumbnail, result.original].filter(Boolean).slice(0, 5),
                   match_type: 'visual',
-                  source_airbnb_image: imageUrl, // Store the Airbnb image that matched
+                  source_airbnb_image: imageUrl,
                 });
-                console.log("FOUND via reverse image:", url.slice(0, 80));
+                console.log("AI-VERIFIED reverse image match:", url.slice(0, 80));
               }
             }
             

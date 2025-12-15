@@ -1,13 +1,92 @@
 import { useState, useRef, useEffect } from "react";
 import { ExternalLink, Sparkles, Check, Calendar, Info, Shield, Lock, Move } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
 import cottageView1 from "@/assets/cottage-view-1.jpg";
 import cottageView2 from "@/assets/cottage-view-2.jpg";
+import type { Json } from "@/integrations/supabase/types";
+
+// Convert JSON to string array
+const toStringArray = (json: Json | null | undefined): string[] => {
+  if (!json) return [];
+  if (Array.isArray(json)) {
+    return json.filter((item): item is string => typeof item === 'string');
+  }
+  return [];
+};
+
+// Format date for display
+const formatDate = (dateStr: string): string => {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+// Static fallback data
+const STATIC_DATA = {
+  title: "Cozy Lakeside Cottage",
+  airbnbPrice: 180,
+  directPrice: 133,
+  airbnbTotal: 540,
+  directTotal: 399,
+  nights: 3,
+  savings: 141,
+  savingsPercent: 26,
+  unlockFee: 14.10,
+  dates: "Jan 15–18, 2025",
+  airbnbImage: cottageView1,
+  directImage: cottageView2,
+};
 
 export function ExampleResult() {
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
   const sliderRef = useRef<HTMLDivElement>(null);
+  
+  const { data: dynamicData, loading } = useLastSuccessfulSearch();
+
+  // Use dynamic data if available, otherwise static
+  const useDynamic = !loading && dynamicData !== null;
+  
+  // Extract values from dynamic data or use static
+  const title = useDynamic ? (dynamicData.airbnb_title || STATIC_DATA.title) : STATIC_DATA.title;
+  const airbnbPrice = useDynamic ? (dynamicData.airbnb_price || STATIC_DATA.airbnbPrice) : STATIC_DATA.airbnbPrice;
+  const nights = useDynamic ? (dynamicData.nights_count || STATIC_DATA.nights) : STATIC_DATA.nights;
+  const directPrice = useDynamic && dynamicData.cheapestResult?.price 
+    ? dynamicData.cheapestResult.price 
+    : STATIC_DATA.directPrice;
+  
+  // Calculate totals
+  const airbnbTotal = airbnbPrice * nights;
+  const serviceFee = Math.round(airbnbTotal * 0.14);
+  const airbnbGrandTotal = airbnbTotal + serviceFee;
+  const directTotal = directPrice * nights;
+  const savings = useDynamic ? (dynamicData.potentialSavings || STATIC_DATA.savings) : STATIC_DATA.savings;
+  const savingsPercent = useDynamic ? (dynamicData.savingsPercentage || STATIC_DATA.savingsPercent) : STATIC_DATA.savingsPercent;
+  const unlockFee = Math.round(savings * 0.1 * 100) / 100;
+  
+  // Date display
+  const dates = useDynamic && dynamicData.check_in_date && dynamicData.check_out_date
+    ? `${formatDate(dynamicData.check_in_date)}–${formatDate(dynamicData.check_out_date)}`
+    : STATIC_DATA.dates;
+  
+  // Images - use source_airbnb_image and matched image from results if available
+  const airbnbImages = useDynamic ? toStringArray(dynamicData.airbnb_images) : [];
+  const airbnbImage = useDynamic && dynamicData.cheapestResult?.source_airbnb_image
+    ? dynamicData.cheapestResult.source_airbnb_image
+    : (airbnbImages[0] || STATIC_DATA.airbnbImage);
+  const directImage = useDynamic && dynamicData.cheapestResult?.image_url
+    ? dynamicData.cheapestResult.image_url
+    : STATIC_DATA.directImage;
+  
+  // Confidence score
+  const confidenceScore = useDynamic && dynamicData.cheapestResult?.confidence_score
+    ? Math.round(dynamicData.cheapestResult.confidence_score * 100)
+    : 98;
+  
+  // Platform name
+  const directPlatform = useDynamic && dynamicData.cheapestResult?.platform_name
+    ? dynamicData.cheapestResult.platform_name
+    : "Direct Booking";
 
   // Handle slider drag
   const handleMouseMove = (e: MouseEvent | TouchEvent) => {
@@ -48,7 +127,7 @@ export function ExampleResult() {
             See the Savings in Action
           </h2>
           <p className="text-lg text-muted-foreground">
-            Here's what a typical Arivioo comparison looks like
+            {useDynamic ? "A real comparison from a recent search" : "Here's what a typical Arivioo comparison looks like"}
           </p>
         </div>
 
@@ -65,7 +144,7 @@ export function ExampleResult() {
                 </div>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Calendar className="w-4 h-4" />
-                  <span>Comparing prices for Jan 15–18, 2025 (3 nights)</span>
+                  <span>Comparing prices for {dates} ({nights} night{nights !== 1 ? 's' : ''})</span>
                 </div>
               </div>
             </div>
@@ -79,21 +158,21 @@ export function ExampleResult() {
                   onMouseDown={() => setIsDragging(true)}
                   onTouchStart={() => setIsDragging(true)}
                 >
-                  {/* Alternative/Direct booking image (bottom layer) - slightly different angle */}
+                  {/* Alternative/Direct booking image (bottom layer) */}
                   <img
-                    src={cottageView2}
-                    alt="Direct booking view - same property, different angle"
+                    src={directImage}
+                    alt={`${directPlatform} - same property`}
                     className="absolute inset-0 w-full h-full object-cover"
                     draggable={false}
                   />
                   
-                  {/* Airbnb image (top layer, clipped) - original listing photo */}
+                  {/* Airbnb image (top layer, clipped) */}
                   <div 
                     className="absolute inset-0 overflow-hidden"
                     style={{ width: `${sliderPosition}%` }}
                   >
                     <img
-                      src={cottageView1}
+                      src={airbnbImage}
                       alt="Airbnb listing view"
                       className="absolute inset-0 w-full h-full object-cover"
                       style={{ 
@@ -117,11 +196,11 @@ export function ExampleResult() {
                   {/* Labels */}
                   <div className="absolute top-4 left-4 px-4 py-2 rounded-full bg-[#FF5A5F] text-white text-sm font-medium shadow-md flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-white/80" />
-                    Airbnb - $540
+                    Airbnb - ${airbnbGrandTotal}
                   </div>
                   <div className="absolute top-4 right-4 px-4 py-2 rounded-full bg-success text-white text-sm font-medium shadow-md flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-white/80" />
-                    Direct - $399
+                    {directPlatform} - ${directTotal}
                   </div>
                   
                   {/* Drag instruction */}
@@ -138,13 +217,14 @@ export function ExampleResult() {
                     <tr className="border-b border-border">
                       <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
                       <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
-                      <th className="text-right py-3 px-4 font-semibold text-foreground">Total (3 nights)</th>
+                      <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights} night{nights !== 1 ? 's' : ''})</th>
                       <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
                       <th className="text-left py-3 px-4 font-semibold text-foreground">Key Differences</th>
                       <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
                     </tr>
                   </thead>
                   <tbody>
+                    {/* Airbnb row */}
                     <tr className="border-b border-border bg-[#FF5A5F]/5">
                       <td className="py-4 px-4">
                         <div className="flex items-center gap-2">
@@ -159,42 +239,22 @@ export function ExampleResult() {
                           Baseline
                         </span>
                       </td>
-                      <td className="py-4 px-4 text-right font-semibold text-foreground">$540</td>
-                      <td className="py-4 px-4 text-right text-muted-foreground">$180/night</td>
+                      <td className="py-4 px-4 text-right font-semibold text-foreground">${airbnbGrandTotal}</td>
+                      <td className="py-4 px-4 text-right text-muted-foreground">${airbnbPrice}/night</td>
                       <td className="py-4 px-4 text-muted-foreground">
-                        <span className="text-xs">AirCover protection, $45 service fee, cleaning included</span>
+                        <span className="text-xs">AirCover protection, ${serviceFee} service fee, cleaning included</span>
                       </td>
                       <td className="py-4 px-4 text-center">
                         <Button variant="outline" size="sm">View</Button>
                       </td>
                     </tr>
-                    <tr className="border-b border-border">
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-2">
-                          <span className="w-2 h-2 rounded-full bg-blue-500" />
-                          <span className="font-medium text-foreground">Booking.com</span>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4 text-center">
-                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-success/20 text-success text-xs font-medium">
-                          <Shield className="w-3 h-3" />
-                          94%
-                        </span>
-                      </td>
-                      <td className="py-4 px-4 text-right font-semibold text-foreground">$495</td>
-                      <td className="py-4 px-4 text-right text-muted-foreground">$165/night</td>
-                      <td className="py-4 px-4 text-muted-foreground">
-                        <span className="text-xs">Free cancellation until 5 days before, breakfast included</span>
-                      </td>
-                      <td className="py-4 px-4 text-center">
-                        <Button variant="outline" size="sm">View Free</Button>
-                      </td>
-                    </tr>
+                    
+                    {/* Best deal row */}
                     <tr className="bg-success/5 border-2 border-success/30">
                       <td className="py-4 px-4">
                         <div className="flex items-center gap-2">
                           <span className="w-2 h-2 rounded-full bg-success" />
-                          <span className="font-medium text-foreground">Direct Booking</span>
+                          <span className="font-medium text-foreground">{directPlatform}</span>
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
                             <Sparkles className="w-3 h-3" />
                             Best Deal
@@ -204,11 +264,11 @@ export function ExampleResult() {
                       <td className="py-4 px-4 text-center">
                         <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-success/20 text-success text-xs font-medium">
                           <Shield className="w-3 h-3" />
-                          98%
+                          {confidenceScore}%
                         </span>
                       </td>
-                      <td className="py-4 px-4 text-right font-bold text-success text-lg">$399</td>
-                      <td className="py-4 px-4 text-right text-success font-medium">$133/night</td>
+                      <td className="py-4 px-4 text-right font-bold text-success text-lg">${directTotal}</td>
+                      <td className="py-4 px-4 text-right text-success font-medium">${directPrice}/night</td>
                       <td className="py-4 px-4">
                         <span className="text-xs text-success flex items-center gap-1">
                           <Check className="w-3 h-3" />
@@ -231,14 +291,14 @@ export function ExampleResult() {
               <div className="border-2 border-success/30 bg-success/5 rounded-2xl p-8 text-center">
                 <p className="text-muted-foreground mb-3 text-lg">Your potential savings by booking direct</p>
                 <div className="flex items-center justify-center gap-3 mb-3">
-                  <p className="text-5xl font-bold text-success">$141</p>
-                  <span className="text-success text-xl font-semibold">(26% off)</span>
+                  <p className="text-5xl font-bold text-success">${savings}</p>
+                  <span className="text-success text-xl font-semibold">({savingsPercent}% off)</span>
                 </div>
                 <p className="text-muted-foreground mb-4">
                   Same property, same dates — just without the platform fees
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  <strong>Unlock fee:</strong> $14.10 (10% of your savings) — Only pay when you save
+                  <strong>Unlock fee:</strong> ${unlockFee.toFixed(2)} (10% of your savings) — Only pay when you save
                 </p>
               </div>
 
@@ -246,8 +306,8 @@ export function ExampleResult() {
               <div className="mt-6 flex items-start gap-3 p-5 bg-muted/30 rounded-2xl">
                 <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
                 <p className="text-sm text-muted-foreground">
-                  <strong>Fair comparison methodology:</strong> All prices shown include total costs with fees and taxes for identical dates. 
-                  Trust scores are based on image matching accuracy. We verify listings using photo matching and location data. Always confirm details directly with the host before booking.
+                  <strong>AI-verified comparison:</strong> All matches are verified using AI image comparison with ≥90% confidence. 
+                  Trust scores show how confident we are that listings show the same property. Always confirm details directly with the host before booking.
                 </p>
               </div>
             </div>
