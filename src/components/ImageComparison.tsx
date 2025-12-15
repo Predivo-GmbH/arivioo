@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
-import { ChevronLeft, ChevronRight, ImageIcon, ArrowLeftRight, Check, AlertCircle, ZoomIn, Move, Maximize2, RotateCcw } from "lucide-react";
+import { ChevronLeft, ChevronRight, ImageIcon, ArrowLeftRight, Check, AlertCircle, ZoomIn, Move, Maximize2, RotateCcw, Wand2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useImageAlignment } from "@/hooks/useImageAlignment";
 
 interface ImageComparisonProps {
   airbnbImages: string[];
@@ -10,14 +11,6 @@ interface ImageComparisonProps {
   platformName: string;
   sourceAirbnbImage?: string | null;
 }
-
-interface ImageAlignment {
-  x: number; // -100 to 100 (left to right)
-  y: number; // -100 to 100 (top to bottom)
-  scale: number; // 1 to 2 (zoom level)
-}
-
-const defaultAlignment: ImageAlignment = { x: 0, y: 0, scale: 1 };
 
 // Get context-aware helper text based on image characteristics
 const getComparisonHelperText = (imageUrl: string): string => {
@@ -35,18 +28,18 @@ const getComparisonHelperText = (imageUrl: string): string => {
 };
 
 // Convert alignment to CSS object-position
-const getObjectPosition = (alignment: ImageAlignment): string => {
-  const x = 50 + alignment.x * 0.5; // Convert -100..100 to 0..100
-  const y = 50 + alignment.y * 0.5;
-  return `${x}% ${y}%`;
+const getObjectPosition = (x: number, y: number): string => {
+  const posX = 50 + x * 0.5;
+  const posY = 50 + y * 0.5;
+  return `${posX}% ${posY}%`;
 };
 
 // Convert alignment to CSS transform for scaled images
-const getTransform = (alignment: ImageAlignment): string => {
-  if (alignment.scale === 1) return 'none';
-  const translateX = alignment.x * 0.3;
-  const translateY = alignment.y * 0.3;
-  return `scale(${alignment.scale}) translate(${translateX}%, ${translateY}%)`;
+const getTransform = (x: number, y: number, scale: number): string => {
+  if (scale === 1) return 'none';
+  const translateX = x * 0.3;
+  const translateY = y * 0.3;
+  return `scale(${scale}) translate(${translateX}%, ${translateY}%)`;
 };
 
 export function ImageComparison({
@@ -64,7 +57,6 @@ export function ImageComparison({
   const [viewMode, setViewMode] = useState<'slider' | 'sideBySide'>('sideBySide');
   const [zoomedImage, setZoomedImage] = useState<string | null>(null);
   const [showAlignmentControls, setShowAlignmentControls] = useState(false);
-  const [altAlignment, setAltAlignment] = useState<ImageAlignment>(defaultAlignment);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const sliderRef = useRef<HTMLDivElement>(null);
@@ -72,11 +64,18 @@ export function ImageComparison({
 
   const hasAirbnbImages = airbnbImages.length > 0;
   const hasAltImages = alternativeImages.length > 0;
-
-  // Reset alignment when switching images
-  useEffect(() => {
-    setAltAlignment(defaultAlignment);
-  }, [altIndex]);
+  
+  const currentAltImage = hasAltImages ? alternativeImages[altIndex] : null;
+  
+  // Use the alignment hook with persistence
+  const {
+    alignment,
+    setAlignment,
+    resetAlignment,
+    autoAlign,
+    isAutoAligning,
+    autoAlignResult,
+  } = useImageAlignment(referenceImage, currentAltImage);
 
   // Handle slider drag
   const handleMouseMove = (e: MouseEvent | TouchEvent) => {
@@ -104,7 +103,7 @@ export function ImageComparison({
     const deltaX = (clientX - panStart.x) * 0.5;
     const deltaY = (clientY - panStart.y) * 0.5;
     
-    setAltAlignment(prev => ({
+    setAlignment(prev => ({
       ...prev,
       x: Math.max(-100, Math.min(100, prev.x + deltaX)),
       y: Math.max(-100, Math.min(100, prev.y + deltaY)),
@@ -155,14 +154,10 @@ export function ImageComparison({
   };
 
   const adjustScale = (delta: number) => {
-    setAltAlignment(prev => ({
+    setAlignment(prev => ({
       ...prev,
       scale: Math.max(1, Math.min(2, prev.scale + delta)),
     }));
-  };
-
-  const resetAlignment = () => {
-    setAltAlignment(defaultAlignment);
   };
 
   if (!hasAirbnbImages && !hasAltImages) {
@@ -172,13 +167,15 @@ export function ImageComparison({
   const AlignableImage = ({ 
     src, 
     alt, 
-    alignment, 
+    x, y, scale,
     canAlign = false,
     onZoom,
   }: { 
     src: string; 
     alt: string; 
-    alignment: ImageAlignment;
+    x: number;
+    y: number;
+    scale: number;
     canAlign?: boolean;
     onZoom: () => void;
   }) => (
@@ -194,8 +191,8 @@ export function ImageComparison({
         alt={alt}
         className="w-full h-full object-cover transition-all duration-200"
         style={{
-          objectPosition: getObjectPosition(alignment),
-          transform: getTransform(alignment),
+          objectPosition: getObjectPosition(x, y),
+          transform: getTransform(x, y, scale),
         }}
         draggable={false}
         onError={(e) => {
@@ -246,16 +243,33 @@ export function ImageComparison({
       <div className="p-4 md:p-6">
         {/* Alignment Controls */}
         {hasAltImages && viewMode === 'sideBySide' && (
-          <div className="mb-4 flex items-center justify-between">
-            <Button
-              variant={showAlignmentControls ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setShowAlignmentControls(!showAlignmentControls)}
-              className="text-xs h-8 gap-1.5"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-              {showAlignmentControls ? 'Done Aligning' : 'Align Images'}
-            </Button>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Button
+                variant={showAlignmentControls ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setShowAlignmentControls(!showAlignmentControls)}
+                className="text-xs h-8 gap-1.5"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                {showAlignmentControls ? 'Done' : 'Align'}
+              </Button>
+              
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={autoAlign}
+                disabled={isAutoAligning || !referenceImage || !currentAltImage}
+                className="text-xs h-8 gap-1.5"
+              >
+                {isAutoAligning ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Wand2 className="w-3.5 h-3.5" />
+                )}
+                Auto-Align
+              </Button>
+            </div>
             
             {showAlignmentControls && (
               <div className="flex items-center gap-2">
@@ -265,19 +279,19 @@ export function ImageComparison({
                     size="sm"
                     onClick={() => adjustScale(-0.1)}
                     className="h-7 w-7 p-0 text-xs"
-                    disabled={altAlignment.scale <= 1}
+                    disabled={alignment.scale <= 1}
                   >
                     −
                   </Button>
                   <span className="text-xs font-medium w-12 text-center">
-                    {Math.round(altAlignment.scale * 100)}%
+                    {Math.round(alignment.scale * 100)}%
                   </span>
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => adjustScale(0.1)}
                     className="h-7 w-7 p-0 text-xs"
-                    disabled={altAlignment.scale >= 2}
+                    disabled={alignment.scale >= 2}
                   >
                     +
                   </Button>
@@ -301,6 +315,18 @@ export function ImageComparison({
             <strong>Alignment mode:</strong> Drag the right image to align it with the Airbnb photo. Use +/− to zoom.
           </div>
         )}
+        
+        {autoAlignResult && autoAlignResult.confidence !== undefined && (
+          <div className={`mb-4 p-3 rounded-lg text-sm ${
+            autoAlignResult.confidence >= 0.7 
+              ? 'bg-success/10 border border-success/20 text-success' 
+              : autoAlignResult.confidence >= 0.4
+              ? 'bg-warning/10 border border-warning/20 text-warning'
+              : 'bg-muted border border-border text-muted-foreground'
+          }`}>
+            <strong>AI Alignment ({Math.round(autoAlignResult.confidence * 100)}% confident):</strong> {autoAlignResult.reasoning}
+          </div>
+        )}
 
         {viewMode === 'slider' && hasAirbnbImages && hasAltImages ? (
           // Slider Comparison View
@@ -317,8 +343,8 @@ export function ImageComparison({
                 alt={`${alternativeTitle} - ${platformName}`}
                 className="absolute inset-0 w-full h-full object-cover"
                 style={{
-                  objectPosition: getObjectPosition(altAlignment),
-                  transform: getTransform(altAlignment),
+                  objectPosition: getObjectPosition(alignment.x, alignment.y),
+                  transform: getTransform(alignment.x, alignment.y, alignment.scale),
                 }}
                 draggable={false}
                 onError={(e) => {
@@ -419,7 +445,9 @@ export function ImageComparison({
                     <AlignableImage
                       src={referenceImage}
                       alt={`${airbnbTitle} - Reference Photo`}
-                      alignment={defaultAlignment}
+                      x={0}
+                      y={0}
+                      scale={1}
                       canAlign={false}
                       onZoom={() => setZoomedImage(referenceImage)}
                     />
@@ -462,7 +490,9 @@ export function ImageComparison({
                     <AlignableImage
                       src={alternativeImages[altIndex]}
                       alt={`${alternativeTitle} - Photo ${altIndex + 1}`}
-                      alignment={altAlignment}
+                      x={alignment.x}
+                      y={alignment.y}
+                      scale={alignment.scale}
                       canAlign={true}
                       onZoom={() => setZoomedImage(alternativeImages[altIndex])}
                     />
