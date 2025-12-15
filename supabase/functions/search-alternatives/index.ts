@@ -1057,9 +1057,9 @@ serve(async (req) => {
     // Step 2: Use Google Lens for visual matching (much better than reverse image search)
     // CRITICAL: Track time and AI comparison budget to avoid timeout
     const searchStartTime = Date.now();
-    const MAX_SEARCH_TIME_MS = 45000; // 45 second hard limit for search phase
-    const MAX_AI_COMPARISONS = 15; // Limit AI comparisons to avoid timeout
-    const TARGET_VISUAL_MATCHES = 3; // Stop early once we have enough matches
+    const MAX_SEARCH_TIME_MS = 55000; // 55 second hard limit for search phase
+    const MAX_AI_COMPARISONS = 25; // Increased AI comparisons to find more matches
+    const TARGET_VISUAL_MATCHES = 8; // Increased target to capture more platforms like Booking.com/TripAdvisor
     let aiComparisonCount = 0;
 
     const isTimeBudgetExceeded = () => {
@@ -1120,8 +1120,8 @@ serve(async (req) => {
                       "text_results:", lensData.text_results?.length || 0);
           
           // Process visual matches - these are the key results with VISUAL CONFIRMATION
-          // LIMIT to first 8 matches per image to avoid timeout
-          const visualMatches = (lensData.visual_matches || []).slice(0, 8);
+          // Increased to 15 matches per image to capture more platforms (Booking.com, TripAdvisor, etc.)
+          const visualMatches = (lensData.visual_matches || []).slice(0, 15);
           for (const match of visualMatches) {
             // Check budgets before each comparison
             if (isTimeBudgetExceeded() || isAIBudgetExceeded() || hasEnoughMatches()) break;
