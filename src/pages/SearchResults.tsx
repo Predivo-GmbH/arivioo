@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { ImageComparison } from "@/components/ImageComparison";
+import { quickCelebration } from "@/lib/confetti";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -155,6 +156,7 @@ export default function SearchResults() {
   const [stepProgress, setStepProgress] = useState(0);
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0);
+  const [hasCelebrated, setHasCelebrated] = useState(false);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -353,7 +355,9 @@ export default function SearchResults() {
         setCurrentStep(STEP_COUNT - 1);
         setStepProgress(100);
         setSearchPhase('done');
-        setTimeout(() => setLoading(false), 400);
+        setTimeout(() => {
+          setLoading(false);
+        }, 400);
       }
     };
     
@@ -368,6 +372,15 @@ export default function SearchResults() {
       }
     };
   }, [searchPhase]);
+
+  // Celebrate when results are shown
+  useEffect(() => {
+    if (!loading && results.length > 0 && !hasCelebrated) {
+      setHasCelebrated(true);
+      // Small delay for UX
+      setTimeout(() => quickCelebration(), 300);
+    }
+  }, [loading, results.length, hasCelebrated]);
 
   if (!user) return null;
   const airbnbImages = toStringArray(search?.airbnb_images);
@@ -833,10 +846,12 @@ export default function SearchResults() {
                                   <td className="py-4 px-4 text-center">
                                     <div className="flex flex-col gap-1.5 items-center">
                                       {isCheapest ? (
-                                        <Button size="sm" className="bg-success hover:bg-success/90">
-                                          <Lock className="w-3 h-3 mr-1" />
-                                          Unlock
-                                          <ExternalLink className="w-3 h-3 ml-1" />
+                                        <Button size="sm" className="bg-success hover:bg-success/90" asChild>
+                                          <Link to={`/unlock?resultId=${result.id}&searchId=${searchId}`}>
+                                            <Lock className="w-3 h-3 mr-1" />
+                                            Unlock
+                                            <ExternalLink className="w-3 h-3 ml-1" />
+                                          </Link>
                                         </Button>
                                       ) : (
                                         <Button variant="outline" size="sm" asChild>
