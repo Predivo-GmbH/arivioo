@@ -327,49 +327,81 @@ export default function SearchResults() {
     return () => window.clearInterval(id);
   }, [loading, searchPhase]);
 
-  const getLiveActivity = (status?: string | null) => {
-    if (!status) return "Starting search…";
+  const getLiveActivity = (status?: string | null): { message: string; detail?: string } => {
+    if (!status) return { message: "Starting search…" };
 
     // Extracting phase
-    if (status === "extracting_photos") return "Extracting property photos from the Airbnb listing…";
-    if (status === "scraping_airbnb_page") return "Loading the Airbnb page to capture dynamic content…";
-    if (status === "extracting_price_with_ai") return "Extracting the Airbnb price from the page…";
+    if (status === "extracting_photos") {
+      return { message: "Extracting property photos", detail: "Downloading clean property images from the Airbnb listing" };
+    }
+    if (status === "scraping_airbnb_page") {
+      return { message: "Loading Airbnb listing", detail: "Capturing page content including dynamic price data" };
+    }
+    if (status === "extracting_price_with_ai") {
+      return { message: "Extracting Airbnb price", detail: "Using AI to find the exact price for your dates" };
+    }
 
     // Reverse image search phase
     if (status.startsWith("searching_platforms_lens_")) {
       const m = status.match(/searching_platforms_lens_(\d+)_of_(\d+)/);
-      if (m) return `Running AI reverse image search (image ${m[1]} of ${m[2]})…`;
-      return "Running AI reverse image search…";
+      if (m) {
+        return { 
+          message: `Searching for matches (image ${m[1]} of ${m[2]})`, 
+          detail: "Running AI reverse image search across Booking.com, Vrbo, TripAdvisor, and more" 
+        };
+      }
+      return { message: "Searching for matches", detail: "Running AI reverse image search" };
     }
-    if (status === "searching_platforms") return "Running AI reverse image search across booking sites…";
+    if (status === "searching_platforms") {
+      return { message: "Searching for matches", detail: "Running AI reverse image search across booking sites" };
+    }
 
     // AI verification
     if (status.startsWith("ai_verifying_")) {
       const platform = status.replace("ai_verifying_", "").replace(/_/g, " ");
-      return `Verifying that photos match on ${platform}…`;
+      const formattedPlatform = platform.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      return { message: `Verifying match on ${formattedPlatform}`, detail: "AI is comparing property photos to confirm it's the same place" };
     }
 
     // Reverse image backup
-    if (status === "reverse_image_search_backup") return "Running backup image search…";
+    if (status === "reverse_image_search_backup") {
+      return { message: "Running backup search", detail: "Trying alternative image search methods" };
+    }
 
-    // Price comparison
-    if (status === "comparing_prices") return "Collecting prices from alternative sites…";
+    // Price comparison - now includes index
+    if (status === "comparing_prices") {
+      return { message: "Collecting prices", detail: "Preparing to scrape prices from matched platforms" };
+    }
     if (status.startsWith("scraping_price_")) {
-      const platform = status.replace("scraping_price_", "").replace(/_/g, " ");
-      return `Collecting price from ${platform}…`;
+      const parts = status.replace("scraping_price_", "");
+      const indexMatch = parts.match(/_(\d+)_of_(\d+)$/);
+      let platform = parts.replace(/_\d+_of_\d+$/, "").replace(/_/g, " ");
+      const formattedPlatform = platform.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      
+      if (indexMatch) {
+        return { 
+          message: `Getting price from ${formattedPlatform} (${indexMatch[1]}/${indexMatch[2]})`, 
+          detail: "Scraping the listing page to find the exact price for your dates" 
+        };
+      }
+      return { message: `Getting price from ${formattedPlatform}`, detail: "Scraping the listing page to find the exact price" };
     }
 
     // Text search fallback
-    if (status.startsWith("text_search_")) return "Running text-based search fallback…";
+    if (status.startsWith("text_search_")) {
+      return { message: "Running text search", detail: "Searching by property name as a fallback" };
+    }
 
     // Completed states
-    if (status === "completed") return "Search complete.";
-    if (status === "price_unavailable") return "Price comparison unavailable (could not read Airbnb price).";
+    if (status === "completed") return { message: "Search complete" };
+    if (status === "price_unavailable") {
+      return { message: "Price unavailable", detail: "Could not extract the Airbnb price for your dates" };
+    }
 
     // Generic fallback
-    if (status === "searching" || status === "pending") return "Starting search…";
+    if (status === "searching" || status === "pending") return { message: "Starting search…" };
 
-    return `Working on: ${status.replace(/_/g, " ")}…`;
+    return { message: status.replace(/_/g, " ") };
   };
 
   // Animate through all steps evenly when search completes
@@ -591,16 +623,26 @@ export default function SearchResults() {
                     Elapsed: <span className="font-medium text-foreground">{Math.floor(thinkingElapsedMs / 1000)}s</span> · Typical: 30–60s
                   </p>
 
-                  {/* Live activity card - always visible and animated */}
-                  <div className="mx-auto max-w-md rounded-xl border-2 border-primary/30 bg-primary/5 p-4 text-left shadow-sm">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                      <p className="text-xs font-medium text-primary">Live Activity</p>
-                    </div>
-                    <p className="text-base font-medium text-foreground leading-relaxed">
-                      {getLiveActivity(search?.status)}
-                    </p>
-                  </div>
+                  {/* Live activity card - always visible with message + detail */}
+                  {(() => {
+                    const activity = getLiveActivity(search?.status);
+                    return (
+                      <div className="mx-auto max-w-md rounded-xl border-2 border-primary/30 bg-primary/5 p-4 text-left shadow-sm">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                          <p className="text-xs font-medium text-primary uppercase tracking-wide">Live Activity</p>
+                        </div>
+                        <p className="text-base font-semibold text-foreground leading-relaxed">
+                          {activity.message}
+                        </p>
+                        {activity.detail && (
+                          <p className="text-sm text-muted-foreground mt-1">
+                            {activity.detail}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {thinkingElapsedMs >= 12000 && (
                     <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-4 text-left">
                       <p className="text-sm font-medium text-foreground mb-2">What we’re doing right now</p>

@@ -1052,6 +1052,7 @@ serve(async (req) => {
       }
       
       if (contentForAI) {
+        await supabase.from("searches").update({ status: "extracting_price_with_ai" }).eq("id", searchId);
         const nights = calculateNights(checkIn, checkOut);
         airbnbPrice = await extractAirbnbPriceWithAI(contentForAI, nights);
       }
@@ -1606,28 +1607,33 @@ serve(async (req) => {
     console.log(`Comparing prices for ${nights} nights: ${checkIn} to ${checkOut}`);
 
     // Step 4: Scrape prices from alternatives using Firecrawl (if available)
+    // Run SEQUENTIALLY so users can see each platform being scraped in real-time
     let resultsWithPrices = topAlternatives;
     
     if (firecrawlApiKey && topAlternatives.length > 0) {
       await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
       console.log("Step 4: Scraping prices from alternatives...");
       
-      // Scrape up to 5 top results for pricing (to avoid rate limits)
-      const priceScrapePromises = topAlternatives.slice(0, 5).map(async (alt, idx) => {
-        // Update status for each platform being scraped
+      const pricedResults: typeof topAlternatives = [];
+      const toScrape = topAlternatives.slice(0, 5);
+      
+      for (let i = 0; i < toScrape.length; i++) {
+        const alt = toScrape[i];
+        // Update status for each platform being scraped - now visible because sequential
         const platformSlug = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_");
-        await supabase.from("searches").update({ status: `scraping_price_${platformSlug}` }).eq("id", searchId);
+        await supabase.from("searches").update({ 
+          status: `scraping_price_${platformSlug}_${i + 1}_of_${toScrape.length}` 
+        }).eq("id", searchId);
+        console.log(`Scraping price ${i + 1}/${toScrape.length} from ${alt.platform_name}...`);
         
         const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
-        return {
+        pricedResults.push({
           ...alt,
           price: priceData.perNightRate,
           total_price: priceData.totalPrice,
           per_night_rate: priceData.perNightRate,
-        };
-      });
-      
-      const pricedResults = await Promise.all(priceScrapePromises);
+        });
+      }
       
       // Merge priced results with remaining unpriced ones
       resultsWithPrices = [
