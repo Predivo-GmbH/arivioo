@@ -51,6 +51,9 @@ interface SearchResult {
   total_price?: number | null;
   per_night_rate?: number | null;
   source_airbnb_image?: string | null; // The Airbnb image that was used for this match
+  price_check_in?: string | null; // Actual dates used for price (may differ from original)
+  price_check_out?: string | null;
+  dates_differ?: boolean; // True if different dates were used due to unavailability
 }
 
 // Use Lovable AI to compare two images and return similarity score (0-100)
@@ -498,20 +501,78 @@ function addDatesToUrl(url: string, checkIn: string, checkOut: string): string {
   }
 }
 
+// Detect if content indicates dates are unavailable
+function detectUnavailability(content: string): boolean {
+  const unavailablePatterns = [
+    /not available/i,
+    /unavailable/i,
+    /sold out/i,
+    /no (rooms?|availability|vacancies)/i,
+    /fully booked/i,
+    /keine verfügbarkeit/i, // German
+    /non disponible/i, // French
+    /no disponible/i, // Spanish
+    /ausgebucht/i, // German "sold out"
+    /complet/i, // French "full"
+    /select (different|other|new) dates/i,
+    /try different dates/i,
+    /change your dates/i,
+    /sorry.*dates/i,
+    /dates.*not available/i,
+  ];
+  return unavailablePatterns.some(p => p.test(content));
+}
+
+// Generate alternative date ranges to try
+function generateAlternativeDates(checkIn: string, checkOut: string): Array<{ checkIn: string; checkOut: string; offset: number }> {
+  const nights = calculateNights(checkIn, checkOut);
+  const baseCheckIn = new Date(checkIn);
+  const alternatives: Array<{ checkIn: string; checkOut: string; offset: number }> = [];
+  
+  // Try offsets: +1, -1, +2, -2, +3, -3, +7 days
+  const offsets = [1, -1, 2, -2, 3, -3, 7];
+  
+  for (const offset of offsets) {
+    const newCheckIn = new Date(baseCheckIn);
+    newCheckIn.setDate(baseCheckIn.getDate() + offset);
+    
+    const newCheckOut = new Date(newCheckIn);
+    newCheckOut.setDate(newCheckIn.getDate() + nights);
+    
+    // Don't try dates in the past
+    if (newCheckIn > new Date()) {
+      alternatives.push({
+        checkIn: newCheckIn.toISOString().split('T')[0],
+        checkOut: newCheckOut.toISOString().split('T')[0],
+        offset,
+      });
+    }
+  }
+  
+  return alternatives;
+}
+
 // Scrape price from a listing page using Firecrawl
 async function scrapePriceFromListing(
   url: string,
   checkIn: string,
   checkOut: string,
   firecrawlApiKey: string,
-): Promise<{ price: number | null; totalPrice: number | null; perNightRate: number | null }> {
+): Promise<{ 
+  price: number | null; 
+  totalPrice: number | null; 
+  perNightRate: number | null;
+  usedCheckIn: string;
+  usedCheckOut: string;
+  datesDiffer: boolean;
+}> {
   const nights = calculateNights(checkIn, checkOut);
 
   const normalizeNumber = (raw: string): number | null => {
-    // Handles: 1,234.56 | 1.234,56 | 1234 | 1 234 | 1’234
+    // Handles: 1,234.56 | 1.234,56 | 1234 | 1 234 | 1'234
     let s = raw
       .replace(/\u00a0/g, " ")
-      .replace(/[\s’']/g, "")
+      .replace(/[\s'']/g, "")
       .trim();
 
     // If both separators exist, decide decimal by the last occurrence
@@ -546,7 +607,7 @@ async function scrapePriceFromListing(
 
   const tryExtract = (content: string): { extracted: number | null; isPerNight: boolean } => {
     const currency = String.raw`(?:\$|€|£|CHF|USD|EUR|GBP|ZAR|AUD|CAD|NZD|SEK|NOK|DKK|PLN|CZK|HUF|R\$|R)`;
-    const amount = String.raw`(\d{1,3}(?:[\s,.’]\d{3})*(?:[\.,]\d{2})?|\d{2,6})`;
+    const amount = String.raw`(\d{1,3}(?:[\s,.']\d{3})*(?:[\.,]\d{2})?|\d{2,6})`;
 
     const patterns: Array<{ re: RegExp; perNight: boolean }> = [
       // Per-night
@@ -576,9 +637,8 @@ async function scrapePriceFromListing(
     return { extracted: null, isPerNight: false };
   };
 
-  const fetchFirecrawl = async (opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number }) => {
-    const urlWithDates = addDatesToUrl(url, checkIn, checkOut);
-    console.log("Scraping price from:", urlWithDates.slice(0, 160));
+  const fetchFirecrawl = async (targetUrl: string, opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number }) => {
+    console.log("Scraping price from:", targetUrl.slice(0, 160));
 
     const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
       method: "POST",
@@ -587,7 +647,7 @@ async function scrapePriceFromListing(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        url: urlWithDates,
+        url: targetUrl,
         formats: opts.formats,
         onlyMainContent: opts.onlyMainContent,
         waitFor: opts.waitFor,
@@ -605,10 +665,22 @@ async function scrapePriceFromListing(
     return { markdown, html };
   };
 
-  try {
+  const tryScrapeDates = async (tryCheckIn: string, tryCheckOut: string): Promise<{ 
+    extracted: number | null; 
+    isPerNight: boolean; 
+    isUnavailable: boolean;
+  }> => {
+    const urlWithDates = addDatesToUrl(url, tryCheckIn, tryCheckOut);
+    
     // Pass 1: Fast scrape
-    const first = await fetchFirecrawl({ formats: ["markdown"], onlyMainContent: true, waitFor: 3500 });
+    const first = await fetchFirecrawl(urlWithDates, { formats: ["markdown"], onlyMainContent: true, waitFor: 3500 });
     let content = first.markdown || "";
+
+    // Check for unavailability first
+    if (detectUnavailability(content)) {
+      console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable`);
+      return { extracted: null, isPerNight: false, isUnavailable: true };
+    }
 
     let { extracted, isPerNight } = tryExtract(content);
 
@@ -617,30 +689,113 @@ async function scrapePriceFromListing(
       const lower = url.toLowerCase();
       const needsDeepScrape = lower.includes("booking.com") || lower.includes("tripadvisor.");
       if (needsDeepScrape) {
-        const second = await fetchFirecrawl({ formats: ["markdown", "html"], onlyMainContent: false, waitFor: 6500 });
+        const second = await fetchFirecrawl(urlWithDates, { formats: ["markdown", "html"], onlyMainContent: false, waitFor: 6500 });
         const htmlText = (second.html || "").replace(/<script[\s\S]*?<\/script>/gi, " ")
           .replace(/<style[\s\S]*?<\/style>/gi, " ")
           .replace(/<[^>]+>/g, " ")
           .replace(/\s+/g, " ");
 
         content = [second.markdown || "", htmlText].join("\n");
+        
+        // Check for unavailability in deep scrape
+        if (detectUnavailability(content)) {
+          console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable (deep scrape)`);
+          return { extracted: null, isPerNight: false, isUnavailable: true };
+        }
+        
         ({ extracted, isPerNight } = tryExtract(content));
       }
     }
 
-    if (!extracted) return { price: null, totalPrice: null, perNightRate: null };
+    return { extracted, isPerNight, isUnavailable: false };
+  };
 
-    if (isPerNight) {
-      console.log("Extracted price:", extracted, "(per night)");
-      return { price: extracted, totalPrice: extracted * nights, perNightRate: extracted };
+  try {
+    // First try with exact dates
+    let result = await tryScrapeDates(checkIn, checkOut);
+    
+    // If unavailable or no price found, try alternative dates
+    if (result.isUnavailable || !result.extracted) {
+      const alternatives = generateAlternativeDates(checkIn, checkOut);
+      
+      for (const alt of alternatives) {
+        console.log(`Trying alternative dates: ${alt.checkIn} - ${alt.checkOut} (offset ${alt.offset > 0 ? '+' : ''}${alt.offset} days)`);
+        result = await tryScrapeDates(alt.checkIn, alt.checkOut);
+        
+        if (result.extracted && !result.isUnavailable) {
+          console.log(`Found price with alternative dates: ${alt.checkIn} - ${alt.checkOut}`);
+          const altNights = calculateNights(alt.checkIn, alt.checkOut);
+          
+          if (result.isPerNight) {
+            console.log("Extracted price:", result.extracted, "(per night) - DIFFERENT DATES");
+            return { 
+              price: result.extracted, 
+              totalPrice: result.extracted * altNights, 
+              perNightRate: result.extracted,
+              usedCheckIn: alt.checkIn,
+              usedCheckOut: alt.checkOut,
+              datesDiffer: true,
+            };
+          }
+          
+          const perNight = Math.round(result.extracted / altNights);
+          console.log("Extracted price:", result.extracted, "(total) - DIFFERENT DATES");
+          return { 
+            price: perNight, 
+            totalPrice: result.extracted, 
+            perNightRate: perNight,
+            usedCheckIn: alt.checkIn,
+            usedCheckOut: alt.checkOut,
+            datesDiffer: true,
+          };
+        }
+      }
+    }
+    
+    // Original dates worked (or no alternatives worked either)
+    if (!result.extracted) {
+      return { 
+        price: null, 
+        totalPrice: null, 
+        perNightRate: null,
+        usedCheckIn: checkIn,
+        usedCheckOut: checkOut,
+        datesDiffer: false,
+      };
     }
 
-    const perNight = Math.round(extracted / nights);
-    console.log("Extracted price:", extracted, "(total)");
-    return { price: perNight, totalPrice: extracted, perNightRate: perNight };
+    if (result.isPerNight) {
+      console.log("Extracted price:", result.extracted, "(per night)");
+      return { 
+        price: result.extracted, 
+        totalPrice: result.extracted * nights, 
+        perNightRate: result.extracted,
+        usedCheckIn: checkIn,
+        usedCheckOut: checkOut,
+        datesDiffer: false,
+      };
+    }
+
+    const perNight = Math.round(result.extracted / nights);
+    console.log("Extracted price:", result.extracted, "(total)");
+    return { 
+      price: perNight, 
+      totalPrice: result.extracted, 
+      perNightRate: perNight,
+      usedCheckIn: checkIn,
+      usedCheckOut: checkOut,
+      datesDiffer: false,
+    };
   } catch (error) {
     console.error("Price scraping error:", error);
-    return { price: null, totalPrice: null, perNightRate: null };
+    return { 
+      price: null, 
+      totalPrice: null, 
+      perNightRate: null,
+      usedCheckIn: checkIn,
+      usedCheckOut: checkOut,
+      datesDiffer: false,
+    };
   }
 }
 
@@ -1042,20 +1197,28 @@ async function runSearchWithStreaming(
   sendProgress(controller, `Proceeding with ${totalCandidates} candidate listings`, visualCountAfterFallback > 0 ? "Includes visually verified matches" : "Text-only candidates (no photo verification)");
 
   // Step 3: Scrape prices
-  sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms`);
+  sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms for dates ${checkIn} to ${checkOut}`);
   await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
 
   const toScrape = alternatives.slice(0, 8);
   for (let i = 0; i < toScrape.length; i++) {
     const alt = toScrape[i];
-    sendProgress(controller, `Getting price from ${alt.platform_name}`, `Scraping listing page (${i + 1}/${toScrape.length})`, { platform: alt.platform_name, index: i + 1, total: toScrape.length });
+    sendProgress(controller, `Getting price from ${alt.platform_name}`, `Checking availability for ${checkIn} to ${checkOut} (${i + 1}/${toScrape.length})`, { platform: alt.platform_name, index: i + 1, total: toScrape.length });
     await supabase.from("searches").update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` }).eq("id", searchId);
 
     if (firecrawlApiKey) {
       const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
       alt.price = priceData.perNightRate;
+      alt.price_check_in = priceData.usedCheckIn;
+      alt.price_check_out = priceData.usedCheckOut;
+      alt.dates_differ = priceData.datesDiffer;
+      
       if (priceData.perNightRate) {
-        sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, { platform: alt.platform_name, price: priceData.perNightRate });
+        if (priceData.datesDiffer) {
+          sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night (dates ${priceData.usedCheckIn} - ${priceData.usedCheckOut}, original dates unavailable)`, { platform: alt.platform_name, price: priceData.perNightRate, datesDiffer: true });
+        } else {
+          sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, { platform: alt.platform_name, price: priceData.perNightRate });
+        }
       }
     }
   }
@@ -1088,8 +1251,11 @@ async function runSearchWithStreaming(
       images: r.images,
       match_type: r.match_type,
       source_airbnb_image: r.source_airbnb_image || null,
+      price_check_in: r.price_check_in || checkIn,
+      price_check_out: r.price_check_out || checkOut,
+      dates_differ: r.dates_differ || false,
     }));
-    console.log("Insert data:", JSON.stringify(insertData.map(d => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price }))));
+    console.log("Insert data:", JSON.stringify(insertData.map(d => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price, datesDiffer: d.dates_differ }))));
     const { data: insertedData, error: insertError } = await supabase.from("search_results").insert(insertData).select();
     if (insertError) {
       console.error("CRITICAL: Failed to insert search results:", insertError.message, insertError.details);
