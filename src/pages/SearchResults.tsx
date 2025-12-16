@@ -13,6 +13,7 @@ import {
   Sparkles, 
   AlertCircle,
   TrendingDown,
+  TrendingUp,
   Calendar,
   Info,
   Shield,
@@ -21,7 +22,9 @@ import {
   Globe,
   DollarSign,
   Check,
-  ArrowLeftRight
+  ArrowLeftRight,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
@@ -162,6 +165,7 @@ export default function SearchResults() {
   const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0);
   const [hasCelebrated, setHasCelebrated] = useState(false);
   const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string }>>([]);
+  const [showMoreExpensive, setShowMoreExpensive] = useState(false);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -628,9 +632,31 @@ export default function SearchResults() {
     return priceB - priceA;
   });
 
+  // Separate results into cheaper (savings) and more expensive (no savings)
+  const cheaperResults = sortedByPrice.filter(r => {
+    if (!r.price || r.price < 10) return false;
+    if (!referencePrice) return true; // If no baseline, show in main list
+    return r.price <= referencePrice;
+  });
+  
+  const moreExpensiveResults = sortedByPrice.filter(r => {
+    if (!r.price || r.price < 10) return false;
+    if (!referencePrice) return false;
+    return r.price > referencePrice;
+  });
+
+  // Results without valid prices (visual matches with no price)
+  const noPriceResults = sortedByPrice.filter(r => !r.price || r.price < 10);
+
   // Show more than 1 result: up to 6 alternatives, while ensuring the cheapest is included
   const MAX_ALTERNATIVES = 6;
-  let displayResults: SearchResult[] = sortedByPrice.slice(0, MAX_ALTERNATIVES);
+  let displayResults: SearchResult[] = cheaperResults.slice(0, MAX_ALTERNATIVES);
+  
+  // Add no-price visual matches to display (they might still be useful)
+  const visualNoPriceResults = noPriceResults.filter(r => r.match_type === 'visual');
+  if (displayResults.length < MAX_ALTERNATIVES && visualNoPriceResults.length > 0) {
+    displayResults = [...displayResults, ...visualNoPriceResults.slice(0, MAX_ALTERNATIVES - displayResults.length)];
+  }
 
   // Only consider valid prices (≥ €10) when finding cheapest
   const resultsWithValidPrices = sortedByPrice.filter(r => r.price && r.price >= 10);
@@ -1254,6 +1280,96 @@ export default function SearchResults() {
                         Always confirm details directly with the host before booking.
                       </p>
                     </div>
+
+                    {/* More Expensive Results - Collapsible */}
+                    {moreExpensiveResults.length > 0 && (
+                      <div className="mt-8 border border-border rounded-xl overflow-hidden">
+                        <button
+                          onClick={() => setShowMoreExpensive(!showMoreExpensive)}
+                          className="w-full flex items-center justify-between p-4 bg-muted/30 hover:bg-muted/50 transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center">
+                              <TrendingUp className="w-4 h-4 text-amber-500" />
+                            </div>
+                            <div className="text-left">
+                              <p className="font-medium text-foreground">
+                                {moreExpensiveResults.length} More Expensive {moreExpensiveResults.length === 1 ? 'Option' : 'Options'}
+                              </p>
+                              <p className="text-sm text-muted-foreground">
+                                These listings are priced higher than Airbnb
+                              </p>
+                            </div>
+                          </div>
+                          {showMoreExpensive ? (
+                            <ChevronUp className="w-5 h-5 text-muted-foreground" />
+                          ) : (
+                            <ChevronDown className="w-5 h-5 text-muted-foreground" />
+                          )}
+                        </button>
+                        
+                        {showMoreExpensive && (
+                          <div className="p-4 border-t border-border bg-card animate-fade-in">
+                            <div className="space-y-3">
+                              {moreExpensiveResults.map((result) => {
+                                const totalPrice = result.price && nights ? result.price * nights : null;
+                                const priceDiff = referencePrice && result.price ? result.price - referencePrice : null;
+                                
+                                return (
+                                  <div 
+                                    key={result.id} 
+                                    className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/20"
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                      <div>
+                                        <p className="font-medium text-foreground">{result.platform_name}</p>
+                                        {result.confidence_score !== null && (
+                                          <span className="text-xs text-muted-foreground flex items-center gap-1">
+                                            <Shield className="w-3 h-3" />
+                                            {Math.round(result.confidence_score * 100)}% match
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-4">
+                                      <div className="text-right">
+                                        <p className="font-semibold text-foreground">
+                                          {totalPrice ? `€${totalPrice}` : '—'}
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                          {result.price ? `€${result.price}/night` : '—'}
+                                        </p>
+                                        {priceDiff && priceDiff > 0 && (
+                                          <p className="text-xs text-amber-600 dark:text-amber-400">
+                                            +€{Math.round(priceDiff * (nights || 1))} more
+                                          </p>
+                                        )}
+                                        {result.dates_differ && result.price_check_in && result.price_check_out && (
+                                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 mt-1 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[10px]">
+                                            <Calendar className="w-2.5 h-2.5" />
+                                            Different dates
+                                          </span>
+                                        )}
+                                      </div>
+                                      <Button variant="outline" size="sm" asChild>
+                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                          View
+                                          <ExternalLink className="w-3 h-3 ml-1" />
+                                        </a>
+                                      </Button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            <p className="mt-4 text-xs text-muted-foreground text-center">
+                              These options cost more than Airbnb for the same dates — shown for reference only
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </>
                 )}
               </div>
