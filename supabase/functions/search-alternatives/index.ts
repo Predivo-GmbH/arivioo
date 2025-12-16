@@ -882,24 +882,32 @@ serve(async (req) => {
             /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
             /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
           ];
-          
+
+          const canonicalizeMuscacheUrl = (url: string) => {
+            const cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+            // Remove query params like ?im_w=1200 to dedupe correctly
+            return cleaned.split("?")[0];
+          };
+
           let allImageUrls: string[] = [];
           const htmlContent = rawHtml || html;
-          
+
           for (const pattern of imagePatterns) {
             const matches = htmlContent.match(pattern) || [];
             allImageUrls.push(...matches);
           }
-          
+
           // Also check markdown for image URLs
           const markdownImageMatches = markdown.match(/https:\/\/a0\.muscache\.com\/im\/pictures\/[^\s\)"\]]+/gi) || [];
           allImageUrls.push(...markdownImageMatches);
-          
-          imageUrls = [...new Set(allImageUrls)]
-            .map(url => url.replace(/\\u002F/g, '/').replace(/\\/g, ''))
+
+          const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+
+          imageUrls = uniqueBases
             .filter(isValidPropertyImage)
+            .map((base) => `${base}?im_w=1200`)
             .slice(0, 5);
-          
+
           console.log(`Firecrawl found ${imageUrls.length} property images`);
         } else {
           console.log("Firecrawl request failed:", firecrawlResponse.status);
@@ -947,25 +955,32 @@ serve(async (req) => {
               /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
               /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
             ];
-            
+
+            const canonicalizeMuscacheUrl = (url: string) => {
+              const cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+              return cleaned.split("?")[0];
+            };
+
             let allImageUrls: string[] = [];
-            
+
             for (const pattern of imagePatterns) {
               const matches = html.match(pattern) || [];
               allImageUrls.push(...matches);
             }
-            
+
             const jsonMatches = html.match(/"pictureUrl"\s*:\s*"([^"]+)"/g) || [];
             for (const match of jsonMatches) {
               const urlMatch = match.match(/"pictureUrl"\s*:\s*"([^"]+)"/);
               if (urlMatch && urlMatch[1]) {
-                allImageUrls.push(urlMatch[1].replace(/\\u002F/g, '/'));
+                allImageUrls.push(urlMatch[1].replace(/\\u002F/g, "/"));
               }
             }
-            
-            imageUrls = [...new Set(allImageUrls)]
-              .map(url => url.replace(/\\u002F/g, '/').replace(/\\/g, ''))
+
+            const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+
+            imageUrls = uniqueBases
               .filter(isValidPropertyImage)
+              .map((base) => `${base}?im_w=1200`)
               .slice(0, 5);
           }
           
@@ -1115,9 +1130,9 @@ serve(async (req) => {
     // Step 2: Use Google Lens for visual matching (much better than reverse image search)
     // CRITICAL: Track time and AI comparison budget to avoid timeout
     const searchStartTime = Date.now();
-    const MAX_SEARCH_TIME_MS = 55000; // 55 second hard limit for search phase
-    const MAX_AI_COMPARISONS = 25; // Increased AI comparisons to find more matches
-    const TARGET_VISUAL_MATCHES = 8; // Increased target to capture more platforms like Booking.com/TripAdvisor
+    const MAX_SEARCH_TIME_MS = 120000; // 2 minute limit for visual search phase (better coverage)
+    const MAX_AI_COMPARISONS = 45; // More AI comparisons to capture more platforms
+    const TARGET_VISUAL_MATCHES = 12; // Target more matches before stopping
     let aiComparisonCount = 0;
 
     const isTimeBudgetExceeded = () => {
@@ -1190,8 +1205,24 @@ serve(async (req) => {
           );
 
           // Process visual matches - these are the key results with VISUAL CONFIRMATION
-          // Increased to 15 matches per image to capture more platforms (Booking.com, TripAdvisor, etc.)
-          const visualMatches = (lensData.visual_matches || []).slice(0, 15);
+          // Prioritize likely booking-platform domains first to spend the AI budget where it matters.
+          const visualMatchesRaw = (lensData.visual_matches || []).slice(0, 15);
+
+          const urlPriority = (u: string | null | undefined) => {
+            if (!u) return 0;
+            const lower = u.toLowerCase();
+            if (lower.includes("booking.com")) return 100;
+            if (lower.includes("tripadvisor.")) return 95;
+            if (isBookingPlatform(u)) return 80;
+            if (isRegionalHotelSite(u)) return 70;
+            if (isDirectPropertySite(u)) return 60;
+            return 0;
+          };
+
+          const visualMatches = visualMatchesRaw
+            .slice()
+            .sort((a: any, b: any) => urlPriority(b.link) - urlPriority(a.link));
+
           for (const match of visualMatches) {
             // Check budgets before each comparison
             if (isTimeBudgetExceeded() || isAIBudgetExceeded() || hasEnoughMatches()) break;

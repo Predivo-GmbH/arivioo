@@ -329,46 +329,46 @@ export default function SearchResults() {
 
   const getLiveActivity = (status?: string | null) => {
     if (!status) return "Starting search…";
-    
+
     // Extracting phase
-    if (status === "extracting_photos") return "📸 Extracting property photos from Airbnb listing…";
-    if (status === "scraping_airbnb_page") return "🌐 Scraping Airbnb page with JavaScript rendering…";
-    if (status === "extracting_price_with_ai") return "🤖 Using AI to extract the Airbnb price…";
-    
-    // Lens search phase
+    if (status === "extracting_photos") return "Extracting property photos from the Airbnb listing…";
+    if (status === "scraping_airbnb_page") return "Loading the Airbnb page to capture dynamic content…";
+    if (status === "extracting_price_with_ai") return "Extracting the Airbnb price from the page…";
+
+    // Reverse image search phase
     if (status.startsWith("searching_platforms_lens_")) {
       const m = status.match(/searching_platforms_lens_(\d+)_of_(\d+)/);
-      if (m) return `🔍 Running Google Lens reverse image search (image ${m[1]} of ${m[2]})…`;
-      return "🔍 Running Google Lens reverse image search…";
+      if (m) return `Running AI reverse image search (image ${m[1]} of ${m[2]})…`;
+      return "Running AI reverse image search…";
     }
-    if (status === "searching_platforms") return "🔍 Searching across booking platforms…";
-    
+    if (status === "searching_platforms") return "Running AI reverse image search across booking sites…";
+
     // AI verification
     if (status.startsWith("ai_verifying_")) {
       const platform = status.replace("ai_verifying_", "").replace(/_/g, " ");
-      return `🤖 AI verifying match on ${platform}…`;
+      return `Verifying that photos match on ${platform}…`;
     }
-    
+
     // Reverse image backup
-    if (status === "reverse_image_search_backup") return "🔄 Running backup reverse image search…";
-    
+    if (status === "reverse_image_search_backup") return "Running backup image search…";
+
     // Price comparison
-    if (status === "comparing_prices") return "💰 Scraping prices from alternative platforms…";
+    if (status === "comparing_prices") return "Collecting prices from alternative sites…";
     if (status.startsWith("scraping_price_")) {
       const platform = status.replace("scraping_price_", "").replace(/_/g, " ");
-      return `💰 Scraping price from ${platform}…`;
+      return `Collecting price from ${platform}…`;
     }
-    
+
     // Text search fallback
-    if (status.startsWith("text_search_")) return "📝 Running text-based search as fallback…";
-    
+    if (status.startsWith("text_search_")) return "Running text-based search fallback…";
+
     // Completed states
-    if (status === "completed") return "✅ Search complete!";
-    if (status === "price_unavailable") return "⚠️ Could not extract Airbnb price";
-    
+    if (status === "completed") return "Search complete.";
+    if (status === "price_unavailable") return "Price comparison unavailable (could not read Airbnb price).";
+
     // Generic fallback
-    if (status === "searching" || status === "pending") return "🚀 Starting search…";
-    
+    if (status === "searching" || status === "pending") return "Starting search…";
+
     return `Working on: ${status.replace(/_/g, " ")}…`;
   };
 
