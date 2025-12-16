@@ -40,6 +40,9 @@ interface SearchResult {
   images: Json;
   match_type?: string;
   source_airbnb_image?: string | null; // The Airbnb image that matched this result
+  price_check_in?: string | null; // Actual dates used for this result's price
+  price_check_out?: string | null;
+  dates_differ?: boolean; // True if different dates were used due to unavailability
 }
 
 interface SearchData {
@@ -1075,13 +1078,28 @@ export default function SearchResults() {
                                     {result.price && result.price >= 10 && totalPrice ? `€${totalPrice}` : '—'}
                                   </td>
                                   <td className={`py-4 px-4 text-right ${isCheapest ? 'text-success font-medium' : 'text-muted-foreground'}`}>
-                                    {result.price && result.price >= 10 ? `€${result.price}/night` : '—'}
+                                    <div className="flex flex-col items-end gap-0.5">
+                                      <span>{result.price && result.price >= 10 ? `€${result.price}/night` : '—'}</span>
+                                      {result.dates_differ && result.price_check_in && result.price_check_out && (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[10px] font-medium">
+                                          <Calendar className="w-2.5 h-2.5" />
+                                          {new Date(result.price_check_in).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – {new Date(result.price_check_out).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                        </span>
+                                      )}
+                                    </div>
                                   </td>
                                   <td className="py-4 px-4 hidden lg:table-cell">
-                                    <span className={`text-xs ${isCheapest ? 'text-success flex items-center gap-1' : 'text-muted-foreground'}`}>
-                                      {isCheapest && <Check className="w-3 h-3" />}
-                                      {keyDiffs.slice(0, 2).join(', ')}
-                                    </span>
+                                    <div className="flex flex-col gap-1">
+                                      <span className={`text-xs ${isCheapest ? 'text-success flex items-center gap-1' : 'text-muted-foreground'}`}>
+                                        {isCheapest && <Check className="w-3 h-3" />}
+                                        {keyDiffs.slice(0, 2).join(', ')}
+                                      </span>
+                                      {result.dates_differ && (
+                                        <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                                          *Original dates unavailable
+                                        </span>
+                                      )}
+                                    </div>
                                   </td>
                                   <td className="py-4 px-4 text-center">
                                     <div className="flex flex-col gap-1.5 items-center">
@@ -1157,6 +1175,12 @@ export default function SearchResults() {
                                   {diff}
                                 </span>
                               ))}
+                              {result.dates_differ && result.price_check_in && result.price_check_out && (
+                                <span className="text-xs px-2 py-1 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center gap-1">
+                                  <Calendar className="w-3 h-3" />
+                                  Price for {new Date(result.price_check_in).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – {new Date(result.price_check_out).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} (original dates unavailable)
+                                </span>
+                              )}
                             </div>
                             
                             {/* Photo Comparison Toggle */}
