@@ -11,13 +11,32 @@ const corsHeaders = {
 type SSEController = ReadableStreamDefaultController<Uint8Array>;
 const encoder = new TextEncoder();
 
-function sendSSE(controller: SSEController, event: string, data: any) {
-  const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  controller.enqueue(encoder.encode(message));
+// Track if controller is still valid
+const controllerValid = new WeakSet<SSEController>();
+
+function sendSSE(controller: SSEController, event: string, data: any): boolean {
+  try {
+    if (!controllerValid.has(controller)) return false;
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    controller.enqueue(encoder.encode(message));
+    return true;
+  } catch (e) {
+    console.log("SSE send failed (stream closed):", event);
+    controllerValid.delete(controller);
+    return false;
+  }
 }
 
-function sendProgress(controller: SSEController, step: string, detail?: string, meta?: Record<string, any>) {
-  sendSSE(controller, "progress", { step, detail, timestamp: Date.now(), ...meta });
+function sendProgress(controller: SSEController, step: string, detail?: string, meta?: Record<string, any>): boolean {
+  return sendSSE(controller, "progress", { step, detail, timestamp: Date.now(), ...meta });
+}
+
+function markControllerValid(controller: SSEController) {
+  controllerValid.add(controller);
+}
+
+function markControllerInvalid(controller: SSEController) {
+  controllerValid.delete(controller);
 }
 
 interface SearchResult {
@@ -1120,6 +1139,7 @@ serve(async (req) => {
 
       const readableStream = new ReadableStream({
         async start(controller) {
+          markControllerValid(controller);
           try {
             await runSearchWithStreaming(controller, {
               search,
@@ -1132,7 +1152,8 @@ serve(async (req) => {
             console.error("Streaming search error:", error);
             sendSSE(controller, "error", { message: (error as Error).message || "Search failed" });
           } finally {
-            controller.close();
+            markControllerInvalid(controller);
+            try { controller.close(); } catch { /* already closed */ }
           }
         },
       });
