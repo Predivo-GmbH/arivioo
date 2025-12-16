@@ -729,6 +729,80 @@ function extractLocationFromTitle(title: string): { city: string | null; country
   return { city: null, country: null };
 }
 
+// Targeted text search fallback (used when visual matches are missing/insufficient)
+async function addTargetedTextMatches(opts: {
+  serpApiKey: string;
+  title: string;
+  cityHint?: string | null;
+  imageUrlForVerification?: string | null;
+  alternatives: SearchResult[];
+  foundUrls: Set<string>;
+  controller?: SSEController;
+}) {
+  const { serpApiKey, title, cityHint, imageUrlForVerification, alternatives, foundUrls, controller } = opts;
+
+  const cleanTitle = title.replace(/\s+/g, " ").trim();
+  const queries = [
+    `${cleanTitle} ${cityHint ?? ""} site:rentbyowner.com`,
+    `${cleanTitle} ${cityHint ?? ""} site:booking.com`,
+    `${cleanTitle} ${cityHint ?? ""} site:tripadvisor.`,
+  ].map(q => q.replace(/\s+/g, " ").trim());
+
+  for (const q of queries) {
+    controller && sendProgress(controller, "Running text search", q);
+
+    try {
+      const res = await fetch(
+        `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(q)}&api_key=${serpApiKey}&num=10`
+      );
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      const organic = (data.organic_results || []) as Array<any>;
+
+      for (const r of organic) {
+        const url: string | undefined = r.link;
+        if (!url) continue;
+        if (url.toLowerCase().includes("airbnb.")) continue;
+        if (foundUrls.has(url)) continue;
+
+        // Only accept URLs that match our platform heuristics
+        if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) continue;
+
+        // If we have an image thumbnail + a reference Airbnb image, try to visually verify it.
+        const thumb: string | null = r.thumbnail || null;
+        let match_type: 'visual' | 'text' = 'text';
+        let confidence_score: number | null = null;
+
+        if (imageUrlForVerification && thumb) {
+          const ai = await compareImagesWithAI(imageUrlForVerification, thumb);
+          if (ai.isMatch && ai.score >= 90) {
+            match_type = 'visual';
+            confidence_score = ai.score;
+          }
+        }
+
+        foundUrls.add(url);
+        alternatives.push({
+          platform_name: getPlatformName(url),
+          listing_url: url,
+          listing_title: r.title || r.snippet || null,
+          price: null,
+          confidence_score,
+          image_url: thumb,
+          images: thumb ? [thumb] : [],
+          match_type,
+          source_airbnb_image: imageUrlForVerification || null,
+        });
+
+        controller && sendProgress(controller, "Found candidate listing", `${getPlatformName(url)} · ${match_type === 'visual' ? `${confidence_score}% verified` : 'text-only'}`);
+      }
+    } catch (e) {
+      console.error("Targeted text search error:", e);
+    }
+  }
+}
+
 // Streaming search implementation
 async function runSearchWithStreaming(
   controller: SSEController,
@@ -942,11 +1016,30 @@ async function runSearchWithStreaming(
   const visualCount = alternatives.filter(a => a.match_type === 'visual').length;
   sendProgress(controller, `Found ${visualCount} verified matches`, "Now collecting prices from each platform");
 
+  // If we got no visual matches, run a targeted text search across likely platforms
   if (visualCount === 0) {
+    const location = extractLocationFromTitle(airbnbTitle);
+    await addTargetedTextMatches({
+      serpApiKey,
+      title: airbnbTitle,
+      cityHint: location.city,
+      imageUrlForVerification: imageUrls[0] || null,
+      alternatives,
+      foundUrls,
+      controller,
+    });
+  }
+
+  const visualCountAfterFallback = alternatives.filter(a => a.match_type === 'visual').length;
+  const totalCandidates = alternatives.length;
+
+  if (totalCandidates === 0) {
     await supabase.from("searches").update({ status: "completed", airbnb_title: airbnbTitle, airbnb_price: airbnbPrice }).eq("id", searchId);
     sendSSE(controller, "complete", { success: true, results: [], airbnb: { title: airbnbTitle, price: airbnbPrice, images: imageUrls } });
     return;
   }
+
+  sendProgress(controller, `Proceeding with ${totalCandidates} candidate listings`, visualCountAfterFallback > 0 ? "Includes visually verified matches" : "Text-only candidates (no photo verification)");
 
   // Step 3: Scrape prices
   sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms`);
@@ -1857,17 +1950,48 @@ serve(async (req) => {
 
     console.log(`Search phase complete. AI comparisons used: ${aiComparisonCount}/${MAX_AI_COMPARISONS}, Time: ${Date.now() - searchStartTime}ms`);
 
-    // EARLY TERMINATION: If no visual matches found after image search, skip expensive text search
-    // Text matches are unverified anyway, so there's little value in showing them
+    // If no visual matches were found, do a targeted text search on major platforms
+    // so we can still surface obvious alternatives (even if not photo-verified).
     const visualMatchCount = alternatives.filter(a => a.match_type === 'visual').length;
     console.log(`Visual search complete: found ${visualMatchCount} AI-verified matches`);
-    
+
     if (visualMatchCount === 0) {
-      console.log("No visual matches found - skipping text search and completing early");
-      
+      console.log("No visual matches found - running targeted text search fallback");
+
+      const location = extractLocationFromTitle(airbnbTitle);
+      await addTargetedTextMatches({
+        serpApiKey: serpApiKey!,
+        title: airbnbTitle,
+        cityHint: location.city,
+        imageUrlForVerification: imageUrls[0] || null,
+        alternatives,
+        foundUrls,
+      });
+
       const nights = calculateNights(checkIn, checkOut);
       const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
       const airbnbImages = imageUrls.slice(0, 5);
+
+      // Persist any candidates we found (visual or text)
+      if (alternatives.length > 0) {
+        await supabase.from("search_results").insert(
+          alternatives.map(r => ({
+            search_id: searchId,
+            platform_name: r.platform_name,
+            listing_url: r.listing_url,
+            listing_title: r.listing_title,
+            price: r.price,
+            original_price: airbnbPrice,
+            savings_amount: null,
+            savings_percentage: null,
+            confidence_score: r.confidence_score,
+            image_url: r.image_url,
+            images: r.images,
+            match_type: r.match_type,
+            source_airbnb_image: r.source_airbnb_image || null,
+          }))
+        );
+      }
 
       await supabase.from("searches").update({
         status: "completed",
@@ -1883,7 +2007,7 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({
           success: true,
-          results: [],
+          results: alternatives,
           airbnb: {
             title: airbnbTitle,
             price: airbnbPrice,
