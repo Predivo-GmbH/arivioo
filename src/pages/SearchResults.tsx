@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import { ImageComparison } from "@/components/ImageComparison";
 import { quickCelebration } from "@/lib/confetti";
@@ -157,12 +158,14 @@ export default function SearchResults() {
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0);
   const [hasCelebrated, setHasCelebrated] = useState(false);
+  const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string }>>([]);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
   const actualDurationRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const lastActivityKeyRef = useRef<string>("");
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -227,6 +230,8 @@ export default function SearchResults() {
           setCurrentStep(-1);
           setStepProgress(0);
           setThinkingElapsedMs(0);
+          setActivityFeed([]);
+          lastActivityKeyRef.current = "";
 
           // Start timer + allow cancel
           searchStartTimeRef.current = Date.now();
@@ -404,6 +409,23 @@ export default function SearchResults() {
     return { message: status.replace(/_/g, " ") };
   };
 
+  // Ticker-style live activity feed: append a line whenever backend status meaningfully changes
+  useEffect(() => {
+    if (!loading) return;
+    if (searchPhase !== "thinking") return;
+
+    const activity = getLiveActivity(search?.status);
+    const key = `${activity.message}__${activity.detail ?? ""}`;
+    if (!activity.message) return;
+    if (key === lastActivityKeyRef.current) return;
+
+    lastActivityKeyRef.current = key;
+    setActivityFeed((prev) => {
+      const next = [...prev, { ts: Date.now(), message: activity.message, detail: activity.detail }];
+      return next.slice(-8);
+    });
+  }, [loading, searchPhase, search?.status]);
+
   // Animate through all steps evenly when search completes
   useEffect(() => {
     if (searchPhase !== 'animating') return;
@@ -497,21 +519,26 @@ export default function SearchResults() {
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
   // Filter and sort results with strict price validation
-  // 1. Must have a valid price (> 0)
-  // 2. If we have Airbnb baseline, filter out prices below 20% (likely parsing errors like €7 vs €700)
-  // 3. Also filter out prices above 200% of baseline (likely different property)
-  const validResults = results.filter(r => {
+  // - Keep visually verified matches even if price scraping failed (so Booking.com/TripAdvisor matches still show)
+  // - Keep text-only matches only when they have a valid price
+  const validResults = results.filter((r) => {
+    const isVisual = r.match_type === "visual";
+
+    // If visually verified but no price, still show it (marked as Price unavailable in UI)
+    if (isVisual && (!r.price || r.price <= 0)) return true;
+
+    // Otherwise require a valid price
     if (!r.price || r.price <= 0) return false;
-    
+
     const totalPrice = nights ? r.price * nights : r.price;
-    
+
     // If we have a reference price, validate against it
     if (airbnbGrandTotal) {
-      const minReasonable = airbnbGrandTotal * 0.20; // At least 20% of Airbnb price
-      const maxReasonable = airbnbGrandTotal * 2.0;  // At most 200% of Airbnb price
+      const minReasonable = airbnbGrandTotal * 0.2;
+      const maxReasonable = airbnbGrandTotal * 2.0;
       return totalPrice >= minReasonable && totalPrice <= maxReasonable;
     }
-    
+
     // Without reference, just ensure price is reasonable (> €10 per night)
     return r.price >= 10;
   });
@@ -632,17 +659,35 @@ export default function SearchResults() {
                           <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
                           <p className="text-xs font-medium text-primary uppercase tracking-wide">Live Activity</p>
                         </div>
-                        <p className="text-base font-semibold text-foreground leading-relaxed">
-                          {activity.message}
-                        </p>
+                        <p className="text-base font-semibold text-foreground leading-relaxed">{activity.message}</p>
                         {activity.detail && (
-                          <p className="text-sm text-muted-foreground mt-1">
-                            {activity.detail}
-                          </p>
+                          <p className="text-sm text-muted-foreground mt-1">{activity.detail}</p>
+                        )}
+
+                        {/* Ticker feed */}
+                        {activityFeed.length > 0 && (
+                          <div className="mt-4 rounded-lg border border-border bg-card/60">
+                            <ScrollArea className="h-32">
+                              <div className="p-3 space-y-2">
+                                {activityFeed
+                                  .slice()
+                                  .reverse()
+                                  .map((item) => (
+                                    <div key={item.ts} className="text-sm">
+                                      <p className="text-foreground/90">{item.message}</p>
+                                      {item.detail && (
+                                        <p className="text-xs text-muted-foreground mt-0.5">{item.detail}</p>
+                                      )}
+                                    </div>
+                                  ))}
+                              </div>
+                            </ScrollArea>
+                          </div>
                         )}
                       </div>
                     );
                   })()}
+
                   {thinkingElapsedMs >= 12000 && (
                     <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-4 text-left">
                       <p className="text-sm font-medium text-foreground mb-2">What we’re doing right now</p>
