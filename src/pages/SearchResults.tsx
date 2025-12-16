@@ -218,10 +218,8 @@ export default function SearchResults() {
         return;
       }
 
-      // If status is 'searching' or 'pending', trigger the search
+      // If status is 'searching' or 'pending', trigger the search with SSE streaming
       if (searchData.status === "searching" || searchData.status === "pending") {
-        let pollId: number | null = null;
-
         try {
           // Reset to thinking phase
           setSearchPhase("thinking");
@@ -236,54 +234,133 @@ export default function SearchResults() {
           abortControllerRef.current?.abort();
           abortControllerRef.current = new AbortController();
 
-          // Poll backend status while the long-running search is happening
-          pollId = window.setInterval(async () => {
-            const { data: liveSearch } = await supabase
+          const startedAt = Date.now();
+
+          // Get session for auth header
+          const { data: { session } } = await supabase.auth.getSession();
+          const authToken = session?.access_token;
+
+          if (!authToken) {
+            throw new Error("Not authenticated");
+          }
+
+          // Use SSE streaming for real-time progress
+          const response = await fetch(
+            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${authToken}`,
+              },
+              body: JSON.stringify({ searchId, stream: true }),
+              signal: abortControllerRef.current.signal,
+            }
+          );
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `HTTP ${response.status}`);
+          }
+
+          const reader = response.body?.getReader();
+          const decoder = new TextDecoder();
+
+          if (!reader) {
+            throw new Error("No response stream");
+          }
+
+          let buffer = "";
+          let searchComplete = false;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // Parse SSE events from buffer
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+            let eventType = "";
+            let eventData = "";
+
+            for (const line of lines) {
+              if (line.startsWith("event: ")) {
+                eventType = line.slice(7).trim();
+              } else if (line.startsWith("data: ")) {
+                eventData = line.slice(6).trim();
+
+                if (eventType && eventData) {
+                  try {
+                    const data = JSON.parse(eventData);
+
+                    if (eventType === "progress") {
+                      // Add to activity feed
+                      setActivityFeed((prev) => {
+                        const key = `${data.step}__${data.detail ?? ""}`;
+                        if (prev.some(p => `${p.message}__${p.detail ?? ""}` === key)) return prev;
+                        const next = [...prev, { ts: data.timestamp || Date.now(), message: data.step, detail: data.detail }];
+                        return next.slice(-12); // Keep last 12 messages
+                      });
+                    } else if (eventType === "complete") {
+                      searchComplete = true;
+                      actualDurationRef.current = Date.now() - startedAt;
+
+                      if (data.success === false) {
+                        throw new Error(data.error || "Search failed");
+                      }
+
+                      // Refresh search and results from DB
+                      const { data: updatedSearch } = await supabase
+                        .from("searches")
+                        .select("*")
+                        .eq("id", searchId)
+                        .single();
+
+                      const { data: resultsData } = await supabase
+                        .from("search_results")
+                        .select("*")
+                        .eq("search_id", searchId)
+                        .order("savings_percentage", { ascending: false, nullsFirst: false });
+
+                      setSearch(updatedSearch as SearchData);
+                      setResults((resultsData || []) as SearchResult[]);
+                      setSearchPhase("animating");
+                    } else if (eventType === "error") {
+                      throw new Error(data.message || "Search failed");
+                    }
+                  } catch (parseError) {
+                    console.error("Failed to parse SSE data:", parseError);
+                  }
+                }
+
+                eventType = "";
+                eventData = "";
+              }
+            }
+          }
+
+          // If stream ended without complete event, fetch results anyway
+          if (!searchComplete) {
+            const { data: updatedSearch } = await supabase
               .from("searches")
               .select("*")
               .eq("id", searchId)
               .single();
-            if (liveSearch) {
-              setSearch(liveSearch as SearchData);
-              setCurrentStep(getCurrentStepIndex((liveSearch as any).status));
-            }
-          }, 900);
 
-          const startedAt = Date.now();
+            const { data: resultsData } = await supabase
+              .from("search_results")
+              .select("*")
+              .eq("search_id", searchId)
+              .order("savings_percentage", { ascending: false, nullsFirst: false });
 
-          const { data, error } = await supabase.functions.invoke("search-alternatives", {
-            body: { searchId },
-          });
-
-          // Record actual duration
-          actualDurationRef.current = Date.now() - startedAt;
-
-          if (error) {
-            throw new Error(error.message || "Search failed");
+            setSearch(updatedSearch as SearchData);
+            setResults((resultsData || []) as SearchResult[]);
+            actualDurationRef.current = Date.now() - startedAt;
+            setSearchPhase("animating");
           }
-
-          if (data && (data as any).success === false) {
-            throw new Error((data as any).error || "Search failed");
-          }
-
-          // Refresh search and results
-          const { data: updatedSearch } = await supabase
-            .from("searches")
-            .select("*")
-            .eq("id", searchId)
-            .single();
-
-          const { data: resultsData } = await supabase
-            .from("search_results")
-            .select("*")
-            .eq("search_id", searchId)
-            .order("savings_percentage", { ascending: false, nullsFirst: false });
-
-          setSearch(updatedSearch as SearchData);
-          setResults((resultsData || []) as SearchResult[]);
-
-          // Now animate through steps evenly
-          setSearchPhase("animating");
         } catch (error: any) {
           // User cancelled
           if (error?.name === "AbortError") {
@@ -304,8 +381,6 @@ export default function SearchResults() {
             animationFrameRef.current = null;
           }
           setLoading(false);
-        } finally {
-          if (pollId) window.clearInterval(pollId);
         }
       }
     };

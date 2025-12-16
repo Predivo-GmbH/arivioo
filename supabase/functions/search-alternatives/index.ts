@@ -7,6 +7,19 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// SSE helper to send streaming events
+type SSEController = ReadableStreamDefaultController<Uint8Array>;
+const encoder = new TextEncoder();
+
+function sendSSE(controller: SSEController, event: string, data: any) {
+  const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  controller.enqueue(encoder.encode(message));
+}
+
+function sendProgress(controller: SSEController, step: string, detail?: string, meta?: Record<string, any>) {
+  sendSSE(controller, "progress", { step, detail, timestamp: Date.now(), ...meta });
+}
+
 interface SearchResult {
   platform_name: string;
   listing_url: string;
@@ -697,6 +710,294 @@ function extractLocationFromTitle(title: string): { city: string | null; country
   return { city: null, country: null };
 }
 
+// Streaming search implementation
+async function runSearchWithStreaming(
+  controller: SSEController,
+  opts: {
+    search: any;
+    searchId: string;
+    supabase: any; // Use any to avoid complex type inference
+    serpApiKey: string;
+    firecrawlApiKey?: string;
+  }
+) {
+  const { search, searchId, supabase, serpApiKey, firecrawlApiKey } = opts;
+
+  sendProgress(controller, "Starting search", `Analyzing ${search.airbnb_url.slice(0, 60)}...`);
+
+  const roomIdMatch = search.airbnb_url.match(/rooms\/(\d+)/);
+  const roomId = roomIdMatch ? roomIdMatch[1] : null;
+
+  // Extract dates
+  let { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
+  if (!checkIn || !checkOut) {
+    const defaults = generateDefaultDates();
+    checkIn = defaults.checkIn;
+    checkOut = defaults.checkOut;
+  }
+
+  const nights = calculateNights(checkIn, checkOut);
+  const alternatives: SearchResult[] = [];
+  const foundUrls = new Set<string>();
+  let airbnbTitle = "Vacation Rental";
+  let airbnbPrice: number | null = null;
+  let imageUrls: string[] = [];
+
+  // Step 1: Extract Airbnb data
+  sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
+  await supabase.from("searches").update({ status: "extracting_photos" }).eq("id", searchId);
+
+  if (firecrawlApiKey) {
+    sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
+    await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
+    
+    try {
+      const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${firecrawlApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: search.airbnb_url,
+          formats: ['markdown', 'html'],
+          onlyMainContent: false,
+          waitFor: 5000,
+        }),
+      });
+      
+      if (firecrawlResponse.ok) {
+        const firecrawlData = await firecrawlResponse.json();
+        const markdown = firecrawlData.data?.markdown || '';
+        const html = firecrawlData.data?.html || '';
+        const rawHtml = firecrawlData.data?.rawHtml || html;
+
+        // Extract title
+        const metaTitle = firecrawlData.data?.metadata?.title;
+        if (metaTitle) {
+          airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        }
+
+        // Extract images
+        const imagePatterns = [
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
+        ];
+
+        const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+        let allImages: string[] = [];
+        for (const pattern of imagePatterns) {
+          allImages.push(...((rawHtml || html).match(pattern) || []));
+        }
+        const unique = [...new Set(allImages.map(canonicalize))];
+        imageUrls = unique.filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
+
+        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, { imageCount: imageUrls.length });
+
+        // Extract price via AI
+        if (markdown.length > 100) {
+          sendProgress(controller, "Extracting Airbnb price", "Using AI to find the exact price for your dates");
+          await supabase.from("searches").update({ status: "extracting_price_with_ai" }).eq("id", searchId);
+          airbnbPrice = await extractAirbnbPriceWithAI(markdown, nights);
+          if (airbnbPrice) {
+            sendProgress(controller, "Price extracted", `Found Airbnb price: €${airbnbPrice}/night`, { airbnbPrice });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Firecrawl error:", e);
+    }
+  }
+
+  // Fallback direct fetch if needed
+  if (imageUrls.length === 0 || !airbnbPrice) {
+    sendProgress(controller, "Fallback extraction", "Trying direct page fetch");
+    try {
+      const resp = await fetch(search.airbnb_url, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" },
+      });
+      if (resp.ok) {
+        const html = await resp.text();
+        const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+        if (titleMatch && (!airbnbTitle || airbnbTitle === "Vacation Rental")) {
+          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").trim();
+        }
+        
+        if (imageUrls.length === 0) {
+          const patterns = [/https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi];
+          let found: string[] = [];
+          for (const p of patterns) found.push(...(html.match(p) || []));
+          imageUrls = [...new Set(found.map(u => u.split("?")[0]))].filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
+        }
+        
+        if (!airbnbPrice) {
+          sendProgress(controller, "Extracting Airbnb price", "Using AI to find the exact price");
+          airbnbPrice = await extractAirbnbPriceWithAI(html.slice(0, 15000), nights);
+          if (airbnbPrice) sendProgress(controller, "Price extracted", `Found: €${airbnbPrice}/night`);
+        }
+      }
+    } catch (e) {
+      console.error("Direct fetch error:", e);
+    }
+  }
+
+  // Abort if no price
+  if (!airbnbPrice) {
+    sendProgress(controller, "Price unavailable", "Could not extract Airbnb price for your dates");
+    await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
+    sendSSE(controller, "complete", { success: false, error: "AIRBNB_PRICE_UNAVAILABLE" });
+    return;
+  }
+
+  // Abort if no images
+  if (imageUrls.length === 0) {
+    sendProgress(controller, "No images found", "Could not extract property images");
+    await supabase.from("searches").update({ status: "completed" }).eq("id", searchId);
+    sendSSE(controller, "complete", { success: true, results: [] });
+    return;
+  }
+
+  // Step 2: Google Lens visual search
+  sendProgress(controller, "Starting visual search", `Searching ${imageUrls.length} images across booking platforms`);
+  await supabase.from("searches").update({ status: "searching_platforms" }).eq("id", searchId);
+
+  const searchStartTime = Date.now();
+  const MAX_TIME = 120000;
+  const MAX_AI = 45;
+  const TARGET = 12;
+  let aiCount = 0;
+
+  for (let idx = 0; idx < imageUrls.length && alternatives.filter(a => a.match_type === 'visual').length < TARGET && Date.now() - searchStartTime < MAX_TIME; idx++) {
+    const imageUrl = imageUrls[idx];
+    sendProgress(controller, `Searching image ${idx + 1} of ${imageUrls.length}`, "Running AI reverse image search on Booking.com, Vrbo, TripAdvisor...", { imageIndex: idx + 1, totalImages: imageUrls.length });
+    await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}` }).eq("id", searchId);
+
+    try {
+      const lensResponse = await fetch(`https://serpapi.com/search.json?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`);
+      if (!lensResponse.ok) continue;
+
+      const lensData = await lensResponse.json();
+      const visualMatches = lensData.visual_matches || [];
+      sendProgress(controller, `Found ${visualMatches.length} potential matches`, "Verifying with AI comparison", { matchCount: visualMatches.length });
+
+      let matchesThisImage = 0;
+      for (const match of visualMatches) {
+        if (aiCount >= MAX_AI || alternatives.filter(a => a.match_type === 'visual').length >= TARGET || matchesThisImage >= 15) break;
+        if (Date.now() - searchStartTime > MAX_TIME) break;
+
+        const matchUrl = match.link;
+        if (!matchUrl || matchUrl.toLowerCase().includes("airbnb.") || foundUrls.has(matchUrl)) continue;
+        if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
+
+        const platformName = getPlatformName(matchUrl);
+        sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
+        await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}` }).eq("id", searchId);
+
+        aiCount++;
+        matchesThisImage++;
+
+        const aiResult = await compareImagesWithAI(imageUrl, match.thumbnail || matchUrl);
+        
+        if (aiResult.isMatch && aiResult.score >= 90) {
+          foundUrls.add(matchUrl);
+          alternatives.push({
+            platform_name: platformName,
+            listing_url: matchUrl,
+            listing_title: match.title || null,
+            price: null,
+            confidence_score: aiResult.score,
+            image_url: match.thumbnail || null,
+            images: match.thumbnail ? [match.thumbnail] : [],
+            match_type: 'visual',
+            source_airbnb_image: imageUrl,
+          });
+          sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, { platform: platformName, confidence: aiResult.score });
+        }
+      }
+    } catch (e) {
+      console.error("Lens search error:", e);
+    }
+  }
+
+  const visualCount = alternatives.filter(a => a.match_type === 'visual').length;
+  sendProgress(controller, `Found ${visualCount} verified matches`, "Now collecting prices from each platform");
+
+  if (visualCount === 0) {
+    await supabase.from("searches").update({ status: "completed", airbnb_title: airbnbTitle, airbnb_price: airbnbPrice }).eq("id", searchId);
+    sendSSE(controller, "complete", { success: true, results: [], airbnb: { title: airbnbTitle, price: airbnbPrice, images: imageUrls } });
+    return;
+  }
+
+  // Step 3: Scrape prices
+  sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms`);
+  await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
+
+  const toScrape = alternatives.slice(0, 8);
+  for (let i = 0; i < toScrape.length; i++) {
+    const alt = toScrape[i];
+    sendProgress(controller, `Getting price from ${alt.platform_name}`, `Scraping listing page (${i + 1}/${toScrape.length})`, { platform: alt.platform_name, index: i + 1, total: toScrape.length });
+    await supabase.from("searches").update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` }).eq("id", searchId);
+
+    if (firecrawlApiKey) {
+      const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
+      alt.price = priceData.perNightRate;
+      if (priceData.perNightRate) {
+        sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, { platform: alt.platform_name, price: priceData.perNightRate });
+      }
+    }
+  }
+
+  // Calculate savings
+  const resultsWithSavings = alternatives.map(alt => ({
+    ...alt,
+    original_price: airbnbPrice,
+    savings_amount: airbnbPrice && alt.price && alt.price < airbnbPrice ? airbnbPrice - alt.price : null,
+    savings_percentage: airbnbPrice && alt.price && alt.price < airbnbPrice ? Math.round(((airbnbPrice - alt.price) / airbnbPrice) * 100) : null,
+  }));
+
+  // Sort by savings
+  resultsWithSavings.sort((a, b) => (b.savings_percentage ?? 0) - (a.savings_percentage ?? 0));
+
+  // Save to DB
+  if (resultsWithSavings.length > 0) {
+    await supabase.from("search_results").insert(resultsWithSavings.map(r => ({
+      search_id: searchId,
+      platform_name: r.platform_name,
+      listing_url: r.listing_url,
+      listing_title: r.listing_title,
+      price: r.price,
+      original_price: r.original_price,
+      savings_amount: r.savings_amount,
+      savings_percentage: r.savings_percentage,
+      confidence_score: r.confidence_score,
+      image_url: r.image_url,
+      images: r.images,
+      match_type: r.match_type,
+      source_airbnb_image: r.source_airbnb_image || null,
+    })));
+  }
+
+  await supabase.from("searches").update({
+    status: "completed",
+    airbnb_title: airbnbTitle,
+    airbnb_price: airbnbPrice,
+    airbnb_image_url: imageUrls[0] || null,
+    airbnb_images: imageUrls.slice(0, 5),
+    check_in_date: checkIn,
+    check_out_date: checkOut,
+    nights_count: nights,
+  }).eq("id", searchId);
+
+  sendProgress(controller, "Search complete", `Found ${resultsWithSavings.length} alternatives`);
+  sendSSE(controller, "complete", {
+    success: true,
+    results: resultsWithSavings,
+    airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, imageUrl: imageUrls[0], images: imageUrls },
+    dates: { checkIn, checkOut, nights },
+  });
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -754,7 +1055,7 @@ serve(async (req) => {
       );
     }
     
-    const { searchId } = body;
+    const { searchId, stream = false } = body;
     
     if (!searchId) {
       return new Response(
@@ -806,6 +1107,42 @@ serve(async (req) => {
       );
     }
 
+    // ============================================================
+    // If streaming mode requested, use SSE
+    // ============================================================
+    if (stream) {
+      const sseHeaders = {
+        ...corsHeaders,
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      };
+
+      const readableStream = new ReadableStream({
+        async start(controller) {
+          try {
+            await runSearchWithStreaming(controller, {
+              search,
+              searchId,
+              supabase,
+              serpApiKey: serpApiKey!,
+              firecrawlApiKey,
+            });
+          } catch (error) {
+            console.error("Streaming search error:", error);
+            sendSSE(controller, "error", { message: (error as Error).message || "Search failed" });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(readableStream, { headers: sseHeaders });
+    }
+
+    // ============================================================
+    // Non-streaming mode (legacy) - existing code path
+    // ============================================================
     console.log("Processing search for URL:", search.airbnb_url);
 
     const roomIdMatch = search.airbnb_url.match(/rooms\/(\d+)/);
