@@ -68,9 +68,9 @@ export function ExampleResult() {
   const savingsPercent = useDynamic ? (dynamicData.savingsPercentage || STATIC_DATA.savingsPercent) : STATIC_DATA.savingsPercent;
   const unlockFee = Math.round(savings * 0.1 * 100) / 100;
   
-  // Date display
-  const dates = useDynamic && dynamicData.check_in_date && dynamicData.check_out_date
-    ? `${formatDate(dynamicData.check_in_date)}–${formatDate(dynamicData.check_out_date)}`
+  // Date display - use generic "X nights" for privacy when showing dynamic data
+  const dates = useDynamic && dynamicData.nights_count
+    ? `${dynamicData.nights_count} nights`
     : STATIC_DATA.dates;
   
   // Images - use source_airbnb_image and matched image from results if available

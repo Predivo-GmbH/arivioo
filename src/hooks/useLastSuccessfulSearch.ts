@@ -11,13 +11,12 @@ interface SearchResult {
 }
 
 interface SuccessfulSearch {
-  id: string;
+  // Note: id and specific dates are intentionally omitted for privacy
+  // This data is displayed publicly on the homepage demo
   airbnb_title: string | null;
   airbnb_price: number | null;
   airbnb_image_url: string | null;
   airbnb_images: Json;
-  check_in_date: string | null;
-  check_out_date: string | null;
   nights_count: number | null;
   cheapestResult: SearchResult | null;
   potentialSavings: number | null;
