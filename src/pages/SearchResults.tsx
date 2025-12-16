@@ -328,16 +328,48 @@ export default function SearchResults() {
   }, [loading, searchPhase]);
 
   const getLiveActivity = (status?: string | null) => {
-    if (!status) return "Starting…";
-    if (status.startsWith("extracting")) return "Extracting property photos from Airbnb";
+    if (!status) return "Starting search…";
+    
+    // Extracting phase
+    if (status === "extracting_photos") return "📸 Extracting property photos from Airbnb listing…";
+    if (status === "scraping_airbnb_page") return "🌐 Scraping Airbnb page with JavaScript rendering…";
+    if (status === "extracting_price_with_ai") return "🤖 Using AI to extract the Airbnb price…";
+    
+    // Lens search phase
     if (status.startsWith("searching_platforms_lens_")) {
       const m = status.match(/searching_platforms_lens_(\d+)_of_(\d+)/);
-      if (m) return `Running Google Lens reverse image search (${m[1]}/${m[2]})`;
-      return "Running Google Lens reverse image search";
+      if (m) return `🔍 Running Google Lens reverse image search (image ${m[1]} of ${m[2]})…`;
+      return "🔍 Running Google Lens reverse image search…";
     }
-    if (status.startsWith("searching_platforms")) return "Searching across platforms + verifying matches";
-    if (status.startsWith("comparing_prices")) return "Scraping prices and comparing totals";
-    return "Working…";
+    if (status === "searching_platforms") return "🔍 Searching across booking platforms…";
+    
+    // AI verification
+    if (status.startsWith("ai_verifying_")) {
+      const platform = status.replace("ai_verifying_", "").replace(/_/g, " ");
+      return `🤖 AI verifying match on ${platform}…`;
+    }
+    
+    // Reverse image backup
+    if (status === "reverse_image_search_backup") return "🔄 Running backup reverse image search…";
+    
+    // Price comparison
+    if (status === "comparing_prices") return "💰 Scraping prices from alternative platforms…";
+    if (status.startsWith("scraping_price_")) {
+      const platform = status.replace("scraping_price_", "").replace(/_/g, " ");
+      return `💰 Scraping price from ${platform}…`;
+    }
+    
+    // Text search fallback
+    if (status.startsWith("text_search_")) return "📝 Running text-based search as fallback…";
+    
+    // Completed states
+    if (status === "completed") return "✅ Search complete!";
+    if (status === "price_unavailable") return "⚠️ Could not extract Airbnb price";
+    
+    // Generic fallback
+    if (status === "searching" || status === "pending") return "🚀 Starting search…";
+    
+    return `Working on: ${status.replace(/_/g, " ")}…`;
   };
 
   // Animate through all steps evenly when search completes
@@ -559,9 +591,15 @@ export default function SearchResults() {
                     Elapsed: <span className="font-medium text-foreground">{Math.floor(thinkingElapsedMs / 1000)}s</span> · Typical: 30–60s
                   </p>
 
-                  <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-3 text-left">
-                    <p className="text-xs text-muted-foreground">Live activity</p>
-                    <p className="text-sm font-medium text-foreground">{getLiveActivity(search?.status)}</p>
+                  {/* Live activity card - always visible and animated */}
+                  <div className="mx-auto max-w-md rounded-xl border-2 border-primary/30 bg-primary/5 p-4 text-left shadow-sm">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                      <p className="text-xs font-medium text-primary">Live Activity</p>
+                    </div>
+                    <p className="text-base font-medium text-foreground leading-relaxed">
+                      {getLiveActivity(search?.status)}
+                    </p>
                   </div>
                   {thinkingElapsedMs >= 12000 && (
                     <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-4 text-left">

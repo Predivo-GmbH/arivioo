@@ -796,6 +796,7 @@ serve(async (req) => {
     
     // Use Firecrawl if available (handles JS-rendered content like prices)
     if (firecrawlApiKey) {
+      await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
       console.log("Using Firecrawl to scrape Airbnb (with JS rendering)...");
       try {
         const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
@@ -999,6 +1000,7 @@ serve(async (req) => {
     
     // CRITICAL: If we still don't have a price, try AI extraction as last resort
     if (!airbnbPrice) {
+      await supabase.from("searches").update({ status: "extracting_price_with_ai" }).eq("id", searchId);
       console.log("Attempting AI-based price extraction...");
       
       // Prefer previously scraped content before making another network call
@@ -1214,6 +1216,8 @@ serve(async (req) => {
             }
 
             // Use AI to compare images and get similarity score
+            const platformSlug = getPlatformName(url).toLowerCase().replace(/[^a-z0-9]/g, "_");
+            await supabase.from("searches").update({ status: `ai_verifying_${platformSlug}` }).eq("id", searchId);
             console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS}...`);
             aiComparisonCount++;
             let aiComparison = await compareImagesWithAI(imageUrl, matchImageUrl);
@@ -1341,6 +1345,7 @@ serve(async (req) => {
       }
       // If Lens didn't find enough and we still have budget, try reverse image search as backup
       if (alternatives.length < 3 && !isTimeBudgetExceeded() && !isAIBudgetExceeded()) {
+        await supabase.from("searches").update({ status: "reverse_image_search_backup" }).eq("id", searchId);
         console.log("Running reverse image search as backup...");
         
         for (const imageUrl of imageUrls.slice(0, 2)) {
@@ -1573,10 +1578,15 @@ serve(async (req) => {
     let resultsWithPrices = topAlternatives;
     
     if (firecrawlApiKey && topAlternatives.length > 0) {
+      await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
       console.log("Step 4: Scraping prices from alternatives...");
       
       // Scrape up to 5 top results for pricing (to avoid rate limits)
-      const priceScrapePromises = topAlternatives.slice(0, 5).map(async (alt) => {
+      const priceScrapePromises = topAlternatives.slice(0, 5).map(async (alt, idx) => {
+        // Update status for each platform being scraped
+        const platformSlug = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_");
+        await supabase.from("searches").update({ status: `scraping_price_${platformSlug}` }).eq("id", searchId);
+        
         const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
         return {
           ...alt,
