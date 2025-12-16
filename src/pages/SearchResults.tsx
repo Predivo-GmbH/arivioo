@@ -586,22 +586,21 @@ export default function SearchResults() {
   const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
-  // Filter and sort results with strict price validation
-  // - Keep visually verified matches even if price scraping failed or returned garbage
+  // Filter and sort results with price validation
+  // - Always keep visually verified matches (even if price is missing or outside our "reasonable" range)
   // - Keep text-only matches only when they have a valid price
   const validResults = results.filter((r) => {
     const isVisual = r.match_type === "visual";
-    const hasValidPrice = r.price && r.price >= 10; // Min €10/night for any real accommodation
 
-    // If visually verified but no valid price, still show it (marked as "—" in UI)
-    if (isVisual && !hasValidPrice) return true;
+    // Visual matches are the core value: show them even if price scraping failed or looks odd.
+    if (isVisual) return true;
 
-    // Otherwise require a valid price
+    const hasValidPrice = !!r.price && r.price >= 10; // Min €10/night for any real accommodation
     if (!hasValidPrice) return false;
 
     const totalPrice = nights ? r.price! * nights : r.price!;
 
-    // If we have a reference price, validate against it
+    // If we have a reference price, validate against it for text-only results
     if (airbnbGrandTotal) {
       const minReasonable = airbnbGrandTotal * 0.2;
       const maxReasonable = airbnbGrandTotal * 2.0;
