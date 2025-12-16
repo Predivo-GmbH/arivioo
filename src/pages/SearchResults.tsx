@@ -185,7 +185,7 @@ export default function SearchResults() {
 
     const fetchAndSearch = async () => {
       searchTriggeredRef.current = true;
-      
+
       // Fetch search record
       const { data: searchData, error: searchError } = await supabase
         .from("searches")
@@ -217,11 +217,13 @@ export default function SearchResults() {
 
       // If status is 'searching' or 'pending', trigger the search
       if (searchData.status === "searching" || searchData.status === "pending") {
+        let pollId: number | null = null;
+
         try {
           const { data: { session } } = await supabase.auth.getSession();
-          
+
           // Reset to thinking phase
-          setSearchPhase('thinking');
+          setSearchPhase("thinking");
           setCurrentStep(-1);
           setStepProgress(0);
           setThinkingElapsedMs(0);
@@ -231,17 +233,30 @@ export default function SearchResults() {
           abortControllerRef.current?.abort();
           abortControllerRef.current = new AbortController();
 
+          // Poll backend status while the long-running search is happening
+          pollId = window.setInterval(async () => {
+            const { data: liveSearch } = await supabase
+              .from("searches")
+              .select("*")
+              .eq("id", searchId)
+              .single();
+            if (liveSearch) {
+              setSearch(liveSearch as SearchData);
+              setCurrentStep(getCurrentStepIndex((liveSearch as any).status));
+            }
+          }, 900);
+
           const response = await fetch(
             `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
             {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+                Authorization: `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
               },
               signal: abortControllerRef.current.signal,
               body: JSON.stringify({ searchId }),
-            }
+            },
           );
 
           // Record actual duration
@@ -268,12 +283,12 @@ export default function SearchResults() {
 
           setSearch(updatedSearch as SearchData);
           setResults((resultsData || []) as SearchResult[]);
-          
+
           // Now animate through steps evenly
-          setSearchPhase('animating');
+          setSearchPhase("animating");
         } catch (error: any) {
           // User cancelled
-          if (error?.name === 'AbortError') {
+          if (error?.name === "AbortError") {
             toast({ title: "Search cancelled", description: "No worries — you can try again anytime." });
             navigate("/dashboard");
             return;
@@ -283,7 +298,7 @@ export default function SearchResults() {
           toast({
             title: "Search Error",
             description: error.message || "Failed to search for alternatives",
-            variant: "destructive"
+            variant: "destructive",
           });
 
           if (animationFrameRef.current) {
@@ -291,6 +306,8 @@ export default function SearchResults() {
             animationFrameRef.current = null;
           }
           setLoading(false);
+        } finally {
+          if (pollId) window.clearInterval(pollId);
         }
       }
     };
@@ -300,7 +317,7 @@ export default function SearchResults() {
 
   // Thinking phase timer (improves UX + makes "stuck" feel less scary)
   useEffect(() => {
-    if (!loading || searchPhase !== 'thinking') return;
+    if (!loading || searchPhase !== "thinking") return;
 
     const startedAt = searchStartTimeRef.current || Date.now();
     const id = window.setInterval(() => {
@@ -309,6 +326,19 @@ export default function SearchResults() {
 
     return () => window.clearInterval(id);
   }, [loading, searchPhase]);
+
+  const getLiveActivity = (status?: string | null) => {
+    if (!status) return "Starting…";
+    if (status.startsWith("extracting")) return "Extracting property photos from Airbnb";
+    if (status.startsWith("searching_platforms_lens_")) {
+      const m = status.match(/searching_platforms_lens_(\d+)_of_(\d+)/);
+      if (m) return `Running Google Lens reverse image search (${m[1]}/${m[2]})`;
+      return "Running Google Lens reverse image search";
+    }
+    if (status.startsWith("searching_platforms")) return "Searching across platforms + verifying matches";
+    if (status.startsWith("comparing_prices")) return "Scraping prices and comparing totals";
+    return "Working…";
+  };
 
   // Animate through all steps evenly when search completes
   useEffect(() => {
@@ -422,31 +452,35 @@ export default function SearchResults() {
     return r.price >= 10;
   });
   
-  // Sort by price descending (most expensive first), then take specific positions
+  // Sort by price descending (most expensive first)
   const sortedByPrice = [...validResults].sort((a, b) => {
     const priceA = a.price || 0;
     const priceB = b.price || 0;
-    return priceB - priceA; // Descending
+    return priceB - priceA;
   });
-  
-  // Take max 3 alternatives (will show 4 total with Airbnb)
-  // Structure: most expensive, second most expensive, cheapest
-  let displayResults: SearchResult[] = [];
-  if (sortedByPrice.length >= 3) {
-    displayResults = [
-      sortedByPrice[0], // Most expensive
-      sortedByPrice[1], // Second most expensive
-      sortedByPrice[sortedByPrice.length - 1] // Cheapest (last after sorting desc)
-    ];
-  } else {
-    displayResults = sortedByPrice.slice(0, 3);
+
+  // Show more than 1 result: up to 6 alternatives, while ensuring the cheapest is included
+  const MAX_ALTERNATIVES = 6;
+  let displayResults: SearchResult[] = sortedByPrice.slice(0, MAX_ALTERNATIVES);
+
+  const cheapestOverall = sortedByPrice.length
+    ? sortedByPrice.reduce((min, r) => (!min.price || (r.price && r.price < min.price)) ? r : min, sortedByPrice[0])
+    : null;
+
+  if (cheapestOverall && !displayResults.some((r) => r.id === cheapestOverall.id)) {
+    // Replace last slot with the cheapest so the Unlock CTA always has something real
+    if (displayResults.length === MAX_ALTERNATIVES) {
+      displayResults = [...displayResults.slice(0, MAX_ALTERNATIVES - 1), cheapestOverall];
+    } else {
+      displayResults = [...displayResults, cheapestOverall];
+    }
   }
-  
+
   // Find cheapest result for unlock button
-  const cheapestResult = displayResults.length > 0 
+  const cheapestResult = displayResults.length > 0
     ? displayResults.reduce((min, r) => (!min.price || (r.price && r.price < min.price)) ? r : min, displayResults[0])
     : null;
-  
+
   // Calculate potential savings
   const cheapestTotalPrice = cheapestResult?.price && nights ? cheapestResult.price * nights : null;
   const potentialSavings = airbnbGrandTotal && cheapestTotalPrice ? airbnbGrandTotal - cheapestTotalPrice : null;
@@ -525,6 +559,10 @@ export default function SearchResults() {
                     Elapsed: <span className="font-medium text-foreground">{Math.floor(thinkingElapsedMs / 1000)}s</span> · Typical: 30–60s
                   </p>
 
+                  <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-3 text-left">
+                    <p className="text-xs text-muted-foreground">Live activity</p>
+                    <p className="text-sm font-medium text-foreground">{getLiveActivity(search?.status)}</p>
+                  </div>
                   {thinkingElapsedMs >= 12000 && (
                     <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-4 text-left">
                       <p className="text-sm font-medium text-foreground mb-2">What we’re doing right now</p>
