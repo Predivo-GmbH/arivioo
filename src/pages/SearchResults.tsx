@@ -166,6 +166,7 @@ export default function SearchResults() {
   const animationFrameRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const lastActivityKeyRef = useRef<string>("");
+  const tickerScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -494,6 +495,13 @@ export default function SearchResults() {
     });
   }, [loading, searchPhase, search?.status]);
 
+  // Auto-scroll ticker feed when new items are added
+  useEffect(() => {
+    if (tickerScrollRef.current && activityFeed.length > 0) {
+      tickerScrollRef.current.scrollTop = 0; // Scroll to top since we reverse the list
+    }
+  }, [activityFeed.length]);
+
   // Animate through all steps evenly when search completes
   useEffect(() => {
     if (searchPhase !== 'animating') return;
@@ -737,12 +745,12 @@ export default function SearchResults() {
                         {activityFeed.length > 0 && (
                           <div className="mt-4 rounded-lg border border-border bg-card/60">
                             <ScrollArea className="h-32">
-                              <div className="p-3 space-y-2">
+                              <div ref={tickerScrollRef} className="p-3 space-y-2">
                                 {activityFeed
                                   .slice()
                                   .reverse()
-                                  .map((item) => (
-                                    <div key={item.ts} className="text-sm">
+                                  .map((item, idx) => (
+                                    <div key={`${item.ts}-${idx}`} className="text-sm">
                                       <p className="text-foreground/90">{item.message}</p>
                                       {item.detail && (
                                         <p className="text-xs text-muted-foreground mt-0.5">{item.detail}</p>
