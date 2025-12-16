@@ -72,17 +72,18 @@ serve(async (req) => {
         if (potentialSavings && potentialSavings > 0) {
           console.log("Found successful search:", search.id, "with savings:", potentialSavings);
           
+          // Return sanitized data - no personal travel dates or IDs
+          // This is intentionally public for homepage demo purposes
           return new Response(
             JSON.stringify({
               success: true,
               data: {
-                id: search.id,
+                // Omit search.id to prevent correlation attacks
                 airbnb_title: search.airbnb_title,
                 airbnb_price: search.airbnb_price,
                 airbnb_image_url: search.airbnb_image_url,
                 airbnb_images: search.airbnb_images,
-                check_in_date: search.check_in_date,
-                check_out_date: search.check_out_date,
+                // Omit specific dates - only show duration for demo
                 nights_count: search.nights_count,
                 cheapestResult: {
                   platform_name: cheapestResult.platform_name,
