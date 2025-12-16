@@ -164,7 +164,7 @@ export default function SearchResults() {
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0);
   const [hasCelebrated, setHasCelebrated] = useState(false);
-  const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string }>>([]);
+  const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string; id: string }>>([]);
   const [showMoreExpensive, setShowMoreExpensive] = useState(false);
 
   const searchTriggeredRef = useRef(false);
@@ -172,8 +172,9 @@ export default function SearchResults() {
   const actualDurationRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const lastActivityKeyRef = useRef<string>("");
+  const seenActivityKeysRef = useRef<Set<string>>(new Set());
   const tickerScrollRef = useRef<HTMLDivElement | null>(null);
+  const activityIdCounterRef = useRef(0);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -235,7 +236,8 @@ export default function SearchResults() {
           setStepProgress(0);
           setThinkingElapsedMs(0);
           setActivityFeed([]);
-          lastActivityKeyRef.current = "";
+          seenActivityKeysRef.current.clear();
+          activityIdCounterRef.current = 0;
 
           // Start timer + allow cancel
           searchStartTimeRef.current = Date.now();
@@ -305,13 +307,19 @@ export default function SearchResults() {
                     const data = JSON.parse(eventData);
 
                     if (eventType === "progress") {
-                      // Add to activity feed
-                      setActivityFeed((prev) => {
-                        const key = `${data.step}__${data.detail ?? ""}`;
-                        if (prev.some(p => `${p.message}__${p.detail ?? ""}` === key)) return prev;
-                        const next = [...prev, { ts: data.timestamp || Date.now(), message: data.step, detail: data.detail }];
-                        return next.slice(-12); // Keep last 12 messages
-                      });
+                      // Add to activity feed with dedup
+                      const key = `${data.step}__${data.detail ?? ""}`;
+                      if (!seenActivityKeysRef.current.has(key)) {
+                        seenActivityKeysRef.current.add(key);
+                        activityIdCounterRef.current += 1;
+                        const newItem = { 
+                          ts: data.timestamp || Date.now(), 
+                          message: data.step, 
+                          detail: data.detail,
+                          id: `activity-${activityIdCounterRef.current}`
+                        };
+                        setActivityFeed((prev) => [...prev, newItem].slice(-12));
+                      }
                     } else if (eventType === "complete") {
                       searchComplete = true;
                       actualDurationRef.current = Date.now() - startedAt;
@@ -493,21 +501,26 @@ export default function SearchResults() {
     const activity = getLiveActivity(search?.status);
     const key = `${activity.message}__${activity.detail ?? ""}`;
     if (!activity.message) return;
-    if (key === lastActivityKeyRef.current) return;
+    if (seenActivityKeysRef.current.has(key)) return;
 
-    lastActivityKeyRef.current = key;
-    setActivityFeed((prev) => {
-      const next = [...prev, { ts: Date.now(), message: activity.message, detail: activity.detail }];
-      return next.slice(-8);
-    });
+    seenActivityKeysRef.current.add(key);
+    activityIdCounterRef.current += 1;
+    const newItem = { 
+      ts: Date.now(), 
+      message: activity.message, 
+      detail: activity.detail,
+      id: `activity-${activityIdCounterRef.current}`
+    };
+    setActivityFeed((prev) => [...prev, newItem].slice(-8));
   }, [loading, searchPhase, search?.status]);
 
   // Auto-scroll ticker feed when new items are added
   useEffect(() => {
     if (tickerScrollRef.current && activityFeed.length > 0) {
-      tickerScrollRef.current.scrollTop = 0; // Scroll to top since we reverse the list
+      // Scroll to top smoothly since we reverse the list (newest at top)
+      tickerScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
     }
-  }, [activityFeed.length]);
+  }, [activityFeed]);
 
   // Animate through all steps evenly when search completes
   useEffect(() => {
@@ -779,7 +792,10 @@ export default function SearchResults() {
                                   .slice()
                                   .reverse()
                                   .map((item, idx) => (
-                                    <div key={`${item.ts}-${idx}`} className="text-sm">
+                                    <div 
+                                      key={item.id} 
+                                      className="text-sm animate-in fade-in slide-in-from-top-2 duration-300"
+                                    >
                                       <p className="text-foreground/90">{item.message}</p>
                                       {item.detail && (
                                         <p className="text-xs text-muted-foreground mt-0.5">{item.detail}</p>
