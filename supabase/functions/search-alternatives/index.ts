@@ -999,7 +999,7 @@ async function runSearchWithStreaming(
             listing_url: matchUrl,
             listing_title: match.title || null,
             price: null,
-            confidence_score: aiResult.score,
+            confidence_score: aiResult.score / 100, // Store as decimal 0-1 for consistency
             image_url: match.thumbnail || null,
             images: match.thumbnail ? [match.thumbnail] : [],
             match_type: 'visual',
@@ -1072,8 +1072,9 @@ async function runSearchWithStreaming(
   resultsWithSavings.sort((a, b) => (b.savings_percentage ?? 0) - (a.savings_percentage ?? 0));
 
   // Save to DB
+  console.log(`Attempting to save ${resultsWithSavings.length} results to DB for search ${searchId}`);
   if (resultsWithSavings.length > 0) {
-    await supabase.from("search_results").insert(resultsWithSavings.map(r => ({
+    const insertData = resultsWithSavings.map(r => ({
       search_id: searchId,
       platform_name: r.platform_name,
       listing_url: r.listing_url,
@@ -1087,7 +1088,14 @@ async function runSearchWithStreaming(
       images: r.images,
       match_type: r.match_type,
       source_airbnb_image: r.source_airbnb_image || null,
-    })));
+    }));
+    console.log("Insert data:", JSON.stringify(insertData.map(d => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price }))));
+    const { data: insertedData, error: insertError } = await supabase.from("search_results").insert(insertData).select();
+    if (insertError) {
+      console.error("CRITICAL: Failed to insert search results:", insertError.message, insertError.details);
+    } else {
+      console.log(`SUCCESS: Inserted ${insertedData?.length || 0} results to search_results table`);
+    }
   }
 
   await supabase.from("searches").update({
