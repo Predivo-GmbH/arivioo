@@ -473,12 +473,82 @@ async function scrapePriceFromListing(
   checkOut: string,
   firecrawlApiKey: string,
 ): Promise<{ price: number | null; totalPrice: number | null; perNightRate: number | null }> {
-  try {
-    // Add dates to URL for price lookup
-    const urlWithDates = addDatesToUrl(url, checkIn, checkOut);
-    console.log("Scraping price from:", urlWithDates.slice(0, 100));
+  const nights = calculateNights(checkIn, checkOut);
 
-    const response = await fetch("https://api.firecrawl.dev/v1/scrape", {
+  const normalizeNumber = (raw: string): number | null => {
+    // Handles: 1,234.56 | 1.234,56 | 1234 | 1 234 | 1’234
+    let s = raw
+      .replace(/\u00a0/g, " ")
+      .replace(/[\s’']/g, "")
+      .trim();
+
+    // If both separators exist, decide decimal by the last occurrence
+    const lastComma = s.lastIndexOf(",");
+    const lastDot = s.lastIndexOf(".");
+
+    if (lastComma !== -1 && lastDot !== -1) {
+      if (lastComma > lastDot) {
+        // 1.234,56 => remove dots as thousands, comma as decimal
+        s = s.replace(/\./g, "").replace(/,/g, ".");
+      } else {
+        // 1,234.56 => remove commas as thousands
+        s = s.replace(/,/g, "");
+      }
+    } else if (lastComma !== -1 && lastDot === -1) {
+      // If comma looks like decimal separator (two digits after), convert to dot
+      const decimals = s.slice(lastComma + 1);
+      if (decimals.length === 2) s = s.replace(/,/g, ".");
+      else s = s.replace(/,/g, "");
+    } else {
+      // Only dot or none: keep dot as decimal, but remove thousands-style dots like 1.234 (no decimals)
+      const dotParts = s.split(".");
+      if (dotParts.length === 2 && dotParts[1].length === 3) {
+        s = s.replace(/\./g, "");
+      }
+    }
+
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    return n;
+  };
+
+  const tryExtract = (content: string): { extracted: number | null; isPerNight: boolean } => {
+    const currency = String.raw`(?:\$|€|£|CHF|USD|EUR|GBP|ZAR|AUD|CAD|NZD|SEK|NOK|DKK|PLN|CZK|HUF|R\$|R)`;
+    const amount = String.raw`(\d{1,3}(?:[\s,.’]\d{3})*(?:[\.,]\d{2})?|\d{2,6})`;
+
+    const patterns: Array<{ re: RegExp; perNight: boolean }> = [
+      // Per-night
+      { re: new RegExp(String.raw`(?:from\s*)?${currency}\s*${amount}\s*(?:per\s*night|/night|night)`, "i"), perNight: true },
+      { re: new RegExp(String.raw`(?:per\s*night|/night|night)\s*(?:from\s*)?${currency}\s*${amount}`, "i"), perNight: true },
+      { re: new RegExp(String.raw`(?:from\s*)?${amount}\s*${currency}\s*(?:per\s*night|/night|night)`, "i"), perNight: true },
+
+      // Total
+      { re: new RegExp(String.raw`total[:\s]*${currency}\s*${amount}`, "i"), perNight: false },
+      { re: new RegExp(String.raw`${currency}\s*${amount}\s*total`, "i"), perNight: false },
+      { re: new RegExp(String.raw`total[:\s]*${amount}\s*${currency}`, "i"), perNight: false },
+
+      // Generic fallback (useful for Booking/TripAdvisor text blocks)
+      { re: new RegExp(String.raw`${currency}\s*${amount}`, "i"), perNight: false },
+      { re: new RegExp(String.raw`${amount}\s*${currency}`, "i"), perNight: false },
+    ];
+
+    for (const p of patterns) {
+      const m = content.match(p.re);
+      if (!m) continue;
+      const raw = m[1];
+      const parsed = raw ? normalizeNumber(raw) : null;
+      if (!parsed || parsed <= 0 || parsed >= 50000) continue;
+      return { extracted: parsed, isPerNight: p.perNight };
+    }
+
+    return { extracted: null, isPerNight: false };
+  };
+
+  const fetchFirecrawl = async (opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number }) => {
+    const urlWithDates = addDatesToUrl(url, checkIn, checkOut);
+    console.log("Scraping price from:", urlWithDates.slice(0, 160));
+
+    const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${firecrawlApiKey}`,
@@ -486,78 +556,56 @@ async function scrapePriceFromListing(
       },
       body: JSON.stringify({
         url: urlWithDates,
-        formats: ["markdown"],
-        onlyMainContent: true,
-        waitFor: 3000, // Wait for dynamic content
+        formats: opts.formats,
+        onlyMainContent: opts.onlyMainContent,
+        waitFor: opts.waitFor,
       }),
     });
 
-    if (!response.ok) {
-      console.log("Firecrawl request failed:", response.status);
-      return { price: null, totalPrice: null, perNightRate: null };
+    if (!resp.ok) {
+      console.log("Firecrawl request failed:", resp.status);
+      return { markdown: "", html: "" };
     }
 
-    const data = await response.json();
-    const content = data.data?.markdown || data.markdown || "";
+    const data = await resp.json();
+    const markdown: string = data.data?.markdown || data.markdown || "";
+    const html: string = data.data?.html || data.html || "";
+    return { markdown, html };
+  };
 
-    if (!content) {
-      console.log("No content from Firecrawl");
-      return { price: null, totalPrice: null, perNightRate: null };
-    }
+  try {
+    // Pass 1: Fast scrape
+    const first = await fetchFirecrawl({ formats: ["markdown"], onlyMainContent: true, waitFor: 3500 });
+    let content = first.markdown || "";
 
-    // Extract price patterns from the content
-    const pricePatterns = [
-      // Total price patterns
-      /total[:\s]*[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i,
-      /[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*total/i,
-      // Per night patterns
-      /[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:per night|\/night|night)/i,
-      /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*[\$€£CHF]?\s*(?:per night|\/night)/i,
-      // Generic price pattern
-      /price[:\s]*[\$€£CHF]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/i,
-      /[\$€£CHF]\s*(\d{1,3}(?:,\d{3})*)/,
-    ];
+    let { extracted, isPerNight } = tryExtract(content);
 
-    let extractedPrice: number | null = null;
-    let isPerNight = false;
+    // Pass 2: Booking.com / TripAdvisor often hide price outside "main" content.
+    if (!extracted) {
+      const lower = url.toLowerCase();
+      const needsDeepScrape = lower.includes("booking.com") || lower.includes("tripadvisor.");
+      if (needsDeepScrape) {
+        const second = await fetchFirecrawl({ formats: ["markdown", "html"], onlyMainContent: false, waitFor: 6500 });
+        const htmlText = (second.html || "").replace(/<script[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ");
 
-    for (const pattern of pricePatterns) {
-      const match = content.match(pattern);
-      if (match) {
-        const priceStr = match[1].replace(/,/g, "");
-        extractedPrice = parseFloat(priceStr);
-
-        // Check if this is a per-night price
-        if (pattern.toString().includes("night")) {
-          isPerNight = true;
-        }
-
-        if (extractedPrice && extractedPrice > 0 && extractedPrice < 50000) {
-          console.log("Extracted price:", extractedPrice, isPerNight ? "(per night)" : "(total)");
-          break;
-        }
+        content = [second.markdown || "", htmlText].join("\n");
+        ({ extracted, isPerNight } = tryExtract(content));
       }
     }
 
-    if (!extractedPrice) {
-      return { price: null, totalPrice: null, perNightRate: null };
-    }
-
-    const nights = calculateNights(checkIn, checkOut);
+    if (!extracted) return { price: null, totalPrice: null, perNightRate: null };
 
     if (isPerNight) {
-      return {
-        price: extractedPrice,
-        totalPrice: extractedPrice * nights,
-        perNightRate: extractedPrice,
-      };
+      console.log("Extracted price:", extracted, "(per night)");
+      return { price: extracted, totalPrice: extracted * nights, perNightRate: extracted };
     }
 
-    return {
-      price: Math.round(extractedPrice / nights),
-      totalPrice: extractedPrice,
-      perNightRate: Math.round(extractedPrice / nights),
-    };
+    const perNight = Math.round(extracted / nights);
+    console.log("Extracted price:", extracted, "(total)");
+    return { price: perNight, totalPrice: extracted, perNightRate: perNight };
   } catch (error) {
     console.error("Price scraping error:", error);
     return { price: null, totalPrice: null, perNightRate: null };
@@ -1615,17 +1663,29 @@ serve(async (req) => {
       console.log("Step 4: Scraping prices from alternatives...");
       
       const pricedResults: typeof topAlternatives = [];
-      const toScrape = topAlternatives.slice(0, 5);
-      
+
+      // Scrape a bit more than 5, but prioritize Booking.com + TripAdvisor if present.
+      const prioritized = [...topAlternatives].sort((a, b) => {
+        const score = (p: string) => {
+          const l = p.toLowerCase();
+          if (l.includes("booking")) return 2;
+          if (l.includes("tripadvisor")) return 2;
+          return 0;
+        };
+        return score(b.platform_name) - score(a.platform_name);
+      });
+
+      const toScrape = prioritized.slice(0, 8);
+
       for (let i = 0; i < toScrape.length; i++) {
         const alt = toScrape[i];
         // Update status for each platform being scraped - now visible because sequential
         const platformSlug = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_");
-        await supabase.from("searches").update({ 
-          status: `scraping_price_${platformSlug}_${i + 1}_of_${toScrape.length}` 
+        await supabase.from("searches").update({
+          status: `scraping_price_${platformSlug}_${i + 1}_of_${toScrape.length}`
         }).eq("id", searchId);
         console.log(`Scraping price ${i + 1}/${toScrape.length} from ${alt.platform_name}...`);
-        
+
         const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
         pricedResults.push({
           ...alt,
