@@ -519,18 +519,19 @@ export default function SearchResults() {
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
   // Filter and sort results with strict price validation
-  // - Keep visually verified matches even if price scraping failed (so Booking.com/TripAdvisor matches still show)
+  // - Keep visually verified matches even if price scraping failed or returned garbage
   // - Keep text-only matches only when they have a valid price
   const validResults = results.filter((r) => {
     const isVisual = r.match_type === "visual";
+    const hasValidPrice = r.price && r.price >= 10; // Min €10/night for any real accommodation
 
-    // If visually verified but no price, still show it (marked as Price unavailable in UI)
-    if (isVisual && (!r.price || r.price <= 0)) return true;
+    // If visually verified but no valid price, still show it (marked as "—" in UI)
+    if (isVisual && !hasValidPrice) return true;
 
     // Otherwise require a valid price
-    if (!r.price || r.price <= 0) return false;
+    if (!hasValidPrice) return false;
 
-    const totalPrice = nights ? r.price * nights : r.price;
+    const totalPrice = nights ? r.price! * nights : r.price!;
 
     // If we have a reference price, validate against it
     if (airbnbGrandTotal) {
@@ -539,14 +540,13 @@ export default function SearchResults() {
       return totalPrice >= minReasonable && totalPrice <= maxReasonable;
     }
 
-    // Without reference, just ensure price is reasonable (> €10 per night)
-    return r.price >= 10;
+    return true;
   });
   
-  // Sort by price descending (most expensive first)
+  // Sort by price descending (most expensive first), treating invalid prices (< €10) as no price
   const sortedByPrice = [...validResults].sort((a, b) => {
-    const priceA = a.price || 0;
-    const priceB = b.price || 0;
+    const priceA = a.price && a.price >= 10 ? a.price : 0;
+    const priceB = b.price && b.price >= 10 ? b.price : 0;
     return priceB - priceA;
   });
 
@@ -554,8 +554,10 @@ export default function SearchResults() {
   const MAX_ALTERNATIVES = 6;
   let displayResults: SearchResult[] = sortedByPrice.slice(0, MAX_ALTERNATIVES);
 
-  const cheapestOverall = sortedByPrice.length
-    ? sortedByPrice.reduce((min, r) => (!min.price || (r.price && r.price < min.price)) ? r : min, sortedByPrice[0])
+  // Only consider valid prices (≥ €10) when finding cheapest
+  const resultsWithValidPrices = sortedByPrice.filter(r => r.price && r.price >= 10);
+  const cheapestOverall = resultsWithValidPrices.length
+    ? resultsWithValidPrices.reduce((min, r) => (r.price! < min.price!) ? r : min, resultsWithValidPrices[0])
     : null;
 
   if (cheapestOverall && !displayResults.some((r) => r.id === cheapestOverall.id)) {
@@ -567,9 +569,9 @@ export default function SearchResults() {
     }
   }
 
-  // Find cheapest result for unlock button
-  const cheapestResult = displayResults.length > 0
-    ? displayResults.reduce((min, r) => (!min.price || (r.price && r.price < min.price)) ? r : min, displayResults[0])
+  // Find cheapest result for unlock button (only valid prices)
+  const cheapestResult = resultsWithValidPrices.length > 0
+    ? resultsWithValidPrices.reduce((min, r) => (r.price! < min.price!) ? r : min, resultsWithValidPrices[0])
     : null;
 
   // Calculate potential savings
@@ -995,10 +997,10 @@ export default function SearchResults() {
                                     )}
                                   </td>
                                   <td className={`py-4 px-4 text-right font-semibold ${isCheapest ? 'text-success text-lg' : 'text-foreground'}`}>
-                                    {totalPrice ? `€${totalPrice}` : result.price ? `€${result.price}` : '—'}
+                                    {result.price && result.price >= 10 && totalPrice ? `€${totalPrice}` : '—'}
                                   </td>
                                   <td className={`py-4 px-4 text-right ${isCheapest ? 'text-success font-medium' : 'text-muted-foreground'}`}>
-                                    {result.price ? `€${result.price}/night` : '—'}
+                                    {result.price && result.price >= 10 ? `€${result.price}/night` : '—'}
                                   </td>
                                   <td className="py-4 px-4 hidden lg:table-cell">
                                     <span className={`text-xs ${isCheapest ? 'text-success flex items-center gap-1' : 'text-muted-foreground'}`}>
