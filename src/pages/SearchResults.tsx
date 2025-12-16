@@ -223,8 +223,6 @@ export default function SearchResults() {
         let pollId: number | null = null;
 
         try {
-          const { data: { session } } = await supabase.auth.getSession();
-
           // Reset to thinking phase
           setSearchPhase("thinking");
           setCurrentStep(-1);
@@ -251,26 +249,21 @@ export default function SearchResults() {
             }
           }, 900);
 
-          const response = await fetch(
-            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/search-alternatives`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-              },
-              signal: abortControllerRef.current.signal,
-              body: JSON.stringify({ searchId }),
-            },
-          );
+          const startedAt = Date.now();
+
+          const { data, error } = await supabase.functions.invoke("search-alternatives", {
+            body: { searchId },
+          });
 
           // Record actual duration
-          actualDurationRef.current = Date.now() - searchStartTimeRef.current;
+          actualDurationRef.current = Date.now() - startedAt;
 
-          const data = await response.json();
+          if (error) {
+            throw new Error(error.message || "Search failed");
+          }
 
-          if (!response.ok) {
-            throw new Error(data.error || "Search failed");
+          if (data && (data as any).success === false) {
+            throw new Error((data as any).error || "Search failed");
           }
 
           // Refresh search and results
