@@ -637,32 +637,56 @@ async function scrapePriceFromListing(
     return { extracted: null, isPerNight: false };
   };
 
-  const fetchFirecrawl = async (targetUrl: string, opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number }) => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const fetchFirecrawl = async (
+    targetUrl: string,
+    opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number },
+  ) => {
     console.log("Scraping price from:", targetUrl.slice(0, 160));
 
-    const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${firecrawlApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: targetUrl,
-        formats: opts.formats,
-        onlyMainContent: opts.onlyMainContent,
-        waitFor: opts.waitFor,
-      }),
-    });
+    // Firecrawl can rate-limit; retry with exponential backoff.
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${firecrawlApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: targetUrl,
+          formats: opts.formats,
+          onlyMainContent: opts.onlyMainContent,
+          waitFor: opts.waitFor,
+        }),
+      });
 
-    if (!resp.ok) {
-      console.log("Firecrawl request failed:", resp.status);
-      return { markdown: "", html: "" };
+      if (!resp.ok) {
+        console.log("Firecrawl request failed:", resp.status);
+
+        // Handle rate limits and transient errors
+        if ((resp.status === 429 || resp.status === 503 || resp.status === 504) && attempt < MAX_ATTEMPTS) {
+          const backoff = 800 * attempt * attempt + Math.floor(Math.random() * 250);
+          console.log(`Retrying Firecrawl in ${backoff}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+          await sleep(backoff);
+          continue;
+        }
+
+        return { markdown: "", html: "" };
+      }
+
+      const data = await resp.json();
+      const markdown: string = data.data?.markdown || data.markdown || "";
+      const html: string = data.data?.html || data.html || "";
+
+      // Gentle throttle to reduce bursts (helps avoid 429 during multi-date attempts)
+      await sleep(150);
+
+      return { markdown, html };
     }
 
-    const data = await resp.json();
-    const markdown: string = data.data?.markdown || data.markdown || "";
-    const html: string = data.data?.html || data.html || "";
-    return { markdown, html };
+    return { markdown: "", html: "" };
   };
 
   const tryScrapeDates = async (tryCheckIn: string, tryCheckOut: string): Promise<{ 

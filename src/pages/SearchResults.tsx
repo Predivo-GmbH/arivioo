@@ -906,11 +906,23 @@ export default function SearchResults() {
                           
                           {/* Progress bar for active step */}
                           {isActive && (
-                            <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                            <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
                               <div 
                                 className="h-full bg-primary rounded-full"
                                 style={{ width: `${stepProgress}%`, transition: 'width 50ms linear' }}
                               />
+                              <div
+                                className="absolute inset-0 pointer-events-none"
+                                aria-hidden="true"
+                              >
+                                <div
+                                  className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.25s_ease-in-out_infinite]"
+                                  style={{
+                                    backgroundImage:
+                                      'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
+                                  }}
+                                />
+                              </div>
                             </div>
                           )}
                           
@@ -930,6 +942,22 @@ export default function SearchResults() {
                   <p className="text-sm text-muted-foreground">
                     Preparing your results...
                   </p>
+                  <div className="mt-3 mx-auto max-w-xs">
+                    <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="absolute inset-0 pointer-events-none"
+                        aria-hidden="true"
+                      >
+                        <div
+                          className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.1s_ease-in-out_infinite]"
+                          style={{
+                            backgroundImage:
+                              'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
