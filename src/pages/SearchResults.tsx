@@ -167,6 +167,7 @@ export default function SearchResults() {
   const [hasCelebrated, setHasCelebrated] = useState(false);
   const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string; id: string }>>([]);
   const [showMoreExpensive, setShowMoreExpensive] = useState(false);
+  const [showNoPriceMatches, setShowNoPriceMatches] = useState(false);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -622,12 +623,12 @@ export default function SearchResults() {
   const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
-  // Filter and sort results (ONLY listings with valid prices)
-  // User requirement: listings without prices don't make sense for comparison.
-  const validResults = results.filter((r) => !!r.price && r.price >= 10);
+  // Separate results with and without valid prices
+  const resultsWithPrices = results.filter((r) => !!r.price && r.price >= 10);
+  const resultsWithoutPrices = results.filter((r) => !r.price || r.price < 10);
 
-  // Sort by price descending
-  const sortedByPrice = [...validResults].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
+  // Sort by price descending (for results with prices)
+  const sortedByPrice = [...resultsWithPrices].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
 
   // Separate results into cheaper (savings) and more expensive (no savings)
   // IMPORTANT: result.price is PER-NIGHT rate, must multiply by nights to get total
@@ -643,6 +644,9 @@ export default function SearchResults() {
     const alternativeTotal = r.price! * nights;
     return alternativeTotal >= airbnbGrandTotal;
   });
+
+  // For backward compatibility, validResults = results with prices
+  const validResults = resultsWithPrices;
 
   // Show up to 10 cheaper alternatives, while ensuring the cheapest is included
   const MAX_ALTERNATIVES = 10;
@@ -1155,6 +1159,61 @@ export default function SearchResults() {
                           </div>
                         )}
                       </div>
+                      )}
+
+                    {/* Additional matches without prices (in "Airbnb Best Price" view) */}
+                    {resultsWithoutPrices.length > 0 && (
+                      <div className="mt-6 pt-6 border-t border-border/50">
+                        <button
+                          onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
+                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
+                        >
+                          {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          <span>View {resultsWithoutPrices.length} additional match{resultsWithoutPrices.length !== 1 ? "es" : ""} (price unavailable)</span>
+                        </button>
+                        
+                        {showNoPriceMatches && (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <tbody>
+                                {resultsWithoutPrices.map((result) => (
+                                  <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
+                                    <td className="py-4 px-4">
+                                      <div className="flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                        <span className="font-medium text-foreground">{result.platform_name}</span>
+                                      </div>
+                                    </td>
+                                    <td className="py-4 px-4 text-center">
+                                      {result.match_type === "visual" && result.confidence_score ? (
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                          <Shield className="w-3 h-3" />
+                                          {Math.round(result.confidence_score * 100)}%
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                          <Info className="w-3 h-3" />
+                                          Text
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-4 px-4 text-right text-muted-foreground">
+                                      <span className="text-sm">Price unavailable</span>
+                                    </td>
+                                    <td className="py-4 px-4 text-center">
+                                      <Button variant="outline" size="sm" asChild>
+                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                          View <ExternalLink className="w-3 h-3 ml-1" />
+                                        </a>
+                                      </Button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {/* Search another button */}
@@ -1455,6 +1514,61 @@ export default function SearchResults() {
                         Always confirm details directly with the host before booking.
                       </p>
                     </div>
+
+                    {/* Additional matches without prices */}
+                    {resultsWithoutPrices.length > 0 && (
+                      <div className="mt-6 pt-6 border-t border-border/50">
+                        <button
+                          onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
+                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
+                        >
+                          {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          <span>View {resultsWithoutPrices.length} additional match{resultsWithoutPrices.length !== 1 ? "es" : ""} (price unavailable)</span>
+                        </button>
+                        
+                        {showNoPriceMatches && (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <tbody>
+                                {resultsWithoutPrices.map((result) => (
+                                  <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
+                                    <td className="py-4 px-4">
+                                      <div className="flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                        <span className="font-medium text-foreground">{result.platform_name}</span>
+                                      </div>
+                                    </td>
+                                    <td className="py-4 px-4 text-center">
+                                      {result.match_type === "visual" && result.confidence_score ? (
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                          <Shield className="w-3 h-3" />
+                                          {Math.round(result.confidence_score * 100)}%
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                          <Info className="w-3 h-3" />
+                                          Text
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-4 px-4 text-right text-muted-foreground">
+                                      <span className="text-sm">Price unavailable</span>
+                                    </td>
+                                    <td className="py-4 px-4 text-center">
+                                      <Button variant="outline" size="sm" asChild>
+                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                          View <ExternalLink className="w-3 h-3 ml-1" />
+                                        </a>
+                                      </Button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* More expensive alternatives are not shown (only cheaper-than-Airbnb results). */}
                   </>
