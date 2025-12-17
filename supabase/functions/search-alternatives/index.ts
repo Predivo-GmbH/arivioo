@@ -1340,93 +1340,122 @@ async function runSearchWithStreaming(
   if (firecrawlApiKey) {
     sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
     await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
-    
-    try {
-      // Use longer wait time for Airbnb's dynamic content
-      const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
-        method: 'POST',
+
+    const scrapeWithFirecrawl = async (formats: string[], waitForMs: number) => {
+      const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
         headers: {
-          'Authorization': `Bearer ${firecrawlApiKey}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${firecrawlApiKey}`,
+          "Content-Type": "application/json",
         },
-          body: JSON.stringify({
-            url: search.airbnb_url,
-            // Include screenshot so we can fall back to visual price reading when HTML/markdown omit dynamic totals.
-            formats: ['markdown', 'html', 'rawHtml', 'screenshot'],
-            onlyMainContent: false,
-            waitFor: 16000, // Airbnb pricing often renders late
-            timeout: 60000,
-          }),
+        body: JSON.stringify({
+          url: search.airbnb_url,
+          formats,
+          onlyMainContent: false,
+          waitFor: waitForMs,
+          timeout: 60000,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        console.error("Firecrawl scrape failed:", resp.status, errText.slice(0, 800));
+        return { ok: false as const, status: resp.status, errorText: errText };
+      }
+
+      const data = await resp.json().catch(() => null);
+      return { ok: true as const, data };
+    };
+
+    try {
+      // Attempt 1: full content + screenshot
+      let attempt = await scrapeWithFirecrawl(["markdown", "html", "rawHtml", "screenshot"], 16000);
+
+      // Attempt 2: retry with longer wait (Airbnb sometimes renders totals very late)
+      if (!attempt.ok) {
+        sendProgress(controller, "Loading Airbnb listing", "Retrying with longer wait");
+        attempt = await scrapeWithFirecrawl(["screenshot", "html", "rawHtml"], 25000);
+      }
+
+      if (attempt.ok) {
+        const firecrawlData = attempt.data;
+        const markdown = firecrawlData?.data?.markdown || "";
+        const html = firecrawlData?.data?.html || "";
+        const rawHtml = firecrawlData?.data?.rawHtml || html;
+        const screenshotBase64: string | null = firecrawlData?.data?.screenshot || null;
+
+        console.log(
+          "Firecrawl received. markdown:",
+          markdown.length,
+          "html:",
+          html.length,
+          "screenshot:",
+          !!screenshotBase64
+        );
+
+        // Extract title
+        const metaTitle = firecrawlData?.data?.metadata?.title;
+        if (metaTitle) {
+          airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        }
+
+        // Extract images
+        const imagePatterns = [
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
+          /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
+        ];
+
+        const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+        let allImages: string[] = [];
+        for (const pattern of imagePatterns) {
+          allImages.push(...((rawHtml || html).match(pattern) || []));
+        }
+        const unique = [...new Set(allImages.map(canonicalize))];
+        imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+
+        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, {
+          imageCount: imageUrls.length,
         });
-        
-        if (firecrawlResponse.ok) {
-          const firecrawlData = await firecrawlResponse.json();
-          const markdown = firecrawlData.data?.markdown || '';
-          const html = firecrawlData.data?.html || '';
-          const rawHtml = firecrawlData.data?.rawHtml || html;
-          const screenshotBase64: string | null = firecrawlData.data?.screenshot || null;
 
-          console.log("Firecrawl received. markdown:", markdown.length, "html:", html.length, "screenshot:", !!screenshotBase64);
+        // Extract price
+        sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
+        await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
-          // Extract title
-          const metaTitle = firecrawlData.data?.metadata?.title;
-          if (metaTitle) {
-            airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        // 1) HTML/Raw HTML (JSON-LD / embedded data)
+        airbnbPrice = extractPriceWithRegex(rawHtml || html, nights);
+
+        // 2) Markdown
+        if (!airbnbPrice && markdown.length > 100) {
+          airbnbPrice = extractPriceWithRegex(markdown, nights);
+        }
+
+        // 3) Screenshot (dynamic totals)
+        if (!airbnbPrice && screenshotBase64) {
+          sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading it from the rendered page");
+          const total = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
+          if (total) {
+            const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
+            airbnbPrice = perNight;
+            console.log("Derived per-night from screenshot total:", total, "->", perNight);
           }
+        }
 
-          // Extract images
-          const imagePatterns = [
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-          ];
+        // 4) AI over combined text
+        if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
+          sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
+          airbnbPrice = await extractAirbnbPriceWithAI(
+            [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
+            nights
+          );
+        }
 
-          const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-          let allImages: string[] = [];
-          for (const pattern of imagePatterns) {
-            allImages.push(...((rawHtml || html).match(pattern) || []));
-          }
-          const unique = [...new Set(allImages.map(canonicalize))];
-          imageUrls = unique.filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
+        if (airbnbPrice) {
+          sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
 
-          sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, { imageCount: imageUrls.length });
-
-          // Extract price: prefer totals (incl. fees) by reading from HTML/JSON-LD; fallback to screenshot; last fallback to AI over text.
-          sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
-          await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
-
-          // 1) HTML/Raw HTML (best chance to include JSON-LD / embedded data)
-          airbnbPrice = extractPriceWithRegex(rawHtml || html, nights);
-
-          // 2) Markdown
-          if (!airbnbPrice && markdown.length > 100) {
-            airbnbPrice = extractPriceWithRegex(markdown, nights);
-          }
-
-          // 3) Screenshot (most reliable for dynamic totals)
-          if (!airbnbPrice && screenshotBase64) {
-            sendProgress(controller, "Extracting Airbnb price", "Price is dynamic  reading it from the rendered page");
-            const total = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
-            if (total) {
-              const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
-              airbnbPrice = perNight;
-              console.log("Derived per-night from screenshot total:", total, "->", perNight);
-            }
-          }
-
-          // 4) AI over combined text
-          if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
-            sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
-            airbnbPrice = await extractAirbnbPriceWithAI(
-              [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
-              nights
-            );
-          }
-
-          if (airbnbPrice) {
-            sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
-
-            await supabase.from("searches").update({
+          await supabase
+            .from("searches")
+            .update({
               airbnb_title: airbnbTitle,
               airbnb_price: airbnbPrice,
               airbnb_image_url: imageUrls[0] || null,
@@ -1434,13 +1463,18 @@ async function runSearchWithStreaming(
               check_in_date: checkIn,
               check_out_date: checkOut,
               nights_count: nights,
-            }).eq("id", searchId);
-          } else {
-            console.log("Price extraction failed for URL:", search.airbnb_url);
-          }
+            })
+            .eq("id", searchId);
+        } else {
+          console.log("Price extraction failed for URL:", search.airbnb_url);
         }
+      } else {
+        // Firecrawl failed twice; we'll fall back to direct fetch.
+        sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
+      }
     } catch (e) {
       console.error("Firecrawl error:", e);
+      sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
     }
   }
 
