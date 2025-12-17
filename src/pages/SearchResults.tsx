@@ -1066,6 +1066,52 @@ export default function SearchResults() {
                           Search Another Property
                         </Link>
                       </Button>
+
+                      {/* Collapsible more expensive alternatives */}
+                      {validResults.length > 0 && (
+                        <div className="mt-8 pt-6 border-t border-border/50">
+                          <button
+                            onClick={() => setShowMoreExpensive(!showMoreExpensive)}
+                            className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mx-auto"
+                          >
+                            {showMoreExpensive ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                            <span>View {validResults.length} more expensive alternative{validResults.length !== 1 ? "s" : ""}</span>
+                          </button>
+                          
+                          {showMoreExpensive && (
+                            <div className="mt-4 space-y-3">
+                              {validResults.map((result) => (
+                                <div key={result.id} className="p-4 rounded-xl border border-border/50 bg-muted/30 text-left">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-2">
+                                      <Globe className="w-4 h-4 text-muted-foreground" />
+                                      <span className="font-medium text-foreground">{result.platform_name}</span>
+                                      {result.match_type === "visual" && result.confidence_score && (
+                                        <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-600">
+                                          {result.confidence_score}% match
+                                        </span>
+                                      )}
+                                    </div>
+                                    <span className="text-amber-600 text-sm font-medium">
+                                      +€{Math.round((result.price || 0) - (search?.airbnb_price ? search.airbnb_price * (nights || 1) * 1.14 : 0))} more
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-lg font-semibold text-foreground">
+                                      €{Math.round(result.price || 0)} total
+                                    </span>
+                                    <Button variant="outline" size="sm" asChild>
+                                      <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                        View <ExternalLink className="w-3 h-3 ml-1" />
+                                      </a>
+                                    </Button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : (
