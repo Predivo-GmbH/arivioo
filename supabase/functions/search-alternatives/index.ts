@@ -323,9 +323,10 @@ function extractPriceWithRegex(content: string, nights: number): number | null {
   return null;
 }
 
-// Use Lovable AI to extract Airbnb price from scraped content
+// Use Lovable AI to extract Airbnb TOTAL price (including mandatory fees) from scraped content.
+// Returns PER-NIGHT derived from total/nights when possible.
 async function extractAirbnbPriceWithAI(content: string, nights: number): Promise<number | null> {
-  // Try regex extraction first (faster and often more reliable)
+  // Try regex extraction first (fast path)
   const regexPrice = extractPriceWithRegex(content, nights);
   if (regexPrice) {
     console.log("Using regex-extracted price:", regexPrice);
@@ -337,27 +338,24 @@ async function extractAirbnbPriceWithAI(content: string, nights: number): Promis
     console.log("LOVABLE_API_KEY not available for AI price extraction");
     return null;
   }
-  
+
   try {
     const prompt = `You are analyzing text scraped from an Airbnb listing page.
 The stay is for exactly ${nights} night(s).
 
-From the content below, determine the actual price PER NIGHT for the selected stay.
+Goal: Extract the TOTAL price for the selected dates as shown by Airbnb (including cleaning fee, service fee, taxes if included in the displayed total).
 
 Rules:
-- If the page directly shows a per-night amount (e.g. "€176 per night" or "176 CHF/night"), use that.
-- If only a total price for the entire stay is shown (e.g. "Total before taxes: €352" for ${nights} nights), compute the per-night price by dividing the total by ${nights}.
-- Look for patterns like "€X night", "$X per night", "X CHF/night", "nightly rate: X"
-- Ignore service fees, cleaning fees, taxes and security deposits when they are listed separately.
-- Ignore crossed-out / discounted "original" prices and use the final price actually charged.
+- Prefer the final TOTAL shown (e.g. "Total", "Total before taxes", or the checkout total).
+- If multiple totals appear, choose the total that represents what the guest will pay for the stay.
+- If only a per-night price is shown, compute total = perNight * ${nights}.
+- If you can only find "Total before taxes", return that (better than nothing).
 
 Content:
 ${content.slice(0, 12000)}
 
-Return ONLY a single number representing the final price per night in the listing's currency (e.g., "125" for €125/night).
-If you cannot find a reliable per-night price, return "null".
-Do not include currency symbols or units - just the number.`;
-
+Return ONLY a single number representing the TOTAL price for the stay (no currency symbol).
+If you cannot find a reliable total, return "null".`;
 
     const response = await fetchWithTimeout(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
@@ -375,31 +373,92 @@ Do not include currency symbols or units - just the number.`;
       },
       15_000
     );
-    
+
     if (!response.ok) {
       console.error("Lovable AI request failed:", response.status);
       return null;
     }
-    
+
     const data = await response.json();
-    const priceText = data.choices?.[0]?.message?.content?.trim();
-    
-    if (!priceText || priceText.toLowerCase() === "null") {
-      console.log("AI could not extract price from content");
+    const totalText = data.choices?.[0]?.message?.content?.trim();
+
+    if (!totalText || totalText.toLowerCase() === "null") {
+      console.log("AI could not extract total price from content");
       return null;
     }
-    
-    // Parse the price
-    const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
-    if (isNaN(price) || price < 10 || price > 5000) {
-      console.log("AI returned invalid price:", priceText);
+
+    const total = parseFloat(totalText.replace(/[^0-9.]/g, ""));
+    if (isNaN(total) || total < 20 || total > 200000) {
+      console.log("AI returned invalid total:", totalText);
       return null;
     }
-    
-    console.log("AI extracted price:", price, "per night");
-    return price;
+
+    const perNight = nights > 0 ? total / nights : total;
+    const rounded = Math.round(perNight * 100) / 100;
+    console.log("AI extracted total:", total, "-> per night:", rounded);
+    return rounded;
   } catch (error) {
     console.error("AI price extraction error:", error);
+    return null;
+  }
+}
+
+// Screenshot-based fallback: ask the multimodal model to read the total from the rendered page.
+async function extractAirbnbTotalFromScreenshotBase64(screenshotBase64: string, nights: number): Promise<number | null> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!lovableApiKey) return null;
+
+  try {
+    const prompt = `This is a screenshot of an Airbnb listing page with dates already selected.
+
+Task:
+1) Read the TOTAL price for the stay shown on the page (prefer the final total a guest pays; if only "Total before taxes" is visible, return that).
+2) Return ONLY the total number (no currency symbols).
+If you cannot find a total price in the screenshot, return "null".`;
+
+    const imageUrl = `data:image/png;base64,${screenshotBase64}`;
+
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          max_tokens: 50,
+        }),
+      },
+      20_000
+    );
+
+    if (!response.ok) {
+      console.error("Screenshot AI request failed:", response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    const totalText = data.choices?.[0]?.message?.content?.trim();
+    if (!totalText || totalText.toLowerCase() === "null") return null;
+
+    const total = parseFloat(totalText.replace(/[^0-9.]/g, ""));
+    if (isNaN(total) || total < 20 || total > 200000) return null;
+
+    console.log("Screenshot extracted total:", total);
+    return total;
+  } catch (e) {
+    console.error("Screenshot price extraction error:", e);
     return null;
   }
 }
@@ -1290,81 +1349,96 @@ async function runSearchWithStreaming(
           'Authorization': `Bearer ${firecrawlApiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          url: search.airbnb_url,
-          formats: ['markdown', 'html', 'rawHtml'],
-          onlyMainContent: false,
-          waitFor: 12000, // Increased wait time for price to load (Airbnb is slow)
-          timeout: 45000,
-        }),
-      });
-      
-      if (firecrawlResponse.ok) {
-        const firecrawlData = await firecrawlResponse.json();
-        const markdown = firecrawlData.data?.markdown || '';
-        const html = firecrawlData.data?.html || '';
-        const rawHtml = firecrawlData.data?.rawHtml || html;
-
-        // Extract title
-        const metaTitle = firecrawlData.data?.metadata?.title;
-        if (metaTitle) {
-          airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-        }
-
-        // Extract images
-        const imagePatterns = [
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-        ];
-
-        const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-        let allImages: string[] = [];
-        for (const pattern of imagePatterns) {
-          allImages.push(...((rawHtml || html).match(pattern) || []));
-        }
-        const unique = [...new Set(allImages.map(canonicalize))];
-        imageUrls = unique.filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
-
-        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, { imageCount: imageUrls.length });
-
-        // Extract price - try from HTML first (JSON-LD and raw content), then markdown, then AI
-        console.log("Firecrawl content sizes - markdown:", markdown.length, "html:", html.length);
+          body: JSON.stringify({
+            url: search.airbnb_url,
+            // Include screenshot so we can fall back to visual price reading when HTML/markdown omit dynamic totals.
+            formats: ['markdown', 'html', 'rawHtml', 'screenshot'],
+            onlyMainContent: false,
+            waitFor: 16000, // Airbnb pricing often renders late
+            timeout: 60000,
+          }),
+        });
         
-        sendProgress(controller, "Extracting Airbnb price", "Analyzing page content for pricing");
-        await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
-        
-        // Try HTML first (has JSON-LD and raw price data)
-        airbnbPrice = extractPriceWithRegex(html || rawHtml, nights);
-        
-        // Try markdown if HTML didn't work
-        if (!airbnbPrice && markdown.length > 100) {
-          airbnbPrice = extractPriceWithRegex(markdown, nights);
-        }
-        
-        // Fall back to AI extraction if regex failed
-        if (!airbnbPrice && markdown.length > 100) {
-          sendProgress(controller, "Using AI for price extraction", "Regex extraction failed, trying AI analysis");
-          airbnbPrice = await extractAirbnbPriceWithAI(markdown + "\n\n" + (html || '').slice(0, 10000), nights);
-        }
-        
-        if (airbnbPrice) {
-          sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
+        if (firecrawlResponse.ok) {
+          const firecrawlData = await firecrawlResponse.json();
+          const markdown = firecrawlData.data?.markdown || '';
+          const html = firecrawlData.data?.html || '';
+          const rawHtml = firecrawlData.data?.rawHtml || html;
+          const screenshotBase64: string | null = firecrawlData.data?.screenshot || null;
 
-          // Persist baseline immediately so the UI can render the Airbnb listing even if the search is interrupted.
-          await supabase.from("searches").update({
-            airbnb_title: airbnbTitle,
-            airbnb_price: airbnbPrice,
-            airbnb_image_url: imageUrls[0] || null,
-            airbnb_images: imageUrls.slice(0, 5),
-            check_in_date: checkIn,
-            check_out_date: checkOut,
-            nights_count: nights,
-          }).eq("id", searchId);
-        } else {
-          console.log("Price extraction failed. First 500 chars of markdown:", markdown.slice(0, 500));
+          console.log("Firecrawl received. markdown:", markdown.length, "html:", html.length, "screenshot:", !!screenshotBase64);
+
+          // Extract title
+          const metaTitle = firecrawlData.data?.metadata?.title;
+          if (metaTitle) {
+            airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+          }
+
+          // Extract images
+          const imagePatterns = [
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
+          ];
+
+          const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+          let allImages: string[] = [];
+          for (const pattern of imagePatterns) {
+            allImages.push(...((rawHtml || html).match(pattern) || []));
+          }
+          const unique = [...new Set(allImages.map(canonicalize))];
+          imageUrls = unique.filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
+
+          sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, { imageCount: imageUrls.length });
+
+          // Extract price: prefer totals (incl. fees) by reading from HTML/JSON-LD; fallback to screenshot; last fallback to AI over text.
+          sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
+          await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
+
+          // 1) HTML/Raw HTML (best chance to include JSON-LD / embedded data)
+          airbnbPrice = extractPriceWithRegex(rawHtml || html, nights);
+
+          // 2) Markdown
+          if (!airbnbPrice && markdown.length > 100) {
+            airbnbPrice = extractPriceWithRegex(markdown, nights);
+          }
+
+          // 3) Screenshot (most reliable for dynamic totals)
+          if (!airbnbPrice && screenshotBase64) {
+            sendProgress(controller, "Extracting Airbnb price", "Price is dynamic  reading it from the rendered page");
+            const total = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
+            if (total) {
+              const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
+              airbnbPrice = perNight;
+              console.log("Derived per-night from screenshot total:", total, "->", perNight);
+            }
+          }
+
+          // 4) AI over combined text
+          if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
+            sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
+            airbnbPrice = await extractAirbnbPriceWithAI(
+              [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
+              nights
+            );
+          }
+
+          if (airbnbPrice) {
+            sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
+
+            await supabase.from("searches").update({
+              airbnb_title: airbnbTitle,
+              airbnb_price: airbnbPrice,
+              airbnb_image_url: imageUrls[0] || null,
+              airbnb_images: imageUrls.slice(0, 5),
+              check_in_date: checkIn,
+              check_out_date: checkOut,
+              nights_count: nights,
+            }).eq("id", searchId);
+          } else {
+            console.log("Price extraction failed for URL:", search.airbnb_url);
+          }
         }
-      }
     } catch (e) {
       console.error("Firecrawl error:", e);
     }
@@ -1404,8 +1478,11 @@ async function runSearchWithStreaming(
 
   // Abort if no price
   if (!airbnbPrice) {
-    sendProgress(controller, "Price unavailable", "Could not extract Airbnb price for your dates");
+    sendProgress(controller, "Price unavailable", "We couldn't read the total price Airbnb shows for those dates. Try different dates or try again in a minute.");
     await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
+    sendSSE(controller, "error", {
+      message: "We couldn't extract the Airbnb total for your selected dates. This can happen when Airbnb loads prices dynamically or blocks automated requests. Please try again, or change your dates and retry.",
+    });
     sendSSE(controller, "complete", { success: false, error: "AIRBNB_PRICE_UNAVAILABLE" });
     return;
   }
@@ -2114,7 +2191,7 @@ serve(async (req) => {
         JSON.stringify({
           success: false,
           error: "AIRBNB_PRICE_UNAVAILABLE",
-          message: "Could not extract Airbnb price for the selected dates, so we cannot compare alternatives.",
+          message: "We couldn't extract the Airbnb total price for the selected dates. Please try again, or pick different dates and retry.",
         }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
