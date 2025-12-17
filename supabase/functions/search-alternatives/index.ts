@@ -2218,10 +2218,12 @@ serve(async (req) => {
       const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
       const airbnbImages = imageUrls.slice(0, 5);
 
-      // Persist any candidates we found (visual or text)
-      if (alternatives.length > 0) {
+      // Filter to only results with valid prices before persisting
+      const resultsWithValidPrices = alternatives.filter(a => a.price && a.price >= 10);
+      
+      if (resultsWithValidPrices.length > 0) {
         await supabase.from("search_results").insert(
-          alternatives.map(r => ({
+          resultsWithValidPrices.map(r => ({
             search_id: searchId,
             platform_name: r.platform_name,
             listing_url: r.listing_url,
@@ -2235,6 +2237,9 @@ serve(async (req) => {
             images: r.images,
             match_type: r.match_type,
             source_airbnb_image: r.source_airbnb_image || null,
+            price_check_in: checkIn,
+            price_check_out: checkOut,
+            dates_differ: false,
           }))
         );
       }
@@ -2383,16 +2388,18 @@ serve(async (req) => {
     console.log(`Comparing prices for ${nights} nights: ${checkIn} to ${checkOut}`);
 
     // Step 4: Scrape prices from alternatives using Firecrawl (if available)
-    // Run SEQUENTIALLY so users can see each platform being scraped in real-time
-    let resultsWithPrices = topAlternatives;
+    // CRITICAL: Only listings WITH valid prices are stored (user requirement)
+    let resultsWithPrices: Array<typeof topAlternatives[0] & { 
+      price_check_in?: string; 
+      price_check_out?: string; 
+      dates_differ?: boolean;
+    }> = [];
     
     if (firecrawlApiKey && topAlternatives.length > 0) {
       await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
-      console.log("Step 4: Scraping prices from alternatives...");
-      
-      const pricedResults: typeof topAlternatives = [];
+      console.log("Step 4: Scraping prices from alternatives (only listings with valid prices will be shown)...");
 
-      // Scrape a bit more than 5, but prioritize Booking.com + TripAdvisor if present.
+      // Prioritize Booking.com + TripAdvisor if present.
       const prioritized = [...topAlternatives].sort((a, b) => {
         const score = (p: string) => {
           const l = p.toLowerCase();
@@ -2403,11 +2410,10 @@ serve(async (req) => {
         return score(b.platform_name) - score(a.platform_name);
       });
 
-      const toScrape = prioritized.slice(0, 8);
+      const toScrape = prioritized.slice(0, 10); // Scrape more to increase chance of getting prices
 
       for (let i = 0; i < toScrape.length; i++) {
         const alt = toScrape[i];
-        // Update status for each platform being scraped - now visible because sequential
         const platformSlug = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_");
         await supabase.from("searches").update({
           status: `scraping_price_${platformSlug}_${i + 1}_of_${toScrape.length}`
@@ -2415,21 +2421,28 @@ serve(async (req) => {
         console.log(`Scraping price ${i + 1}/${toScrape.length} from ${alt.platform_name}...`);
 
         const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
-        pricedResults.push({
-          ...alt,
-          price: priceData.perNightRate,
-          total_price: priceData.totalPrice,
-          per_night_rate: priceData.perNightRate,
-        });
+        
+        // CRITICAL: Only add listings with valid prices (>= 10 per night)
+        if (priceData.perNightRate && priceData.perNightRate >= 10) {
+          console.log(`✓ Valid price found: €${priceData.perNightRate}/night for ${alt.platform_name} (dates: ${priceData.usedCheckIn} to ${priceData.usedCheckOut}${priceData.datesDiffer ? ' - DIFFERENT DATES' : ''})`);
+          resultsWithPrices.push({
+            ...alt,
+            price: priceData.perNightRate,
+            total_price: priceData.totalPrice,
+            per_night_rate: priceData.perNightRate,
+            price_check_in: priceData.usedCheckIn,
+            price_check_out: priceData.usedCheckOut,
+            dates_differ: priceData.datesDiffer,
+          });
+        } else {
+          console.log(`✗ No valid price for ${alt.platform_name} - excluding from results`);
+        }
       }
       
-      // Merge priced results with remaining unpriced ones
-      resultsWithPrices = [
-        ...pricedResults,
-        ...topAlternatives.slice(5),
-      ];
-      
-      console.log("Price scraping complete. Results with prices:", pricedResults.filter(r => r.price).length);
+      console.log(`Price scraping complete. ${resultsWithPrices.length}/${toScrape.length} listings have valid prices.`);
+    } else if (topAlternatives.length > 0) {
+      // No Firecrawl API key - cannot scrape prices, so no results can be shown
+      console.log("No Firecrawl API key available - cannot scrape prices, no results will be shown");
     }
 
     // Calculate savings based on Airbnb price
@@ -2467,7 +2480,9 @@ serve(async (req) => {
       return scoreB - scoreA;
     });
 
+    // Only store results that have valid prices (this is already filtered in step 4)
     if (resultsWithSavings.length > 0) {
+      console.log(`Storing ${resultsWithSavings.length} results with valid prices`);
       await supabase.from("search_results").insert(
         resultsWithSavings.map(r => ({
           search_id: searchId,
@@ -2483,8 +2498,13 @@ serve(async (req) => {
           images: r.images,
           match_type: r.match_type,
           source_airbnb_image: r.source_airbnb_image || null,
+          price_check_in: r.price_check_in || checkIn,
+          price_check_out: r.price_check_out || checkOut,
+          dates_differ: r.dates_differ || false,
         }))
       );
+    } else {
+      console.log("No results with valid prices to store");
     }
 
     await supabase.from("searches").update({ 
