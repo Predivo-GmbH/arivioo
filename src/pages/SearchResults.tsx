@@ -1025,28 +1025,74 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </div>
-                ) : (search?.status === "completed" && results.length === 0) ? (
-                  <div className="py-12 text-center">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
-                      <AlertCircle className="w-8 h-8 text-muted-foreground" />
+) : (search?.status === "completed" && results.length === 0) ? (
+                  <>
+                    {/* No alternatives found, but still show Airbnb baseline */}
+                    <div className="mb-6 p-4 rounded-xl bg-muted/40 border border-border">
+                      <h3 className="text-lg font-semibold text-foreground mb-1">No Alternative Listings Found</h3>
+                      <p className="text-sm text-muted-foreground">
+                        We couldn’t find this property on other platforms using photo matching. Airbnb is likely your best option for this stay.
+                      </p>
                     </div>
-                    <h3 className="text-xl font-semibold text-foreground mb-2">
-                      No Alternative Listings Found
-                    </h3>
-                    <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                      We couldn't find this property on Booking.com, Vrbo, or other platforms using photo matching and property details.
-                      It might be exclusive to Airbnb or listed under a different name elsewhere.
-                    </p>
-                    <p className="text-sm text-muted-foreground mb-6">
-                      This means Airbnb is likely your best option for this property!
-                    </p>
+
+                    <div className="overflow-x-auto mb-8">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-border">
+                            <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
+                            <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
+                            <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights || 1} nights)</th>
+                            <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
+                            <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Key Differences</th>
+                            <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr className="bg-primary/5 border-2 border-primary/20">
+                            <td className="py-4 px-4">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="w-2 h-2 rounded-full bg-primary" />
+                                <span className="font-medium text-foreground">Airbnb</span>
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/15 text-primary text-xs font-medium">
+                                  <Sparkles className="w-3 h-3" />
+                                  Baseline
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-4 px-4 text-center">
+                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs font-medium">
+                                <Shield className="w-3 h-3" />
+                                Baseline
+                              </span>
+                            </td>
+                            <td className="py-4 px-4 text-right font-semibold text-foreground text-lg">
+                              €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
+                            </td>
+                            <td className="py-4 px-4 text-right text-foreground font-medium">
+                              €{referencePrice ? Math.round(referencePrice) : "—"}/night
+                            </td>
+                            <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
+                              <span className="text-xs">AirCover protection, service fee, cleaning fee may apply</span>
+                            </td>
+                            <td className="py-4 px-4 text-center">
+                              <Button size="sm" asChild>
+                                <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
+                                  View on Airbnb <ExternalLink className="w-3 h-3 ml-1" />
+                                </a>
+                              </Button>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
                     <Button asChild>
                       <Link to="/dashboard">
                         <Search className="w-4 h-4 mr-2" />
                         Try Another Search
                       </Link>
                     </Button>
-                  </div>
+                  </>
                 ) : (search?.status === "completed" && displayResults.length === 0) ? (
                   /* Alternatives exist but none are cheaper than Airbnb - use same table layout */
                   <>
