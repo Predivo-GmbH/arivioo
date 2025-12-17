@@ -1767,7 +1767,7 @@ serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const serpApiKey = Deno.env.get("SERPAPI_API_KEY");
-    const firecrawlApiKey = Deno.env.get("FIRECRAWL_API_KEY");
+    const firecrawlApiKey = Deno.env.get("FIRECRAWL_API_KEY_1") || Deno.env.get("FIRECRAWL_API_KEY");
 
     if (!serpApiKey) {
       return new Response(
