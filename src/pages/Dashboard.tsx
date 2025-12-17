@@ -28,40 +28,6 @@ const getFirstImage = (json: Json | null | undefined): string | null => {
   return null;
 };
 
-// Helper to check if URL contains dates
-const extractDatesFromUrl = (url: string): { checkIn: string | null; checkOut: string | null } => {
-  try {
-    const urlObj = new URL(url);
-    const checkIn = urlObj.searchParams.get("check_in");
-    const checkOut = urlObj.searchParams.get("check_out");
-    return { checkIn, checkOut };
-  } catch {
-    return { checkIn: null, checkOut: null };
-  }
-};
-
-const validateAirbnbUrl = (url: string): { valid: boolean; error?: string } => {
-  if (!url.trim()) {
-    return { valid: false, error: "Please enter an Airbnb URL" };
-  }
-  
-  // Check if it's an Airbnb URL
-  if (!url.includes("airbnb.")) {
-    return { valid: false, error: "Please enter a valid Airbnb URL" };
-  }
-  
-  // Check for dates
-  const { checkIn, checkOut } = extractDatesFromUrl(url);
-  if (!checkIn || !checkOut) {
-    return { 
-      valid: false, 
-      error: "Please include dates in your Airbnb URL. Select your dates on Airbnb first, then copy the full URL (it should contain check_in and check_out parameters)." 
-    };
-  }
-  
-  return { valid: true };
-};
-
 export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
   const [url, setUrl] = useState("");
@@ -79,18 +45,6 @@ export default function Dashboard() {
   // Auto-trigger search when URL is set from params and user is ready
   useEffect(() => {
     if (urlFromParams && user && !autoSearching && !loading) {
-      // Validate URL including date check
-      const validation = validateAirbnbUrl(urlFromParams);
-      if (!validation.valid) {
-        toast({ 
-          title: "Invalid URL", 
-          description: validation.error, 
-          variant: "destructive" 
-        });
-        setSearchParams({});
-        return;
-      }
-
       setAutoSearching(true);
       setUrl(urlFromParams);
       
@@ -154,18 +108,7 @@ export default function Dashboard() {
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) return;
-
-    // Validate URL including date check
-    const validation = validateAirbnbUrl(url);
-    if (!validation.valid) {
-      toast({ 
-        title: "Invalid URL", 
-        description: validation.error, 
-        variant: "destructive" 
-      });
-      return;
-    }
+    if (!url.trim() || !user) return;
 
     setLoading(true);
     try {
