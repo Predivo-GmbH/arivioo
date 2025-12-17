@@ -2423,8 +2423,8 @@ serve(async (req) => {
     console.log(`Comparing prices for ${nights} nights: ${checkIn} to ${checkOut}`);
 
     // Step 4: Scrape prices from alternatives using Firecrawl (if available)
-    // CRITICAL: Only listings WITH valid prices are stored (user requirement)
-    let resultsWithPrices: Array<typeof topAlternatives[0] & { 
+    // IMPORTANT: Store ALL visual matches - prices are optional, not required for display
+    let resultsWithPriceAttempts: Array<typeof topAlternatives[0] & { 
       price_check_in?: string; 
       price_check_out?: string; 
       dates_differ?: boolean;
@@ -2432,7 +2432,7 @@ serve(async (req) => {
     
     if (firecrawlApiKey && topAlternatives.length > 0) {
       await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
-      console.log("Step 4: Scraping prices from alternatives (only listings with valid prices will be shown)...");
+      console.log("Step 4: Scraping prices from alternatives...");
 
       // Prioritize Booking.com + TripAdvisor if present.
       const prioritized = [...topAlternatives].sort((a, b) => {
@@ -2457,31 +2457,40 @@ serve(async (req) => {
 
         const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
         
-        // CRITICAL: Only add listings with valid prices (>= 10 per night)
-        if (priceData.perNightRate && priceData.perNightRate >= 10) {
-          console.log(`✓ Valid price found: €${priceData.perNightRate}/night for ${alt.platform_name} (dates: ${priceData.usedCheckIn} to ${priceData.usedCheckOut}${priceData.datesDiffer ? ' - DIFFERENT DATES' : ''})`);
-          resultsWithPrices.push({
-            ...alt,
-            price: priceData.perNightRate,
-            total_price: priceData.totalPrice,
-            per_night_rate: priceData.perNightRate,
-            price_check_in: priceData.usedCheckIn,
-            price_check_out: priceData.usedCheckOut,
-            dates_differ: priceData.datesDiffer,
-          });
+        // Store ALL results - price is optional (null is OK)
+        const hasValidPrice = priceData.perNightRate && priceData.perNightRate >= 10;
+        if (hasValidPrice) {
+          console.log(`✓ Valid price found: €${priceData.perNightRate}/night for ${alt.platform_name}`);
         } else {
-          console.log(`✗ No valid price for ${alt.platform_name} - excluding from results`);
+          console.log(`○ No price extracted for ${alt.platform_name} - will still store match`);
         }
+        
+        resultsWithPriceAttempts.push({
+          ...alt,
+          price: hasValidPrice ? priceData.perNightRate : null,
+          total_price: hasValidPrice ? priceData.totalPrice : null,
+          per_night_rate: hasValidPrice ? priceData.perNightRate : null,
+          price_check_in: priceData.usedCheckIn || checkIn,
+          price_check_out: priceData.usedCheckOut || checkOut,
+          dates_differ: priceData.datesDiffer || false,
+        });
       }
       
-      console.log(`Price scraping complete. ${resultsWithPrices.length}/${toScrape.length} listings have valid prices.`);
+      const withPrices = resultsWithPriceAttempts.filter(r => r.price && r.price >= 10).length;
+      console.log(`Price scraping complete. ${withPrices}/${toScrape.length} listings have valid prices.`);
     } else if (topAlternatives.length > 0) {
-      // No Firecrawl API key - cannot scrape prices, so no results can be shown
-      console.log("No Firecrawl API key available - cannot scrape prices, no results will be shown");
+      // No Firecrawl API key - store all matches without prices
+      console.log("No Firecrawl API key available - storing visual matches without prices");
+      resultsWithPriceAttempts = topAlternatives.map(alt => ({
+        ...alt,
+        price_check_in: checkIn,
+        price_check_out: checkOut,
+        dates_differ: false,
+      }));
     }
 
     // Calculate savings based on Airbnb price
-    const resultsWithSavings = resultsWithPrices.map(alt => {
+    const resultsWithSavings = resultsWithPriceAttempts.map(alt => {
       let savingsAmount: number | null = null;
       let savingsPercentage: number | null = null;
       
