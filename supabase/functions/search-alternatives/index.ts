@@ -688,34 +688,38 @@ function isValidAirbnbUrl(url: string): boolean {
 // Check if an image URL is a valid property photo (not logo/favicon)
 function isValidPropertyImage(url: string): boolean {
   const lowercaseUrl = url.toLowerCase();
-  
+
   // Exclude favicons, logos, and platform assets
   const excludePatterns = [
-    "favicon", "logo", "icon", "brand", "platform-assets",
-    "airbnbplatformassets", "airbnb-platform-assets",
-    "sprite", "button", "arrow", "avatar", "profile",
-    "social", "badge", "marker", "pin", "placeholder"
+    "favicon",
+    "logo",
+    "icon",
+    "brand",
+    "platform-assets",
+    "airbnbplatformassets",
+    "airbnb-platform-assets",
+    "sprite",
+    "button",
+    "arrow",
+    "avatar",
+    "profile",
+    "social",
+    "badge",
+    "marker",
+    "pin",
+    "placeholder",
   ];
-  
-  if (excludePatterns.some(p => lowercaseUrl.includes(p))) {
-    return false;
-  }
-  
-  // Must be a muscache CDN image with reasonable size
-  if (!url.includes("muscache.com")) return false;
-  
-  // Must be in pictures folder (not assets)
-  if (!url.includes("/pictures/") && !url.includes("/im/pictures/")) return false;
-  
-  // Prefer hosting/miso format images (actual property photos)
-  const preferredPatterns = [
-    "/hosting/", "/miso/", "/BnbProperty/", "Hosting-"
-  ];
-  
-  return preferredPatterns.some(p => url.includes(p)) || 
-         // Or general property images with proper extensions
-         (/\.(jpg|jpeg|png|webp)/i.test(url) && url.length > 100);
+
+  if (excludePatterns.some((p) => lowercaseUrl.includes(p))) return false;
+
+  // Airbnb listing photos are hosted on muscache; accept any pictures URL.
+  if (!lowercaseUrl.includes("muscache.com")) return false;
+  if (!lowercaseUrl.includes("/im/pictures/")) return false;
+
+  // Accept common image types OR long CDN URLs with query params.
+  return /\.(jpg|jpeg|png|webp)(\?|$)/i.test(lowercaseUrl) || lowercaseUrl.length > 80;
 }
+
 
 // Extract dates from Airbnb URL
 function extractDatesFromUrl(url: string): { checkIn: string | null; checkOut: string | null } {
@@ -1399,11 +1403,10 @@ async function runSearchWithStreaming(
           airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
 
-        // Extract images
+        // Extract images (Airbnb rotates subdomains and path variants frequently)
         const imagePatterns = [
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
+          /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+          /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
         ];
 
         const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
@@ -1493,12 +1496,18 @@ async function runSearchWithStreaming(
         }
         
         if (imageUrls.length === 0) {
-          const patterns = [/https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi];
+          const patterns = [
+            /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+            /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+          ];
           let found: string[] = [];
           for (const p of patterns) found.push(...(html.match(p) || []));
-          imageUrls = [...new Set(found.map(u => u.split("?")[0]))].filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
+          imageUrls = [...new Set(found.map((u) => u.split("?")[0]))]
+            .filter(isValidPropertyImage)
+            .map((u) => `${u}?im_w=1200`)
+            .slice(0, 5);
         }
-        
+
         if (!airbnbPrice) {
           sendProgress(controller, "Extracting Airbnb price", "Using AI to find the exact price");
           airbnbPrice = await extractAirbnbPriceWithAI(html.slice(0, 15000), nights);
@@ -1524,8 +1533,25 @@ async function runSearchWithStreaming(
   // Abort if no images
   if (imageUrls.length === 0) {
     sendProgress(controller, "No images found", "Could not extract property images");
-    await supabase.from("searches").update({ status: "completed" }).eq("id", searchId);
-    sendSSE(controller, "complete", { success: true, results: [] });
+    await supabase
+      .from("searches")
+      .update({
+        status: "completed",
+        airbnb_title: airbnbTitle,
+        airbnb_price: airbnbPrice,
+        airbnb_image_url: null,
+        airbnb_images: [],
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        nights_count: nights,
+      })
+      .eq("id", searchId);
+    sendSSE(controller, "complete", {
+      success: true,
+      results: [],
+      airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, images: [] },
+      dates: { checkIn, checkOut, nights },
+    });
     return;
   }
 
