@@ -8,3 +8,6 @@ verify_jwt = true
 
 [functions.get-last-success]
 verify_jwt = false
+
+[functions.verify-bypass-password]
+verify_jwt = false
