@@ -1159,7 +1159,7 @@ export default function SearchResults() {
                           </div>
                         )}
                       </div>
-                      )}
+                    )}
 
                     {/* Additional matches without prices (in "Airbnb Best Price" view) */}
                     {resultsWithoutPrices.length > 0 && (
