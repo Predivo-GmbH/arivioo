@@ -22,6 +22,7 @@ import {
   Globe,
   DollarSign,
   Check,
+  CheckCircle,
   ArrowLeftRight,
   ChevronDown,
   ChevronUp
@@ -1010,6 +1011,62 @@ export default function SearchResults() {
                         Try Another Search
                       </Link>
                     </Button>
+                  </div>
+                ) : (search?.status === "completed" && displayResults.length === 0) ? (
+                  /* Alternatives exist but none are cheaper than Airbnb */
+                  <div className="py-12">
+                    {/* Airbnb baseline card */}
+                    <div className="max-w-xl mx-auto mb-8 p-6 rounded-2xl border-2 border-primary/20 bg-primary/5">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="w-10 h-10 rounded-full bg-[#FF5A5F]/10 flex items-center justify-center">
+                          <span className="text-[#FF5A5F] text-lg font-bold">A</span>
+                        </div>
+                        <div>
+                          <h3 className="font-semibold text-foreground">Airbnb</h3>
+                          <p className="text-sm text-muted-foreground">{search?.airbnb_title || "Original listing"}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-baseline gap-2 mb-2">
+                        <span className="text-3xl font-bold text-foreground">
+                          €{search?.airbnb_price ? Math.round(search.airbnb_price * (nights || 1) * 1.14) : "—"}
+                        </span>
+                        <span className="text-muted-foreground">total for {nights || 1} nights</span>
+                      </div>
+                      <p className="text-sm text-muted-foreground mb-4">
+                        €{search?.airbnb_price || "—"}/night + ~14% service fee
+                      </p>
+                      <Button className="w-full" asChild>
+                        <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
+                          Book on Airbnb
+                          <ExternalLink className="w-4 h-4 ml-2" />
+                        </a>
+                      </Button>
+                    </div>
+
+                    {/* Good news message */}
+                    <div className="max-w-xl mx-auto text-center">
+                      <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-500/10 flex items-center justify-center">
+                        <CheckCircle className="w-8 h-8 text-green-500" />
+                      </div>
+                      <h3 className="text-xl font-semibold text-foreground mb-2">
+                        Airbnb Has the Best Price
+                      </h3>
+                      <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+                        We found this property on {validResults.length} other platform{validResults.length !== 1 ? "s" : ""}, 
+                        but none offered a lower price than Airbnb. 
+                        You're already getting the best deal!
+                      </p>
+                      <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground mb-6">
+                        <Shield className="w-4 h-4" />
+                        <span>AirCover protection included with your Airbnb booking</span>
+                      </div>
+                      <Button variant="outline" asChild>
+                        <Link to="/dashboard">
+                          <Search className="w-4 h-4 mr-2" />
+                          Search Another Property
+                        </Link>
+                      </Button>
+                    </div>
                   </div>
                 ) : (
                   <>
