@@ -14,6 +14,24 @@ export type Database = {
   }
   public: {
     Tables: {
+      launch_signups: {
+        Row: {
+          created_at: string
+          email: string
+          id: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+          id?: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
+          id?: string
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           created_at: string
@@ -45,6 +63,7 @@ export type Database = {
         Row: {
           confidence_score: number | null
           created_at: string
+          dates_differ: boolean | null
           id: string
           image_url: string | null
           images: Json | null
@@ -54,6 +73,8 @@ export type Database = {
           original_price: number | null
           platform_name: string
           price: number | null
+          price_check_in: string | null
+          price_check_out: string | null
           savings_amount: number | null
           savings_percentage: number | null
           search_id: string
@@ -62,6 +83,7 @@ export type Database = {
         Insert: {
           confidence_score?: number | null
           created_at?: string
+          dates_differ?: boolean | null
           id?: string
           image_url?: string | null
           images?: Json | null
@@ -71,6 +93,8 @@ export type Database = {
           original_price?: number | null
           platform_name: string
           price?: number | null
+          price_check_in?: string | null
+          price_check_out?: string | null
           savings_amount?: number | null
           savings_percentage?: number | null
           search_id: string
@@ -79,6 +103,7 @@ export type Database = {
         Update: {
           confidence_score?: number | null
           created_at?: string
+          dates_differ?: boolean | null
           id?: string
           image_url?: string | null
           images?: Json | null
@@ -88,6 +113,8 @@ export type Database = {
           original_price?: number | null
           platform_name?: string
           price?: number | null
+          price_check_in?: string | null
+          price_check_out?: string | null
           savings_amount?: number | null
           savings_percentage?: number | null
           search_id?: string

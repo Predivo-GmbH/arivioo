@@ -11,6 +11,20 @@ const corsHeaders = {
 type SSEController = ReadableStreamDefaultController<Uint8Array>;
 const encoder = new TextEncoder();
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 12_000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Track if controller is still valid
 const controllerValid = new WeakSet<SSEController>();
 
@@ -51,6 +65,9 @@ interface SearchResult {
   total_price?: number | null;
   per_night_rate?: number | null;
   source_airbnb_image?: string | null; // The Airbnb image that was used for this match
+  price_check_in?: string | null; // Actual dates used for price (may differ from original)
+  price_check_out?: string | null;
+  dates_differ?: boolean; // True if different dates were used due to unavailability
 }
 
 // Use Lovable AI to compare two images and return similarity score (0-100)
@@ -95,27 +112,31 @@ Where:
 - isMatch: true only if score >= 90
 - explanation: 1-2 sentence reason for your assessment`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${lovableApiKey}`,
-        "Content-Type": "application/json",
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: airbnbImageUrl } },
+                { type: "image_url", image_url: { url: alternativeImageUrl } },
+              ],
+            },
+          ],
+          max_tokens: 200,
+        }),
       },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { 
-            role: "user", 
-            content: [
-              { type: "text", text: prompt },
-              { type: "image_url", image_url: { url: airbnbImageUrl } },
-              { type: "image_url", image_url: { url: alternativeImageUrl } }
-            ]
-          }
-        ],
-        max_tokens: 200,
-      }),
-    });
+      12_000
+    );
     
     if (!response.ok) {
       console.error("Lovable AI image comparison failed:", response.status);
@@ -154,73 +175,290 @@ Where:
   }
 }
 
-// Use Lovable AI to extract Airbnb price from scraped content
+// Try to extract price from JSON-LD structured data (most reliable for Airbnb)
+function extractPriceFromJsonLD(content: string): number | null {
+  try {
+    // Look for JSON-LD script tags
+    const jsonLdMatches = content.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+    if (jsonLdMatches) {
+      for (const match of jsonLdMatches) {
+        const jsonContent = match.replace(/<script[^>]*>|<\/script>/gi, '');
+        try {
+          const data = JSON.parse(jsonContent);
+          // Check for offers/price in structured data
+          if (data.offers?.price) {
+            const price = parseFloat(data.offers.price);
+            if (price >= 15 && price <= 5000) {
+              console.log("JSON-LD extracted price:", price);
+              return price;
+            }
+          }
+          if (data.priceRange) {
+            const priceMatch = data.priceRange.match(/\$?(\d+)/);
+            if (priceMatch) {
+              const price = parseFloat(priceMatch[1]);
+              if (price >= 15 && price <= 5000) {
+                console.log("JSON-LD priceRange extracted:", price);
+                return price;
+              }
+            }
+          }
+        } catch (e) {
+          // Continue to next JSON-LD block
+        }
+      }
+    }
+  } catch (e) {
+    console.error("JSON-LD extraction error:", e);
+  }
+  return null;
+}
+
+// Try to extract price with regex patterns first (faster, more reliable for common formats)
+function extractPriceWithRegex(content: string, nights: number): number | null {
+  console.log("Attempting regex price extraction, content length:", content.length);
+  
+  // First try JSON-LD structured data
+  const jsonLdPrice = extractPriceFromJsonLD(content);
+  if (jsonLdPrice) return jsonLdPrice;
+  
+  // Airbnb-specific patterns - they often show "$XXX night" or "$XXX per night"
+  const airbnbPatterns = [
+    // $123 night (Airbnb's common format)
+    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:night|\/night|per night)/gi,
+    // $123 x 2 nights = $246 (calculate per night from this)
+    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*x\s*\d+\s*night/gi,
+    // €123 night, £123 night
+    /[€£]\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:night|\/night|per night)/gi,
+  ];
+  
+  for (const pattern of airbnbPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      let priceStr = match[1].replace(/,/g, '');
+      const price = parseFloat(priceStr);
+      if (price >= 15 && price <= 5000) {
+        console.log("Airbnb pattern extracted per-night price:", price);
+        return price;
+      }
+    }
+  }
+  
+  // Common Airbnb price patterns - look for per-night prices
+  const perNightPatterns = [
+    // "priceString":"$399" or similar JSON patterns
+    /"(?:price|priceString|priceForDisplay|displayPrice)"[:\s]*"\$?(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)"/gi,
+    // "amount":399 or "price":399 in JSON
+    /"(?:amount|price|pricePerNight|nightlyPrice|basePrice)"[:\s]*(\d{1,4}(?:\.\d{2})?)/gi,
+    // €123 per night, $123/night, CHF 123 per night
+    /([€$£]|CHF|USD|EUR)\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per|\/)\s*night/gi,
+    // 123 € per night, 123 CHF/night
+    /(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*([€$£]|CHF|USD|EUR)\s*(?:per|\/)\s*night/gi,
+  ];
+  
+  for (const pattern of perNightPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      let priceStr = match[2] || match[1];
+      priceStr = priceStr.replace(/[^\d.,]/g, '').replace(',', '');
+      const price = parseFloat(priceStr);
+      if (price >= 15 && price <= 5000) {
+        console.log("Regex extracted per-night price:", price);
+        return price;
+      }
+    }
+  }
+  
+  // Look for total price patterns and divide by nights
+  const totalPatterns = [
+    // Total: $500, Total before taxes: $500
+    /total(?:\s+(?:before\s+)?(?:taxes|fees))?[:\s]*\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    // $500 total
+    /\$\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
+    // €500 total, £500 total
+    /[€£]\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
+  ];
+  
+  for (const pattern of totalPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      let priceStr = match[1].replace(/,/g, '');
+      const totalPrice = parseFloat(priceStr);
+      if (totalPrice >= 30 && totalPrice <= 50000 && nights > 0) {
+        const perNight = Math.round(totalPrice / nights);
+        if (perNight >= 15 && perNight <= 5000) {
+          console.log("Regex extracted total price:", totalPrice, "-> per night:", perNight);
+          return perNight;
+        }
+      }
+    }
+  }
+  
+  // Last resort: find any dollar amount that looks like a nightly rate
+  const anyPricePattern = /\$\s*(\d{2,4})(?:\.\d{2})?/g;
+  const allPrices: number[] = [];
+  let priceMatch;
+  while ((priceMatch = anyPricePattern.exec(content)) !== null) {
+    const price = parseFloat(priceMatch[1]);
+    if (price >= 30 && price <= 2000) {
+      allPrices.push(price);
+    }
+  }
+  
+  // If we found prices, return the most common one in a reasonable range
+  if (allPrices.length > 0) {
+    // Find mode (most frequent price)
+    const priceCount: Record<number, number> = {};
+    for (const p of allPrices) {
+      priceCount[p] = (priceCount[p] || 0) + 1;
+    }
+    const sortedPrices = Object.entries(priceCount).sort((a, b) => b[1] - a[1]);
+    if (sortedPrices.length > 0) {
+      const mostCommonPrice = parseFloat(sortedPrices[0][0]);
+      console.log("Found most common price from content:", mostCommonPrice);
+      return mostCommonPrice;
+    }
+  }
+  
+  return null;
+}
+
+// Use Lovable AI to extract Airbnb TOTAL price (including mandatory fees) from scraped content.
+// Returns PER-NIGHT derived from total/nights when possible.
 async function extractAirbnbPriceWithAI(content: string, nights: number): Promise<number | null> {
+  // Try regex extraction first (fast path)
+  const regexPrice = extractPriceWithRegex(content, nights);
+  if (regexPrice) {
+    console.log("Using regex-extracted price:", regexPrice);
+    return regexPrice;
+  }
+
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
   if (!lovableApiKey) {
     console.log("LOVABLE_API_KEY not available for AI price extraction");
     return null;
   }
-  
+
   try {
     const prompt = `You are analyzing text scraped from an Airbnb listing page.
 The stay is for exactly ${nights} night(s).
 
-From the content below, determine the actual price PER NIGHT for the selected stay.
+Goal: Extract the TOTAL price for the selected dates as shown by Airbnb (including cleaning fee, service fee, taxes if included in the displayed total).
 
 Rules:
-- If the page directly shows a per-night amount (e.g. "€176 per night" or "176 CHF/night"), use that.
-- If only a total price for the entire stay is shown (e.g. "Total before taxes: €352" for ${nights} nights), compute the per-night price by dividing the total by ${nights}.
-- Ignore service fees, cleaning fees, taxes and security deposits when they are listed separately.
-- Ignore crossed-out / discounted "original" prices and use the final price actually charged.
+- Prefer the final TOTAL shown (e.g. "Total", "Total before taxes", or the checkout total).
+- If multiple totals appear, choose the total that represents what the guest will pay for the stay.
+- If only a per-night price is shown, compute total = perNight * ${nights}.
+- If you can only find "Total before taxes", return that (better than nothing).
 
 Content:
-${content.slice(0, 8000)}
+${content.slice(0, 12000)}
 
-Return ONLY a single number representing the final price per night in the listing's currency (e.g., "125" for €125/night).
-If you cannot find a reliable per-night price, return "null".
-Do not include currency symbols or units - just the number.`;
+Return ONLY a single number representing the TOTAL price for the stay (no currency symbol).
+If you cannot find a reliable total, return "null".`;
 
-
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${lovableApiKey}`,
-        "Content-Type": "application/json",
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 50,
+        }),
       },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "user", content: prompt }
-        ],
-        max_tokens: 50,
-      }),
-    });
-    
+      15_000
+    );
+
     if (!response.ok) {
       console.error("Lovable AI request failed:", response.status);
       return null;
     }
-    
+
     const data = await response.json();
-    const priceText = data.choices?.[0]?.message?.content?.trim();
-    
-    if (!priceText || priceText.toLowerCase() === "null") {
-      console.log("AI could not extract price");
+    const totalText = data.choices?.[0]?.message?.content?.trim();
+
+    if (!totalText || totalText.toLowerCase() === "null") {
+      console.log("AI could not extract total price from content");
       return null;
     }
-    
-    // Parse the price
-    const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
-    if (isNaN(price) || price < 10 || price > 5000) {
-      console.log("AI returned invalid price:", priceText);
+
+    const total = parseFloat(totalText.replace(/[^0-9.]/g, ""));
+    if (isNaN(total) || total < 20 || total > 200000) {
+      console.log("AI returned invalid total:", totalText);
       return null;
     }
-    
-    console.log("AI extracted price:", price, "per night");
-    return price;
+
+    const perNight = nights > 0 ? total / nights : total;
+    const rounded = Math.round(perNight * 100) / 100;
+    console.log("AI extracted total:", total, "-> per night:", rounded);
+    return rounded;
   } catch (error) {
     console.error("AI price extraction error:", error);
+    return null;
+  }
+}
+
+// Screenshot-based fallback: ask the multimodal model to read the total from the rendered page.
+async function extractAirbnbTotalFromScreenshotBase64(screenshotBase64: string, nights: number): Promise<number | null> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!lovableApiKey) return null;
+
+  try {
+    const prompt = `This is a screenshot of an Airbnb listing page with dates already selected.
+
+Task:
+1) Read the TOTAL price for the stay shown on the page (prefer the final total a guest pays; if only "Total before taxes" is visible, return that).
+2) Return ONLY the total number (no currency symbols).
+If you cannot find a total price in the screenshot, return "null".`;
+
+    const imageUrl = `data:image/png;base64,${screenshotBase64}`;
+
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          max_tokens: 50,
+        }),
+      },
+      20_000
+    );
+
+    if (!response.ok) {
+      console.error("Screenshot AI request failed:", response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    const totalText = data.choices?.[0]?.message?.content?.trim();
+    if (!totalText || totalText.toLowerCase() === "null") return null;
+
+    const total = parseFloat(totalText.replace(/[^0-9.]/g, ""));
+    if (isNaN(total) || total < 20 || total > 200000) return null;
+
+    console.log("Screenshot extracted total:", total);
+    return total;
+  } catch (e) {
+    console.error("Screenshot price extraction error:", e);
     return null;
   }
 }
@@ -369,14 +607,79 @@ function isDirectPropertySite(url: string): boolean {
 // UUID v4 validation regex
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// Validate Airbnb URL format (supports all locales)
+// Maximum URL length to prevent DoS
+const MAX_URL_LENGTH = 2048;
+
+// Strict allowlist of valid Airbnb domains (prevents SSRF via subdomain tricks)
+const AIRBNB_DOMAINS = [
+  "airbnb.com", "airbnb.co.uk", "airbnb.de", "airbnb.fr", "airbnb.es",
+  "airbnb.it", "airbnb.nl", "airbnb.pt", "airbnb.at", "airbnb.ch",
+  "airbnb.be", "airbnb.ie", "airbnb.se", "airbnb.no", "airbnb.dk",
+  "airbnb.fi", "airbnb.pl", "airbnb.cz", "airbnb.hu", "airbnb.gr",
+  "airbnb.ca", "airbnb.com.au", "airbnb.co.nz", "airbnb.co.za",
+  "airbnb.jp", "airbnb.kr", "airbnb.cn", "airbnb.com.hk", "airbnb.com.sg",
+  "airbnb.co.in", "airbnb.com.br", "airbnb.mx", "airbnb.com.ar",
+  "airbnb.ru", "airbnb.com.tr", "airbnb.ae", "airbnb.co.il"
+];
+
+// Check if hostname is a private/internal IP (SSRF protection)
+function isPrivateOrInternalIP(hostname: string): boolean {
+  // Block localhost variants
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+    return true;
+  }
+  
+  // Block private IP ranges (RFC 1918)
+  const privateIPPatterns = [
+    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/,           // 10.0.0.0/8
+    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/, // 172.16.0.0/12
+    /^192\.168\.\d{1,3}\.\d{1,3}$/,              // 192.168.0.0/16
+    /^169\.254\.\d{1,3}\.\d{1,3}$/,              // Link-local
+    /^0\.0\.0\.0$/,                               // Any address
+  ];
+  
+  return privateIPPatterns.some(pattern => pattern.test(hostname));
+}
+
+// Validate Airbnb URL format with strict domain allowlist (prevents SSRF)
 function isValidAirbnbUrl(url: string): boolean {
+  // Check URL length limit
+  if (!url || url.length > MAX_URL_LENGTH) {
+    return false;
+  }
+  
   try {
     const parsed = new URL(url);
-    return (
-      (parsed.hostname.includes("airbnb.") || parsed.hostname === "airbnb.com") &&
-      parsed.pathname.includes("/rooms/")
+    
+    // Only allow http/https protocols
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    
+    // Block userinfo in URL (prevents SSRF like airbnb.com@evil.com)
+    if (parsed.username || parsed.password) {
+      return false;
+    }
+    
+    // Block private/internal IPs
+    if (isPrivateOrInternalIP(parsed.hostname)) {
+      return false;
+    }
+    
+    // Extract the base domain (handles www. prefix)
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    
+    // Check against strict allowlist
+    const isAllowedDomain = AIRBNB_DOMAINS.some(domain => 
+      hostname === domain || hostname.endsWith('.' + domain)
     );
+    
+    if (!isAllowedDomain) {
+      return false;
+    }
+    
+    // Must have /rooms/ path
+    return parsed.pathname.includes("/rooms/");
   } catch {
     return false;
   }
@@ -385,34 +688,38 @@ function isValidAirbnbUrl(url: string): boolean {
 // Check if an image URL is a valid property photo (not logo/favicon)
 function isValidPropertyImage(url: string): boolean {
   const lowercaseUrl = url.toLowerCase();
-  
+
   // Exclude favicons, logos, and platform assets
   const excludePatterns = [
-    "favicon", "logo", "icon", "brand", "platform-assets",
-    "airbnbplatformassets", "airbnb-platform-assets",
-    "sprite", "button", "arrow", "avatar", "profile",
-    "social", "badge", "marker", "pin", "placeholder"
+    "favicon",
+    "logo",
+    "icon",
+    "brand",
+    "platform-assets",
+    "airbnbplatformassets",
+    "airbnb-platform-assets",
+    "sprite",
+    "button",
+    "arrow",
+    "avatar",
+    "profile",
+    "social",
+    "badge",
+    "marker",
+    "pin",
+    "placeholder",
   ];
-  
-  if (excludePatterns.some(p => lowercaseUrl.includes(p))) {
-    return false;
-  }
-  
-  // Must be a muscache CDN image with reasonable size
-  if (!url.includes("muscache.com")) return false;
-  
-  // Must be in pictures folder (not assets)
-  if (!url.includes("/pictures/") && !url.includes("/im/pictures/")) return false;
-  
-  // Prefer hosting/miso format images (actual property photos)
-  const preferredPatterns = [
-    "/hosting/", "/miso/", "/BnbProperty/", "Hosting-"
-  ];
-  
-  return preferredPatterns.some(p => url.includes(p)) || 
-         // Or general property images with proper extensions
-         (/\.(jpg|jpeg|png|webp)/i.test(url) && url.length > 100);
+
+  if (excludePatterns.some((p) => lowercaseUrl.includes(p))) return false;
+
+  // Airbnb listing photos are hosted on muscache; accept any pictures URL.
+  if (!lowercaseUrl.includes("muscache.com")) return false;
+  if (!lowercaseUrl.includes("/im/pictures/")) return false;
+
+  // Accept common image types OR long CDN URLs with query params.
+  return /\.(jpg|jpeg|png|webp)(\?|$)/i.test(lowercaseUrl) || lowercaseUrl.length > 80;
 }
+
 
 // Extract dates from Airbnb URL
 function extractDatesFromUrl(url: string): { checkIn: string | null; checkOut: string | null } {
@@ -498,20 +805,78 @@ function addDatesToUrl(url: string, checkIn: string, checkOut: string): string {
   }
 }
 
+// Detect if content indicates dates are unavailable
+function detectUnavailability(content: string): boolean {
+  const unavailablePatterns = [
+    /not available/i,
+    /unavailable/i,
+    /sold out/i,
+    /no (rooms?|availability|vacancies)/i,
+    /fully booked/i,
+    /keine verfügbarkeit/i, // German
+    /non disponible/i, // French
+    /no disponible/i, // Spanish
+    /ausgebucht/i, // German "sold out"
+    /complet/i, // French "full"
+    /select (different|other|new) dates/i,
+    /try different dates/i,
+    /change your dates/i,
+    /sorry.*dates/i,
+    /dates.*not available/i,
+  ];
+  return unavailablePatterns.some(p => p.test(content));
+}
+
+// Generate alternative date ranges to try
+function generateAlternativeDates(checkIn: string, checkOut: string): Array<{ checkIn: string; checkOut: string; offset: number }> {
+  const nights = calculateNights(checkIn, checkOut);
+  const baseCheckIn = new Date(checkIn);
+  const alternatives: Array<{ checkIn: string; checkOut: string; offset: number }> = [];
+  
+  // Try offsets: +1, -1, +2, -2, +3, -3, +7 days
+  const offsets = [1, -1, 2, -2, 3, -3, 7];
+  
+  for (const offset of offsets) {
+    const newCheckIn = new Date(baseCheckIn);
+    newCheckIn.setDate(baseCheckIn.getDate() + offset);
+    
+    const newCheckOut = new Date(newCheckIn);
+    newCheckOut.setDate(newCheckIn.getDate() + nights);
+    
+    // Don't try dates in the past
+    if (newCheckIn > new Date()) {
+      alternatives.push({
+        checkIn: newCheckIn.toISOString().split('T')[0],
+        checkOut: newCheckOut.toISOString().split('T')[0],
+        offset,
+      });
+    }
+  }
+  
+  return alternatives;
+}
+
 // Scrape price from a listing page using Firecrawl
 async function scrapePriceFromListing(
   url: string,
   checkIn: string,
   checkOut: string,
   firecrawlApiKey: string,
-): Promise<{ price: number | null; totalPrice: number | null; perNightRate: number | null }> {
+): Promise<{ 
+  price: number | null; 
+  totalPrice: number | null; 
+  perNightRate: number | null;
+  usedCheckIn: string;
+  usedCheckOut: string;
+  datesDiffer: boolean;
+}> {
   const nights = calculateNights(checkIn, checkOut);
 
   const normalizeNumber = (raw: string): number | null => {
-    // Handles: 1,234.56 | 1.234,56 | 1234 | 1 234 | 1’234
+    // Handles: 1,234.56 | 1.234,56 | 1234 | 1 234 | 1'234
     let s = raw
       .replace(/\u00a0/g, " ")
-      .replace(/[\s’']/g, "")
+      .replace(/[\s'']/g, "")
       .trim();
 
     // If both separators exist, decide decimal by the last occurrence
@@ -546,69 +911,115 @@ async function scrapePriceFromListing(
 
   const tryExtract = (content: string): { extracted: number | null; isPerNight: boolean } => {
     const currency = String.raw`(?:\$|€|£|CHF|USD|EUR|GBP|ZAR|AUD|CAD|NZD|SEK|NOK|DKK|PLN|CZK|HUF|R\$|R)`;
-    const amount = String.raw`(\d{1,3}(?:[\s,.’]\d{3})*(?:[\.,]\d{2})?|\d{2,6})`;
+    const amount = String.raw`(\d{1,3}(?:[\s,.']\d{3})*(?:[\.,]\d{2})?|\d{2,6})`;
 
-    const patterns: Array<{ re: RegExp; perNight: boolean }> = [
-      // Per-night
-      { re: new RegExp(String.raw`(?:from\s*)?${currency}\s*${amount}\s*(?:per\s*night|/night|night)`, "i"), perNight: true },
-      { re: new RegExp(String.raw`(?:per\s*night|/night|night)\s*(?:from\s*)?${currency}\s*${amount}`, "i"), perNight: true },
-      { re: new RegExp(String.raw`(?:from\s*)?${amount}\s*${currency}\s*(?:per\s*night|/night|night)`, "i"), perNight: true },
+    // Collect ALL currency amounts in the page (the first one is often NOT the price).
+    const reAll = new RegExp(String.raw`${currency}\s*${amount}|${amount}\s*${currency}`, "gi");
+    const candidates: Array<{ value: number; perNightHint: boolean }> = [];
 
-      // Total
-      { re: new RegExp(String.raw`total[:\s]*${currency}\s*${amount}`, "i"), perNight: false },
-      { re: new RegExp(String.raw`${currency}\s*${amount}\s*total`, "i"), perNight: false },
-      { re: new RegExp(String.raw`total[:\s]*${amount}\s*${currency}`, "i"), perNight: false },
-
-      // Generic fallback (useful for Booking/TripAdvisor text blocks)
-      { re: new RegExp(String.raw`${currency}\s*${amount}`, "i"), perNight: false },
-      { re: new RegExp(String.raw`${amount}\s*${currency}`, "i"), perNight: false },
-    ];
-
-    for (const p of patterns) {
-      const m = content.match(p.re);
-      if (!m) continue;
-      const raw = m[1];
+    const text = content;
+    let match: RegExpExecArray | null;
+    while ((match = reAll.exec(text)) !== null) {
+      const raw = match[1] || match[2];
       const parsed = raw ? normalizeNumber(raw) : null;
       if (!parsed || parsed <= 0 || parsed >= 50000) continue;
-      return { extracted: parsed, isPerNight: p.perNight };
+
+      const windowStart = Math.max(0, match.index - 25);
+      const windowEnd = Math.min(text.length, match.index + match[0].length + 25);
+      const windowText = text.slice(windowStart, windowEnd).toLowerCase();
+      const perNightHint = /per\s*night|\/night|night/.test(windowText);
+
+      candidates.push({ value: parsed, perNightHint });
     }
 
-    return { extracted: null, isPerNight: false };
-  };
+    if (candidates.length === 0) return { extracted: null, isPerNight: false };
 
-  const fetchFirecrawl = async (opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number }) => {
-    const urlWithDates = addDatesToUrl(url, checkIn, checkOut);
-    console.log("Scraping price from:", urlWithDates.slice(0, 160));
-
-    const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${firecrawlApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: urlWithDates,
-        formats: opts.formats,
-        onlyMainContent: opts.onlyMainContent,
-        waitFor: opts.waitFor,
-      }),
-    });
-
-    if (!resp.ok) {
-      console.log("Firecrawl request failed:", resp.status);
-      return { markdown: "", html: "" };
+    // Prefer explicit per-night hints.
+    const perNightCandidates = candidates.filter((c) => c.perNightHint);
+    if (perNightCandidates.length > 0) {
+      const best = perNightCandidates
+        .map((c) => c.value)
+        .filter((v) => v >= 10 && v <= 5000)
+        .sort((a, b) => b - a)[0];
+      return best ? { extracted: best, isPerNight: true } : { extracted: null, isPerNight: false };
     }
 
-    const data = await resp.json();
-    const markdown: string = data.data?.markdown || data.markdown || "";
-    const html: string = data.data?.html || data.html || "";
-    return { markdown, html };
+    // Otherwise assume totals: pick the largest plausible total, then derive per-night later.
+    const bestTotal = candidates
+      .map((c) => c.value)
+      .filter((v) => v >= 20 && v <= 50000)
+      .sort((a, b) => b - a)[0];
+
+    return bestTotal ? { extracted: bestTotal, isPerNight: false } : { extracted: null, isPerNight: false };
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const fetchFirecrawl = async (
+    targetUrl: string,
+    opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number },
+  ) => {
+    console.log("Scraping price from:", targetUrl.slice(0, 160));
+
+    // Firecrawl can rate-limit; retry with exponential backoff.
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${firecrawlApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: targetUrl,
+          formats: opts.formats,
+          onlyMainContent: opts.onlyMainContent,
+          waitFor: opts.waitFor,
+        }),
+      });
+
+      if (!resp.ok) {
+        console.log("Firecrawl request failed:", resp.status);
+
+        // Handle rate limits and transient errors
+        if ((resp.status === 429 || resp.status === 503 || resp.status === 504) && attempt < MAX_ATTEMPTS) {
+          const backoff = 800 * attempt * attempt + Math.floor(Math.random() * 250);
+          console.log(`Retrying Firecrawl in ${backoff}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+          await sleep(backoff);
+          continue;
+        }
+
+        return { markdown: "", html: "" };
+      }
+
+      const data = await resp.json();
+      const markdown: string = data.data?.markdown || data.markdown || "";
+      const html: string = data.data?.html || data.html || "";
+
+      // Gentle throttle to reduce bursts (helps avoid 429 during multi-date attempts)
+      await sleep(150);
+
+      return { markdown, html };
+    }
+
+    return { markdown: "", html: "" };
   };
 
-  try {
+  const tryScrapeDates = async (tryCheckIn: string, tryCheckOut: string): Promise<{ 
+    extracted: number | null; 
+    isPerNight: boolean; 
+    isUnavailable: boolean;
+  }> => {
+    const urlWithDates = addDatesToUrl(url, tryCheckIn, tryCheckOut);
+    
     // Pass 1: Fast scrape
-    const first = await fetchFirecrawl({ formats: ["markdown"], onlyMainContent: true, waitFor: 3500 });
+    const first = await fetchFirecrawl(urlWithDates, { formats: ["markdown"], onlyMainContent: true, waitFor: 3500 });
     let content = first.markdown || "";
+
+    // Check for unavailability first
+    if (detectUnavailability(content)) {
+      console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable`);
+      return { extracted: null, isPerNight: false, isUnavailable: true };
+    }
 
     let { extracted, isPerNight } = tryExtract(content);
 
@@ -617,30 +1028,113 @@ async function scrapePriceFromListing(
       const lower = url.toLowerCase();
       const needsDeepScrape = lower.includes("booking.com") || lower.includes("tripadvisor.");
       if (needsDeepScrape) {
-        const second = await fetchFirecrawl({ formats: ["markdown", "html"], onlyMainContent: false, waitFor: 6500 });
+        const second = await fetchFirecrawl(urlWithDates, { formats: ["markdown", "html"], onlyMainContent: false, waitFor: 6500 });
         const htmlText = (second.html || "").replace(/<script[\s\S]*?<\/script>/gi, " ")
           .replace(/<style[\s\S]*?<\/style>/gi, " ")
           .replace(/<[^>]+>/g, " ")
           .replace(/\s+/g, " ");
 
         content = [second.markdown || "", htmlText].join("\n");
+        
+        // Check for unavailability in deep scrape
+        if (detectUnavailability(content)) {
+          console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable (deep scrape)`);
+          return { extracted: null, isPerNight: false, isUnavailable: true };
+        }
+        
         ({ extracted, isPerNight } = tryExtract(content));
       }
     }
 
-    if (!extracted) return { price: null, totalPrice: null, perNightRate: null };
+    return { extracted, isPerNight, isUnavailable: false };
+  };
 
-    if (isPerNight) {
-      console.log("Extracted price:", extracted, "(per night)");
-      return { price: extracted, totalPrice: extracted * nights, perNightRate: extracted };
+  try {
+    // First try with exact dates
+    let result = await tryScrapeDates(checkIn, checkOut);
+    
+    // If unavailable or no price found, try alternative dates
+    if (result.isUnavailable || !result.extracted) {
+      const alternatives = generateAlternativeDates(checkIn, checkOut);
+      
+      for (const alt of alternatives) {
+        console.log(`Trying alternative dates: ${alt.checkIn} - ${alt.checkOut} (offset ${alt.offset > 0 ? '+' : ''}${alt.offset} days)`);
+        result = await tryScrapeDates(alt.checkIn, alt.checkOut);
+        
+        if (result.extracted && !result.isUnavailable) {
+          console.log(`Found price with alternative dates: ${alt.checkIn} - ${alt.checkOut}`);
+          const altNights = calculateNights(alt.checkIn, alt.checkOut);
+          
+          if (result.isPerNight) {
+            console.log("Extracted price:", result.extracted, "(per night) - DIFFERENT DATES");
+            return { 
+              price: result.extracted, 
+              totalPrice: result.extracted * altNights, 
+              perNightRate: result.extracted,
+              usedCheckIn: alt.checkIn,
+              usedCheckOut: alt.checkOut,
+              datesDiffer: true,
+            };
+          }
+          
+          const perNight = Math.round(result.extracted / altNights);
+          console.log("Extracted price:", result.extracted, "(total) - DIFFERENT DATES");
+          return { 
+            price: perNight, 
+            totalPrice: result.extracted, 
+            perNightRate: perNight,
+            usedCheckIn: alt.checkIn,
+            usedCheckOut: alt.checkOut,
+            datesDiffer: true,
+          };
+        }
+      }
+    }
+    
+    // Original dates worked (or no alternatives worked either)
+    if (!result.extracted) {
+      return { 
+        price: null, 
+        totalPrice: null, 
+        perNightRate: null,
+        usedCheckIn: checkIn,
+        usedCheckOut: checkOut,
+        datesDiffer: false,
+      };
     }
 
-    const perNight = Math.round(extracted / nights);
-    console.log("Extracted price:", extracted, "(total)");
-    return { price: perNight, totalPrice: extracted, perNightRate: perNight };
+    if (result.isPerNight) {
+      console.log("Extracted price:", result.extracted, "(per night)");
+      return { 
+        price: result.extracted, 
+        totalPrice: result.extracted * nights, 
+        perNightRate: result.extracted,
+        usedCheckIn: checkIn,
+        usedCheckOut: checkOut,
+        datesDiffer: false,
+      };
+    }
+
+    const perNight = Math.round(result.extracted / nights);
+    console.log("Extracted price:", result.extracted, "(total)");
+    return { 
+      price: perNight, 
+      totalPrice: result.extracted, 
+      perNightRate: perNight,
+      usedCheckIn: checkIn,
+      usedCheckOut: checkOut,
+      datesDiffer: false,
+    };
   } catch (error) {
     console.error("Price scraping error:", error);
-    return { price: null, totalPrice: null, perNightRate: null };
+    return { 
+      price: null, 
+      totalPrice: null, 
+      perNightRate: null,
+      usedCheckIn: checkIn,
+      usedCheckOut: checkOut,
+      datesDiffer: false,
+    };
   }
 }
 
@@ -821,12 +1315,19 @@ async function runSearchWithStreaming(
   const roomIdMatch = search.airbnb_url.match(/rooms\/(\d+)/);
   const roomId = roomIdMatch ? roomIdMatch[1] : null;
 
-  // Extract dates
-  let { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
+  // Extract dates - REQUIRED in URL
+  const { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
   if (!checkIn || !checkOut) {
-    const defaults = generateDefaultDates();
-    checkIn = defaults.checkIn;
-    checkOut = defaults.checkOut;
+    console.log("Missing dates in URL - dates are required for price comparison");
+    await supabase.from("searches").update({ 
+      status: "dates_required" 
+    }).eq("id", searchId);
+    sendProgress(controller, "Dates required", "Please include check-in and check-out dates in your Airbnb URL to compare prices");
+    sendSSE(controller, "error", { 
+      message: "Dates are required for price comparison. Please copy a full Airbnb URL that includes your check-in and check-out dates (e.g., airbnb.com/rooms/123?check_in=2025-01-15&check_out=2025-01-18)." 
+    });
+    sendSSE(controller, "complete", { searchId, status: "dates_required" });
+    return;
   }
 
   const nights = calculateNights(checkIn, checkOut);
@@ -843,39 +1344,69 @@ async function runSearchWithStreaming(
   if (firecrawlApiKey) {
     sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
     await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
-    
-    try {
-      const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
-        method: 'POST',
+
+    const scrapeWithFirecrawl = async (formats: string[], waitForMs: number) => {
+      const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+        method: "POST",
         headers: {
-          'Authorization': `Bearer ${firecrawlApiKey}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${firecrawlApiKey}`,
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           url: search.airbnb_url,
-          formats: ['markdown', 'html'],
+          formats,
           onlyMainContent: false,
-          waitFor: 5000,
+          waitFor: waitForMs,
+          timeout: 60000,
         }),
       });
-      
-      if (firecrawlResponse.ok) {
-        const firecrawlData = await firecrawlResponse.json();
-        const markdown = firecrawlData.data?.markdown || '';
-        const html = firecrawlData.data?.html || '';
-        const rawHtml = firecrawlData.data?.rawHtml || html;
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        console.error("Firecrawl scrape failed:", resp.status, errText.slice(0, 800));
+        return { ok: false as const, status: resp.status, errorText: errText };
+      }
+
+      const data = await resp.json().catch(() => null);
+      return { ok: true as const, data };
+    };
+
+    try {
+      // Attempt 1: full content + screenshot
+      let attempt = await scrapeWithFirecrawl(["markdown", "html", "rawHtml", "screenshot"], 16000);
+
+      // Attempt 2: retry with longer wait (Airbnb sometimes renders totals very late)
+      if (!attempt.ok) {
+        sendProgress(controller, "Loading Airbnb listing", "Retrying with longer wait");
+        attempt = await scrapeWithFirecrawl(["screenshot", "html", "rawHtml"], 25000);
+      }
+
+      if (attempt.ok) {
+        const firecrawlData = attempt.data;
+        const markdown = firecrawlData?.data?.markdown || "";
+        const html = firecrawlData?.data?.html || "";
+        const rawHtml = firecrawlData?.data?.rawHtml || html;
+        const screenshotBase64: string | null = firecrawlData?.data?.screenshot || null;
+
+        console.log(
+          "Firecrawl received. markdown:",
+          markdown.length,
+          "html:",
+          html.length,
+          "screenshot:",
+          !!screenshotBase64
+        );
 
         // Extract title
-        const metaTitle = firecrawlData.data?.metadata?.title;
+        const metaTitle = firecrawlData?.data?.metadata?.title;
         if (metaTitle) {
           airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
 
-        // Extract images
+        // Extract images (Airbnb rotates subdomains and path variants frequently)
         const imagePatterns = [
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-          /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
+          /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+          /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
         ];
 
         const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
@@ -884,22 +1415,69 @@ async function runSearchWithStreaming(
           allImages.push(...((rawHtml || html).match(pattern) || []));
         }
         const unique = [...new Set(allImages.map(canonicalize))];
-        imageUrls = unique.filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
+        imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
 
-        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, { imageCount: imageUrls.length });
+        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, {
+          imageCount: imageUrls.length,
+        });
 
-        // Extract price via AI
-        if (markdown.length > 100) {
-          sendProgress(controller, "Extracting Airbnb price", "Using AI to find the exact price for your dates");
-          await supabase.from("searches").update({ status: "extracting_price_with_ai" }).eq("id", searchId);
-          airbnbPrice = await extractAirbnbPriceWithAI(markdown, nights);
-          if (airbnbPrice) {
-            sendProgress(controller, "Price extracted", `Found Airbnb price: €${airbnbPrice}/night`, { airbnbPrice });
+        // Extract price
+        sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
+        await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
+
+        // 1) HTML/Raw HTML (JSON-LD / embedded data)
+        airbnbPrice = extractPriceWithRegex(rawHtml || html, nights);
+
+        // 2) Markdown
+        if (!airbnbPrice && markdown.length > 100) {
+          airbnbPrice = extractPriceWithRegex(markdown, nights);
+        }
+
+        // 3) Screenshot (dynamic totals)
+        if (!airbnbPrice && screenshotBase64) {
+          sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading it from the rendered page");
+          const total = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
+          if (total) {
+            const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
+            airbnbPrice = perNight;
+            console.log("Derived per-night from screenshot total:", total, "->", perNight);
           }
         }
+
+        // 4) AI over combined text
+        if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
+          sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
+          airbnbPrice = await extractAirbnbPriceWithAI(
+            [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
+            nights
+          );
+        }
+
+        if (airbnbPrice) {
+          sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
+
+          await supabase
+            .from("searches")
+            .update({
+              airbnb_title: airbnbTitle,
+              airbnb_price: airbnbPrice,
+              airbnb_image_url: imageUrls[0] || null,
+              airbnb_images: imageUrls.slice(0, 5),
+              check_in_date: checkIn,
+              check_out_date: checkOut,
+              nights_count: nights,
+            })
+            .eq("id", searchId);
+        } else {
+          console.log("Price extraction failed for URL:", search.airbnb_url);
+        }
+      } else {
+        // Firecrawl failed twice; we'll fall back to direct fetch.
+        sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
       }
     } catch (e) {
       console.error("Firecrawl error:", e);
+      sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
     }
   }
 
@@ -918,12 +1496,18 @@ async function runSearchWithStreaming(
         }
         
         if (imageUrls.length === 0) {
-          const patterns = [/https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi];
+          const patterns = [
+            /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+            /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+          ];
           let found: string[] = [];
           for (const p of patterns) found.push(...(html.match(p) || []));
-          imageUrls = [...new Set(found.map(u => u.split("?")[0]))].filter(isValidPropertyImage).map(u => `${u}?im_w=1200`).slice(0, 5);
+          imageUrls = [...new Set(found.map((u) => u.split("?")[0]))]
+            .filter(isValidPropertyImage)
+            .map((u) => `${u}?im_w=1200`)
+            .slice(0, 5);
         }
-        
+
         if (!airbnbPrice) {
           sendProgress(controller, "Extracting Airbnb price", "Using AI to find the exact price");
           airbnbPrice = await extractAirbnbPriceWithAI(html.slice(0, 15000), nights);
@@ -937,8 +1521,11 @@ async function runSearchWithStreaming(
 
   // Abort if no price
   if (!airbnbPrice) {
-    sendProgress(controller, "Price unavailable", "Could not extract Airbnb price for your dates");
+    sendProgress(controller, "Price unavailable", "We couldn't read the total price Airbnb shows for those dates. Try different dates or try again in a minute.");
     await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
+    sendSSE(controller, "error", {
+      message: "We couldn't extract the Airbnb total for your selected dates. This can happen when Airbnb loads prices dynamically or blocks automated requests. Please try again, or change your dates and retry.",
+    });
     sendSSE(controller, "complete", { success: false, error: "AIRBNB_PRICE_UNAVAILABLE" });
     return;
   }
@@ -946,8 +1533,25 @@ async function runSearchWithStreaming(
   // Abort if no images
   if (imageUrls.length === 0) {
     sendProgress(controller, "No images found", "Could not extract property images");
-    await supabase.from("searches").update({ status: "completed" }).eq("id", searchId);
-    sendSSE(controller, "complete", { success: true, results: [] });
+    await supabase
+      .from("searches")
+      .update({
+        status: "completed",
+        airbnb_title: airbnbTitle,
+        airbnb_price: airbnbPrice,
+        airbnb_image_url: null,
+        airbnb_images: [],
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        nights_count: nights,
+      })
+      .eq("id", searchId);
+    sendSSE(controller, "complete", {
+      success: true,
+      results: [],
+      airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, images: [] },
+      dates: { checkIn, checkOut, nights },
+    });
     return;
   }
 
@@ -957,7 +1561,7 @@ async function runSearchWithStreaming(
 
   const searchStartTime = Date.now();
   const MAX_TIME = 120000;
-  const MAX_AI = 45;
+  const MAX_AI = 30;
   const TARGET = 12;
   let aiCount = 0;
 
@@ -976,7 +1580,7 @@ async function runSearchWithStreaming(
 
       let matchesThisImage = 0;
       for (const match of visualMatches) {
-        if (aiCount >= MAX_AI || alternatives.filter(a => a.match_type === 'visual').length >= TARGET || matchesThisImage >= 15) break;
+        if (aiCount >= MAX_AI || alternatives.filter(a => a.match_type === 'visual').length >= TARGET || matchesThisImage >= 8) break;
         if (Date.now() - searchStartTime > MAX_TIME) break;
 
         const matchUrl = match.link;
@@ -1042,26 +1646,72 @@ async function runSearchWithStreaming(
   sendProgress(controller, `Proceeding with ${totalCandidates} candidate listings`, visualCountAfterFallback > 0 ? "Includes visually verified matches" : "Text-only candidates (no photo verification)");
 
   // Step 3: Scrape prices
-  sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms`);
+  sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms for dates ${checkIn} to ${checkOut}`);
   await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
 
-  const toScrape = alternatives.slice(0, 8);
+  // Keep it bounded: price scraping is the slowest + most rate-limited step.
+  // Scrape more candidates (and prioritize major booking platforms) so we don't miss cheaper listings.
+  const prioritizedForPricing = [...alternatives].sort((a, b) => {
+    const score = (x: typeof alternatives[number]) => {
+      const u = x.listing_url.toLowerCase();
+      if (u.includes("booking.com")) return 5;
+      if (u.includes("tripadvisor.")) return 5;
+      if (u.includes("vrbo.com") || u.includes("homeaway.")) return 4;
+      if (u.includes("holidaycheck.")) return 4;
+      if (isRegionalHotelSite(x.listing_url) || isDirectPropertySite(x.listing_url)) return 3;
+      return 0;
+    };
+    return score(b) - score(a);
+  });
+
+  const toScrape = prioritizedForPricing.slice(0, 20);
   for (let i = 0; i < toScrape.length; i++) {
     const alt = toScrape[i];
-    sendProgress(controller, `Getting price from ${alt.platform_name}`, `Scraping listing page (${i + 1}/${toScrape.length})`, { platform: alt.platform_name, index: i + 1, total: toScrape.length });
-    await supabase.from("searches").update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` }).eq("id", searchId);
+    sendProgress(
+      controller,
+      `Getting price from ${alt.platform_name}`,
+      `Checking availability for ${checkIn} to ${checkOut} (${i + 1}/${toScrape.length})`,
+      { platform: alt.platform_name, index: i + 1, total: toScrape.length }
+    );
+    await supabase
+      .from("searches")
+      .update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` })
+      .eq("id", searchId);
 
-    if (firecrawlApiKey) {
-      const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
-      alt.price = priceData.perNightRate;
-      if (priceData.perNightRate) {
-        sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, { platform: alt.platform_name, price: priceData.perNightRate });
+    if (!firecrawlApiKey) continue;
+
+    const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
+    alt.price = priceData.perNightRate;
+    alt.price_check_in = priceData.usedCheckIn;
+    alt.price_check_out = priceData.usedCheckOut;
+    alt.dates_differ = priceData.datesDiffer;
+
+    if (priceData.perNightRate && priceData.perNightRate >= 10) {
+      if (priceData.datesDiffer) {
+        sendProgress(
+          controller,
+          `Found price on ${alt.platform_name}`,
+          `€${priceData.perNightRate}/night (dates ${priceData.usedCheckIn} - ${priceData.usedCheckOut}, original dates unavailable)`,
+          { platform: alt.platform_name, price: priceData.perNightRate, datesDiffer: true }
+        );
+      } else {
+        sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, {
+          platform: alt.platform_name,
+          price: priceData.perNightRate,
+        });
       }
+    } else {
+      sendProgress(controller, `No price on ${alt.platform_name}`, "No valid price found for the selected dates", {
+        platform: alt.platform_name,
+      });
     }
   }
 
+  // User requirement: ONLY keep alternatives that have a valid price
+  const resultsWithPrices = alternatives.filter((a) => !!a.price && a.price >= 10);
+
   // Calculate savings
-  const resultsWithSavings = alternatives.map(alt => ({
+  const resultsWithSavings = resultsWithPrices.map((alt) => ({
     ...alt,
     original_price: airbnbPrice,
     savings_amount: airbnbPrice && alt.price && alt.price < airbnbPrice ? airbnbPrice - alt.price : null,
@@ -1071,10 +1721,10 @@ async function runSearchWithStreaming(
   // Sort by savings
   resultsWithSavings.sort((a, b) => (b.savings_percentage ?? 0) - (a.savings_percentage ?? 0));
 
-  // Save to DB
-  console.log(`Attempting to save ${resultsWithSavings.length} results to DB for search ${searchId}`);
+  // Save to DB (only priced results)
+  console.log(`Attempting to save ${resultsWithSavings.length} priced results to DB for search ${searchId}`);
   if (resultsWithSavings.length > 0) {
-    const insertData = resultsWithSavings.map(r => ({
+    const insertData = resultsWithSavings.map((r) => ({
       search_id: searchId,
       platform_name: r.platform_name,
       listing_url: r.listing_url,
@@ -1088,8 +1738,14 @@ async function runSearchWithStreaming(
       images: r.images,
       match_type: r.match_type,
       source_airbnb_image: r.source_airbnb_image || null,
+      price_check_in: r.price_check_in || checkIn,
+      price_check_out: r.price_check_out || checkOut,
+      dates_differ: r.dates_differ || false,
     }));
-    console.log("Insert data:", JSON.stringify(insertData.map(d => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price }))));
+    console.log(
+      "Insert data:",
+      JSON.stringify(insertData.map((d) => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price, datesDiffer: d.dates_differ })))
+    );
     const { data: insertedData, error: insertError } = await supabase.from("search_results").insert(insertData).select();
     if (insertError) {
       console.error("CRITICAL: Failed to insert search results:", insertError.message, insertError.details);
@@ -1109,7 +1765,7 @@ async function runSearchWithStreaming(
     nights_count: nights,
   }).eq("id", searchId);
 
-  sendProgress(controller, "Search complete", `Found ${resultsWithSavings.length} alternatives`);
+  sendProgress(controller, "Search complete", resultsWithSavings.length > 0 ? `Found ${resultsWithSavings.length} priced alternatives` : "No priced alternatives found");
   sendSSE(controller, "complete", {
     success: true,
     results: resultsWithSavings,
@@ -1137,7 +1793,7 @@ serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const serpApiKey = Deno.env.get("SERPAPI_API_KEY");
-    const firecrawlApiKey = Deno.env.get("FIRECRAWL_API_KEY");
+    const firecrawlApiKey = Deno.env.get("FIRECRAWL_API_KEY_1") || Deno.env.get("FIRECRAWL_API_KEY");
 
     if (!serpApiKey) {
       return new Response(
@@ -1271,16 +1927,23 @@ serve(async (req) => {
     const roomId = roomIdMatch ? roomIdMatch[1] : null;
     console.log("Airbnb room ID:", roomId);
 
-    // Extract dates from URL or generate defaults
-    let { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
+    // Extract dates from URL - REQUIRED for price comparison
+    const { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
     if (!checkIn || !checkOut) {
-      const defaults = generateDefaultDates();
-      checkIn = defaults.checkIn;
-      checkOut = defaults.checkOut;
-      console.log("Using default dates:", checkIn, "to", checkOut);
-    } else {
-      console.log("Using URL dates:", checkIn, "to", checkOut);
+      console.log("Missing dates in URL - dates are required for price comparison");
+      await supabase.from("searches").update({ 
+        status: "dates_required" 
+      }).eq("id", searchId);
+      return new Response(
+        JSON.stringify({ 
+          success: false, 
+          error: "Dates are required for price comparison. Please copy a full Airbnb URL that includes your check-in and check-out dates (e.g., airbnb.com/rooms/123?check_in=2025-01-15&check_out=2025-01-18).",
+          status: "dates_required"
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
+      );
     }
+    console.log("Using URL dates:", checkIn, "to", checkOut);
 
     // Update status to step 1
     await supabase.from("searches").update({ 
@@ -1381,17 +2044,27 @@ serve(async (req) => {
             }
           }
           
-          // Extract images from HTML content
+          // Extract images from HTML content - comprehensive patterns for all Airbnb CDN formats
           const imagePatterns = [
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
+            // Standard hosting images
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)\]\\]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)\]\\]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)\]\\]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)\]\\]+/gi,
+            // UUID format images
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}[^"'\s\)\]\\]*/gi,
+            // Airbnb media URLs (newer format)
+            /https:\/\/a0\.muscache\.com\/im\/ml\/[^"'\s\)\]\\]+/gi,
+            // Alternative subdomains (a1, a2, etc.)
+            /https:\/\/a[0-9]\.muscache\.com\/im\/pictures\/[^"'\s\)\]\\]+/gi,
+            // Generic muscache with any path to /pictures/
+            /https:\/\/[a-z0-9]+\.muscache\.com\/[^"'\s\)\]\\]*pictures[^"'\s\)\]\\]+/gi,
           ];
 
           const canonicalizeMuscacheUrl = (url: string) => {
-            const cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+            let cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+            // Remove trailing punctuation that might have been captured
+            cleaned = cleaned.replace(/[,;:]+$/, "");
             // Remove query params like ?im_w=1200 to dedupe correctly
             return cleaned.split("?")[0];
           };
@@ -1399,23 +2072,49 @@ serve(async (req) => {
           let allImageUrls: string[] = [];
           const htmlContent = rawHtml || html;
 
+          // Log content length for debugging
+          console.log(`Searching for images in ${htmlContent.length} chars of HTML content`);
+
           for (const pattern of imagePatterns) {
             const matches = htmlContent.match(pattern) || [];
+            if (matches.length > 0) {
+              console.log(`Pattern ${pattern.source.substring(0, 50)}... found ${matches.length} matches`);
+            }
             allImageUrls.push(...matches);
           }
 
           // Also check markdown for image URLs
-          const markdownImageMatches = markdown.match(/https:\/\/a0\.muscache\.com\/im\/pictures\/[^\s\)"\]]+/gi) || [];
+          const markdownImageMatches = markdown.match(/https:\/\/[a-z0-9]+\.muscache\.com\/[^\s\)"\]\\]+/gi) || [];
+          if (markdownImageMatches.length > 0) {
+            console.log(`Markdown found ${markdownImageMatches.length} potential image URLs`);
+          }
           allImageUrls.push(...markdownImageMatches);
 
-          const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+          // Log total found before filtering
+          console.log(`Total raw image URLs found: ${allImageUrls.length}`);
+          if (allImageUrls.length > 0) {
+            console.log(`Sample URLs: ${allImageUrls.slice(0, 3).join(", ")}`);
+          }
 
-          imageUrls = uniqueBases
-            .filter(isValidPropertyImage)
+          const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+          console.log(`Unique base URLs after deduplication: ${uniqueBases.length}`);
+
+          // More lenient filter - just need muscache and pictures
+          const filteredUrls = uniqueBases.filter(url => {
+            if (!url.includes("muscache.com")) return false;
+            // Exclude obvious non-property images
+            const excludePatterns = ["favicon", "logo", "icon", "brand", "sprite", "button", "avatar", "profile"];
+            if (excludePatterns.some(p => url.toLowerCase().includes(p))) return false;
+            return true;
+          });
+          
+          console.log(`Filtered URLs after basic validation: ${filteredUrls.length}`);
+
+          imageUrls = filteredUrls
             .map((base) => `${base}?im_w=1200`)
             .slice(0, 5);
 
-          console.log(`Firecrawl found ${imageUrls.length} property images`);
+          console.log(`Final image URLs for search: ${imageUrls.length}`);
         } else {
           console.log("Firecrawl request failed:", firecrawlResponse.status);
         }
@@ -1456,15 +2155,19 @@ serve(async (req) => {
           // Extract images if not already found
           if (imageUrls.length === 0) {
             const imagePatterns = [
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}[^"'\s\)\]\\]*/gi,
+              /https:\/\/a0\.muscache\.com\/im\/ml\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a[0-9]\.muscache\.com\/im\/pictures\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/[a-z0-9]+\.muscache\.com\/[^"'\s\)\]\\]*pictures[^"'\s\)\]\\]+/gi,
             ];
 
             const canonicalizeMuscacheUrl = (url: string) => {
-              const cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+              let cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+              cleaned = cleaned.replace(/[,;:]+$/, "");
               return cleaned.split("?")[0];
             };
 
@@ -1484,11 +2187,20 @@ serve(async (req) => {
             }
 
             const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+            
+            // More lenient filter
+            const filteredUrls = uniqueBases.filter(url => {
+              if (!url.includes("muscache.com")) return false;
+              const excludePatterns = ["favicon", "logo", "icon", "brand", "sprite", "button", "avatar", "profile"];
+              if (excludePatterns.some(p => url.toLowerCase().includes(p))) return false;
+              return true;
+            });
 
-            imageUrls = uniqueBases
-              .filter(isValidPropertyImage)
+            imageUrls = filteredUrls
               .map((base) => `${base}?im_w=1200`)
               .slice(0, 5);
+            
+            console.log(`Fallback found ${imageUrls.length} images from direct fetch`);
           }
           
           // Try to extract price from JSON data if not already found
@@ -1588,7 +2300,7 @@ serve(async (req) => {
         JSON.stringify({
           success: false,
           error: "AIRBNB_PRICE_UNAVAILABLE",
-          message: "Could not extract Airbnb price for the selected dates, so we cannot compare alternatives.",
+          message: "We couldn't extract the Airbnb total price for the selected dates. Please try again, or pick different dates and retry.",
         }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
@@ -1980,10 +2692,12 @@ serve(async (req) => {
       const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
       const airbnbImages = imageUrls.slice(0, 5);
 
-      // Persist any candidates we found (visual or text)
-      if (alternatives.length > 0) {
+      // Filter to only results with valid prices before persisting
+      const resultsWithValidPrices = alternatives.filter(a => a.price && a.price >= 10);
+      
+      if (resultsWithValidPrices.length > 0) {
         await supabase.from("search_results").insert(
-          alternatives.map(r => ({
+          resultsWithValidPrices.map(r => ({
             search_id: searchId,
             platform_name: r.platform_name,
             listing_url: r.listing_url,
@@ -1997,6 +2711,9 @@ serve(async (req) => {
             images: r.images,
             match_type: r.match_type,
             source_airbnb_image: r.source_airbnb_image || null,
+            price_check_in: checkIn,
+            price_check_out: checkOut,
+            dates_differ: false,
           }))
         );
       }
@@ -2145,16 +2862,18 @@ serve(async (req) => {
     console.log(`Comparing prices for ${nights} nights: ${checkIn} to ${checkOut}`);
 
     // Step 4: Scrape prices from alternatives using Firecrawl (if available)
-    // Run SEQUENTIALLY so users can see each platform being scraped in real-time
-    let resultsWithPrices = topAlternatives;
+    // IMPORTANT: Store ALL visual matches - prices are optional, not required for display
+    let resultsWithPriceAttempts: Array<typeof topAlternatives[0] & { 
+      price_check_in?: string; 
+      price_check_out?: string; 
+      dates_differ?: boolean;
+    }> = [];
     
     if (firecrawlApiKey && topAlternatives.length > 0) {
       await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
       console.log("Step 4: Scraping prices from alternatives...");
-      
-      const pricedResults: typeof topAlternatives = [];
 
-      // Scrape a bit more than 5, but prioritize Booking.com + TripAdvisor if present.
+      // Prioritize Booking.com + TripAdvisor if present.
       const prioritized = [...topAlternatives].sort((a, b) => {
         const score = (p: string) => {
           const l = p.toLowerCase();
@@ -2165,11 +2884,10 @@ serve(async (req) => {
         return score(b.platform_name) - score(a.platform_name);
       });
 
-      const toScrape = prioritized.slice(0, 8);
+      const toScrape = prioritized.slice(0, 10); // Scrape more to increase chance of getting prices
 
       for (let i = 0; i < toScrape.length; i++) {
         const alt = toScrape[i];
-        // Update status for each platform being scraped - now visible because sequential
         const platformSlug = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_");
         await supabase.from("searches").update({
           status: `scraping_price_${platformSlug}_${i + 1}_of_${toScrape.length}`
@@ -2177,25 +2895,41 @@ serve(async (req) => {
         console.log(`Scraping price ${i + 1}/${toScrape.length} from ${alt.platform_name}...`);
 
         const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
-        pricedResults.push({
+        
+        // Store ALL results - price is optional (null is OK)
+        const hasValidPrice = priceData.perNightRate && priceData.perNightRate >= 10;
+        if (hasValidPrice) {
+          console.log(`✓ Valid price found: €${priceData.perNightRate}/night for ${alt.platform_name}`);
+        } else {
+          console.log(`○ No price extracted for ${alt.platform_name} - will still store match`);
+        }
+        
+        resultsWithPriceAttempts.push({
           ...alt,
-          price: priceData.perNightRate,
-          total_price: priceData.totalPrice,
-          per_night_rate: priceData.perNightRate,
+          price: hasValidPrice ? priceData.perNightRate : null,
+          total_price: hasValidPrice ? priceData.totalPrice : null,
+          per_night_rate: hasValidPrice ? priceData.perNightRate : null,
+          price_check_in: priceData.usedCheckIn || checkIn,
+          price_check_out: priceData.usedCheckOut || checkOut,
+          dates_differ: priceData.datesDiffer || false,
         });
       }
       
-      // Merge priced results with remaining unpriced ones
-      resultsWithPrices = [
-        ...pricedResults,
-        ...topAlternatives.slice(5),
-      ];
-      
-      console.log("Price scraping complete. Results with prices:", pricedResults.filter(r => r.price).length);
+      const withPrices = resultsWithPriceAttempts.filter(r => r.price && r.price >= 10).length;
+      console.log(`Price scraping complete. ${withPrices}/${toScrape.length} listings have valid prices.`);
+    } else if (topAlternatives.length > 0) {
+      // No Firecrawl API key - store all matches without prices
+      console.log("No Firecrawl API key available - storing visual matches without prices");
+      resultsWithPriceAttempts = topAlternatives.map(alt => ({
+        ...alt,
+        price_check_in: checkIn,
+        price_check_out: checkOut,
+        dates_differ: false,
+      }));
     }
 
     // Calculate savings based on Airbnb price
-    const resultsWithSavings = resultsWithPrices.map(alt => {
+    const resultsWithSavings = resultsWithPriceAttempts.map(alt => {
       let savingsAmount: number | null = null;
       let savingsPercentage: number | null = null;
       
@@ -2229,7 +2963,9 @@ serve(async (req) => {
       return scoreB - scoreA;
     });
 
+    // Only store results that have valid prices (this is already filtered in step 4)
     if (resultsWithSavings.length > 0) {
+      console.log(`Storing ${resultsWithSavings.length} results with valid prices`);
       await supabase.from("search_results").insert(
         resultsWithSavings.map(r => ({
           search_id: searchId,
@@ -2245,8 +2981,13 @@ serve(async (req) => {
           images: r.images,
           match_type: r.match_type,
           source_airbnb_image: r.source_airbnb_image || null,
+          price_check_in: r.price_check_in || checkIn,
+          price_check_out: r.price_check_out || checkOut,
+          dates_differ: r.dates_differ || false,
         }))
       );
+    } else {
+      console.log("No results with valid prices to store");
     }
 
     await supabase.from("searches").update({ 

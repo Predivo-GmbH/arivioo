@@ -163,4 +163,11 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.7; }
   }
+
+  /* Indeterminate shimmer used in loading states */
+  @keyframes loading-sweep {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(320%); }
+  }
 }
+
