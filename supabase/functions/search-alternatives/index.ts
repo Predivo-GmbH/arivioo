@@ -1267,7 +1267,21 @@ async function runSearchWithStreaming(
   await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
 
   // Keep it bounded: price scraping is the slowest + most rate-limited step.
-  const toScrape = alternatives.slice(0, 8);
+  // Scrape more candidates (and prioritize major booking platforms) so we don't miss cheaper listings.
+  const prioritizedForPricing = [...alternatives].sort((a, b) => {
+    const score = (x: typeof alternatives[number]) => {
+      const u = x.listing_url.toLowerCase();
+      if (u.includes("booking.com")) return 5;
+      if (u.includes("tripadvisor.")) return 5;
+      if (u.includes("vrbo.com") || u.includes("homeaway.")) return 4;
+      if (u.includes("holidaycheck.")) return 4;
+      if (isRegionalHotelSite(x.listing_url) || isDirectPropertySite(x.listing_url)) return 3;
+      return 0;
+    };
+    return score(b) - score(a);
+  });
+
+  const toScrape = prioritizedForPricing.slice(0, 20);
   for (let i = 0; i < toScrape.length; i++) {
     const alt = toScrape[i];
     sendProgress(
