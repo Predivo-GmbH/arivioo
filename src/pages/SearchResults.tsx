@@ -630,17 +630,18 @@ export default function SearchResults() {
   const sortedByPrice = [...validResults].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
 
   // Separate results into cheaper (savings) and more expensive (no savings)
-  // User requirement: do NOT show alternatives that are more expensive than Airbnb.
-  // IMPORTANT: Compare alternative TOTAL prices to Airbnb TOTAL price (including fees)
+  // IMPORTANT: result.price is PER-NIGHT rate, must multiply by nights to get total
   const cheaperResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal) return true;
-    return r.price! < airbnbGrandTotal;
+    if (!airbnbGrandTotal || !nights) return true;
+    const alternativeTotal = r.price! * nights;
+    return alternativeTotal < airbnbGrandTotal;
   });
 
   // More expensive alternatives for collapsed section
   const moreExpensiveResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal) return false;
-    return r.price! >= airbnbGrandTotal;
+    if (!airbnbGrandTotal || !nights) return false;
+    const alternativeTotal = r.price! * nights;
+    return alternativeTotal >= airbnbGrandTotal;
   });
 
   // Show up to 10 cheaper alternatives, while ensuring the cheapest is included
@@ -674,8 +675,9 @@ export default function SearchResults() {
     : null;
 
   // Calculate potential savings
-  // NOTE: cheapestResult.price is already the TOTAL price, not per-night
-  const potentialSavings = airbnbGrandTotal && cheapestResult?.price ? airbnbGrandTotal - cheapestResult.price : null;
+  // NOTE: cheapestResult.price is PER-NIGHT rate, multiply by nights for total
+  const cheapestTotal = cheapestResult?.price && nights ? cheapestResult.price * nights : null;
+  const potentialSavings = airbnbGrandTotal && cheapestTotal ? airbnbGrandTotal - cheapestTotal : null;
 
 
   // Helper to generate key differences based on platform
@@ -1088,7 +1090,8 @@ export default function SearchResults() {
                           {showMoreExpensive && (
                             <div className="mt-4 space-y-3">
                               {moreExpensiveResults.map((result) => {
-                                const priceDiff = Math.round((result.price || 0) - (airbnbGrandTotal || 0));
+                                const alternativeTotal = (result.price || 0) * (nights || 1);
+                                const priceDiff = Math.round(alternativeTotal - (airbnbGrandTotal || 0));
                                 return (
                                   <div key={result.id} className="p-4 rounded-xl border border-border/50 bg-muted/30 text-left">
                                     <div className="flex items-center justify-between mb-2">
@@ -1106,9 +1109,14 @@ export default function SearchResults() {
                                       </span>
                                     </div>
                                     <div className="flex items-center justify-between">
-                                      <span className="text-lg font-semibold text-foreground">
-                                        €{Math.round(result.price || 0)} total
-                                      </span>
+                                      <div>
+                                        <span className="text-lg font-semibold text-foreground">
+                                          €{Math.round(alternativeTotal)} total
+                                        </span>
+                                        <span className="text-sm text-muted-foreground ml-2">
+                                          (€{Math.round(result.price || 0)}/night)
+                                        </span>
+                                      </div>
                                       <Button variant="outline" size="sm" asChild>
                                         <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
                                           View <ExternalLink className="w-3 h-3 ml-1" />
