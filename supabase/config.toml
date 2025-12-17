@@ -4,7 +4,7 @@ project_id = "xxhdiekpduvlsovjomkw"
 verify_jwt = true
 
 [functions.analyze-image-alignment]
-verify_jwt = true
+verify_jwt = false
 
 [functions.get-last-success]
 verify_jwt = false
