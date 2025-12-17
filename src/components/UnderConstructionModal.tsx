@@ -5,7 +5,6 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Rocket, Mail, Lock, Eye, EyeOff, Sparkles, CheckCircle } from "lucide-react";
 
-const BYPASS_PASSWORD = "4Lz%1CiF";
 const STORAGE_KEY = "arivioo_access_granted";
 
 interface UnderConstructionModalProps {
@@ -61,16 +60,39 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
     }
   };
 
-  const handlePasswordSubmit = (e: React.FormEvent) => {
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (password === BYPASS_PASSWORD) {
-      localStorage.setItem(STORAGE_KEY, "true");
-      toast.success("Access granted!");
-      onAccessGranted();
-    } else {
-      toast.error("Invalid password");
+    if (!password) {
+      toast.error("Please enter a password");
+      return;
+    }
+
+    setIsSubmitting(true);
+    
+    try {
+      const { data, error } = await supabase.functions.invoke('verify-bypass-password', {
+        body: { password }
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (data?.valid) {
+        localStorage.setItem(STORAGE_KEY, "true");
+        toast.success("Access granted!");
+        onAccessGranted();
+      } else {
+        toast.error("Invalid password");
+        setPassword("");
+      }
+    } catch (error: any) {
+      console.error("Error verifying password:", error);
+      toast.error("Unable to verify password. Please try again.");
       setPassword("");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
