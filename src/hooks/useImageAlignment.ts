@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
+import { supabase } from '@/integrations/supabase/client';
 
 export interface ImageAlignment {
   x: number;
@@ -110,27 +111,17 @@ export function useImageAlignment(referenceUrl: string | null, targetUrl: string
     setIsAutoAligning(true);
     
     try {
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-image-alignment`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify({
-            referenceImageUrl: referenceUrl,
-            targetImageUrl: targetUrl,
-          }),
-        }
-      );
+      const { data, error } = await supabase.functions.invoke('analyze-image-alignment', {
+        body: {
+          referenceImageUrl: referenceUrl,
+          targetImageUrl: targetUrl,
+        },
+      });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Failed with status ${response.status}`);
+      if (error) {
+        throw new Error(error.message || 'Failed to analyze images');
       }
 
-      const data = await response.json();
       const result = data.alignment as AlignmentWithMeta;
       
       setAutoAlignResult(result);
