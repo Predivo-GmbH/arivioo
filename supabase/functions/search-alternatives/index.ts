@@ -2018,17 +2018,27 @@ serve(async (req) => {
             }
           }
           
-          // Extract images from HTML content
+          // Extract images from HTML content - comprehensive patterns for all Airbnb CDN formats
           const imagePatterns = [
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
-            /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
+            // Standard hosting images
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)\]\\]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)\]\\]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)\]\\]+/gi,
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)\]\\]+/gi,
+            // UUID format images
+            /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}[^"'\s\)\]\\]*/gi,
+            // Airbnb media URLs (newer format)
+            /https:\/\/a0\.muscache\.com\/im\/ml\/[^"'\s\)\]\\]+/gi,
+            // Alternative subdomains (a1, a2, etc.)
+            /https:\/\/a[0-9]\.muscache\.com\/im\/pictures\/[^"'\s\)\]\\]+/gi,
+            // Generic muscache with any path to /pictures/
+            /https:\/\/[a-z0-9]+\.muscache\.com\/[^"'\s\)\]\\]*pictures[^"'\s\)\]\\]+/gi,
           ];
 
           const canonicalizeMuscacheUrl = (url: string) => {
-            const cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+            let cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+            // Remove trailing punctuation that might have been captured
+            cleaned = cleaned.replace(/[,;:]+$/, "");
             // Remove query params like ?im_w=1200 to dedupe correctly
             return cleaned.split("?")[0];
           };
@@ -2036,23 +2046,49 @@ serve(async (req) => {
           let allImageUrls: string[] = [];
           const htmlContent = rawHtml || html;
 
+          // Log content length for debugging
+          console.log(`Searching for images in ${htmlContent.length} chars of HTML content`);
+
           for (const pattern of imagePatterns) {
             const matches = htmlContent.match(pattern) || [];
+            if (matches.length > 0) {
+              console.log(`Pattern ${pattern.source.substring(0, 50)}... found ${matches.length} matches`);
+            }
             allImageUrls.push(...matches);
           }
 
           // Also check markdown for image URLs
-          const markdownImageMatches = markdown.match(/https:\/\/a0\.muscache\.com\/im\/pictures\/[^\s\)"\]]+/gi) || [];
+          const markdownImageMatches = markdown.match(/https:\/\/[a-z0-9]+\.muscache\.com\/[^\s\)"\]\\]+/gi) || [];
+          if (markdownImageMatches.length > 0) {
+            console.log(`Markdown found ${markdownImageMatches.length} potential image URLs`);
+          }
           allImageUrls.push(...markdownImageMatches);
 
-          const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+          // Log total found before filtering
+          console.log(`Total raw image URLs found: ${allImageUrls.length}`);
+          if (allImageUrls.length > 0) {
+            console.log(`Sample URLs: ${allImageUrls.slice(0, 3).join(", ")}`);
+          }
 
-          imageUrls = uniqueBases
-            .filter(isValidPropertyImage)
+          const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+          console.log(`Unique base URLs after deduplication: ${uniqueBases.length}`);
+
+          // More lenient filter - just need muscache and pictures
+          const filteredUrls = uniqueBases.filter(url => {
+            if (!url.includes("muscache.com")) return false;
+            // Exclude obvious non-property images
+            const excludePatterns = ["favicon", "logo", "icon", "brand", "sprite", "button", "avatar", "profile"];
+            if (excludePatterns.some(p => url.toLowerCase().includes(p))) return false;
+            return true;
+          });
+          
+          console.log(`Filtered URLs after basic validation: ${filteredUrls.length}`);
+
+          imageUrls = filteredUrls
             .map((base) => `${base}?im_w=1200`)
             .slice(0, 5);
 
-          console.log(`Firecrawl found ${imageUrls.length} property images`);
+          console.log(`Final image URLs for search: ${imageUrls.length}`);
         } else {
           console.log("Firecrawl request failed:", firecrawlResponse.status);
         }
@@ -2093,15 +2129,19 @@ serve(async (req) => {
           // Extract images if not already found
           if (imageUrls.length === 0) {
             const imagePatterns = [
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)]+/gi,
-              /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(?:jpg|jpeg|png|webp)/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/hosting\/Hosting-[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/miso\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/BnbProperty\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/prohost-api\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a0\.muscache\.com\/im\/pictures\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}[^"'\s\)\]\\]*/gi,
+              /https:\/\/a0\.muscache\.com\/im\/ml\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/a[0-9]\.muscache\.com\/im\/pictures\/[^"'\s\)\]\\]+/gi,
+              /https:\/\/[a-z0-9]+\.muscache\.com\/[^"'\s\)\]\\]*pictures[^"'\s\)\]\\]+/gi,
             ];
 
             const canonicalizeMuscacheUrl = (url: string) => {
-              const cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+              let cleaned = url.replace(/\\u002F/g, "/").replace(/\\/g, "");
+              cleaned = cleaned.replace(/[,;:]+$/, "");
               return cleaned.split("?")[0];
             };
 
@@ -2121,11 +2161,20 @@ serve(async (req) => {
             }
 
             const uniqueBases = [...new Set(allImageUrls.map(canonicalizeMuscacheUrl))];
+            
+            // More lenient filter
+            const filteredUrls = uniqueBases.filter(url => {
+              if (!url.includes("muscache.com")) return false;
+              const excludePatterns = ["favicon", "logo", "icon", "brand", "sprite", "button", "avatar", "profile"];
+              if (excludePatterns.some(p => url.toLowerCase().includes(p))) return false;
+              return true;
+            });
 
-            imageUrls = uniqueBases
-              .filter(isValidPropertyImage)
+            imageUrls = filteredUrls
               .map((base) => `${base}?im_w=1200`)
               .slice(0, 5);
+            
+            console.log(`Fallback found ${imageUrls.length} images from direct fetch`);
           }
           
           // Try to extract price from JSON data if not already found
