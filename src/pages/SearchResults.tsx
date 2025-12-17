@@ -631,9 +631,16 @@ export default function SearchResults() {
 
   // Separate results into cheaper (savings) and more expensive (no savings)
   // User requirement: do NOT show alternatives that are more expensive than Airbnb.
+  // IMPORTANT: Compare alternative TOTAL prices to Airbnb TOTAL price (including fees)
   const cheaperResults = sortedByPrice.filter((r) => {
-    if (!referencePrice) return true;
-    return r.price! < referencePrice;
+    if (!airbnbGrandTotal) return true;
+    return r.price! < airbnbGrandTotal;
+  });
+
+  // More expensive alternatives for collapsed section
+  const moreExpensiveResults = sortedByPrice.filter((r) => {
+    if (!airbnbGrandTotal) return false;
+    return r.price! >= airbnbGrandTotal;
   });
 
   // Show up to 10 cheaper alternatives, while ensuring the cheapest is included
@@ -1028,12 +1035,12 @@ export default function SearchResults() {
                       </div>
                       <div className="flex items-baseline gap-2 mb-2">
                         <span className="text-3xl font-bold text-foreground">
-                          €{search?.airbnb_price ? Math.round(search.airbnb_price * (nights || 1) * 1.14) : "—"}
+                          €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
                         </span>
                         <span className="text-muted-foreground">total for {nights || 1} nights</span>
                       </div>
                       <p className="text-sm text-muted-foreground mb-4">
-                        €{search?.airbnb_price || "—"}/night + ~14% service fee
+                        €{referencePrice ? Math.round(referencePrice) : "—"}/night + ~14% service fee
                       </p>
                       <Button className="w-full" asChild>
                         <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
@@ -1052,7 +1059,7 @@ export default function SearchResults() {
                         Airbnb Has the Best Price
                       </h3>
                       <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                        We found this property on {validResults.length} other platform{validResults.length !== 1 ? "s" : ""}, 
+                        We found this property on {moreExpensiveResults.length} other platform{moreExpensiveResults.length !== 1 ? "s" : ""}, 
                         but none offered a lower price than Airbnb. 
                         You're already getting the best deal!
                       </p>
@@ -1068,46 +1075,49 @@ export default function SearchResults() {
                       </Button>
 
                       {/* Collapsible more expensive alternatives */}
-                      {validResults.length > 0 && (
+                      {moreExpensiveResults.length > 0 && (
                         <div className="mt-8 pt-6 border-t border-border/50">
                           <button
                             onClick={() => setShowMoreExpensive(!showMoreExpensive)}
                             className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mx-auto"
                           >
                             {showMoreExpensive ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                            <span>View {validResults.length} more expensive alternative{validResults.length !== 1 ? "s" : ""}</span>
+                            <span>View {moreExpensiveResults.length} more expensive alternative{moreExpensiveResults.length !== 1 ? "s" : ""}</span>
                           </button>
                           
                           {showMoreExpensive && (
                             <div className="mt-4 space-y-3">
-                              {validResults.map((result) => (
-                                <div key={result.id} className="p-4 rounded-xl border border-border/50 bg-muted/30 text-left">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2">
-                                      <Globe className="w-4 h-4 text-muted-foreground" />
-                                      <span className="font-medium text-foreground">{result.platform_name}</span>
-                                      {result.match_type === "visual" && result.confidence_score && (
-                                        <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-600">
-                                          {result.confidence_score}% match
-                                        </span>
-                                      )}
+                              {moreExpensiveResults.map((result) => {
+                                const priceDiff = Math.round((result.price || 0) - (airbnbGrandTotal || 0));
+                                return (
+                                  <div key={result.id} className="p-4 rounded-xl border border-border/50 bg-muted/30 text-left">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <div className="flex items-center gap-2">
+                                        <Globe className="w-4 h-4 text-muted-foreground" />
+                                        <span className="font-medium text-foreground">{result.platform_name}</span>
+                                        {result.match_type === "visual" && result.confidence_score && (
+                                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-600">
+                                            {result.confidence_score}% match
+                                          </span>
+                                        )}
+                                      </div>
+                                      <span className="text-amber-600 text-sm font-medium">
+                                        +€{priceDiff} more
+                                      </span>
                                     </div>
-                                    <span className="text-amber-600 text-sm font-medium">
-                                      +€{Math.round((result.price || 0) - (search?.airbnb_price ? search.airbnb_price * (nights || 1) * 1.14 : 0))} more
-                                    </span>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-lg font-semibold text-foreground">
+                                        €{Math.round(result.price || 0)} total
+                                      </span>
+                                      <Button variant="outline" size="sm" asChild>
+                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                          View <ExternalLink className="w-3 h-3 ml-1" />
+                                        </a>
+                                      </Button>
+                                    </div>
                                   </div>
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-lg font-semibold text-foreground">
-                                      €{Math.round(result.price || 0)} total
-                                    </span>
-                                    <Button variant="outline" size="sm" asChild>
-                                      <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                        View <ExternalLink className="w-3 h-3 ml-1" />
-                                      </a>
-                                    </Button>
-                                  </div>
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )}
                         </div>
