@@ -621,67 +621,35 @@ export default function SearchResults() {
   const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
-  // Filter and sort results with price validation
-  // - Always keep visually verified matches (even if price is missing or outside our "reasonable" range)
-  // - Keep text-only matches only when they have a valid price
-  const validResults = results.filter((r) => {
-    const isVisual = r.match_type === "visual";
+  // Filter and sort results (ONLY listings with valid prices)
+  // User requirement: listings without prices don't make sense for comparison.
+  const validResults = results.filter((r) => !!r.price && r.price >= 10);
 
-    // Visual matches are the core value: show them even if price scraping failed or looks odd.
-    if (isVisual) return true;
-
-    const hasValidPrice = !!r.price && r.price >= 10; // Min €10/night for any real accommodation
-    if (!hasValidPrice) return false;
-
-    const totalPrice = nights ? r.price! * nights : r.price!;
-
-    // If we have a reference price, validate against it for text-only results
-    if (airbnbGrandTotal) {
-      const minReasonable = airbnbGrandTotal * 0.2;
-      const maxReasonable = airbnbGrandTotal * 2.0;
-      return totalPrice >= minReasonable && totalPrice <= maxReasonable;
-    }
-
-    return true;
-  });
-  
-  // Sort by price descending (most expensive first), treating invalid prices (< €10) as no price
-  const sortedByPrice = [...validResults].sort((a, b) => {
-    const priceA = a.price && a.price >= 10 ? a.price : 0;
-    const priceB = b.price && b.price >= 10 ? b.price : 0;
-    return priceB - priceA;
-  });
+  // Sort by price descending
+  const sortedByPrice = [...validResults].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
 
   // Separate results into cheaper (savings) and more expensive (no savings)
-  const cheaperResults = sortedByPrice.filter(r => {
-    if (!r.price || r.price < 10) return false;
-    if (!referencePrice) return true; // If no baseline, show in main list
-    return r.price <= referencePrice;
+  const cheaperResults = sortedByPrice.filter((r) => {
+    if (!referencePrice) return true;
+    return r.price! <= referencePrice;
   });
-  
-  const moreExpensiveResults = sortedByPrice.filter(r => {
-    if (!r.price || r.price < 10) return false;
+
+  const moreExpensiveResults = sortedByPrice.filter((r) => {
     if (!referencePrice) return false;
-    return r.price > referencePrice;
+    return r.price! > referencePrice;
   });
 
-  // Results without valid prices (visual matches with no price)
-  const noPriceResults = sortedByPrice.filter(r => !r.price || r.price < 10);
-
-  // Show more than 1 result: up to 6 alternatives, while ensuring the cheapest is included
+  // Show up to 6 alternatives, while ensuring the cheapest is included
   const MAX_ALTERNATIVES = 6;
   let displayResults: SearchResult[] = cheaperResults.slice(0, MAX_ALTERNATIVES);
-  
-  // Add no-price visual matches to display (they might still be useful)
-  const visualNoPriceResults = noPriceResults.filter(r => r.match_type === 'visual');
-  if (displayResults.length < MAX_ALTERNATIVES && visualNoPriceResults.length > 0) {
-    displayResults = [...displayResults, ...visualNoPriceResults.slice(0, MAX_ALTERNATIVES - displayResults.length)];
-  }
 
   // Only consider valid prices (≥ €10) when finding cheapest
-  const resultsWithValidPrices = sortedByPrice.filter(r => r.price && r.price >= 10);
+  const resultsWithValidPrices = sortedByPrice;
   const cheapestOverall = resultsWithValidPrices.length
-    ? resultsWithValidPrices.reduce((min, r) => (r.price! < min.price!) ? r : min, resultsWithValidPrices[0])
+    ? resultsWithValidPrices.reduce(
+        (min, r) => (r.price! < min.price! ? r : min),
+        resultsWithValidPrices[0]
+      )
     : null;
 
   if (cheapestOverall && !displayResults.some((r) => r.id === cheapestOverall.id)) {
@@ -692,7 +660,6 @@ export default function SearchResults() {
       displayResults = [...displayResults, cheapestOverall];
     }
   }
-
   // Find cheapest result for unlock button (only valid prices)
   const cheapestResult = resultsWithValidPrices.length > 0
     ? resultsWithValidPrices.reduce((min, r) => (r.price! < min.price!) ? r : min, resultsWithValidPrices[0])

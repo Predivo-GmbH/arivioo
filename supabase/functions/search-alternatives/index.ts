@@ -629,34 +629,45 @@ async function scrapePriceFromListing(
     const currency = String.raw`(?:\$|€|£|CHF|USD|EUR|GBP|ZAR|AUD|CAD|NZD|SEK|NOK|DKK|PLN|CZK|HUF|R\$|R)`;
     const amount = String.raw`(\d{1,3}(?:[\s,.']\d{3})*(?:[\.,]\d{2})?|\d{2,6})`;
 
-    const patterns: Array<{ re: RegExp; perNight: boolean }> = [
-      // Per-night
-      { re: new RegExp(String.raw`(?:from\s*)?${currency}\s*${amount}\s*(?:per\s*night|/night|night)`, "i"), perNight: true },
-      { re: new RegExp(String.raw`(?:per\s*night|/night|night)\s*(?:from\s*)?${currency}\s*${amount}`, "i"), perNight: true },
-      { re: new RegExp(String.raw`(?:from\s*)?${amount}\s*${currency}\s*(?:per\s*night|/night|night)`, "i"), perNight: true },
+    // Collect ALL currency amounts in the page (the first one is often NOT the price).
+    const reAll = new RegExp(String.raw`${currency}\s*${amount}|${amount}\s*${currency}`, "gi");
+    const candidates: Array<{ value: number; perNightHint: boolean }> = [];
 
-      // Total
-      { re: new RegExp(String.raw`total[:\s]*${currency}\s*${amount}`, "i"), perNight: false },
-      { re: new RegExp(String.raw`${currency}\s*${amount}\s*total`, "i"), perNight: false },
-      { re: new RegExp(String.raw`total[:\s]*${amount}\s*${currency}`, "i"), perNight: false },
-
-      // Generic fallback (useful for Booking/TripAdvisor text blocks)
-      { re: new RegExp(String.raw`${currency}\s*${amount}`, "i"), perNight: false },
-      { re: new RegExp(String.raw`${amount}\s*${currency}`, "i"), perNight: false },
-    ];
-
-    for (const p of patterns) {
-      const m = content.match(p.re);
-      if (!m) continue;
-      const raw = m[1];
+    const text = content;
+    let match: RegExpExecArray | null;
+    while ((match = reAll.exec(text)) !== null) {
+      const raw = match[1] || match[2];
       const parsed = raw ? normalizeNumber(raw) : null;
       if (!parsed || parsed <= 0 || parsed >= 50000) continue;
-      return { extracted: parsed, isPerNight: p.perNight };
+
+      const windowStart = Math.max(0, match.index - 25);
+      const windowEnd = Math.min(text.length, match.index + match[0].length + 25);
+      const windowText = text.slice(windowStart, windowEnd).toLowerCase();
+      const perNightHint = /per\s*night|\/night|night/.test(windowText);
+
+      candidates.push({ value: parsed, perNightHint });
     }
 
-    return { extracted: null, isPerNight: false };
-  };
+    if (candidates.length === 0) return { extracted: null, isPerNight: false };
 
+    // Prefer explicit per-night hints.
+    const perNightCandidates = candidates.filter((c) => c.perNightHint);
+    if (perNightCandidates.length > 0) {
+      const best = perNightCandidates
+        .map((c) => c.value)
+        .filter((v) => v >= 10 && v <= 5000)
+        .sort((a, b) => b - a)[0];
+      return best ? { extracted: best, isPerNight: true } : { extracted: null, isPerNight: false };
+    }
+
+    // Otherwise assume totals: pick the largest plausible total, then derive per-night later.
+    const bestTotal = candidates
+      .map((c) => c.value)
+      .filter((v) => v >= 20 && v <= 50000)
+      .sort((a, b) => b - a)[0];
+
+    return bestTotal ? { extracted: bestTotal, isPerNight: false } : { extracted: null, isPerNight: false };
+  };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   const fetchFirecrawl = async (
@@ -1256,7 +1267,7 @@ async function runSearchWithStreaming(
   await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
 
   // Keep it bounded: price scraping is the slowest + most rate-limited step.
-  const toScrape = alternatives.slice(0, 6);
+  const toScrape = alternatives.slice(0, 8);
   for (let i = 0; i < toScrape.length; i++) {
     const alt = toScrape[i];
     sendProgress(
@@ -1270,33 +1281,40 @@ async function runSearchWithStreaming(
       .update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` })
       .eq("id", searchId);
 
-    if (firecrawlApiKey) {
-      const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
-      alt.price = priceData.perNightRate;
-      alt.price_check_in = priceData.usedCheckIn;
-      alt.price_check_out = priceData.usedCheckOut;
-      alt.dates_differ = priceData.datesDiffer;
+    if (!firecrawlApiKey) continue;
 
-      if (priceData.perNightRate) {
-        if (priceData.datesDiffer) {
-          sendProgress(
-            controller,
-            `Found price on ${alt.platform_name}`,
-            `€${priceData.perNightRate}/night (dates ${priceData.usedCheckIn} - ${priceData.usedCheckOut}, original dates unavailable)`,
-            { platform: alt.platform_name, price: priceData.perNightRate, datesDiffer: true }
-          );
-        } else {
-          sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, {
-            platform: alt.platform_name,
-            price: priceData.perNightRate,
-          });
-        }
+    const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
+    alt.price = priceData.perNightRate;
+    alt.price_check_in = priceData.usedCheckIn;
+    alt.price_check_out = priceData.usedCheckOut;
+    alt.dates_differ = priceData.datesDiffer;
+
+    if (priceData.perNightRate && priceData.perNightRate >= 10) {
+      if (priceData.datesDiffer) {
+        sendProgress(
+          controller,
+          `Found price on ${alt.platform_name}`,
+          `€${priceData.perNightRate}/night (dates ${priceData.usedCheckIn} - ${priceData.usedCheckOut}, original dates unavailable)`,
+          { platform: alt.platform_name, price: priceData.perNightRate, datesDiffer: true }
+        );
+      } else {
+        sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, {
+          platform: alt.platform_name,
+          price: priceData.perNightRate,
+        });
       }
+    } else {
+      sendProgress(controller, `No price on ${alt.platform_name}`, "No valid price found for the selected dates", {
+        platform: alt.platform_name,
+      });
     }
   }
 
+  // User requirement: ONLY keep alternatives that have a valid price
+  const resultsWithPrices = alternatives.filter((a) => !!a.price && a.price >= 10);
+
   // Calculate savings
-  const resultsWithSavings = alternatives.map(alt => ({
+  const resultsWithSavings = resultsWithPrices.map((alt) => ({
     ...alt,
     original_price: airbnbPrice,
     savings_amount: airbnbPrice && alt.price && alt.price < airbnbPrice ? airbnbPrice - alt.price : null,
@@ -1306,10 +1324,10 @@ async function runSearchWithStreaming(
   // Sort by savings
   resultsWithSavings.sort((a, b) => (b.savings_percentage ?? 0) - (a.savings_percentage ?? 0));
 
-  // Save to DB
-  console.log(`Attempting to save ${resultsWithSavings.length} results to DB for search ${searchId}`);
+  // Save to DB (only priced results)
+  console.log(`Attempting to save ${resultsWithSavings.length} priced results to DB for search ${searchId}`);
   if (resultsWithSavings.length > 0) {
-    const insertData = resultsWithSavings.map(r => ({
+    const insertData = resultsWithSavings.map((r) => ({
       search_id: searchId,
       platform_name: r.platform_name,
       listing_url: r.listing_url,
@@ -1327,7 +1345,10 @@ async function runSearchWithStreaming(
       price_check_out: r.price_check_out || checkOut,
       dates_differ: r.dates_differ || false,
     }));
-    console.log("Insert data:", JSON.stringify(insertData.map(d => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price, datesDiffer: d.dates_differ }))));
+    console.log(
+      "Insert data:",
+      JSON.stringify(insertData.map((d) => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price, datesDiffer: d.dates_differ })))
+    );
     const { data: insertedData, error: insertError } = await supabase.from("search_results").insert(insertData).select();
     if (insertError) {
       console.error("CRITICAL: Failed to insert search results:", insertError.message, insertError.details);
@@ -1347,7 +1368,7 @@ async function runSearchWithStreaming(
     nights_count: nights,
   }).eq("id", searchId);
 
-  sendProgress(controller, "Search complete", `Found ${resultsWithSavings.length} alternatives`);
+  sendProgress(controller, "Search complete", resultsWithSavings.length > 0 ? `Found ${resultsWithSavings.length} priced alternatives` : "No priced alternatives found");
   sendSSE(controller, "complete", {
     success: true,
     results: resultsWithSavings,
