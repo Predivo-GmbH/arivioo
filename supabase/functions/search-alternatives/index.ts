@@ -11,6 +11,20 @@ const corsHeaders = {
 type SSEController = ReadableStreamDefaultController<Uint8Array>;
 const encoder = new TextEncoder();
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 12_000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Track if controller is still valid
 const controllerValid = new WeakSet<SSEController>();
 
@@ -98,27 +112,31 @@ Where:
 - isMatch: true only if score >= 90
 - explanation: 1-2 sentence reason for your assessment`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${lovableApiKey}`,
-        "Content-Type": "application/json",
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: airbnbImageUrl } },
+                { type: "image_url", image_url: { url: alternativeImageUrl } },
+              ],
+            },
+          ],
+          max_tokens: 200,
+        }),
       },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { 
-            role: "user", 
-            content: [
-              { type: "text", text: prompt },
-              { type: "image_url", image_url: { url: airbnbImageUrl } },
-              { type: "image_url", image_url: { url: alternativeImageUrl } }
-            ]
-          }
-        ],
-        max_tokens: 200,
-      }),
-    });
+      12_000
+    );
     
     if (!response.ok) {
       console.error("Lovable AI image comparison failed:", response.status);
@@ -185,20 +203,22 @@ If you cannot find a reliable per-night price, return "null".
 Do not include currency symbols or units - just the number.`;
 
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${lovableApiKey}`,
-        "Content-Type": "application/json",
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 50,
+        }),
       },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "user", content: prompt }
-        ],
-        max_tokens: 50,
-      }),
-    });
+      8_000
+    );
     
     if (!response.ok) {
       console.error("Lovable AI request failed:", response.status);
@@ -1074,6 +1094,17 @@ async function runSearchWithStreaming(
           airbnbPrice = await extractAirbnbPriceWithAI(markdown, nights);
           if (airbnbPrice) {
             sendProgress(controller, "Price extracted", `Found Airbnb price: €${airbnbPrice}/night`, { airbnbPrice });
+
+            // Persist baseline immediately so the UI can render the Airbnb listing even if the search is interrupted.
+            await supabase.from("searches").update({
+              airbnb_title: airbnbTitle,
+              airbnb_price: airbnbPrice,
+              airbnb_image_url: imageUrls[0] || null,
+              airbnb_images: imageUrls.slice(0, 5),
+              check_in_date: checkIn,
+              check_out_date: checkOut,
+              nights_count: nights,
+            }).eq("id", searchId);
           }
         }
       }
@@ -1136,7 +1167,7 @@ async function runSearchWithStreaming(
 
   const searchStartTime = Date.now();
   const MAX_TIME = 120000;
-  const MAX_AI = 45;
+  const MAX_AI = 30;
   const TARGET = 12;
   let aiCount = 0;
 
@@ -1155,7 +1186,7 @@ async function runSearchWithStreaming(
 
       let matchesThisImage = 0;
       for (const match of visualMatches) {
-        if (aiCount >= MAX_AI || alternatives.filter(a => a.match_type === 'visual').length >= TARGET || matchesThisImage >= 15) break;
+        if (aiCount >= MAX_AI || alternatives.filter(a => a.match_type === 'visual').length >= TARGET || matchesThisImage >= 8) break;
         if (Date.now() - searchStartTime > MAX_TIME) break;
 
         const matchUrl = match.link;
@@ -1224,11 +1255,20 @@ async function runSearchWithStreaming(
   sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms for dates ${checkIn} to ${checkOut}`);
   await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
 
-  const toScrape = alternatives.slice(0, 8);
+  // Keep it bounded: price scraping is the slowest + most rate-limited step.
+  const toScrape = alternatives.slice(0, 6);
   for (let i = 0; i < toScrape.length; i++) {
     const alt = toScrape[i];
-    sendProgress(controller, `Getting price from ${alt.platform_name}`, `Checking availability for ${checkIn} to ${checkOut} (${i + 1}/${toScrape.length})`, { platform: alt.platform_name, index: i + 1, total: toScrape.length });
-    await supabase.from("searches").update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` }).eq("id", searchId);
+    sendProgress(
+      controller,
+      `Getting price from ${alt.platform_name}`,
+      `Checking availability for ${checkIn} to ${checkOut} (${i + 1}/${toScrape.length})`,
+      { platform: alt.platform_name, index: i + 1, total: toScrape.length }
+    );
+    await supabase
+      .from("searches")
+      .update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` })
+      .eq("id", searchId);
 
     if (firecrawlApiKey) {
       const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
@@ -1236,12 +1276,20 @@ async function runSearchWithStreaming(
       alt.price_check_in = priceData.usedCheckIn;
       alt.price_check_out = priceData.usedCheckOut;
       alt.dates_differ = priceData.datesDiffer;
-      
+
       if (priceData.perNightRate) {
         if (priceData.datesDiffer) {
-          sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night (dates ${priceData.usedCheckIn} - ${priceData.usedCheckOut}, original dates unavailable)`, { platform: alt.platform_name, price: priceData.perNightRate, datesDiffer: true });
+          sendProgress(
+            controller,
+            `Found price on ${alt.platform_name}`,
+            `€${priceData.perNightRate}/night (dates ${priceData.usedCheckIn} - ${priceData.usedCheckOut}, original dates unavailable)`,
+            { platform: alt.platform_name, price: priceData.perNightRate, datesDiffer: true }
+          );
         } else {
-          sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, { platform: alt.platform_name, price: priceData.perNightRate });
+          sendProgress(controller, `Found price on ${alt.platform_name}`, `€${priceData.perNightRate}/night`, {
+            platform: alt.platform_name,
+            price: priceData.perNightRate,
+          });
         }
       }
     }

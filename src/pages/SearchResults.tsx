@@ -358,25 +358,32 @@ export default function SearchResults() {
             }
           }
 
-          // If stream ended without complete event, fetch results anyway
-          if (!searchComplete) {
-            const { data: updatedSearch } = await supabase
-              .from("searches")
-              .select("*")
-              .eq("id", searchId)
-              .single();
+           // If stream ended without complete event, fetch results anyway
+           if (!searchComplete) {
+             const { data: updatedSearch } = await supabase
+               .from("searches")
+               .select("*")
+               .eq("id", searchId)
+               .single();
 
-            const { data: resultsData } = await supabase
-              .from("search_results")
-              .select("*")
-              .eq("search_id", searchId)
-              .order("savings_percentage", { ascending: false, nullsFirst: false });
+             // If the backend is still running, keep the user in the loading state
+             if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
+               setSearch(updatedSearch as SearchData);
+               setSearchPhase("thinking");
+               return;
+             }
 
-            setSearch(updatedSearch as SearchData);
-            setResults((resultsData || []) as SearchResult[]);
-            actualDurationRef.current = Date.now() - startedAt;
-            setSearchPhase("animating");
-          }
+             const { data: resultsData } = await supabase
+               .from("search_results")
+               .select("*")
+               .eq("search_id", searchId)
+               .order("savings_percentage", { ascending: false, nullsFirst: false });
+
+             setSearch(updatedSearch as SearchData);
+             setResults((resultsData || []) as SearchResult[]);
+             actualDurationRef.current = Date.now() - startedAt;
+             setSearchPhase("animating");
+           }
         } catch (error: any) {
           // User cancelled
           if (error?.name === "AbortError") {
@@ -1015,7 +1022,7 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </div>
-                ) : results.length === 0 ? (
+                ) : (search?.status === "completed" && results.length === 0) ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-muted-foreground" />
@@ -1024,7 +1031,7 @@ export default function SearchResults() {
                       No Alternative Listings Found
                     </h3>
                     <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                      We couldn't find this property on Booking.com, Vrbo, or other platforms using photo matching and property details. 
+                      We couldn't find this property on Booking.com, Vrbo, or other platforms using photo matching and property details.
                       It might be exclusive to Airbnb or listed under a different name elsewhere.
                     </p>
                     <p className="text-sm text-muted-foreground mb-6">
@@ -1039,6 +1046,7 @@ export default function SearchResults() {
                   </div>
                 ) : (
                   <>
+                    {/* Comparison Table - Matching ExampleResult layout */}
                     {/* Comparison Table - Matching ExampleResult layout */}
                     <div className="overflow-x-auto mb-8">
                       <table className="w-full text-sm">
