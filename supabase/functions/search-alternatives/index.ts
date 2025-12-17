@@ -392,14 +392,79 @@ function isDirectPropertySite(url: string): boolean {
 // UUID v4 validation regex
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-// Validate Airbnb URL format (supports all locales)
+// Maximum URL length to prevent DoS
+const MAX_URL_LENGTH = 2048;
+
+// Strict allowlist of valid Airbnb domains (prevents SSRF via subdomain tricks)
+const AIRBNB_DOMAINS = [
+  "airbnb.com", "airbnb.co.uk", "airbnb.de", "airbnb.fr", "airbnb.es",
+  "airbnb.it", "airbnb.nl", "airbnb.pt", "airbnb.at", "airbnb.ch",
+  "airbnb.be", "airbnb.ie", "airbnb.se", "airbnb.no", "airbnb.dk",
+  "airbnb.fi", "airbnb.pl", "airbnb.cz", "airbnb.hu", "airbnb.gr",
+  "airbnb.ca", "airbnb.com.au", "airbnb.co.nz", "airbnb.co.za",
+  "airbnb.jp", "airbnb.kr", "airbnb.cn", "airbnb.com.hk", "airbnb.com.sg",
+  "airbnb.co.in", "airbnb.com.br", "airbnb.mx", "airbnb.com.ar",
+  "airbnb.ru", "airbnb.com.tr", "airbnb.ae", "airbnb.co.il"
+];
+
+// Check if hostname is a private/internal IP (SSRF protection)
+function isPrivateOrInternalIP(hostname: string): boolean {
+  // Block localhost variants
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+    return true;
+  }
+  
+  // Block private IP ranges (RFC 1918)
+  const privateIPPatterns = [
+    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/,           // 10.0.0.0/8
+    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/, // 172.16.0.0/12
+    /^192\.168\.\d{1,3}\.\d{1,3}$/,              // 192.168.0.0/16
+    /^169\.254\.\d{1,3}\.\d{1,3}$/,              // Link-local
+    /^0\.0\.0\.0$/,                               // Any address
+  ];
+  
+  return privateIPPatterns.some(pattern => pattern.test(hostname));
+}
+
+// Validate Airbnb URL format with strict domain allowlist (prevents SSRF)
 function isValidAirbnbUrl(url: string): boolean {
+  // Check URL length limit
+  if (!url || url.length > MAX_URL_LENGTH) {
+    return false;
+  }
+  
   try {
     const parsed = new URL(url);
-    return (
-      (parsed.hostname.includes("airbnb.") || parsed.hostname === "airbnb.com") &&
-      parsed.pathname.includes("/rooms/")
+    
+    // Only allow http/https protocols
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    
+    // Block userinfo in URL (prevents SSRF like airbnb.com@evil.com)
+    if (parsed.username || parsed.password) {
+      return false;
+    }
+    
+    // Block private/internal IPs
+    if (isPrivateOrInternalIP(parsed.hostname)) {
+      return false;
+    }
+    
+    // Extract the base domain (handles www. prefix)
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    
+    // Check against strict allowlist
+    const isAllowedDomain = AIRBNB_DOMAINS.some(domain => 
+      hostname === domain || hostname.endsWith('.' + domain)
     );
+    
+    if (!isAllowedDomain) {
+      return false;
+    }
+    
+    // Must have /rooms/ path
+    return parsed.pathname.includes("/rooms/");
   } catch {
     return false;
   }
