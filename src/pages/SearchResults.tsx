@@ -13,7 +13,6 @@ import {
   Sparkles, 
   AlertCircle,
   TrendingDown,
-  TrendingUp,
   Calendar,
   Info,
   Shield,
@@ -22,10 +21,7 @@ import {
   Globe,
   DollarSign,
   Check,
-  CheckCircle,
-  ArrowLeftRight,
-  ChevronDown,
-  ChevronUp
+  ArrowLeftRight
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
@@ -165,18 +161,15 @@ export default function SearchResults() {
   const [expandedComparison, setExpandedComparison] = useState<string | null>(null);
   const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0);
   const [hasCelebrated, setHasCelebrated] = useState(false);
-  const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string; id: string }>>([]);
-  const [showMoreExpensive, setShowMoreExpensive] = useState(false);
-  const [showNoPriceMatches, setShowNoPriceMatches] = useState(false);
+  const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string }>>([]);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
   const actualDurationRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const seenActivityKeysRef = useRef<Set<string>>(new Set());
+  const lastActivityKeyRef = useRef<string>("");
   const tickerScrollRef = useRef<HTMLDivElement | null>(null);
-  const activityIdCounterRef = useRef(0);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -238,8 +231,7 @@ export default function SearchResults() {
           setStepProgress(0);
           setThinkingElapsedMs(0);
           setActivityFeed([]);
-          seenActivityKeysRef.current.clear();
-          activityIdCounterRef.current = 0;
+          lastActivityKeyRef.current = "";
 
           // Start timer + allow cancel
           searchStartTimeRef.current = Date.now();
@@ -309,19 +301,13 @@ export default function SearchResults() {
                     const data = JSON.parse(eventData);
 
                     if (eventType === "progress") {
-                      // Add to activity feed with dedup
-                      const key = `${data.step}__${data.detail ?? ""}`;
-                      if (!seenActivityKeysRef.current.has(key)) {
-                        seenActivityKeysRef.current.add(key);
-                        activityIdCounterRef.current += 1;
-                        const newItem = { 
-                          ts: data.timestamp || Date.now(), 
-                          message: data.step, 
-                          detail: data.detail,
-                          id: `activity-${activityIdCounterRef.current}`
-                        };
-                        setActivityFeed((prev) => [...prev, newItem].slice(-12));
-                      }
+                      // Add to activity feed
+                      setActivityFeed((prev) => {
+                        const key = `${data.step}__${data.detail ?? ""}`;
+                        if (prev.some(p => `${p.message}__${p.detail ?? ""}` === key)) return prev;
+                        const next = [...prev, { ts: data.timestamp || Date.now(), message: data.step, detail: data.detail }];
+                        return next.slice(-12); // Keep last 12 messages
+                      });
                     } else if (eventType === "complete") {
                       searchComplete = true;
                       actualDurationRef.current = Date.now() - startedAt;
@@ -360,32 +346,25 @@ export default function SearchResults() {
             }
           }
 
-           // If stream ended without complete event, fetch results anyway
-           if (!searchComplete) {
-             const { data: updatedSearch } = await supabase
-               .from("searches")
-               .select("*")
-               .eq("id", searchId)
-               .single();
+          // If stream ended without complete event, fetch results anyway
+          if (!searchComplete) {
+            const { data: updatedSearch } = await supabase
+              .from("searches")
+              .select("*")
+              .eq("id", searchId)
+              .single();
 
-             // If the backend is still running, keep the user in the loading state
-             if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
-               setSearch(updatedSearch as SearchData);
-               setSearchPhase("thinking");
-               return;
-             }
+            const { data: resultsData } = await supabase
+              .from("search_results")
+              .select("*")
+              .eq("search_id", searchId)
+              .order("savings_percentage", { ascending: false, nullsFirst: false });
 
-             const { data: resultsData } = await supabase
-               .from("search_results")
-               .select("*")
-               .eq("search_id", searchId)
-               .order("savings_percentage", { ascending: false, nullsFirst: false });
-
-             setSearch(updatedSearch as SearchData);
-             setResults((resultsData || []) as SearchResult[]);
-             actualDurationRef.current = Date.now() - startedAt;
-             setSearchPhase("animating");
-           }
+            setSearch(updatedSearch as SearchData);
+            setResults((resultsData || []) as SearchResult[]);
+            actualDurationRef.current = Date.now() - startedAt;
+            setSearchPhase("animating");
+          }
         } catch (error: any) {
           // User cancelled
           if (error?.name === "AbortError") {
@@ -510,26 +489,21 @@ export default function SearchResults() {
     const activity = getLiveActivity(search?.status);
     const key = `${activity.message}__${activity.detail ?? ""}`;
     if (!activity.message) return;
-    if (seenActivityKeysRef.current.has(key)) return;
+    if (key === lastActivityKeyRef.current) return;
 
-    seenActivityKeysRef.current.add(key);
-    activityIdCounterRef.current += 1;
-    const newItem = { 
-      ts: Date.now(), 
-      message: activity.message, 
-      detail: activity.detail,
-      id: `activity-${activityIdCounterRef.current}`
-    };
-    setActivityFeed((prev) => [...prev, newItem].slice(-8));
+    lastActivityKeyRef.current = key;
+    setActivityFeed((prev) => {
+      const next = [...prev, { ts: Date.now(), message: activity.message, detail: activity.detail }];
+      return next.slice(-8);
+    });
   }, [loading, searchPhase, search?.status]);
 
   // Auto-scroll ticker feed when new items are added
   useEffect(() => {
     if (tickerScrollRef.current && activityFeed.length > 0) {
-      // Scroll to top smoothly since we reverse the list (newest at top)
-      tickerScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+      tickerScrollRef.current.scrollTop = 0; // Scroll to top since we reverse the list
     }
-  }, [activityFeed]);
+  }, [activityFeed.length]);
 
   // Animate through all steps evenly when search completes
   useEffect(() => {
@@ -623,42 +597,45 @@ export default function SearchResults() {
   const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
-  // Separate results with and without valid prices
-  const resultsWithPrices = results.filter((r) => !!r.price && r.price >= 10);
-  const resultsWithoutPrices = results.filter((r) => !r.price || r.price < 10);
+  // Filter and sort results with price validation
+  // - Always keep visually verified matches (even if price is missing or outside our "reasonable" range)
+  // - Keep text-only matches only when they have a valid price
+  const validResults = results.filter((r) => {
+    const isVisual = r.match_type === "visual";
 
-  // Sort by price descending (for results with prices)
-  const sortedByPrice = [...resultsWithPrices].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
+    // Visual matches are the core value: show them even if price scraping failed or looks odd.
+    if (isVisual) return true;
 
-  // Separate results into cheaper (savings) and more expensive (no savings)
-  // IMPORTANT: result.price is PER-NIGHT rate, must multiply by nights to get total
-  const cheaperResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal || !nights) return true;
-    const alternativeTotal = r.price! * nights;
-    return alternativeTotal < airbnbGrandTotal;
+    const hasValidPrice = !!r.price && r.price >= 10; // Min €10/night for any real accommodation
+    if (!hasValidPrice) return false;
+
+    const totalPrice = nights ? r.price! * nights : r.price!;
+
+    // If we have a reference price, validate against it for text-only results
+    if (airbnbGrandTotal) {
+      const minReasonable = airbnbGrandTotal * 0.2;
+      const maxReasonable = airbnbGrandTotal * 2.0;
+      return totalPrice >= minReasonable && totalPrice <= maxReasonable;
+    }
+
+    return true;
+  });
+  
+  // Sort by price descending (most expensive first), treating invalid prices (< €10) as no price
+  const sortedByPrice = [...validResults].sort((a, b) => {
+    const priceA = a.price && a.price >= 10 ? a.price : 0;
+    const priceB = b.price && b.price >= 10 ? b.price : 0;
+    return priceB - priceA;
   });
 
-  // More expensive alternatives for collapsed section
-  const moreExpensiveResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal || !nights) return false;
-    const alternativeTotal = r.price! * nights;
-    return alternativeTotal >= airbnbGrandTotal;
-  });
+  // Show more than 1 result: up to 6 alternatives, while ensuring the cheapest is included
+  const MAX_ALTERNATIVES = 6;
+  let displayResults: SearchResult[] = sortedByPrice.slice(0, MAX_ALTERNATIVES);
 
-  // For backward compatibility, validResults = results with prices
-  const validResults = resultsWithPrices;
-
-  // Show up to 10 cheaper alternatives, while ensuring the cheapest is included
-  const MAX_ALTERNATIVES = 10;
-  let displayResults: SearchResult[] = cheaperResults.slice(0, MAX_ALTERNATIVES);
-
-  // Only consider valid prices (≥ €10) AND cheaper-than-Airbnb when finding cheapest
-  const resultsWithValidPrices = cheaperResults;
+  // Only consider valid prices (≥ €10) when finding cheapest
+  const resultsWithValidPrices = sortedByPrice.filter(r => r.price && r.price >= 10);
   const cheapestOverall = resultsWithValidPrices.length
-    ? resultsWithValidPrices.reduce(
-        (min, r) => (r.price! < min.price! ? r : min),
-        resultsWithValidPrices[0]
-      )
+    ? resultsWithValidPrices.reduce((min, r) => (r.price! < min.price!) ? r : min, resultsWithValidPrices[0])
     : null;
 
   if (cheapestOverall && !displayResults.some((r) => r.id === cheapestOverall.id)) {
@@ -670,18 +647,14 @@ export default function SearchResults() {
     }
   }
 
-  // Find cheapest result for unlock button (only valid prices + cheaper than Airbnb)
+  // Find cheapest result for unlock button (only valid prices)
   const cheapestResult = resultsWithValidPrices.length > 0
-    ? resultsWithValidPrices.reduce(
-        (min, r) => (r.price! < min.price! ? r : min),
-        resultsWithValidPrices[0]
-      )
+    ? resultsWithValidPrices.reduce((min, r) => (r.price! < min.price!) ? r : min, resultsWithValidPrices[0])
     : null;
 
   // Calculate potential savings
-  // NOTE: cheapestResult.price is PER-NIGHT rate, multiply by nights for total
-  const cheapestTotal = cheapestResult?.price && nights ? cheapestResult.price * nights : null;
-  const potentialSavings = airbnbGrandTotal && cheapestTotal ? airbnbGrandTotal - cheapestTotal : null;
+  const cheapestTotalPrice = cheapestResult?.price && nights ? cheapestResult.price * nights : null;
+  const potentialSavings = airbnbGrandTotal && cheapestTotalPrice ? airbnbGrandTotal - cheapestTotalPrice : null;
 
 
   // Helper to generate key differences based on platform
@@ -780,10 +753,7 @@ export default function SearchResults() {
                                   .slice()
                                   .reverse()
                                   .map((item, idx) => (
-                                    <div 
-                                      key={item.id} 
-                                      className="text-sm animate-in fade-in slide-in-from-top-2 duration-300"
-                                    >
+                                    <div key={`${item.ts}-${idx}`} className="text-sm">
                                       <p className="text-foreground/90">{item.message}</p>
                                       {item.detail && (
                                         <p className="text-xs text-muted-foreground mt-0.5">{item.detail}</p>
@@ -894,23 +864,11 @@ export default function SearchResults() {
                           
                           {/* Progress bar for active step */}
                           {isActive && (
-                            <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
+                            <div className="h-1.5 bg-muted rounded-full overflow-hidden">
                               <div 
                                 className="h-full bg-primary rounded-full"
                                 style={{ width: `${stepProgress}%`, transition: 'width 50ms linear' }}
                               />
-                              <div
-                                className="absolute inset-0 pointer-events-none"
-                                aria-hidden="true"
-                              >
-                                <div
-                                  className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.25s_ease-in-out_infinite]"
-                                  style={{
-                                    backgroundImage:
-                                      'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
-                                  }}
-                                />
-                              </div>
                             </div>
                           )}
                           
@@ -930,22 +888,6 @@ export default function SearchResults() {
                   <p className="text-sm text-muted-foreground">
                     Preparing your results...
                   </p>
-                  <div className="mt-3 mx-auto max-w-xs">
-                    <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="absolute inset-0 pointer-events-none"
-                        aria-hidden="true"
-                      >
-                        <div
-                          className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.1s_ease-in-out_infinite]"
-                          style={{
-                            backgroundImage:
-                              'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
-                          }}
-                        />
-                      </div>
-                    </div>
-                  </div>
                 </div>
               </div>
             )}
@@ -1003,7 +945,7 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </div>
-                ) : (search?.status === "completed" && results.length === 0) ? (
+                ) : results.length === 0 ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-muted-foreground" />
@@ -1012,7 +954,7 @@ export default function SearchResults() {
                       No Alternative Listings Found
                     </h3>
                     <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                      We couldn't find this property on Booking.com, Vrbo, or other platforms using photo matching and property details.
+                      We couldn't find this property on Booking.com, Vrbo, or other platforms using photo matching and property details. 
                       It might be exclusive to Airbnb or listed under a different name elsewhere.
                     </p>
                     <p className="text-sm text-muted-foreground mb-6">
@@ -1025,210 +967,8 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </div>
-                ) : (search?.status === "completed" && displayResults.length === 0) ? (
-                  /* Alternatives exist but none are cheaper than Airbnb - use same table layout */
-                  <>
-                    {/* Success banner */}
-                    <div className="mb-6 p-4 rounded-xl bg-green-500/10 border border-green-500/20 flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
-                        <CheckCircle className="w-5 h-5 text-green-500" />
-                      </div>
-                      <div>
-                        <h3 className="font-semibold text-foreground">Airbnb Has the Best Price</h3>
-                        <p className="text-sm text-muted-foreground">
-                          We found this property on {moreExpensiveResults.length} other platform{moreExpensiveResults.length !== 1 ? "s" : ""}, 
-                          but none offered a lower price. You're already getting the best deal!
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Comparison Table - Same layout as normal results */}
-                    <div className="overflow-x-auto mb-8">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-border">
-                            <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
-                            <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
-                            <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights || 1} nights)</th>
-                            <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
-                            <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Key Differences</th>
-                            <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {/* Airbnb Row - Highlighted as Best Deal */}
-                          <tr className="bg-success/5 border-2 border-success/30">
-                            <td className="py-4 px-4">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="w-2 h-2 rounded-full bg-success" />
-                                <span className="font-medium text-foreground">Airbnb</span>
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
-                                  <Sparkles className="w-3 h-3" />
-                                  Best Deal
-                                </span>
-                              </div>
-                            </td>
-                            <td className="py-4 px-4 text-center">
-                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs font-medium">
-                                <Shield className="w-3 h-3" />
-                                Baseline
-                              </span>
-                            </td>
-                            <td className="py-4 px-4 text-right font-semibold text-success text-lg">
-                              €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
-                            </td>
-                            <td className="py-4 px-4 text-right text-success font-medium">
-                              €{referencePrice ? Math.round(referencePrice) : "—"}/night
-                            </td>
-                            <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
-                              <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
-                            </td>
-                            <td className="py-4 px-4 text-center">
-                              <Button size="sm" asChild>
-                                <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
-                                  Book <ExternalLink className="w-3 h-3 ml-1" />
-                                </a>
-                              </Button>
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {/* Collapsible more expensive alternatives */}
-                    {moreExpensiveResults.length > 0 && (
-                      <div className="border-t border-border/50 pt-6">
-                        <button
-                          onClick={() => setShowMoreExpensive(!showMoreExpensive)}
-                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
-                        >
-                          {showMoreExpensive ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>View {moreExpensiveResults.length} more expensive alternative{moreExpensiveResults.length !== 1 ? "s" : ""}</span>
-                        </button>
-                        
-                        {showMoreExpensive && (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <tbody>
-                                {moreExpensiveResults.map((result) => {
-                                  const alternativeTotal = (result.price || 0) * (nights || 1);
-                                  const priceDiff = Math.round(alternativeTotal - (airbnbGrandTotal || 0));
-                                  return (
-                                    <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
-                                      <td className="py-4 px-4">
-                                        <div className="flex items-center gap-2">
-                                          <span className="w-2 h-2 rounded-full bg-amber-500" />
-                                          <span className="font-medium text-foreground">{result.platform_name}</span>
-                                        </div>
-                                      </td>
-                                      <td className="py-4 px-4 text-center">
-                                        {result.match_type === "visual" && result.confidence_score ? (
-                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                            <Shield className="w-3 h-3" />
-                                            {Math.round(result.confidence_score)}%
-                                          </span>
-                                        ) : (
-                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                            <Info className="w-3 h-3" />
-                                            Text
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="py-4 px-4 text-right">
-                                        <span className="font-semibold text-foreground">€{Math.round(alternativeTotal)}</span>
-                                        <span className="text-amber-600 text-xs ml-2">(+€{priceDiff})</span>
-                                      </td>
-                                      <td className="py-4 px-4 text-right text-muted-foreground">
-                                        €{Math.round(result.price || 0)}/night
-                                      </td>
-                                      <td className="py-4 px-4 hidden lg:table-cell">
-                                        <span className="text-xs text-muted-foreground">May have different terms</span>
-                                      </td>
-                                      <td className="py-4 px-4 text-center">
-                                        <Button variant="outline" size="sm" asChild>
-                                          <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                            View <ExternalLink className="w-3 h-3 ml-1" />
-                                          </a>
-                                        </Button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                      )}
-
-                    {/* Additional matches without prices (in "Airbnb Best Price" view) */}
-                    {resultsWithoutPrices.length > 0 && (
-                      <div className="mt-6 pt-6 border-t border-border/50">
-                        <button
-                          onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
-                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
-                        >
-                          {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>View {resultsWithoutPrices.length} additional match{resultsWithoutPrices.length !== 1 ? "es" : ""} (price unavailable)</span>
-                        </button>
-                        
-                        {showNoPriceMatches && (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <tbody>
-                                {resultsWithoutPrices.map((result) => (
-                                  <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
-                                    <td className="py-4 px-4">
-                                      <div className="flex items-center gap-2">
-                                        <span className="w-2 h-2 rounded-full bg-muted-foreground" />
-                                        <span className="font-medium text-foreground">{result.platform_name}</span>
-                                      </div>
-                                    </td>
-                                    <td className="py-4 px-4 text-center">
-                                      {result.match_type === "visual" && result.confidence_score ? (
-                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                          <Shield className="w-3 h-3" />
-                                          {Math.round(result.confidence_score * 100)}%
-                                        </span>
-                                      ) : (
-                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                          <Info className="w-3 h-3" />
-                                          Text
-                                        </span>
-                                      )}
-                                    </td>
-                                    <td className="py-4 px-4 text-right text-muted-foreground">
-                                      <span className="text-sm">Price unavailable</span>
-                                    </td>
-                                    <td className="py-4 px-4 text-center">
-                                      <Button variant="outline" size="sm" asChild>
-                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                          View <ExternalLink className="w-3 h-3 ml-1" />
-                                        </a>
-                                      </Button>
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Search another button */}
-                    <div className="text-center mt-8">
-                      <Button variant="outline" asChild>
-                        <Link to="/dashboard">
-                          <Search className="w-4 h-4 mr-2" />
-                          Search Another Property
-                        </Link>
-                      </Button>
-                    </div>
-                  </>
                 ) : (
                   <>
-                    {/* Comparison Table - Matching ExampleResult layout */}
                     {/* Comparison Table - Matching ExampleResult layout */}
                     <div className="overflow-x-auto mb-8">
                       <table className="w-full text-sm">
@@ -1514,63 +1254,6 @@ export default function SearchResults() {
                         Always confirm details directly with the host before booking.
                       </p>
                     </div>
-
-                    {/* Additional matches without prices */}
-                    {resultsWithoutPrices.length > 0 && (
-                      <div className="mt-6 pt-6 border-t border-border/50">
-                        <button
-                          onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
-                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
-                        >
-                          {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>View {resultsWithoutPrices.length} additional match{resultsWithoutPrices.length !== 1 ? "es" : ""} (price unavailable)</span>
-                        </button>
-                        
-                        {showNoPriceMatches && (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <tbody>
-                                {resultsWithoutPrices.map((result) => (
-                                  <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
-                                    <td className="py-4 px-4">
-                                      <div className="flex items-center gap-2">
-                                        <span className="w-2 h-2 rounded-full bg-muted-foreground" />
-                                        <span className="font-medium text-foreground">{result.platform_name}</span>
-                                      </div>
-                                    </td>
-                                    <td className="py-4 px-4 text-center">
-                                      {result.match_type === "visual" && result.confidence_score ? (
-                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                          <Shield className="w-3 h-3" />
-                                          {Math.round(result.confidence_score * 100)}%
-                                        </span>
-                                      ) : (
-                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                          <Info className="w-3 h-3" />
-                                          Text
-                                        </span>
-                                      )}
-                                    </td>
-                                    <td className="py-4 px-4 text-right text-muted-foreground">
-                                      <span className="text-sm">Price unavailable</span>
-                                    </td>
-                                    <td className="py-4 px-4 text-center">
-                                      <Button variant="outline" size="sm" asChild>
-                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                          View <ExternalLink className="w-3 h-3 ml-1" />
-                                        </a>
-                                      </Button>
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* More expensive alternatives are not shown (only cheaper-than-Airbnb results). */}
                   </>
                 )}
               </div>
