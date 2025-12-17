@@ -1022,116 +1022,151 @@ export default function SearchResults() {
                     </Button>
                   </div>
                 ) : (search?.status === "completed" && displayResults.length === 0) ? (
-                  /* Alternatives exist but none are cheaper than Airbnb */
-                  <div className="py-12">
-                    {/* Airbnb baseline card */}
-                    <div className="max-w-xl mx-auto mb-8 p-6 rounded-2xl border-2 border-primary/20 bg-primary/5">
-                      <div className="flex items-center gap-3 mb-4">
-                        <div className="w-10 h-10 rounded-full bg-[#FF5A5F]/10 flex items-center justify-center">
-                          <span className="text-[#FF5A5F] text-lg font-bold">A</span>
-                        </div>
-                        <div>
-                          <h3 className="font-semibold text-foreground">Airbnb</h3>
-                          <p className="text-sm text-muted-foreground">{search?.airbnb_title || "Original listing"}</p>
-                        </div>
+                  /* Alternatives exist but none are cheaper than Airbnb - use same table layout */
+                  <>
+                    {/* Success banner */}
+                    <div className="mb-6 p-4 rounded-xl bg-green-500/10 border border-green-500/20 flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
+                        <CheckCircle className="w-5 h-5 text-green-500" />
                       </div>
-                      <div className="flex items-baseline gap-2 mb-2">
-                        <span className="text-3xl font-bold text-foreground">
-                          €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
-                        </span>
-                        <span className="text-muted-foreground">total for {nights || 1} nights</span>
+                      <div>
+                        <h3 className="font-semibold text-foreground">Airbnb Has the Best Price</h3>
+                        <p className="text-sm text-muted-foreground">
+                          We found this property on {moreExpensiveResults.length} other platform{moreExpensiveResults.length !== 1 ? "s" : ""}, 
+                          but none offered a lower price. You're already getting the best deal!
+                        </p>
                       </div>
-                      <p className="text-sm text-muted-foreground mb-4">
-                        €{referencePrice ? Math.round(referencePrice) : "—"}/night + ~14% service fee
-                      </p>
-                      <Button className="w-full" asChild>
-                        <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
-                          Book on Airbnb
-                          <ExternalLink className="w-4 h-4 ml-2" />
-                        </a>
-                      </Button>
                     </div>
 
-                    {/* Good news message */}
-                    <div className="max-w-xl mx-auto text-center">
-                      <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-500/10 flex items-center justify-center">
-                        <CheckCircle className="w-8 h-8 text-green-500" />
+                    {/* Comparison Table - Same layout as normal results */}
+                    <div className="overflow-x-auto mb-8">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-border">
+                            <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
+                            <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
+                            <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights || 1} nights)</th>
+                            <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
+                            <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Key Differences</th>
+                            <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {/* Airbnb Row - Highlighted as Best Deal */}
+                          <tr className="bg-success/5 border-2 border-success/30">
+                            <td className="py-4 px-4">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="w-2 h-2 rounded-full bg-success" />
+                                <span className="font-medium text-foreground">Airbnb</span>
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success text-xs font-medium">
+                                  <Sparkles className="w-3 h-3" />
+                                  Best Deal
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-4 px-4 text-center">
+                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs font-medium">
+                                <Shield className="w-3 h-3" />
+                                Baseline
+                              </span>
+                            </td>
+                            <td className="py-4 px-4 text-right font-semibold text-success text-lg">
+                              €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
+                            </td>
+                            <td className="py-4 px-4 text-right text-success font-medium">
+                              €{referencePrice ? Math.round(referencePrice) : "—"}/night
+                            </td>
+                            <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
+                              <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
+                            </td>
+                            <td className="py-4 px-4 text-center">
+                              <Button size="sm" asChild>
+                                <a href={search?.airbnb_url} target="_blank" rel="noopener noreferrer">
+                                  Book <ExternalLink className="w-3 h-3 ml-1" />
+                                </a>
+                              </Button>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Collapsible more expensive alternatives */}
+                    {moreExpensiveResults.length > 0 && (
+                      <div className="border-t border-border/50 pt-6">
+                        <button
+                          onClick={() => setShowMoreExpensive(!showMoreExpensive)}
+                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
+                        >
+                          {showMoreExpensive ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          <span>View {moreExpensiveResults.length} more expensive alternative{moreExpensiveResults.length !== 1 ? "s" : ""}</span>
+                        </button>
+                        
+                        {showMoreExpensive && (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <tbody>
+                                {moreExpensiveResults.map((result) => {
+                                  const alternativeTotal = (result.price || 0) * (nights || 1);
+                                  const priceDiff = Math.round(alternativeTotal - (airbnbGrandTotal || 0));
+                                  return (
+                                    <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
+                                      <td className="py-4 px-4">
+                                        <div className="flex items-center gap-2">
+                                          <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                          <span className="font-medium text-foreground">{result.platform_name}</span>
+                                        </div>
+                                      </td>
+                                      <td className="py-4 px-4 text-center">
+                                        {result.match_type === "visual" && result.confidence_score ? (
+                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                            <Shield className="w-3 h-3" />
+                                            {Math.round(result.confidence_score)}%
+                                          </span>
+                                        ) : (
+                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                            <Info className="w-3 h-3" />
+                                            Text
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="py-4 px-4 text-right">
+                                        <span className="font-semibold text-foreground">€{Math.round(alternativeTotal)}</span>
+                                        <span className="text-amber-600 text-xs ml-2">(+€{priceDiff})</span>
+                                      </td>
+                                      <td className="py-4 px-4 text-right text-muted-foreground">
+                                        €{Math.round(result.price || 0)}/night
+                                      </td>
+                                      <td className="py-4 px-4 hidden lg:table-cell">
+                                        <span className="text-xs text-muted-foreground">May have different terms</span>
+                                      </td>
+                                      <td className="py-4 px-4 text-center">
+                                        <Button variant="outline" size="sm" asChild>
+                                          <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                            View <ExternalLink className="w-3 h-3 ml-1" />
+                                          </a>
+                                        </Button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
                       </div>
-                      <h3 className="text-xl font-semibold text-foreground mb-2">
-                        Airbnb Has the Best Price
-                      </h3>
-                      <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                        We found this property on {moreExpensiveResults.length} other platform{moreExpensiveResults.length !== 1 ? "s" : ""}, 
-                        but none offered a lower price than Airbnb. 
-                        You're already getting the best deal!
-                      </p>
-                      <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground mb-6">
-                        <Shield className="w-4 h-4" />
-                        <span>AirCover protection included with your Airbnb booking</span>
-                      </div>
+                    )}
+
+                    {/* Search another button */}
+                    <div className="text-center mt-8">
                       <Button variant="outline" asChild>
                         <Link to="/dashboard">
                           <Search className="w-4 h-4 mr-2" />
                           Search Another Property
                         </Link>
                       </Button>
-
-                      {/* Collapsible more expensive alternatives */}
-                      {moreExpensiveResults.length > 0 && (
-                        <div className="mt-8 pt-6 border-t border-border/50">
-                          <button
-                            onClick={() => setShowMoreExpensive(!showMoreExpensive)}
-                            className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mx-auto"
-                          >
-                            {showMoreExpensive ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                            <span>View {moreExpensiveResults.length} more expensive alternative{moreExpensiveResults.length !== 1 ? "s" : ""}</span>
-                          </button>
-                          
-                          {showMoreExpensive && (
-                            <div className="mt-4 space-y-3">
-                              {moreExpensiveResults.map((result) => {
-                                const alternativeTotal = (result.price || 0) * (nights || 1);
-                                const priceDiff = Math.round(alternativeTotal - (airbnbGrandTotal || 0));
-                                return (
-                                  <div key={result.id} className="p-4 rounded-xl border border-border/50 bg-muted/30 text-left">
-                                    <div className="flex items-center justify-between mb-2">
-                                      <div className="flex items-center gap-2">
-                                        <Globe className="w-4 h-4 text-muted-foreground" />
-                                        <span className="font-medium text-foreground">{result.platform_name}</span>
-                                        {result.match_type === "visual" && result.confidence_score && (
-                                          <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-600">
-                                            {result.confidence_score}% match
-                                          </span>
-                                        )}
-                                      </div>
-                                      <span className="text-amber-600 text-sm font-medium">
-                                        +€{priceDiff} more
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <div>
-                                        <span className="text-lg font-semibold text-foreground">
-                                          €{Math.round(alternativeTotal)} total
-                                        </span>
-                                        <span className="text-sm text-muted-foreground ml-2">
-                                          (€{Math.round(result.price || 0)}/night)
-                                        </span>
-                                      </div>
-                                      <Button variant="outline" size="sm" asChild>
-                                        <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                          View <ExternalLink className="w-3 h-3 ml-1" />
-                                        </a>
-                                      </Button>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
-                  </div>
+                  </>
                 ) : (
                   <>
                     {/* Comparison Table - Matching ExampleResult layout */}
