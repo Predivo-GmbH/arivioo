@@ -674,8 +674,8 @@ export default function SearchResults() {
     : null;
 
   // Calculate potential savings
-  const cheapestTotalPrice = cheapestResult?.price && nights ? cheapestResult.price * nights : null;
-  const potentialSavings = airbnbGrandTotal && cheapestTotalPrice ? airbnbGrandTotal - cheapestTotalPrice : null;
+  // NOTE: cheapestResult.price is already the TOTAL price, not per-night
+  const potentialSavings = airbnbGrandTotal && cheapestResult?.price ? airbnbGrandTotal - cheapestResult.price : null;
 
 
   // Helper to generate key differences based on platform
