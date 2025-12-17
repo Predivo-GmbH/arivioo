@@ -1159,12 +1159,19 @@ async function runSearchWithStreaming(
   const roomIdMatch = search.airbnb_url.match(/rooms\/(\d+)/);
   const roomId = roomIdMatch ? roomIdMatch[1] : null;
 
-  // Extract dates
-  let { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
+  // Extract dates - REQUIRED in URL
+  const { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
   if (!checkIn || !checkOut) {
-    const defaults = generateDefaultDates();
-    checkIn = defaults.checkIn;
-    checkOut = defaults.checkOut;
+    console.log("Missing dates in URL - dates are required for price comparison");
+    await supabase.from("searches").update({ 
+      status: "dates_required" 
+    }).eq("id", searchId);
+    sendProgress(controller, "Dates required", "Please include check-in and check-out dates in your Airbnb URL to compare prices");
+    sendSSE(controller, "error", { 
+      message: "Dates are required for price comparison. Please copy a full Airbnb URL that includes your check-in and check-out dates (e.g., airbnb.com/rooms/123?check_in=2025-01-15&check_out=2025-01-18)." 
+    });
+    sendSSE(controller, "complete", { searchId, status: "dates_required" });
+    return;
   }
 
   const nights = calculateNights(checkIn, checkOut);
@@ -1674,16 +1681,23 @@ serve(async (req) => {
     const roomId = roomIdMatch ? roomIdMatch[1] : null;
     console.log("Airbnb room ID:", roomId);
 
-    // Extract dates from URL or generate defaults
-    let { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
+    // Extract dates from URL - REQUIRED for price comparison
+    const { checkIn, checkOut } = extractDatesFromUrl(search.airbnb_url);
     if (!checkIn || !checkOut) {
-      const defaults = generateDefaultDates();
-      checkIn = defaults.checkIn;
-      checkOut = defaults.checkOut;
-      console.log("Using default dates:", checkIn, "to", checkOut);
-    } else {
-      console.log("Using URL dates:", checkIn, "to", checkOut);
+      console.log("Missing dates in URL - dates are required for price comparison");
+      await supabase.from("searches").update({ 
+        status: "dates_required" 
+      }).eq("id", searchId);
+      return new Response(
+        JSON.stringify({ 
+          success: false, 
+          error: "Dates are required for price comparison. Please copy a full Airbnb URL that includes your check-in and check-out dates (e.g., airbnb.com/rooms/123?check_in=2025-01-15&check_out=2025-01-18).",
+          status: "dates_required"
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
+      );
     }
+    console.log("Using URL dates:", checkIn, "to", checkOut);
 
     // Update status to step 1
     await supabase.from("searches").update({ 

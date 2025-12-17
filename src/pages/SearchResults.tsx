@@ -216,6 +216,17 @@ export default function SearchResults() {
       setSearch(searchData as SearchData);
       setCurrentStep(getCurrentStepIndex(searchData.status));
 
+      // Handle dates_required status
+      if (searchData.status === "dates_required") {
+        toast({
+          title: "Dates Required",
+          description: "Please include check-in and check-out dates in your Airbnb URL to compare prices.",
+          variant: "destructive",
+        });
+        navigate("/dashboard");
+        return;
+      }
+
       // If search is already completed, fetch results
       if (searchData.status === "completed") {
         const { data: resultsData } = await supabase
@@ -369,9 +380,20 @@ export default function SearchResults() {
                .single();
 
              // If the backend is still running, keep the user in the loading state
-             if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
+             if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable" && updatedSearch.status !== "dates_required") {
                setSearch(updatedSearch as SearchData);
                setSearchPhase("thinking");
+               return;
+             }
+             
+             // Handle dates_required status
+             if (updatedSearch?.status === "dates_required") {
+               toast({
+                 title: "Dates Required",
+                 description: "Please include check-in and check-out dates in your Airbnb URL to compare prices.",
+                 variant: "destructive",
+               });
+               navigate("/dashboard");
                return;
              }
 
