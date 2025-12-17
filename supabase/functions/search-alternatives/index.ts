@@ -175,8 +175,70 @@ Where:
   }
 }
 
+// Try to extract price with regex patterns first (faster, more reliable for common formats)
+function extractPriceWithRegex(content: string, nights: number): number | null {
+  // Common Airbnb price patterns - look for per-night prices first
+  const perNightPatterns = [
+    // €123 per night, $123/night, CHF 123 per night
+    /([€$£CHF₹A-Z]{1,4})\s*(\d{1,4}(?:[.,]\d{2})?)\s*(?:per|\/)\s*night/gi,
+    // 123 € per night, 123 CHF/night
+    /(\d{1,4}(?:[.,]\d{2})?)\s*([€$£CHF₹A-Z]{1,4})\s*(?:per|\/)\s*night/gi,
+    // "price":"123" or "pricePerNight":123
+    /"(?:price|pricePerNight|nightlyPrice)"[:\s]*"?(\d{1,4}(?:\.\d{2})?)"?/gi,
+    // €123 night or $123 night
+    /([€$£])\s*(\d{1,4}(?:[.,]\d{2})?)\s*night/gi,
+  ];
+  
+  for (const pattern of perNightPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      let priceStr = match[2] || match[1];
+      priceStr = priceStr.replace(/[^\d.,]/g, '').replace(',', '.');
+      const price = parseFloat(priceStr);
+      if (price >= 15 && price <= 3000) {
+        console.log("Regex extracted per-night price:", price);
+        return price;
+      }
+    }
+  }
+  
+  // Look for total price patterns and divide by nights
+  const totalPatterns = [
+    // Total: €500, Total before taxes: €500
+    /total(?:\s+(?:before\s+)?(?:taxes|fees))?[:\s]*([€$£CHF₹A-Z]{1,4})\s*(\d{1,5}(?:[.,]\d{2})?)/gi,
+    /total(?:\s+(?:before\s+)?(?:taxes|fees))?[:\s]*(\d{1,5}(?:[.,]\d{2})?)\s*([€$£CHF₹A-Z]{1,4})/gi,
+    // €500 total
+    /([€$£])\s*(\d{1,5}(?:[.,]\d{2})?)\s*total/gi,
+  ];
+  
+  for (const pattern of totalPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      let priceStr = match[2] || match[1];
+      priceStr = priceStr.replace(/[^\d.,]/g, '').replace(',', '.');
+      const totalPrice = parseFloat(priceStr);
+      if (totalPrice >= 30 && totalPrice <= 50000 && nights > 0) {
+        const perNight = Math.round(totalPrice / nights);
+        if (perNight >= 15 && perNight <= 3000) {
+          console.log("Regex extracted total price:", totalPrice, "-> per night:", perNight);
+          return perNight;
+        }
+      }
+    }
+  }
+  
+  return null;
+}
+
 // Use Lovable AI to extract Airbnb price from scraped content
 async function extractAirbnbPriceWithAI(content: string, nights: number): Promise<number | null> {
+  // Try regex extraction first (faster and often more reliable)
+  const regexPrice = extractPriceWithRegex(content, nights);
+  if (regexPrice) {
+    console.log("Using regex-extracted price:", regexPrice);
+    return regexPrice;
+  }
+
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
   if (!lovableApiKey) {
     console.log("LOVABLE_API_KEY not available for AI price extraction");
@@ -192,11 +254,12 @@ From the content below, determine the actual price PER NIGHT for the selected st
 Rules:
 - If the page directly shows a per-night amount (e.g. "€176 per night" or "176 CHF/night"), use that.
 - If only a total price for the entire stay is shown (e.g. "Total before taxes: €352" for ${nights} nights), compute the per-night price by dividing the total by ${nights}.
+- Look for patterns like "€X night", "$X per night", "X CHF/night", "nightly rate: X"
 - Ignore service fees, cleaning fees, taxes and security deposits when they are listed separately.
 - Ignore crossed-out / discounted "original" prices and use the final price actually charged.
 
 Content:
-${content.slice(0, 8000)}
+${content.slice(0, 12000)}
 
 Return ONLY a single number representing the final price per night in the listing's currency (e.g., "125" for €125/night).
 If you cannot find a reliable per-night price, return "null".
@@ -217,7 +280,7 @@ Do not include currency symbols or units - just the number.`;
           max_tokens: 50,
         }),
       },
-      8_000
+      15_000
     );
     
     if (!response.ok) {
@@ -229,7 +292,7 @@ Do not include currency symbols or units - just the number.`;
     const priceText = data.choices?.[0]?.message?.content?.trim();
     
     if (!priceText || priceText.toLowerCase() === "null") {
-      console.log("AI could not extract price");
+      console.log("AI could not extract price from content");
       return null;
     }
     
@@ -1120,6 +1183,7 @@ async function runSearchWithStreaming(
     await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
     
     try {
+      // Use longer wait time for Airbnb's dynamic content
       const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
         method: 'POST',
         headers: {
@@ -1130,7 +1194,8 @@ async function runSearchWithStreaming(
           url: search.airbnb_url,
           formats: ['markdown', 'html'],
           onlyMainContent: false,
-          waitFor: 5000,
+          waitFor: 8000, // Increased wait time for price to load
+          timeout: 30000,
         }),
       });
       
