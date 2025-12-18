@@ -2188,18 +2188,22 @@ async function runSearchWithStreaming(
   };
 
   // Allow UI to request skipping a stuck step (via skip_requested column)
-  const shouldSkipNow = async (): Promise<boolean> => {
-    const { data } = await supabase
+  // IMPORTANT: This must only skip ONE upcoming check, not the entire remainder of the run.
+  // We implement this as an atomic "claim" operation: if skip_requested=true, flip it to false and return true.
+  const claimSkipNow = async (): Promise<boolean> => {
+    const { data, error } = await supabase
       .from("searches")
-      .select("skip_requested")
+      .update({ skip_requested: false })
       .eq("id", searchId)
-      .single();
-    return data?.skip_requested === true;
-  };
+      .eq("skip_requested", true)
+      .select("id");
 
-  // Clear skip flag and continue with next status
-  const clearSkipFlag = async () => {
-    await supabase.from("searches").update({ skip_requested: false }).eq("id", searchId);
+    if (error) {
+      console.log("claimSkipNow error:", error.message || error);
+      return false;
+    }
+
+    return Array.isArray(data) && data.length > 0;
   };
 
   // Heartbeat on start
@@ -2214,8 +2218,7 @@ async function runSearchWithStreaming(
     await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
 
     const scrapeWithFirecrawl = async (formats: string[], waitForMs: number) => {
-      if (await shouldSkipNow()) {
-        await clearSkipFlag();
+      if (await claimSkipNow()) {
         return { ok: false as const, status: 499, errorText: "skipped" };
       }
       await heartbeat();
@@ -2464,10 +2467,9 @@ async function runSearchWithStreaming(
   const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
 
   for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
-    if (await shouldSkipNow()) {
+    if (await claimSkipNow()) {
       console.log("SKIP requested - skipping remaining visual search");
       sendProgress(controller, "Skipped current step", "Skipping remaining image search and continuing", { skipped: true });
-      await clearSkipFlag();
       break;
     }
 
@@ -2485,10 +2487,9 @@ async function runSearchWithStreaming(
 
         let matchesThisImage = 0;
         for (const match of visualMatches) {
-          if (await shouldSkipNow()) {
+          if (await claimSkipNow()) {
             console.log("SKIP requested - stopping match verification for this image");
             sendProgress(controller, "Skipped current step", "Skipping remaining match verification", { skipped: true });
-            await clearSkipFlag();
             matchesThisImage = 999;
             break;
           }
@@ -2606,10 +2607,9 @@ async function runSearchWithStreaming(
   const toScrape = prioritizedForPricing.slice(0, 20);
   for (let i = 0; i < toScrape.length; i++) {
     // Check for skip request before each price scrape
-    if (await shouldSkipNow()) {
+    if (await claimSkipNow()) {
       console.log("SKIP requested - stopping price scraping");
       sendProgress(controller, "Skipped price collection", "Moving to results with data collected so far", { skipped: true });
-      await clearSkipFlag();
       break;
     }
     await heartbeat();
