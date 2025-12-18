@@ -2279,11 +2279,31 @@ async function runSearchWithStreaming(
   // Key: normalized platform name, Value: best alternative found so far
   const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
 
+  // Helper to check if user requested to skip current step (manual/auto skip from UI)
+  async function shouldSkipStep(): Promise<boolean> {
+    const { data } = await supabase
+      .from("searches")
+      .select("status")
+      .eq("id", searchId)
+      .single();
+    return data?.status === "skip_current_step";
+  }
+
+  async function clearSkipAndContinue(nextStatus: string) {
+    await supabase.from("searches").update({ status: nextStatus }).eq("id", searchId);
+  }
+
   for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
+    if (await shouldSkipStep()) {
+      console.log("SKIP requested - skipping remaining visual search");
+      sendProgress(controller, "Skipped current step", "Skipping remaining image search and continuing", { skipped: true });
+      await clearSkipAndContinue("searching_platforms");
+      break;
+    }
+
     const imageUrl = imageUrls[idx];
     sendProgress(controller, `Searching image ${idx + 1} of ${imageUrls.length}`, "Running AI reverse image search on Booking.com, Vrbo, TripAdvisor...", { imageIndex: idx + 1, totalImages: imageUrls.length });
     await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}` }).eq("id", searchId);
-
     try {
       const lensResponse = await fetch(`https://serpapi.com/search.json?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`);
       if (!lensResponse.ok) continue;
@@ -2292,16 +2312,23 @@ async function runSearchWithStreaming(
       const visualMatches = lensData.visual_matches || [];
       sendProgress(controller, `Found ${visualMatches.length} potential matches`, "Verifying with AI comparison", { matchCount: visualMatches.length });
 
-      let matchesThisImage = 0;
-      for (const match of visualMatches) {
-        if (aiCount >= MAX_AI || matchesThisImage >= 8) break;
-        if (Date.now() - searchStartTime > MAX_TIME) break;
+        let matchesThisImage = 0;
+        for (const match of visualMatches) {
+          if (await shouldSkipStep()) {
+            console.log("SKIP requested - stopping match verification for this image");
+            sendProgress(controller, "Skipped current step", "Skipping remaining match verification", { skipped: true });
+            await clearSkipAndContinue("searching_platforms");
+            matchesThisImage = 999;
+            break;
+          }
 
-        const matchUrl = match.link;
-        if (!matchUrl || matchUrl.toLowerCase().includes("airbnb.") || foundUrls.has(matchUrl)) continue;
-        if (isBlockedNonBookingPlatform(matchUrl)) continue;
-        if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
+          if (aiCount >= MAX_AI || matchesThisImage >= 8) break;
+          if (Date.now() - searchStartTime > MAX_TIME) break;
 
+          const matchUrl = match.link;
+          if (!matchUrl || matchUrl.toLowerCase().includes("airbnb.") || foundUrls.has(matchUrl)) continue;
+          if (isBlockedNonBookingPlatform(matchUrl)) continue;
+          if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
         const platformName = getPlatformName(matchUrl);
         const platformKey = platformName.toLowerCase().replace(/[^a-z0-9]/g, '');
         
@@ -3709,8 +3736,8 @@ serve(async (req) => {
       // Per-platform timeout: 25 seconds max per price scrape to prevent stuck searches
       const PRICE_SCRAPE_TIMEOUT_MS = 25_000;
       
-      // Helper to check if user requested to skip current step
-      async function shouldSkipStep(): Promise<boolean> {
+      // Respect skip requests (manual/auto) while scraping prices
+      async function shouldSkipPriceStep(): Promise<boolean> {
         const { data } = await supabase
           .from("searches")
           .select("status")
@@ -3718,10 +3745,10 @@ serve(async (req) => {
           .single();
         return data?.status === "skip_current_step";
       }
-      
+
       for (let i = 0; i < toScrape.length; i++) {
         // Check if user requested to skip before starting this platform
-        const skipRequested = await shouldSkipStep();
+        const skipRequested = await shouldSkipPriceStep();
         if (skipRequested) {
           console.log(`SKIP requested by user - skipping remaining ${toScrape.length - i} price scrapes`);
           // Reset status and break out of loop

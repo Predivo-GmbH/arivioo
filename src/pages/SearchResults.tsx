@@ -174,6 +174,10 @@ export default function SearchResults() {
   const actualDurationRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const abortReasonRef = useRef<"cancel" | "skip" | null>(null);
+  const lastProgressAtRef = useRef<number>(Date.now());
+  const autoSkipRequestedRef = useRef(false);
+  const skipInFlightRef = useRef(false);
   const seenActivityKeysRef = useRef<Set<string>>(new Set());
   const tickerScrollRef = useRef<HTMLDivElement | null>(null);
   const activityIdCounterRef = useRef(0);
@@ -251,9 +255,13 @@ export default function SearchResults() {
           setActivityFeed([]);
           seenActivityKeysRef.current.clear();
           activityIdCounterRef.current = 0;
+          lastProgressAtRef.current = Date.now();
+          autoSkipRequestedRef.current = false;
+          skipInFlightRef.current = false;
 
-          // Start timer + allow cancel
+          // Start timer + allow cancel/skip
           searchStartTimeRef.current = Date.now();
+          abortReasonRef.current = null;
           abortControllerRef.current?.abort();
           abortControllerRef.current = new AbortController();
 
@@ -320,16 +328,19 @@ export default function SearchResults() {
                     const data = JSON.parse(eventData);
 
                     if (eventType === "progress") {
+                      lastProgressAtRef.current = Date.now();
+                      autoSkipRequestedRef.current = false;
+
                       // Add to activity feed with dedup
                       const key = `${data.step}__${data.detail ?? ""}`;
                       if (!seenActivityKeysRef.current.has(key)) {
                         seenActivityKeysRef.current.add(key);
                         activityIdCounterRef.current += 1;
-                        const newItem = { 
-                          ts: data.timestamp || Date.now(), 
-                          message: data.step, 
+                        const newItem = {
+                          ts: data.timestamp || Date.now(),
+                          message: data.step,
                           detail: data.detail,
-                          id: `activity-${activityIdCounterRef.current}`
+                          id: `activity-${activityIdCounterRef.current}`,
                         };
                         setActivityFeed((prev) => [...prev, newItem].slice(-12));
                       }
@@ -408,15 +419,53 @@ export default function SearchResults() {
              actualDurationRef.current = Date.now() - startedAt;
              setSearchPhase("animating");
            }
-         } catch (error: any) {
-           // User cancelled
-           if (error?.name === "AbortError") {
-             toast({ title: "Search cancelled", description: "No worries — you can try again anytime." });
-             navigate("/dashboard");
-             return;
-           }
+        } catch (error: any) {
+          // Cancel/skip via AbortController
+          if (error?.name === "AbortError") {
+            const reason = abortReasonRef.current;
+            abortReasonRef.current = null;
 
-          console.error("Search error:", error);
+            if (reason === "cancel") {
+              toast({ title: "Search cancelled", description: "No worries — you can try again anytime." });
+              navigate("/dashboard");
+              return;
+            }
+
+            // Skip: do not navigate away; we'll re-sync from DB below.
+            if (reason === "skip") {
+              // Allow a moment for the backend to notice the skip flag
+              await new Promise((r) => setTimeout(r, 250));
+
+              const { data: updatedSearch } = await supabase
+                .from("searches")
+                .select("*")
+                .eq("id", searchId)
+                .single();
+
+              const { data: resultsData } = await supabase
+                .from("search_results")
+                .select("*")
+                .eq("search_id", searchId)
+                .order("savings_percentage", { ascending: false, nullsFirst: false });
+
+              setSearch(updatedSearch as SearchData);
+              setResults((resultsData || []) as SearchResult[]);
+
+              // If we already have completion, move on; otherwise stay in thinking (polling will continue).
+              if (updatedSearch?.status === "completed" || updatedSearch?.status === "price_unavailable") {
+                actualDurationRef.current = Math.max(0, Date.now() - (searchStartTimeRef.current || Date.now()));
+                setSearchPhase("animating");
+              } else {
+                setSearchPhase("thinking");
+              }
+              return;
+            }
+
+            // Default: treat as cancel
+            toast({ title: "Search cancelled", description: "No worries — you can try again anytime." });
+            navigate("/dashboard");
+            return;
+          }
           toast({
             title: "Search Error",
             description: error.message || "Failed to search for alternatives",
@@ -446,6 +495,45 @@ export default function SearchResults() {
 
     return () => window.clearInterval(id);
   }, [loading, searchPhase]);
+
+  const requestSkipCurrentStep = async (mode: "manual" | "auto") => {
+    if (!searchId || skipInFlightRef.current) return;
+    skipInFlightRef.current = true;
+
+    try {
+      await supabase.from("searches").update({ status: "skip_current_step" }).eq("id", searchId);
+
+      toast({
+        title: mode === "manual" ? "Skipping…" : "Taking too long",
+        description: mode === "manual" ? "Skipping the current step" : "Automatically skipping the current step",
+      });
+
+      abortReasonRef.current = "skip";
+      abortControllerRef.current?.abort();
+    } finally {
+      // let polling/watchdogs decide if we need to skip again
+      window.setTimeout(() => {
+        skipInFlightRef.current = false;
+      }, 1500);
+    }
+  };
+
+  // Automatic skip if no progress events arrive for a while
+  useEffect(() => {
+    if (!loading || searchPhase !== "thinking") return;
+
+    const id = window.setInterval(() => {
+      const sinceProgress = Date.now() - lastProgressAtRef.current;
+
+      // If the stream is alive but nothing has happened for a while, skip the current backend step.
+      if (sinceProgress > 25_000 && !autoSkipRequestedRef.current) {
+        autoSkipRequestedRef.current = true;
+        void requestSkipCurrentStep("auto");
+      }
+    }, 1000);
+
+    return () => window.clearInterval(id);
+  }, [loading, searchPhase, searchId]);
 
   const getLiveActivity = (status?: string | null): { message: string; detail?: string } => {
     if (!status) return { message: "Starting search…" };
@@ -840,6 +928,7 @@ export default function SearchResults() {
                     <Button
                       variant="outline"
                       onClick={() => {
+                        abortReasonRef.current = "cancel";
                         abortControllerRef.current?.abort();
                       }}
                     >
@@ -855,19 +944,7 @@ export default function SearchResults() {
                     </Button>
                     <Button
                       variant="ghost"
-                      onClick={async () => {
-                        // Signal the edge function to skip current step
-                        if (searchId) {
-                          await supabase
-                            .from("searches")
-                            .update({ status: "skip_current_step" })
-                            .eq("id", searchId);
-                          toast({ 
-                            title: "Skipping...", 
-                            description: "Moving to the next step" 
-                          });
-                        }
-                      }}
+                      onClick={() => requestSkipCurrentStep("manual")}
                     >
                       Skip this step
                     </Button>
