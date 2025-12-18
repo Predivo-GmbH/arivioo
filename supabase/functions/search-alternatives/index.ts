@@ -2048,6 +2048,16 @@ async function runSearchWithStreaming(
   let airbnbPrice: number | null = null;
   let imageUrls: string[] = [];
 
+  // Allow UI to request skipping a stuck step (manual/auto)
+  const shouldSkipNow = async (): Promise<boolean> => {
+    const { data } = await supabase
+      .from("searches")
+      .select("status")
+      .eq("id", searchId)
+      .single();
+    return data?.status === "skip_current_step";
+  };
+
   // Step 1: Extract Airbnb data
   sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
   await supabase.from("searches").update({ status: "extracting_photos" }).eq("id", searchId);
@@ -2057,20 +2067,29 @@ async function runSearchWithStreaming(
     await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
 
     const scrapeWithFirecrawl = async (formats: string[], waitForMs: number) => {
-      const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${firecrawlApiKey}`,
-          "Content-Type": "application/json",
+      if (await shouldSkipNow()) {
+        return { ok: false as const, status: 499, errorText: "skipped" };
+      }
+
+      const resp = await fetchWithTimeout(
+        "https://api.firecrawl.dev/v1/scrape",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firecrawlApiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: search.airbnb_url,
+            formats,
+            onlyMainContent: false,
+            waitFor: waitForMs,
+            timeout: 60000,
+          }),
         },
-        body: JSON.stringify({
-          url: search.airbnb_url,
-          formats,
-          onlyMainContent: false,
-          waitFor: waitForMs,
-          timeout: 60000,
-        }),
-      });
+        // Keep this below the Firecrawl-side timeout; we just want to avoid hanging fetches.
+        65_000
+      );
 
       if (!resp.ok) {
         const errText = await resp.text().catch(() => "");
@@ -2086,10 +2105,26 @@ async function runSearchWithStreaming(
       // Attempt 1: full content + screenshot
       let attempt = await scrapeWithFirecrawl(["markdown", "html", "rawHtml", "screenshot"], 16000);
 
+      if (attempt.status === 499) {
+        console.log("SKIP requested during Airbnb scrape");
+        sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction", { skipped: true });
+        await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
+        sendSSE(controller, "complete", { searchId, status: "price_unavailable", success: true });
+        return;
+      }
+
       // Attempt 2: retry with longer wait (Airbnb sometimes renders totals very late)
       if (!attempt.ok) {
         sendProgress(controller, "Loading Airbnb listing", "Retrying with longer wait");
         attempt = await scrapeWithFirecrawl(["screenshot", "html", "rawHtml"], 25000);
+      }
+
+      if (attempt.status === 499) {
+        console.log("SKIP requested during Airbnb scrape (retry)");
+        sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction", { skipped: true });
+        await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
+        sendSSE(controller, "complete", { searchId, status: "price_unavailable", success: true });
+        return;
       }
 
       if (attempt.ok) {
