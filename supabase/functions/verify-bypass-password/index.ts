@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -12,6 +13,7 @@ const rateLimitMap = new Map<string, { attempts: number; lastAttempt: number; lo
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour window
 const MAX_ATTEMPTS = 5; // 5 attempts per hour per IP
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minute lockout after exceeding limit
+const ACCESS_GRANT_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours access grant
 
 function getClientIP(req: Request): string {
   // Check common headers for client IP
@@ -61,6 +63,17 @@ function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
   return { allowed: true };
 }
 
+// Timing-safe string comparison to prevent timing attacks
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -90,7 +103,7 @@ serve(async (req) => {
   }
 
   try {
-    const { password } = await req.json();
+    const { password, userId } = await req.json();
     
     if (!password || typeof password !== 'string') {
       console.warn(`Invalid password format from IP: ${clientIP}`);
@@ -126,6 +139,44 @@ serve(async (req) => {
     // Log all attempts with IP (but not the password itself)
     console.log(`Bypass password verification from IP ${clientIP}: ${isValid ? 'SUCCESS' : 'FAILED'}`);
 
+    // SECURITY FIX: If valid and userId provided, create server-side access grant
+    if (isValid && userId && typeof userId === 'string') {
+      try {
+        const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+        const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+        const supabase = createClient(supabaseUrl, supabaseServiceKey);
+        
+        const grantedUntil = new Date(Date.now() + ACCESS_GRANT_DURATION_MS).toISOString();
+        
+        // Upsert access grant (insert or update if exists)
+        const { error: grantError } = await supabase
+          .from('access_grants')
+          .upsert(
+            { 
+              user_id: userId, 
+              granted_until: grantedUntil,
+              updated_at: new Date().toISOString()
+            },
+            { onConflict: 'user_id' }
+          );
+        
+        if (grantError) {
+          console.error('Error creating access grant:', grantError);
+          // Don't fail the request, just log the error
+        } else {
+          console.log(`Access grant created for user ${userId} until ${grantedUntil}`);
+        }
+        
+        return new Response(
+          JSON.stringify({ valid: isValid, grantedUntil }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      } catch (grantError) {
+        console.error('Error in access grant creation:', grantError);
+        // Still return valid response, access grant is supplementary
+      }
+    }
+
     return new Response(
       JSON.stringify({ valid: isValid }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -139,14 +190,3 @@ serve(async (req) => {
     );
   }
 });
-
-// Timing-safe string comparison to prevent timing attacks
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  
-  let result = 0;
-  for (let i = 0; i < a.length; i++) {
-    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return result === 0;
-}

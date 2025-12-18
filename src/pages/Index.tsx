@@ -11,23 +11,46 @@ import { FAQ } from "@/components/landing/FAQ";
 import { FinalCTA } from "@/components/landing/FinalCTA";
 import { Footer } from "@/components/landing/Footer";
 import { UnderConstructionModal } from "@/components/UnderConstructionModal";
-
-const STORAGE_KEY = "arivioo_access_granted";
+import { supabase } from "@/integrations/supabase/client";
 
 const Index = () => {
   const [accessGranted, setAccessGranted] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // Check localStorage on mount
-    const granted = localStorage.getItem(STORAGE_KEY) === "true";
-    setAccessGranted(granted);
+    // Check server-side access grant
+    const checkAccess = async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        
+        if (user) {
+          // Check if user has a valid access grant in the database
+          const { data: grant, error } = await supabase
+            .from('access_grants')
+            .select('granted_until')
+            .eq('user_id', user.id)
+            .maybeSingle();
+          
+          if (!error && grant && new Date(grant.granted_until) > new Date()) {
+            setAccessGranted(true);
+            return;
+          }
+        }
+        
+        setAccessGranted(false);
+      } catch (error) {
+        console.error('Error checking access:', error);
+        setAccessGranted(false);
+      }
+    };
+
+    checkAccess();
   }, []);
 
   const handleAccessGranted = () => {
     setAccessGranted(true);
   };
 
-  // Show nothing while checking localStorage to prevent flash
+  // Show nothing while checking access to prevent flash
   if (accessGranted === null) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">

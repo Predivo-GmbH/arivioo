@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      access_grants: {
+        Row: {
+          created_at: string
+          granted_until: string
+          id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          granted_until: string
+          id?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          granted_until?: string
+          id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       launch_signups: {
         Row: {
           created_at: string
@@ -142,6 +166,7 @@ export type Database = {
           created_at: string
           id: string
           nights_count: number | null
+          public_demo_ok: boolean
           status: string
           updated_at: string
           user_id: string
@@ -157,6 +182,7 @@ export type Database = {
           created_at?: string
           id?: string
           nights_count?: number | null
+          public_demo_ok?: boolean
           status?: string
           updated_at?: string
           user_id: string
@@ -172,6 +198,7 @@ export type Database = {
           created_at?: string
           id?: string
           nights_count?: number | null
+          public_demo_ok?: boolean
           status?: string
           updated_at?: string
           user_id?: string

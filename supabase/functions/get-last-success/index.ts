@@ -19,10 +19,12 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // Find the most recent completed search with visual matches
+    // SECURITY FIX: Only show searches where user has opted-in to public demo
     const { data: searches, error: searchError } = await supabase
       .from("searches")
       .select("*")
       .eq("status", "completed")
+      .eq("public_demo_ok", true) // Only show user-consented searches
       .not("airbnb_price", "is", null)
       .not("airbnb_title", "is", null)
       .order("created_at", { ascending: false })
@@ -73,7 +75,7 @@ serve(async (req) => {
           console.log("Found successful search:", search.id, "with savings:", potentialSavings);
           
           // Return sanitized data - no personal travel dates or IDs
-          // This is intentionally public for homepage demo purposes
+          // User has explicitly opted-in via public_demo_ok flag
           return new Response(
             JSON.stringify({
               success: true,
