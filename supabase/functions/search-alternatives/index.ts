@@ -403,6 +403,131 @@ If you cannot find a reliable total, return "null".`;
   }
 }
 
+// Use AI to extract price from alternative booking platforms (Booking.com, TripAdvisor, etc.)
+async function extractAlternativePlatformPriceWithAI(
+  content: string, 
+  platformName: string,
+  checkIn: string,
+  checkOut: string,
+  nights: number
+): Promise<{ perNight: number | null; total: number | null; currency: string | null }> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!lovableApiKey) {
+    console.log("LOVABLE_API_KEY not available for AI price extraction");
+    return { perNight: null, total: null, currency: null };
+  }
+
+  try {
+    const prompt = `You are analyzing text scraped from a ${platformName} booking page.
+The dates being checked are: ${checkIn} to ${checkOut} (${nights} night(s)).
+
+Goal: Extract the booking price for these specific dates.
+
+IMPORTANT RULES:
+1. Look for prices that are clearly associated with booking/staying at this property
+2. Prefer TOTAL price for the stay (including fees, taxes if shown)
+3. If only per-night price is shown, that's fine - indicate it clearly
+4. IGNORE prices that are:
+   - Review counts or ratings (like "8.5" or "4.7")
+   - Distance measurements
+   - Number of guests/rooms
+   - Prices for other properties on the same page
+   - "Starting from" prices without specific dates
+
+5. The price should be for the SPECIFIC PROPERTY on this page, not other listings
+
+Look for patterns like:
+- "€95 per night" or "$120/night" 
+- "Total: €190" or "2 nights: €190"
+- "Price for 2 nights: €190"
+- Price shown near "Book now" or "Reserve" buttons
+
+Scraped content (first 10000 chars):
+${content.slice(0, 10000)}
+
+Return your answer in this exact JSON format:
+{"total": <number or null>, "perNight": <number or null>, "currency": "<EUR/USD/CHF/GBP or null>", "confidence": "<high/medium/low>", "reasoning": "<brief explanation>"}
+
+If you cannot find a reliable price for this specific property and dates, return:
+{"total": null, "perNight": null, "currency": null, "confidence": "low", "reasoning": "Could not find price"}`;
+
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 200,
+        }),
+      },
+      20_000
+    );
+
+    if (!response.ok) {
+      console.error("AI price extraction failed:", response.status);
+      return { perNight: null, total: null, currency: null };
+    }
+
+    const data = await response.json();
+    const responseText = data.choices?.[0]?.message?.content?.trim() || "";
+    
+    // Parse JSON from response (handle markdown code blocks)
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1].trim();
+    } else if (responseText.startsWith("{")) {
+      jsonStr = responseText;
+    }
+    
+    try {
+      const parsed = JSON.parse(jsonStr);
+      console.log(`AI price extraction for ${platformName}:`, parsed);
+      
+      // Validate the extracted prices
+      let total = parsed.total;
+      let perNight = parsed.perNight;
+      
+      // If only total is provided, calculate per-night
+      if (total && !perNight && nights > 0) {
+        perNight = Math.round(total / nights);
+      }
+      
+      // If only per-night is provided, calculate total
+      if (perNight && !total && nights > 0) {
+        total = perNight * nights;
+      }
+      
+      // Validate reasonable price ranges
+      if (perNight && (perNight < 5 || perNight > 10000)) {
+        console.log(`AI extracted unreasonable per-night price: ${perNight}`);
+        return { perNight: null, total: null, currency: null };
+      }
+      
+      if (parsed.confidence === "low" && !perNight && !total) {
+        return { perNight: null, total: null, currency: null };
+      }
+      
+      return { 
+        perNight: perNight || null, 
+        total: total || null, 
+        currency: parsed.currency || null 
+      };
+    } catch (parseErr) {
+      console.error("Failed to parse AI response:", responseText.slice(0, 200));
+      return { perNight: null, total: null, currency: null };
+    }
+  } catch (error) {
+    console.error("AI price extraction error:", error);
+    return { perNight: null, total: null, currency: null };
+  }
+}
+
 // Screenshot-based fallback: ask the multimodal model to read the total from the rendered page.
 async function extractAirbnbTotalFromScreenshotBase64(screenshotBase64: string, nights: number): Promise<number | null> {
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
@@ -997,12 +1122,13 @@ function generateAlternativeDates(checkIn: string, checkOut: string): Array<{ ch
   return alternatives;
 }
 
-// Scrape price from a listing page using Firecrawl
+// Scrape price from a listing page using Firecrawl + AI extraction
 async function scrapePriceFromListing(
   url: string,
   checkIn: string,
   checkOut: string,
   firecrawlApiKey: string,
+  platformName: string = "Unknown Platform",
 ): Promise<{ 
   price: number | null; 
   totalPrice: number | null; 
@@ -1151,40 +1277,52 @@ async function scrapePriceFromListing(
     isUnavailable: boolean;
   }> => {
     const urlWithDates = addDatesToUrl(url, tryCheckIn, tryCheckOut);
+    const tryNights = calculateNights(tryCheckIn, tryCheckOut);
     
-    // Pass 1: Fast scrape
-    const first = await fetchFirecrawl(urlWithDates, { formats: ["markdown"], onlyMainContent: true, waitFor: 3500 });
-    let content = first.markdown || "";
+    console.log(`Scraping ${platformName} with dates ${tryCheckIn} to ${tryCheckOut}: ${urlWithDates.slice(0, 150)}`);
+    
+    // Scrape with longer wait time for dynamic content
+    const waitTime = url.toLowerCase().includes("booking.com") || url.toLowerCase().includes("tripadvisor.") ? 8000 : 5000;
+    const scrapeResult = await fetchFirecrawl(urlWithDates, { 
+      formats: ["markdown", "html"], 
+      onlyMainContent: false, 
+      waitFor: waitTime 
+    });
+    
+    let content = scrapeResult.markdown || "";
+    const htmlText = (scrapeResult.html || "").replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ");
+    content = [content, htmlText].join("\n");
 
     // Check for unavailability first
     if (detectUnavailability(content)) {
-      console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable`);
+      console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable on ${platformName}`);
       return { extracted: null, isPerNight: false, isUnavailable: true };
     }
 
-    let { extracted, isPerNight } = tryExtract(content);
-
-    // Pass 2: Booking.com / TripAdvisor often hide price outside "main" content.
-    if (!extracted) {
-      const lower = url.toLowerCase();
-      const needsDeepScrape = lower.includes("booking.com") || lower.includes("tripadvisor.");
-      if (needsDeepScrape) {
-        const second = await fetchFirecrawl(urlWithDates, { formats: ["markdown", "html"], onlyMainContent: false, waitFor: 6500 });
-        const htmlText = (second.html || "").replace(/<script[\s\S]*?<\/script>/gi, " ")
-          .replace(/<style[\s\S]*?<\/style>/gi, " ")
-          .replace(/<[^>]+>/g, " ")
-          .replace(/\s+/g, " ");
-
-        content = [second.markdown || "", htmlText].join("\n");
-        
-        // Check for unavailability in deep scrape
-        if (detectUnavailability(content)) {
-          console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable (deep scrape)`);
-          return { extracted: null, isPerNight: false, isUnavailable: true };
-        }
-        
-        ({ extracted, isPerNight } = tryExtract(content));
-      }
+    // Use AI extraction for accurate price detection
+    console.log(`Using AI to extract price from ${platformName} content (${content.length} chars)`);
+    const aiResult = await extractAlternativePlatformPriceWithAI(
+      content,
+      platformName,
+      tryCheckIn,
+      tryCheckOut,
+      tryNights
+    );
+    
+    if (aiResult.perNight && aiResult.perNight >= 5) {
+      console.log(`AI extracted ${platformName} price: ${aiResult.perNight}/night (total: ${aiResult.total})`);
+      return { extracted: aiResult.perNight, isPerNight: true, isUnavailable: false };
+    }
+    
+    // Fallback to regex extraction if AI fails
+    console.log(`AI extraction failed for ${platformName}, trying regex fallback`);
+    const { extracted, isPerNight } = tryExtract(content);
+    
+    if (extracted) {
+      console.log(`Regex extracted ${platformName} price: ${extracted} (isPerNight: ${isPerNight})`);
     }
 
     return { extracted, isPerNight, isUnavailable: false };
@@ -1844,7 +1982,7 @@ async function runSearchWithStreaming(
 
     if (!firecrawlApiKey) continue;
 
-    const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
+    const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey, alt.platform_name);
     alt.price = priceData.perNightRate;
     alt.price_check_in = priceData.usedCheckIn;
     alt.price_check_out = priceData.usedCheckOut;
