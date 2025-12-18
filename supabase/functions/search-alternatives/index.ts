@@ -632,6 +632,277 @@ If you cannot find a total price in the screenshot, return "null".`;
   }
 }
 
+// ===============================================
+// PLATFORM ADAPTER SYSTEM - Deep Link Generation
+// ===============================================
+
+// Platform capability classification
+type PlatformCapability = "url_driven" | "api_driven" | "session_driven";
+type LinkReliability = "high" | "medium" | "low";
+
+interface PlatformAdapter {
+  name: string;
+  capability: PlatformCapability;
+  reliability: LinkReliability;
+  domains: string[];
+  // Generate the best deep link for a property with dates
+  generateDeepLink: (
+    baseUrl: string,
+    checkIn: string,
+    checkOut: string,
+    adults?: number,
+    children?: number,
+    rooms?: number
+  ) => string;
+  // Platform-specific wait time for JS rendering
+  scrapeWaitTime: number;
+  // Whether to use screenshot fallback for pricing
+  useScreenshotFallback: boolean;
+  // Platform-specific price extraction hints
+  pricePatterns?: RegExp[];
+}
+
+// Booking.com Adapter
+const bookingComAdapter: PlatformAdapter = {
+  name: "Booking.com",
+  capability: "session_driven",
+  reliability: "medium",
+  domains: ["booking.com"],
+  scrapeWaitTime: 12000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      // Clear any existing date params to avoid conflicts
+      url.searchParams.delete("checkin");
+      url.searchParams.delete("checkout");
+      url.searchParams.delete("checkin_month");
+      url.searchParams.delete("checkin_monthday");
+      url.searchParams.delete("checkin_year");
+      url.searchParams.delete("checkout_month");
+      url.searchParams.delete("checkout_monthday");
+      url.searchParams.delete("checkout_year");
+      
+      // Booking.com uses YYYY-MM-DD format
+      url.searchParams.set("checkin", checkIn);
+      url.searchParams.set("checkout", checkOut);
+      url.searchParams.set("group_adults", adults.toString());
+      url.searchParams.set("group_children", children.toString());
+      url.searchParams.set("no_rooms", rooms.toString());
+      url.searchParams.set("selected_currency", "EUR"); // Consistent currency
+      
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+  pricePatterns: [
+    /€\s*(\d{1,3}(?:[,.']\d{3})*(?:[.,]\d{2})?)/gi,
+    /(\d{1,3}(?:[,.']\d{3})*(?:[.,]\d{2})?)\s*€/gi,
+    /EUR\s*(\d{1,3}(?:[,.']\d{3})*)/gi,
+  ],
+};
+
+// Vrbo/HomeAway Adapter (Expedia Group)
+const vrboAdapter: PlatformAdapter = {
+  name: "Vrbo",
+  capability: "url_driven",
+  reliability: "high",
+  domains: ["vrbo.com", "homeaway.com", "homeaway.de", "homeaway.fr", "homeaway.es", "homeaway.it", "homeaway.co.uk"],
+  scrapeWaitTime: 8000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0) => {
+    try {
+      const url = new URL(baseUrl);
+      // Vrbo uses arrival/departure format
+      url.searchParams.set("arrival", checkIn);
+      url.searchParams.set("departure", checkOut);
+      url.searchParams.set("adults", adults.toString());
+      if (children > 0) {
+        url.searchParams.set("children", children.toString());
+      }
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+};
+
+// Expedia Adapter
+const expediaAdapter: PlatformAdapter = {
+  name: "Expedia",
+  capability: "url_driven",
+  reliability: "high",
+  domains: ["expedia.com", "expedia.de", "expedia.fr", "expedia.co.uk", "expedia.es", "expedia.it", "expedia.nl", "expedia.be"],
+  scrapeWaitTime: 8000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      // Expedia uses chkin/chkout format
+      url.searchParams.set("chkin", checkIn);
+      url.searchParams.set("chkout", checkOut);
+      url.searchParams.set("rm1", `a${adults}${children > 0 ? `c${children}` : ""}`);
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+};
+
+// Hotels.com Adapter (Expedia Group)
+const hotelsComAdapter: PlatformAdapter = {
+  name: "Hotels.com",
+  capability: "url_driven",
+  reliability: "high",
+  domains: ["hotels.com", "hotels.de", "hotels.fr", "hotels.co.uk"],
+  scrapeWaitTime: 8000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      url.searchParams.set("checkIn", checkIn);
+      url.searchParams.set("checkOut", checkOut);
+      url.searchParams.set("adults", adults.toString());
+      url.searchParams.set("children", children.toString());
+      url.searchParams.set("rooms", rooms.toString());
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+};
+
+// Agoda Adapter
+const agodaAdapter: PlatformAdapter = {
+  name: "Agoda",
+  capability: "url_driven",
+  reliability: "medium",
+  domains: ["agoda.com", "agoda.de", "agoda.fr", "agoda.co.uk"],
+  scrapeWaitTime: 10000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      // Agoda uses checkIn/los (length of stay) OR checkIn/checkOut
+      url.searchParams.set("checkIn", checkIn);
+      url.searchParams.set("checkOut", checkOut);
+      url.searchParams.set("rooms", rooms.toString());
+      url.searchParams.set("adults", adults.toString());
+      url.searchParams.set("children", children.toString());
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+};
+
+// TripAdvisor Adapter
+const tripAdvisorAdapter: PlatformAdapter = {
+  name: "TripAdvisor",
+  capability: "session_driven",
+  reliability: "low",
+  domains: ["tripadvisor.com", "tripadvisor.de", "tripadvisor.fr", "tripadvisor.co.uk", "tripadvisor.ch", "tripadvisor.co.za", "tripadvisor.it", "tripadvisor.es"],
+  scrapeWaitTime: 12000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      // TripAdvisor uses checkin/checkout with YYYY-MM-DD
+      url.searchParams.set("checkin", checkIn);
+      url.searchParams.set("checkout", checkOut);
+      url.searchParams.set("adults", adults.toString());
+      url.searchParams.set("rooms", rooms.toString());
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+};
+
+// HolidayCheck Adapter
+const holidayCheckAdapter: PlatformAdapter = {
+  name: "HolidayCheck",
+  capability: "session_driven",
+  reliability: "low",
+  domains: ["holidaycheck.de", "holidaycheck.at", "holidaycheck.ch"],
+  scrapeWaitTime: 12000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      url.searchParams.set("checkin", checkIn);
+      url.searchParams.set("checkout", checkOut);
+      url.searchParams.set("adults", adults.toString());
+      url.searchParams.set("rooms", rooms.toString());
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+};
+
+// Generic/Direct Booking Adapter
+const genericAdapter: PlatformAdapter = {
+  name: "Direct Booking",
+  capability: "url_driven",
+  reliability: "medium",
+  domains: [],
+  scrapeWaitTime: 8000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2) => {
+    try {
+      const url = new URL(baseUrl);
+      // Try common parameter names
+      url.searchParams.set("checkin", checkIn);
+      url.searchParams.set("checkout", checkOut);
+      url.searchParams.set("check_in", checkIn);
+      url.searchParams.set("check_out", checkOut);
+      url.searchParams.set("arrival", checkIn);
+      url.searchParams.set("departure", checkOut);
+      return url.toString();
+    } catch {
+      return baseUrl;
+    }
+  },
+};
+
+// Platform adapter registry
+const platformAdapters: PlatformAdapter[] = [
+  bookingComAdapter,
+  vrboAdapter,
+  expediaAdapter,
+  hotelsComAdapter,
+  agodaAdapter,
+  tripAdvisorAdapter,
+  holidayCheckAdapter,
+];
+
+// Get the appropriate adapter for a URL
+function getPlatformAdapter(url: string): PlatformAdapter {
+  const lowercaseUrl = url.toLowerCase();
+  for (const adapter of platformAdapters) {
+    if (adapter.domains.some(domain => lowercaseUrl.includes(domain))) {
+      return adapter;
+    }
+  }
+  return genericAdapter;
+}
+
+// Generate optimized deep link using platform adapter
+function generatePricedDeepLink(
+  url: string,
+  checkIn: string,
+  checkOut: string,
+  adults: number = 2,
+  children: number = 0,
+  rooms: number = 1
+): { deepLink: string; adapter: PlatformAdapter; reliability: LinkReliability } {
+  const adapter = getPlatformAdapter(url);
+  const deepLink = adapter.generateDeepLink(url, checkIn, checkOut, adults, children, rooms);
+  return { deepLink, adapter, reliability: adapter.reliability };
+}
+
 // Expanded platform list for better coverage - including international variants
 function getPlatformName(url: string): string {
   const lowercaseUrl = url.toLowerCase();
@@ -1074,10 +1345,9 @@ function isValidBookablePropertyUrl(url: string): { valid: boolean; reason?: str
   return { valid: true };
 }
 
-// Add date parameters to a URL for a given platform
+// Add date parameters to a URL using platform adapter system
 function addDatesToUrl(url: string, checkIn: string, checkOut: string): string {
-  // Only attach dates to sites that are likely to actually *use* them.
-  // Adding checkin/checkout to random pages creates false "prices" and breaks date confidence.
+  // Only attach dates to sites that are likely to actually use them
   const shouldAttach =
     isBookingPlatform(url) ||
     isRegionalHotelSite(url) ||
@@ -1086,43 +1356,9 @@ function addDatesToUrl(url: string, checkIn: string, checkOut: string): string {
 
   if (!shouldAttach) return url;
 
-  try {
-    const urlObj = new URL(url);
-    const lowercaseUrl = url.toLowerCase();
-
-    // Platform-specific date parameter names
-    if (lowercaseUrl.includes("booking.com")) {
-      urlObj.searchParams.set("checkin", checkIn);
-      urlObj.searchParams.set("checkout", checkOut);
-    } else if (lowercaseUrl.includes("vrbo.com") || lowercaseUrl.includes("homeaway.")) {
-      urlObj.searchParams.set("arrival", checkIn);
-      urlObj.searchParams.set("departure", checkOut);
-    } else if (lowercaseUrl.includes("expedia.")) {
-      urlObj.searchParams.set("chkin", checkIn);
-      urlObj.searchParams.set("chkout", checkOut);
-    } else if (lowercaseUrl.includes("hotels.com")) {
-      urlObj.searchParams.set("checkIn", checkIn);
-      urlObj.searchParams.set("checkOut", checkOut);
-    } else if (lowercaseUrl.includes("agoda.")) {
-      urlObj.searchParams.set("checkIn", checkIn);
-      urlObj.searchParams.set("checkOut", checkOut);
-    } else if (lowercaseUrl.includes("tripadvisor.")) {
-      // TripAdvisor uses different format
-      urlObj.searchParams.set("checkin", checkIn);
-      urlObj.searchParams.set("checkout", checkOut);
-    } else if (lowercaseUrl.includes("holidaycheck.")) {
-      urlObj.searchParams.set("checkin", checkIn);
-      urlObj.searchParams.set("checkout", checkOut);
-    } else {
-      // Generic (but only for sites we consider bookable)
-      urlObj.searchParams.set("checkin", checkIn);
-      urlObj.searchParams.set("checkout", checkOut);
-    }
-
-    return urlObj.toString();
-  } catch {
-    return url;
-  }
+  // Use the platform adapter system for consistent deep link generation
+  const { deepLink } = generatePricedDeepLink(url, checkIn, checkOut);
+  return deepLink;
 }
 
 // Detect if content indicates dates are unavailable
@@ -1176,7 +1412,120 @@ function generateAlternativeDates(checkIn: string, checkOut: string): Array<{ ch
   return alternatives;
 }
 
-// Scrape price from a listing page using Firecrawl + AI extraction
+// Screenshot-based price extraction for any platform (multimodal AI)
+async function extractPriceFromScreenshot(
+  screenshotBase64: string,
+  platformName: string,
+  checkIn: string,
+  checkOut: string,
+  nights: number
+): Promise<{
+  perNight: number | null;
+  total: number | null;
+  currency: string | null;
+  confidence: "high" | "medium" | "low";
+  datesConfirmed: boolean;
+}> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!lovableApiKey) return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
+
+  try {
+    const prompt = `This is a screenshot of a ${platformName} property booking page.
+The dates being searched are: ${checkIn} to ${checkOut} (${nights} night(s)).
+
+Task:
+1) Look for the TOTAL price or per-night price displayed for booking this property.
+2) Verify if the displayed dates match or are close to ${checkIn} - ${checkOut}.
+3) Extract the most prominent/final price shown (prefer total price if available).
+
+Return ONLY JSON:
+{"total": <number|null>, "perNight": <number|null>, "currency": "<EUR|USD|GBP|CHF|etc>", "confidence": "high"|"medium"|"low", "datesConfirmed": <true|false>}
+
+Rules:
+- If you see a clear price with dates matching ${checkIn}-${checkOut}, set datesConfirmed=true.
+- If dates are different but close (within 3 days), still extract the price but set datesConfirmed=false.
+- Ignore prices for other properties, recommendations, or ads.
+- "high" confidence = clear price displayed, dates match.
+- "medium" confidence = price visible but dates unclear.
+- "low" confidence = no clear price found.`;
+
+    const imageUrl = `data:image/png;base64,${screenshotBase64}`;
+
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          max_tokens: 150,
+        }),
+      },
+      25_000
+    );
+
+    if (!response.ok) {
+      console.error("Screenshot AI request failed:", response.status);
+      return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
+    }
+
+    const data = await response.json();
+    const responseText = data.choices?.[0]?.message?.content?.trim() || "";
+
+    // Parse JSON from response
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1].trim();
+    } else if (responseText.startsWith("{")) {
+      jsonStr = responseText;
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    console.log(`Screenshot price extraction for ${platformName}:`, parsed);
+
+    const confidence = (["high", "medium", "low"].includes(parsed.confidence)) 
+      ? parsed.confidence as "high" | "medium" | "low" 
+      : "low";
+
+    let total = typeof parsed.total === "number" ? parsed.total : null;
+    let perNight = typeof parsed.perNight === "number" ? parsed.perNight : null;
+
+    // Calculate missing value
+    if (total && !perNight && nights > 0) perNight = Math.round(total / nights);
+    if (perNight && !total && nights > 0) total = perNight * nights;
+
+    // Validate ranges
+    if (perNight && (perNight < 5 || perNight > 10000)) {
+      return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
+    }
+
+    return {
+      perNight,
+      total,
+      currency: parsed.currency || null,
+      confidence,
+      datesConfirmed: Boolean(parsed.datesConfirmed),
+    };
+  } catch (e) {
+    console.error("Screenshot price extraction error:", e);
+    return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
+  }
+}
+
+// Enhanced scrape price from a listing page using Platform Adapters + Firecrawl + Screenshot fallback
 async function scrapePriceFromListing(
   url: string,
   checkIn: string,
@@ -1190,35 +1539,31 @@ async function scrapePriceFromListing(
   usedCheckIn: string;
   usedCheckOut: string;
   datesDiffer: boolean;
+  extractionMethod?: string;
+  reliability?: LinkReliability;
 }> {
   const nights = calculateNights(checkIn, checkOut);
+  
+  // Get platform adapter for optimized deep link generation
+  const adapter = getPlatformAdapter(url);
+  console.log(`Using ${adapter.name} adapter (capability: ${adapter.capability}, reliability: ${adapter.reliability})`);
 
   const normalizeNumber = (raw: string): number | null => {
-    // Handles: 1,234.56 | 1.234,56 | 1234 | 1 234 | 1'234
-    let s = raw
-      .replace(/\u00a0/g, " ")
-      .replace(/[\s'']/g, "")
-      .trim();
-
-    // If both separators exist, decide decimal by the last occurrence
+    let s = raw.replace(/\u00a0/g, " ").replace(/[\s'']/g, "").trim();
     const lastComma = s.lastIndexOf(",");
     const lastDot = s.lastIndexOf(".");
 
     if (lastComma !== -1 && lastDot !== -1) {
       if (lastComma > lastDot) {
-        // 1.234,56 => remove dots as thousands, comma as decimal
         s = s.replace(/\./g, "").replace(/,/g, ".");
       } else {
-        // 1,234.56 => remove commas as thousands
         s = s.replace(/,/g, "");
       }
     } else if (lastComma !== -1 && lastDot === -1) {
-      // If comma looks like decimal separator (two digits after), convert to dot
       const decimals = s.slice(lastComma + 1);
       if (decimals.length === 2) s = s.replace(/,/g, ".");
       else s = s.replace(/,/g, "");
     } else {
-      // Only dot or none: keep dot as decimal, but remove thousands-style dots like 1.234 (no decimals)
       const dotParts = s.split(".");
       if (dotParts.length === 2 && dotParts[1].length === 3) {
         s = s.replace(/\./g, "");
@@ -1233,21 +1578,18 @@ async function scrapePriceFromListing(
   const tryExtract = (content: string): { extracted: number | null; isPerNight: boolean } => {
     const currency = String.raw`(?:\$|€|£|CHF|USD|EUR|GBP|ZAR|AUD|CAD|NZD|SEK|NOK|DKK|PLN|CZK|HUF|R\$|R)`;
     const amount = String.raw`(\d{1,3}(?:[\s,.']\d{3})*(?:[\.,]\d{2})?|\d{2,6})`;
-
-    // Collect ALL currency amounts in the page (the first one is often NOT the price).
     const reAll = new RegExp(String.raw`${currency}\s*${amount}|${amount}\s*${currency}`, "gi");
     const candidates: Array<{ value: number; perNightHint: boolean }> = [];
 
-    const text = content;
     let match: RegExpExecArray | null;
-    while ((match = reAll.exec(text)) !== null) {
+    while ((match = reAll.exec(content)) !== null) {
       const raw = match[1] || match[2];
       const parsed = raw ? normalizeNumber(raw) : null;
       if (!parsed || parsed <= 0 || parsed >= 50000) continue;
 
       const windowStart = Math.max(0, match.index - 25);
-      const windowEnd = Math.min(text.length, match.index + match[0].length + 25);
-      const windowText = text.slice(windowStart, windowEnd).toLowerCase();
+      const windowEnd = Math.min(content.length, match.index + match[0].length + 25);
+      const windowText = content.slice(windowStart, windowEnd).toLowerCase();
       const perNightHint = /per\s*night|\/night|night/.test(windowText);
 
       candidates.push({ value: parsed, perNightHint });
@@ -1255,33 +1597,25 @@ async function scrapePriceFromListing(
 
     if (candidates.length === 0) return { extracted: null, isPerNight: false };
 
-    // Prefer explicit per-night hints.
     const perNightCandidates = candidates.filter((c) => c.perNightHint);
     if (perNightCandidates.length > 0) {
-      const best = perNightCandidates
-        .map((c) => c.value)
-        .filter((v) => v >= 10 && v <= 5000)
-        .sort((a, b) => b - a)[0];
+      const best = perNightCandidates.map((c) => c.value).filter((v) => v >= 10 && v <= 5000).sort((a, b) => b - a)[0];
       return best ? { extracted: best, isPerNight: true } : { extracted: null, isPerNight: false };
     }
 
-    // Otherwise assume totals: pick the largest plausible total, then derive per-night later.
-    const bestTotal = candidates
-      .map((c) => c.value)
-      .filter((v) => v >= 20 && v <= 50000)
-      .sort((a, b) => b - a)[0];
-
+    const bestTotal = candidates.map((c) => c.value).filter((v) => v >= 20 && v <= 50000).sort((a, b) => b - a)[0];
     return bestTotal ? { extracted: bestTotal, isPerNight: false } : { extracted: null, isPerNight: false };
   };
+
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  const fetchFirecrawl = async (
+  // Enhanced Firecrawl fetch with screenshot support
+  const fetchFirecrawlWithScreenshot = async (
     targetUrl: string,
-    opts: { formats: ("markdown" | "html")[]; onlyMainContent: boolean; waitFor: number },
-  ) => {
+    opts: { formats: string[]; onlyMainContent: boolean; waitFor: number },
+  ): Promise<{ markdown: string; html: string; screenshot: string | null }> => {
     console.log("Scraping price from:", targetUrl.slice(0, 160));
 
-    // Firecrawl can rate-limit; retry with exponential backoff.
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
@@ -1300,49 +1634,47 @@ async function scrapePriceFromListing(
 
       if (!resp.ok) {
         console.log("Firecrawl request failed:", resp.status);
-
-        // Handle rate limits and transient errors
         if ((resp.status === 429 || resp.status === 503 || resp.status === 504) && attempt < MAX_ATTEMPTS) {
           const backoff = 800 * attempt * attempt + Math.floor(Math.random() * 250);
           console.log(`Retrying Firecrawl in ${backoff}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
           await sleep(backoff);
           continue;
         }
-
-        return { markdown: "", html: "" };
+        return { markdown: "", html: "", screenshot: null };
       }
 
       const data = await resp.json();
       const markdown: string = data.data?.markdown || data.markdown || "";
       const html: string = data.data?.html || data.html || "";
+      const screenshot: string | null = data.data?.screenshot || data.screenshot || null;
 
-      // Gentle throttle to reduce bursts (helps avoid 429 during multi-date attempts)
       await sleep(150);
-
-      return { markdown, html };
+      return { markdown, html, screenshot };
     }
 
-    return { markdown: "", html: "" };
+    return { markdown: "", html: "", screenshot: null };
   };
 
   const tryScrapeDates = async (tryCheckIn: string, tryCheckOut: string): Promise<{
     extracted: number | null;
     isPerNight: boolean;
     isUnavailable: boolean;
+    extractionMethod: string;
   }> => {
-    const urlWithDates = addDatesToUrl(url, tryCheckIn, tryCheckOut);
+    // Use platform adapter to generate optimized deep link
+    const { deepLink } = generatePricedDeepLink(url, tryCheckIn, tryCheckOut);
     const tryNights = calculateNights(tryCheckIn, tryCheckOut);
 
-    console.log(
-      `Scraping ${platformName} with dates ${tryCheckIn} to ${tryCheckOut}: ${urlWithDates.slice(0, 150)}`,
-    );
+    console.log(`Scraping ${platformName} with adapter-generated deep link: ${deepLink.slice(0, 180)}`);
 
-    // Scrape with longer wait time for dynamic content
-    const waitTime = url.toLowerCase().includes("booking.com") || url.toLowerCase().includes("tripadvisor.") ? 8000 : 5000;
-    const scrapeResult = await fetchFirecrawl(urlWithDates, {
-      formats: ["markdown", "html"],
+    // Use adapter's recommended wait time and include screenshot for session-driven platforms
+    const includeScreenshot = adapter.useScreenshotFallback || adapter.capability === "session_driven";
+    const formats = includeScreenshot ? ["markdown", "html", "screenshot"] : ["markdown", "html"];
+    
+    const scrapeResult = await fetchFirecrawlWithScreenshot(deepLink, {
+      formats,
       onlyMainContent: false,
-      waitFor: waitTime,
+      waitFor: adapter.scrapeWaitTime,
     });
 
     let content = scrapeResult.markdown || "";
@@ -1356,10 +1688,10 @@ async function scrapePriceFromListing(
     // Check for unavailability first
     if (detectUnavailability(content)) {
       console.log(`Dates ${tryCheckIn} - ${tryCheckOut} appear unavailable on ${platformName}`);
-      return { extracted: null, isPerNight: false, isUnavailable: true };
+      return { extracted: null, isPerNight: false, isUnavailable: true, extractionMethod: "unavailable" };
     }
 
-    // Use AI extraction for accurate price detection AND date confirmation
+    // Strategy 1: AI text extraction
     console.log(`Using AI to extract price from ${platformName} content (${content.length} chars)`);
     const aiResult = await extractAlternativePlatformPriceWithAI(content, platformName, tryCheckIn, tryCheckOut, tryNights);
 
@@ -1370,34 +1702,50 @@ async function scrapePriceFromListing(
       aiResult.perNight >= 5;
 
     if (aiAcceptable) {
-      console.log(
-        `AI extracted ${platformName} price: ${aiResult.perNight}/night (total: ${aiResult.total}) (confidence: ${aiResult.confidence})`,
+      console.log(`AI text extracted ${platformName} price: ${aiResult.perNight}/night (confidence: ${aiResult.confidence})`);
+      return { extracted: aiResult.perNight!, isPerNight: true, isUnavailable: false, extractionMethod: "ai_text" };
+    }
+
+    // Strategy 2: Screenshot-based extraction (for session-driven platforms)
+    if (scrapeResult.screenshot && adapter.useScreenshotFallback) {
+      console.log(`Attempting screenshot-based price extraction for ${platformName}`);
+      const screenshotResult = await extractPriceFromScreenshot(
+        scrapeResult.screenshot,
+        platformName,
+        tryCheckIn,
+        tryCheckOut,
+        tryNights
       );
-      return { extracted: aiResult.perNight!, isPerNight: true, isUnavailable: false };
+
+      if (screenshotResult.perNight && screenshotResult.confidence !== "low") {
+        console.log(`Screenshot extracted ${platformName} price: ${screenshotResult.perNight}/night (confidence: ${screenshotResult.confidence})`);
+        return { 
+          extracted: screenshotResult.perNight, 
+          isPerNight: true, 
+          isUnavailable: false, 
+          extractionMethod: "screenshot" 
+        };
+      }
     }
 
-    console.log(
-      `AI did not return a date-confirmed price for ${platformName} (datesConfirmed=${aiResult.datesConfirmed}, confidence=${aiResult.confidence}).`,
-    );
-
-    // Regex fallback ONLY if the content actually mentions our ISO dates.
-    // (Otherwise we risk grabbing random prices / other properties.)
+    // Strategy 3: Regex fallback (only if content mentions dates)
     const mentionsDates = content.includes(tryCheckIn) || content.includes(tryCheckOut);
-    if (!mentionsDates) {
-      return { extracted: null, isPerNight: false, isUnavailable: false };
+    if (mentionsDates) {
+      const { extracted, isPerNight } = tryExtract(content);
+      if (extracted) {
+        console.log(`Regex extracted ${platformName} price: ${extracted} (isPerNight: ${isPerNight})`);
+        return { extracted, isPerNight, isUnavailable: false, extractionMethod: "regex" };
+      }
     }
 
-    const { extracted, isPerNight } = tryExtract(content);
-    if (extracted) {
-      console.log(`Regex extracted ${platformName} price: ${extracted} (isPerNight: ${isPerNight})`);
-    }
-
-    return { extracted, isPerNight, isUnavailable: false };
+    console.log(`No price extracted for ${platformName} (AI datesConfirmed=${aiResult.datesConfirmed}, confidence=${aiResult.confidence})`);
+    return { extracted: null, isPerNight: false, isUnavailable: false, extractionMethod: "none" };
   };
 
   try {
     // First try with exact dates
     let result = await tryScrapeDates(checkIn, checkOut);
+    let extractionMethod = result.extractionMethod;
     
     // If unavailable or no price found, try alternative dates
     if (result.isUnavailable || !result.extracted) {
@@ -1406,13 +1754,13 @@ async function scrapePriceFromListing(
       for (const alt of alternatives) {
         console.log(`Trying alternative dates: ${alt.checkIn} - ${alt.checkOut} (offset ${alt.offset > 0 ? '+' : ''}${alt.offset} days)`);
         result = await tryScrapeDates(alt.checkIn, alt.checkOut);
+        extractionMethod = result.extractionMethod;
         
         if (result.extracted && !result.isUnavailable) {
           console.log(`Found price with alternative dates: ${alt.checkIn} - ${alt.checkOut}`);
           const altNights = calculateNights(alt.checkIn, alt.checkOut);
           
           if (result.isPerNight) {
-            console.log("Extracted price:", result.extracted, "(per night) - DIFFERENT DATES");
             return { 
               price: result.extracted, 
               totalPrice: result.extracted * altNights, 
@@ -1420,11 +1768,12 @@ async function scrapePriceFromListing(
               usedCheckIn: alt.checkIn,
               usedCheckOut: alt.checkOut,
               datesDiffer: true,
+              extractionMethod,
+              reliability: adapter.reliability,
             };
           }
           
           const perNight = Math.round(result.extracted / altNights);
-          console.log("Extracted price:", result.extracted, "(total) - DIFFERENT DATES");
           return { 
             price: perNight, 
             totalPrice: result.extracted, 
@@ -1432,6 +1781,8 @@ async function scrapePriceFromListing(
             usedCheckIn: alt.checkIn,
             usedCheckOut: alt.checkOut,
             datesDiffer: true,
+            extractionMethod,
+            reliability: adapter.reliability,
           };
         }
       }
@@ -1446,11 +1797,12 @@ async function scrapePriceFromListing(
         usedCheckIn: checkIn,
         usedCheckOut: checkOut,
         datesDiffer: false,
+        extractionMethod: "none",
+        reliability: adapter.reliability,
       };
     }
 
     if (result.isPerNight) {
-      console.log("Extracted price:", result.extracted, "(per night)");
       return { 
         price: result.extracted, 
         totalPrice: result.extracted * nights, 
@@ -1458,11 +1810,12 @@ async function scrapePriceFromListing(
         usedCheckIn: checkIn,
         usedCheckOut: checkOut,
         datesDiffer: false,
+        extractionMethod,
+        reliability: adapter.reliability,
       };
     }
 
     const perNight = Math.round(result.extracted / nights);
-    console.log("Extracted price:", result.extracted, "(total)");
     return { 
       price: perNight, 
       totalPrice: result.extracted, 
@@ -1470,6 +1823,8 @@ async function scrapePriceFromListing(
       usedCheckIn: checkIn,
       usedCheckOut: checkOut,
       datesDiffer: false,
+      extractionMethod,
+      reliability: adapter.reliability,
     };
   } catch (error) {
     console.error("Price scraping error:", error);
@@ -1480,6 +1835,8 @@ async function scrapePriceFromListing(
       usedCheckIn: checkIn,
       usedCheckOut: checkOut,
       datesDiffer: false,
+      extractionMethod: "error",
+      reliability: adapter.reliability,
     };
   }
 }
