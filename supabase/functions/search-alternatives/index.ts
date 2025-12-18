@@ -604,6 +604,33 @@ function isDirectPropertySite(url: string): boolean {
   return false;
 }
 
+// Blocklist of non-booking platforms (stock photo sites, social media, etc.)
+function isBlockedNonBookingPlatform(url: string): boolean {
+  const lowercaseUrl = url.toLowerCase();
+  const blockedDomains = [
+    // Stock photo and image sites
+    "shutterstock.", "istockphoto.", "gettyimages.", "dreamstime.", "123rf.",
+    "depositphotos.", "adobestock.", "stock.adobe.", "canstockphoto.", "bigstockphoto.",
+    "alamy.", "stocksy.", "pond5.", "vecteezy.", "freepik.", "pexels.", "unsplash.",
+    "pixabay.", "flickr.", "500px.", "smugmug.", "photobucket.",
+    // Social media
+    "facebook.", "instagram.", "twitter.", "x.com", "pinterest.", "tiktok.",
+    "linkedin.", "reddit.", "tumblr.", "snapchat.",
+    // Search engines and maps
+    "google.", "bing.", "yahoo.", "duckduckgo.", "maps.", "serpapi.",
+    // Video platforms
+    "youtube.", "vimeo.", "dailymotion.",
+    // News and encyclopedias
+    "wikipedia.", "wikimedia.", "news.", "cnn.", "bbc.",
+    // E-commerce (non-travel)
+    "amazon.", "ebay.", "etsy.", "alibaba.", "aliexpress.",
+    // Other non-booking sites
+    "cloudflare.", "archive.org", "quora.", "medium.", "yelp.",
+    ".gov", ".edu", "craigslist.",
+  ];
+  return blockedDomains.some(d => lowercaseUrl.includes(d));
+}
+
 // UUID v4 validation regex
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -1260,7 +1287,8 @@ async function addTargetedTextMatches(opts: {
         if (url.toLowerCase().includes("airbnb.")) continue;
         if (foundUrls.has(url)) continue;
 
-        // Only accept URLs that match our platform heuristics
+        // Only accept URLs that match our platform heuristics and aren't blocked
+        if (isBlockedNonBookingPlatform(url)) continue;
         if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) continue;
 
         // If we have an image thumbnail + a reference Airbnb image, try to visually verify it.
@@ -1585,6 +1613,7 @@ async function runSearchWithStreaming(
 
         const matchUrl = match.link;
         if (!matchUrl || matchUrl.toLowerCase().includes("airbnb.") || foundUrls.has(matchUrl)) continue;
+        if (isBlockedNonBookingPlatform(matchUrl)) continue;
         if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
 
         const platformName = getPlatformName(matchUrl);
@@ -2451,7 +2480,8 @@ serve(async (req) => {
             if (!url) continue;
             if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
 
-            // Quick filter: only check booking platforms and direct sites
+            // Quick filter: only check booking platforms and direct sites, exclude blocked platforms
+            if (isBlockedNonBookingPlatform(url)) continue;
             if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) {
               continue;
             }
@@ -2510,7 +2540,8 @@ serve(async (req) => {
             // Use AI-verified confidence score (converted to 0-1 scale)
             const verifiedConfidence = aiComparison.score / 100;
 
-            // Check if it's a known booking platform OR regional hotel site
+            // Check if it's a known booking platform OR regional hotel site (skip blocked platforms)
+            if (isBlockedNonBookingPlatform(url)) continue;
             if (isBookingPlatform(url) || isRegionalHotelSite(url)) {
               foundUrls.add(url);
               const resultImages: string[] = [];
@@ -2798,6 +2829,7 @@ serve(async (req) => {
           for (const result of results) {
             const url = result.link;
             if (!url || url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
+            if (isBlockedNonBookingPlatform(url)) continue;
             
             if (isBookingPlatform(url) || isRegionalHotelSite(url)) {
               foundUrls.add(url);
