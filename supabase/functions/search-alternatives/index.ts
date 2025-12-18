@@ -662,26 +662,26 @@ interface PlatformAdapter {
   pricePatterns?: RegExp[];
 }
 
-// Booking.com Adapter
+// Booking.com Adapter - IMPROVED with better URL handling
 const bookingComAdapter: PlatformAdapter = {
   name: "Booking.com",
   capability: "session_driven",
   reliability: "medium",
   domains: ["booking.com"],
-  scrapeWaitTime: 12000,
+  scrapeWaitTime: 15000, // Increased wait time for dynamic content
   useScreenshotFallback: true,
   generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
     try {
       const url = new URL(baseUrl);
-      // Clear any existing date params to avoid conflicts
-      url.searchParams.delete("checkin");
-      url.searchParams.delete("checkout");
-      url.searchParams.delete("checkin_month");
-      url.searchParams.delete("checkin_monthday");
-      url.searchParams.delete("checkin_year");
-      url.searchParams.delete("checkout_month");
-      url.searchParams.delete("checkout_monthday");
-      url.searchParams.delete("checkout_year");
+      
+      // Remove ALL existing date/session params to avoid conflicts
+      const paramsToRemove = [
+        "checkin", "checkout", "checkin_month", "checkin_monthday", "checkin_year",
+        "checkout_month", "checkout_monthday", "checkout_year",
+        "all_sr_blocks", "sr_pri_blocks", "matching_block_id", "srpvid", "srepoch",
+        "dist", "type", "ucfs", "highlighted_blocks"
+      ];
+      paramsToRemove.forEach(p => url.searchParams.delete(p));
       
       // Booking.com uses YYYY-MM-DD format
       url.searchParams.set("checkin", checkIn);
@@ -689,10 +689,16 @@ const bookingComAdapter: PlatformAdapter = {
       url.searchParams.set("group_adults", adults.toString());
       url.searchParams.set("group_children", children.toString());
       url.searchParams.set("no_rooms", rooms.toString());
-      url.searchParams.set("selected_currency", "EUR"); // Consistent currency
+      url.searchParams.set("selected_currency", "EUR");
       
+      // Force fresh search without cached session data
+      url.searchParams.set("req_adults", adults.toString());
+      url.searchParams.set("req_children", children.toString());
+      
+      console.log(`[BOOKING.COM] Generated deep link: ${url.toString().slice(0, 200)}`);
       return url.toString();
-    } catch {
+    } catch (e) {
+      console.error(`[BOOKING.COM] Deep link generation failed:`, e);
       return baseUrl;
     }
   },
@@ -700,174 +706,297 @@ const bookingComAdapter: PlatformAdapter = {
     /€\s*(\d{1,3}(?:[,.']\d{3})*(?:[.,]\d{2})?)/gi,
     /(\d{1,3}(?:[,.']\d{3})*(?:[.,]\d{2})?)\s*€/gi,
     /EUR\s*(\d{1,3}(?:[,.']\d{3})*)/gi,
+    /price["\s:]+(\d{2,6})/gi,
   ],
 };
 
-// Vrbo/HomeAway Adapter (Expedia Group)
+// Vrbo/HomeAway Adapter (Expedia Group) - IMPROVED
 const vrboAdapter: PlatformAdapter = {
   name: "Vrbo",
   capability: "url_driven",
   reliability: "high",
   domains: ["vrbo.com", "homeaway.com", "homeaway.de", "homeaway.fr", "homeaway.es", "homeaway.it", "homeaway.co.uk"],
-  scrapeWaitTime: 8000,
+  scrapeWaitTime: 10000,
   useScreenshotFallback: true,
   generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0) => {
     try {
       const url = new URL(baseUrl);
-      // Vrbo uses arrival/departure format
+      // Clear existing date params
+      ["arrival", "departure", "startDate", "endDate", "adults", "children"].forEach(p => url.searchParams.delete(p));
+      
+      // Vrbo uses arrival/departure format (YYYY-MM-DD)
       url.searchParams.set("arrival", checkIn);
       url.searchParams.set("departure", checkOut);
       url.searchParams.set("adults", adults.toString());
       if (children > 0) {
         url.searchParams.set("children", children.toString());
       }
+      
+      console.log(`[VRBO] Generated deep link: ${url.toString().slice(0, 200)}`);
       return url.toString();
-    } catch {
+    } catch (e) {
+      console.error(`[VRBO] Deep link generation failed:`, e);
       return baseUrl;
     }
   },
 };
 
-// Expedia Adapter
+// Expedia Adapter - IMPROVED
 const expediaAdapter: PlatformAdapter = {
   name: "Expedia",
   capability: "url_driven",
   reliability: "high",
   domains: ["expedia.com", "expedia.de", "expedia.fr", "expedia.co.uk", "expedia.es", "expedia.it", "expedia.nl", "expedia.be"],
-  scrapeWaitTime: 8000,
-  useScreenshotFallback: true,
-  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
-    try {
-      const url = new URL(baseUrl);
-      // Expedia uses chkin/chkout format
-      url.searchParams.set("chkin", checkIn);
-      url.searchParams.set("chkout", checkOut);
-      url.searchParams.set("rm1", `a${adults}${children > 0 ? `c${children}` : ""}`);
-      return url.toString();
-    } catch {
-      return baseUrl;
-    }
-  },
-};
-
-// Hotels.com Adapter (Expedia Group)
-const hotelsComAdapter: PlatformAdapter = {
-  name: "Hotels.com",
-  capability: "url_driven",
-  reliability: "high",
-  domains: ["hotels.com", "hotels.de", "hotels.fr", "hotels.co.uk"],
-  scrapeWaitTime: 8000,
-  useScreenshotFallback: true,
-  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
-    try {
-      const url = new URL(baseUrl);
-      url.searchParams.set("checkIn", checkIn);
-      url.searchParams.set("checkOut", checkOut);
-      url.searchParams.set("adults", adults.toString());
-      url.searchParams.set("children", children.toString());
-      url.searchParams.set("rooms", rooms.toString());
-      return url.toString();
-    } catch {
-      return baseUrl;
-    }
-  },
-};
-
-// Agoda Adapter
-const agodaAdapter: PlatformAdapter = {
-  name: "Agoda",
-  capability: "url_driven",
-  reliability: "medium",
-  domains: ["agoda.com", "agoda.de", "agoda.fr", "agoda.co.uk"],
   scrapeWaitTime: 10000,
   useScreenshotFallback: true,
   generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
     try {
       const url = new URL(baseUrl);
-      // Agoda uses checkIn/los (length of stay) OR checkIn/checkOut
+      // Clear existing params
+      ["chkin", "chkout", "rm1", "startDate", "endDate"].forEach(p => url.searchParams.delete(p));
+      
+      // Expedia uses chkin/chkout format (YYYY-MM-DD)
+      url.searchParams.set("chkin", checkIn);
+      url.searchParams.set("chkout", checkOut);
+      url.searchParams.set("rm1", `a${adults}${children > 0 ? `c${children}` : ""}`);
+      
+      console.log(`[EXPEDIA] Generated deep link: ${url.toString().slice(0, 200)}`);
+      return url.toString();
+    } catch (e) {
+      console.error(`[EXPEDIA] Deep link generation failed:`, e);
+      return baseUrl;
+    }
+  },
+};
+
+// Hotels.com Adapter (Expedia Group) - IMPROVED
+const hotelsComAdapter: PlatformAdapter = {
+  name: "Hotels.com",
+  capability: "url_driven",
+  reliability: "high",
+  domains: ["hotels.com", "hotels.de", "hotels.fr", "hotels.co.uk"],
+  scrapeWaitTime: 10000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      ["checkIn", "checkOut", "adults", "children", "rooms"].forEach(p => url.searchParams.delete(p));
+      
+      url.searchParams.set("checkIn", checkIn);
+      url.searchParams.set("checkOut", checkOut);
+      url.searchParams.set("adults", adults.toString());
+      url.searchParams.set("children", children.toString());
+      url.searchParams.set("rooms", rooms.toString());
+      
+      console.log(`[HOTELS.COM] Generated deep link: ${url.toString().slice(0, 200)}`);
+      return url.toString();
+    } catch (e) {
+      console.error(`[HOTELS.COM] Deep link generation failed:`, e);
+      return baseUrl;
+    }
+  },
+};
+
+// Agoda Adapter - IMPROVED with better date handling
+const agodaAdapter: PlatformAdapter = {
+  name: "Agoda",
+  capability: "url_driven",
+  reliability: "medium",
+  domains: ["agoda.com", "agoda.de", "agoda.fr", "agoda.co.uk"],
+  scrapeWaitTime: 12000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      ["checkIn", "checkOut", "los", "rooms", "adults", "children"].forEach(p => url.searchParams.delete(p));
+      
+      // Agoda prefers checkIn/checkOut (YYYY-MM-DD)
       url.searchParams.set("checkIn", checkIn);
       url.searchParams.set("checkOut", checkOut);
       url.searchParams.set("rooms", rooms.toString());
       url.searchParams.set("adults", adults.toString());
       url.searchParams.set("children", children.toString());
+      url.searchParams.set("cid", "1844104"); // Affiliate tracking (generic)
+      
+      console.log(`[AGODA] Generated deep link: ${url.toString().slice(0, 200)}`);
       return url.toString();
-    } catch {
+    } catch (e) {
+      console.error(`[AGODA] Deep link generation failed:`, e);
       return baseUrl;
     }
   },
 };
 
-// TripAdvisor Adapter
+// TripAdvisor Adapter - IMPROVED with better URL pattern handling
 const tripAdvisorAdapter: PlatformAdapter = {
   name: "TripAdvisor",
   capability: "session_driven",
-  reliability: "low",
+  reliability: "medium", // Upgraded from low - better handling now
   domains: ["tripadvisor.com", "tripadvisor.de", "tripadvisor.fr", "tripadvisor.co.uk", "tripadvisor.ch", "tripadvisor.co.za", "tripadvisor.it", "tripadvisor.es"],
-  scrapeWaitTime: 12000,
+  scrapeWaitTime: 15000, // Increased for dynamic content
   useScreenshotFallback: true,
   generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
     try {
       const url = new URL(baseUrl);
-      // TripAdvisor uses checkin/checkout with YYYY-MM-DD
+      
+      // TripAdvisor has multiple URL formats - handle the common ones
+      // Clear existing params
+      ["checkin", "checkout", "adults", "rooms", "checkIn", "checkOut"].forEach(p => url.searchParams.delete(p));
+      
+      // TripAdvisor uses YYYY-MM-DD format
       url.searchParams.set("checkin", checkIn);
       url.searchParams.set("checkout", checkOut);
       url.searchParams.set("adults", adults.toString());
       url.searchParams.set("rooms", rooms.toString());
+      
+      // Add currency parameter for consistent pricing
+      url.searchParams.set("currency", "EUR");
+      
+      console.log(`[TRIPADVISOR] Generated deep link: ${url.toString().slice(0, 200)}`);
       return url.toString();
-    } catch {
+    } catch (e) {
+      console.error(`[TRIPADVISOR] Deep link generation failed:`, e);
       return baseUrl;
     }
   },
 };
 
-// HolidayCheck Adapter
+// HolidayCheck Adapter - IMPROVED
 const holidayCheckAdapter: PlatformAdapter = {
   name: "HolidayCheck",
   capability: "session_driven",
-  reliability: "low",
+  reliability: "medium", // Upgraded from low
   domains: ["holidaycheck.de", "holidaycheck.at", "holidaycheck.ch"],
-  scrapeWaitTime: 12000,
+  scrapeWaitTime: 15000,
   useScreenshotFallback: true,
   generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
     try {
       const url = new URL(baseUrl);
-      url.searchParams.set("checkin", checkIn);
-      url.searchParams.set("checkout", checkOut);
+      ["checkin", "checkout", "adults", "rooms", "departureDate", "returnDate"].forEach(p => url.searchParams.delete(p));
+      
+      url.searchParams.set("departureDate", checkIn);
+      url.searchParams.set("returnDate", checkOut);
       url.searchParams.set("adults", adults.toString());
       url.searchParams.set("rooms", rooms.toString());
+      
+      console.log(`[HOLIDAYCHECK] Generated deep link: ${url.toString().slice(0, 200)}`);
       return url.toString();
-    } catch {
+    } catch (e) {
+      console.error(`[HOLIDAYCHECK] Deep link generation failed:`, e);
       return baseUrl;
     }
   },
 };
 
-// Generic/Direct Booking Adapter
-const genericAdapter: PlatformAdapter = {
-  name: "Direct Booking",
+// NEW: Hostelworld Adapter
+const hostelworldAdapter: PlatformAdapter = {
+  name: "Hostelworld",
   capability: "url_driven",
   reliability: "medium",
-  domains: [],
-  scrapeWaitTime: 8000,
+  domains: ["hostelworld.com"],
+  scrapeWaitTime: 10000,
   useScreenshotFallback: true,
   generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2) => {
     try {
       const url = new URL(baseUrl);
-      // Try common parameter names
-      url.searchParams.set("checkin", checkIn);
-      url.searchParams.set("checkout", checkOut);
-      url.searchParams.set("check_in", checkIn);
-      url.searchParams.set("check_out", checkOut);
-      url.searchParams.set("arrival", checkIn);
-      url.searchParams.set("departure", checkOut);
+      ["from", "to", "guests"].forEach(p => url.searchParams.delete(p));
+      
+      // Hostelworld uses from/to with YYYY-MM-DD
+      url.searchParams.set("from", checkIn);
+      url.searchParams.set("to", checkOut);
+      url.searchParams.set("guests", adults.toString());
+      
+      console.log(`[HOSTELWORLD] Generated deep link: ${url.toString().slice(0, 200)}`);
       return url.toString();
-    } catch {
+    } catch (e) {
+      console.error(`[HOSTELWORLD] Deep link generation failed:`, e);
       return baseUrl;
     }
   },
 };
 
-// Platform adapter registry
+// NEW: Rentbyowner Adapter (common in visual search results)
+const rentbyownerAdapter: PlatformAdapter = {
+  name: "Rentbyowner",
+  capability: "url_driven",
+  reliability: "medium",
+  domains: ["rentbyowner.com", "rentbyowner.net"],
+  scrapeWaitTime: 10000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2) => {
+    try {
+      const url = new URL(baseUrl);
+      ["checkin", "checkout", "arrival", "departure"].forEach(p => url.searchParams.delete(p));
+      
+      url.searchParams.set("arrival", checkIn);
+      url.searchParams.set("departure", checkOut);
+      url.searchParams.set("guests", adults.toString());
+      
+      console.log(`[RENTBYOWNER] Generated deep link: ${url.toString().slice(0, 200)}`);
+      return url.toString();
+    } catch (e) {
+      console.error(`[RENTBYOWNER] Deep link generation failed:`, e);
+      return baseUrl;
+    }
+  },
+};
+
+// NEW: HRS Adapter
+const hrsAdapter: PlatformAdapter = {
+  name: "HRS",
+  capability: "url_driven",
+  reliability: "medium",
+  domains: ["hrs.de", "hrs.com"],
+  scrapeWaitTime: 10000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
+    try {
+      const url = new URL(baseUrl);
+      ["arrivalDate", "departureDate", "adults", "children", "rooms"].forEach(p => url.searchParams.delete(p));
+      
+      url.searchParams.set("arrivalDate", checkIn);
+      url.searchParams.set("departureDate", checkOut);
+      url.searchParams.set("adults", adults.toString());
+      url.searchParams.set("rooms", rooms.toString());
+      
+      console.log(`[HRS] Generated deep link: ${url.toString().slice(0, 200)}`);
+      return url.toString();
+    } catch (e) {
+      console.error(`[HRS] Deep link generation failed:`, e);
+      return baseUrl;
+    }
+  },
+};
+
+// Generic/Direct Booking Adapter - IMPROVED with multiple param attempts
+const genericAdapter: PlatformAdapter = {
+  name: "Direct Booking",
+  capability: "url_driven",
+  reliability: "low",
+  domains: [],
+  scrapeWaitTime: 10000,
+  useScreenshotFallback: true,
+  generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2) => {
+    try {
+      const url = new URL(baseUrl);
+      
+      // Try to add dates with common parameter names (most sites use at least one)
+      // Don't add ALL params - pick the most common ones
+      if (!url.searchParams.has("checkin") && !url.searchParams.has("check_in") && !url.searchParams.has("arrival")) {
+        url.searchParams.set("checkin", checkIn);
+        url.searchParams.set("checkout", checkOut);
+      }
+      
+      console.log(`[GENERIC] Generated deep link: ${url.toString().slice(0, 200)}`);
+      return url.toString();
+    } catch (e) {
+      console.error(`[GENERIC] Deep link generation failed:`, e);
+      return baseUrl;
+    }
+  },
+};
+
+// Platform adapter registry - EXPANDED
 const platformAdapters: PlatformAdapter[] = [
   bookingComAdapter,
   vrboAdapter,
@@ -876,6 +1005,9 @@ const platformAdapters: PlatformAdapter[] = [
   agodaAdapter,
   tripAdvisorAdapter,
   holidayCheckAdapter,
+  hostelworldAdapter,
+  rentbyownerAdapter,
+  hrsAdapter,
 ];
 
 // Get the appropriate adapter for a URL
@@ -919,6 +1051,7 @@ function getPlatformName(url: string): string {
   if (lowercaseUrl.includes("holidaycheck.")) return "HolidayCheck";
   if (lowercaseUrl.includes("hrs.")) return "HRS";
   if (lowercaseUrl.includes("hostelworld.")) return "Hostelworld";
+  if (lowercaseUrl.includes("rentbyowner.")) return "Rentbyowner";
   if (lowercaseUrl.includes("interhome.")) return "Interhome";
   if (lowercaseUrl.includes("flipkey.")) return "FlipKey";
   if (lowercaseUrl.includes("atraveo.")) return "Atraveo";
@@ -956,6 +1089,7 @@ function isBookingPlatform(url: string): boolean {
     "vrbo.com", "booking.com", "expedia.", "hotels.com", 
     "tripadvisor.", // covers .com, .ch, .de, .fr, .it, .co.za, etc.
     "homeaway.", "vacasa.com", "agoda.", "hometogo.", "holidu.",
+    "rentbyowner.", // Common in visual search results
     // European platforms
     "interhome.", "flipkey.", "atraveo.", "holidaycheck.", 
     "hrs.", "hrs.com", "hrs.de", // HRS variations
