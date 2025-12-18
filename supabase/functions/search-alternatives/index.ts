@@ -25,6 +25,32 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
   }
 }
 
+// Generic timeout wrapper for any async operation - prevents stuck processes
+async function withTimeout<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+  operationName: string
+): Promise<T> {
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      console.log(`TIMEOUT: ${operationName} exceeded ${timeoutMs}ms - skipping`);
+      resolve(fallback);
+    }, timeoutMs);
+
+    operation()
+      .then((result) => {
+        clearTimeout(timeoutId);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timeoutId);
+        console.log(`ERROR in ${operationName}:`, error.message || error);
+        resolve(fallback);
+      });
+  });
+}
+
 // Track if controller is still valid
 const controllerValid = new WeakSet<SSEController>();
 
@@ -2805,12 +2831,18 @@ serve(async (req) => {
           console.log("Google Lens searching:", imageUrl.slice(0, 80));
 
           // Use Google Lens engine - MUCH better at finding same place across sites
-          const lensResponse = await fetch(
-            `https://serpapi.com/search.json?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`,
+          // Wrap with timeout to prevent stuck API calls (30s max)
+          const lensResponse = await withTimeout(
+            () => fetch(
+              `https://serpapi.com/search.json?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`,
+            ),
+            30_000,
+            null,
+            `Google Lens search for image ${idx + 1}`
           );
 
-          if (!lensResponse.ok) {
-            console.log("Lens search failed:", lensResponse.status);
+          if (!lensResponse || !lensResponse.ok) {
+            console.log("Lens search failed:", lensResponse?.status || "timeout");
             continue;
           }
 
@@ -2877,11 +2909,19 @@ serve(async (req) => {
             }
 
             // Use AI to compare images and get similarity score
+            // Wrap with timeout to prevent stuck AI comparisons (20s max)
             const platformSlug = getPlatformName(url).toLowerCase().replace(/[^a-z0-9]/g, "_");
             await supabase.from("searches").update({ status: `ai_verifying_${platformSlug}` }).eq("id", searchId);
             console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS}...`);
             aiComparisonCount++;
-            let aiComparison = await compareImagesWithAI(imageUrl, matchImageUrl);
+            
+            const AI_COMPARISON_TIMEOUT_MS = 20_000;
+            let aiComparison = await withTimeout(
+              () => compareImagesWithAI(imageUrl, matchImageUrl),
+              AI_COMPARISON_TIMEOUT_MS,
+              { score: 0, isMatch: false, explanation: "Timeout" },
+              `AI comparison for ${platformSlug}`
+            );
             console.log(
               `AI result: score=${aiComparison.score}, isMatch=${aiComparison.isMatch}, reason: ${aiComparison.explanation}`,
             );
@@ -2895,11 +2935,22 @@ serve(async (req) => {
               !isTimeBudgetExceeded()
             ) {
               console.log("Retrying AI match with scraped high-res image for:", url.slice(0, 80));
-              const betterImage = await scrapeBestImageFromListing(url, firecrawlApiKey);
+              // Wrap image scraping with timeout (15s max)
+              const betterImage = await withTimeout(
+                () => scrapeBestImageFromListing(url, firecrawlApiKey),
+                15_000,
+                null,
+                `Scrape high-res image from ${platformSlug}`
+              );
               if (betterImage) {
                 console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (hi-res retry)...`);
                 aiComparisonCount++;
-                aiComparison = await compareImagesWithAI(imageUrl, betterImage);
+                aiComparison = await withTimeout(
+                  () => compareImagesWithAI(imageUrl, betterImage),
+                  AI_COMPARISON_TIMEOUT_MS,
+                  { score: 0, isMatch: false, explanation: "Timeout" },
+                  `AI comparison retry for ${platformSlug}`
+                );
                 console.log(
                   `AI retry result: score=${aiComparison.score}, isMatch=${aiComparison.isMatch}, reason: ${aiComparison.explanation}`,
                 );
@@ -3298,6 +3349,9 @@ serve(async (req) => {
 
       const toScrape = prioritized.slice(0, 10); // Scrape more to increase chance of getting prices
 
+      // Per-platform timeout: 45 seconds max per price scrape to prevent stuck searches
+      const PRICE_SCRAPE_TIMEOUT_MS = 45_000;
+      
       for (let i = 0; i < toScrape.length; i++) {
         const alt = toScrape[i];
         const platformSlug = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_");
@@ -3306,7 +3360,22 @@ serve(async (req) => {
         }).eq("id", searchId);
         console.log(`Scraping price ${i + 1}/${toScrape.length} from ${alt.platform_name}...`);
 
-        const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey);
+        // Wrap price scraping with timeout to prevent stuck searches
+        const fallbackPriceData = {
+          price: null,
+          totalPrice: null,
+          perNightRate: null,
+          usedCheckIn: checkIn,
+          usedCheckOut: checkOut,
+          datesDiffer: false,
+        };
+        
+        const priceData = await withTimeout(
+          () => scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey),
+          PRICE_SCRAPE_TIMEOUT_MS,
+          fallbackPriceData,
+          `Price scrape for ${alt.platform_name}`
+        );
         
         // Store ALL results - price is optional (null is OK)
         const hasValidPrice = priceData.perNightRate && priceData.perNightRate >= 10;
