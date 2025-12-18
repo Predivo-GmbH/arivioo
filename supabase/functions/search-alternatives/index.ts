@@ -1852,7 +1852,11 @@ async function runSearchWithStreaming(
   const TARGET = 12;
   let aiCount = 0;
 
-  for (let idx = 0; idx < imageUrls.length && alternatives.filter(a => a.match_type === 'visual').length < TARGET && Date.now() - searchStartTime < MAX_TIME; idx++) {
+  // Track the best match per platform (by confidence score) to avoid redundant verification
+  // Key: normalized platform name, Value: best alternative found so far
+  const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
+
+  for (let idx = 0; idx < imageUrls.length && bestMatchPerPlatform.size < TARGET && Date.now() - searchStartTime < MAX_TIME; idx++) {
     const imageUrl = imageUrls[idx];
     sendProgress(controller, `Searching image ${idx + 1} of ${imageUrls.length}`, "Running AI reverse image search on Booking.com, Vrbo, TripAdvisor...", { imageIndex: idx + 1, totalImages: imageUrls.length });
     await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}` }).eq("id", searchId);
@@ -1867,7 +1871,7 @@ async function runSearchWithStreaming(
 
       let matchesThisImage = 0;
       for (const match of visualMatches) {
-        if (aiCount >= MAX_AI || alternatives.filter(a => a.match_type === 'visual').length >= TARGET || matchesThisImage >= 8) break;
+        if (aiCount >= MAX_AI || bestMatchPerPlatform.size >= TARGET || matchesThisImage >= 8) break;
         if (Date.now() - searchStartTime > MAX_TIME) break;
 
         const matchUrl = match.link;
@@ -1876,6 +1880,15 @@ async function runSearchWithStreaming(
         if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
 
         const platformName = getPlatformName(matchUrl);
+        const platformKey = platformName.toLowerCase().replace(/[^a-z0-9]/g, '');
+        
+        // Skip if we already have a verified match for this platform
+        // (we only need one verified match per platform, then we fetch the price from that URL)
+        if (bestMatchPerPlatform.has(platformKey)) {
+          console.log(`Skipping ${platformName} - already have verified match for this platform`);
+          continue;
+        }
+
         sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
         await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}` }).eq("id", searchId);
 
@@ -1886,7 +1899,7 @@ async function runSearchWithStreaming(
         
         if (aiResult.isMatch && aiResult.score >= 90) {
           foundUrls.add(matchUrl);
-          alternatives.push({
+          const newMatch = {
             platform_name: platformName,
             listing_url: matchUrl,
             listing_title: match.title || null,
@@ -1894,9 +1907,14 @@ async function runSearchWithStreaming(
             confidence_score: aiResult.score / 100, // Store as decimal 0-1 for consistency
             image_url: match.thumbnail || null,
             images: match.thumbnail ? [match.thumbnail] : [],
-            match_type: 'visual',
+            match_type: 'visual' as const,
             source_airbnb_image: imageUrl,
-          });
+          };
+          
+          // Store as best match for this platform
+          bestMatchPerPlatform.set(platformKey, newMatch);
+          alternatives.push(newMatch);
+          
           sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, { platform: platformName, confidence: aiResult.score });
         }
       }
@@ -1905,8 +1923,8 @@ async function runSearchWithStreaming(
     }
   }
 
-  const visualCount = alternatives.filter(a => a.match_type === 'visual').length;
-  sendProgress(controller, `Found ${visualCount} verified matches`, "Now collecting prices from each platform");
+  const visualCount = bestMatchPerPlatform.size;
+  sendProgress(controller, `Found ${visualCount} verified platforms`, "Each platform verified once - now collecting prices");
 
   // If we got no visual matches, run a targeted text search across likely platforms
   if (visualCount === 0) {
