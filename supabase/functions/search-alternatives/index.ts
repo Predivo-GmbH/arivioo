@@ -3349,10 +3349,29 @@ serve(async (req) => {
 
       const toScrape = prioritized.slice(0, 10); // Scrape more to increase chance of getting prices
 
-      // Per-platform timeout: 45 seconds max per price scrape to prevent stuck searches
-      const PRICE_SCRAPE_TIMEOUT_MS = 45_000;
+      // Per-platform timeout: 25 seconds max per price scrape to prevent stuck searches
+      const PRICE_SCRAPE_TIMEOUT_MS = 25_000;
+      
+      // Helper to check if user requested to skip current step
+      async function shouldSkipStep(): Promise<boolean> {
+        const { data } = await supabase
+          .from("searches")
+          .select("status")
+          .eq("id", searchId)
+          .single();
+        return data?.status === "skip_current_step";
+      }
       
       for (let i = 0; i < toScrape.length; i++) {
+        // Check if user requested to skip before starting this platform
+        const skipRequested = await shouldSkipStep();
+        if (skipRequested) {
+          console.log(`SKIP requested by user - skipping remaining ${toScrape.length - i} price scrapes`);
+          // Reset status and break out of loop
+          await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
+          break;
+        }
+        
         const alt = toScrape[i];
         const platformSlug = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_");
         await supabase.from("searches").update({
