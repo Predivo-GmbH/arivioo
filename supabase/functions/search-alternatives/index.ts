@@ -1849,14 +1849,13 @@ async function runSearchWithStreaming(
   const searchStartTime = Date.now();
   const MAX_TIME = 120000;
   const MAX_AI = 30;
-  const TARGET = 12;
   let aiCount = 0;
 
-  // Track the best match per platform (by confidence score) to avoid redundant verification
+  // Track the best match per platform (by confidence score)
   // Key: normalized platform name, Value: best alternative found so far
   const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
 
-  for (let idx = 0; idx < imageUrls.length && bestMatchPerPlatform.size < TARGET && Date.now() - searchStartTime < MAX_TIME; idx++) {
+  for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
     const imageUrl = imageUrls[idx];
     sendProgress(controller, `Searching image ${idx + 1} of ${imageUrls.length}`, "Running AI reverse image search on Booking.com, Vrbo, TripAdvisor...", { imageIndex: idx + 1, totalImages: imageUrls.length });
     await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}` }).eq("id", searchId);
@@ -1871,7 +1870,7 @@ async function runSearchWithStreaming(
 
       let matchesThisImage = 0;
       for (const match of visualMatches) {
-        if (aiCount >= MAX_AI || bestMatchPerPlatform.size >= TARGET || matchesThisImage >= 8) break;
+        if (aiCount >= MAX_AI || matchesThisImage >= 8) break;
         if (Date.now() - searchStartTime > MAX_TIME) break;
 
         const matchUrl = match.link;
@@ -1882,10 +1881,11 @@ async function runSearchWithStreaming(
         const platformName = getPlatformName(matchUrl);
         const platformKey = platformName.toLowerCase().replace(/[^a-z0-9]/g, '');
         
-        // Skip if we already have a verified match for this platform
-        // (we only need one verified match per platform, then we fetch the price from that URL)
-        if (bestMatchPerPlatform.has(platformKey)) {
-          console.log(`Skipping ${platformName} - already have verified match for this platform`);
+        // Check if we already have a match for this platform with high confidence
+        const existingMatch = bestMatchPerPlatform.get(platformKey);
+        if (existingMatch && existingMatch.confidence_score && existingMatch.confidence_score >= 0.98) {
+          // Already have an excellent match for this platform, skip
+          console.log(`Skipping ${platformName} verification - already have 98%+ match`);
           continue;
         }
 
@@ -1894,34 +1894,44 @@ async function runSearchWithStreaming(
 
         aiCount++;
         matchesThisImage++;
+        foundUrls.add(matchUrl);
 
         const aiResult = await compareImagesWithAI(imageUrl, match.thumbnail || matchUrl);
         
         if (aiResult.isMatch && aiResult.score >= 90) {
-          foundUrls.add(matchUrl);
-          const newMatch = {
-            platform_name: platformName,
-            listing_url: matchUrl,
-            listing_title: match.title || null,
-            price: null,
-            confidence_score: aiResult.score / 100, // Store as decimal 0-1 for consistency
-            image_url: match.thumbnail || null,
-            images: match.thumbnail ? [match.thumbnail] : [],
-            match_type: 'visual' as const,
-            source_airbnb_image: imageUrl,
-          };
+          const newConfidence = aiResult.score / 100;
           
-          // Store as best match for this platform
-          bestMatchPerPlatform.set(platformKey, newMatch);
-          alternatives.push(newMatch);
-          
-          sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, { platform: platformName, confidence: aiResult.score });
+          // Only keep this match if it's better than what we have for this platform
+          if (!existingMatch || newConfidence > (existingMatch.confidence_score || 0)) {
+            const newMatch = {
+              platform_name: platformName,
+              listing_url: matchUrl,
+              listing_title: match.title || null,
+              price: null,
+              confidence_score: newConfidence,
+              image_url: match.thumbnail || null,
+              images: match.thumbnail ? [match.thumbnail] : [],
+              match_type: 'visual' as const,
+              source_airbnb_image: imageUrl,
+            };
+            
+            bestMatchPerPlatform.set(platformKey, newMatch);
+            
+            if (existingMatch) {
+              sendProgress(controller, `Better match on ${platformName}`, `${aiResult.score}% confidence (was ${Math.round((existingMatch.confidence_score || 0) * 100)}%)`, { platform: platformName, confidence: aiResult.score });
+            } else {
+              sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, { platform: platformName, confidence: aiResult.score });
+            }
+          }
         }
       }
     } catch (e) {
       console.error("Lens search error:", e);
     }
   }
+
+  // After all verification, collect best matches into alternatives array
+  alternatives.push(...bestMatchPerPlatform.values());
 
   const visualCount = bestMatchPerPlatform.size;
   sendProgress(controller, `Found ${visualCount} verified platforms`, "Each platform verified once - now collecting prices");
