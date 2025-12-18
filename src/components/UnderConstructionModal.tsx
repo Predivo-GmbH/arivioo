@@ -5,8 +5,6 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Rocket, Mail, Lock, Eye, EyeOff, Sparkles, CheckCircle } from "lucide-react";
 
-const STORAGE_KEY = "arivioo_access_granted";
-
 interface UnderConstructionModalProps {
   onAccessGranted: () => void;
 }
@@ -18,13 +16,36 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isEmailSubmitted, setIsEmailSubmitted] = useState(false);
+  const [isCheckingAccess, setIsCheckingAccess] = useState(true);
 
   useEffect(() => {
-    // Check if access was previously granted
-    const accessGranted = localStorage.getItem(STORAGE_KEY);
-    if (accessGranted === "true") {
-      onAccessGranted();
-    }
+    // Check server-side access grant instead of localStorage
+    const checkAccessGrant = async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        
+        if (user) {
+          // Check if user has a valid access grant in the database
+          const { data: grant, error } = await supabase
+            .from('access_grants')
+            .select('granted_until')
+            .eq('user_id', user.id)
+            .maybeSingle();
+          
+          if (!error && grant && new Date(grant.granted_until) > new Date()) {
+            console.log('Valid access grant found, granting access');
+            onAccessGranted();
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('Error checking access grant:', error);
+      } finally {
+        setIsCheckingAccess(false);
+      }
+    };
+
+    checkAccessGrant();
   }, [onAccessGranted]);
 
   const handleEmailSubmit = async (e: React.FormEvent) => {
@@ -71,8 +92,25 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
     setIsSubmitting(true);
     
     try {
+      // First, ensure user is signed in (anonymously if needed)
+      let userId: string | undefined;
+      
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        userId = user.id;
+      } else {
+        // Sign in anonymously to get a user ID for access grant
+        const { data: anonData, error: anonError } = await supabase.auth.signInAnonymously();
+        if (anonError) {
+          console.error('Error signing in anonymously:', anonError);
+        } else {
+          userId = anonData.user?.id;
+        }
+      }
+
+      // Verify password and create server-side access grant
       const { data, error } = await supabase.functions.invoke('verify-bypass-password', {
-        body: { password }
+        body: { password, userId }
       });
 
       if (error) {
@@ -80,7 +118,6 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
       }
 
       if (data?.valid) {
-        localStorage.setItem(STORAGE_KEY, "true");
         toast.success("Access granted!");
         onAccessGranted();
       } else {
@@ -95,6 +132,15 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
       setIsSubmitting(false);
     }
   };
+
+  // Show loading while checking access
+  if (isCheckingAccess) {
+    return (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-gradient-to-br from-background via-background to-primary/5">
+        <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-gradient-to-br from-background via-background to-primary/5">
