@@ -501,7 +501,17 @@ export default function SearchResults() {
     skipInFlightRef.current = true;
 
     try {
-      await supabase.from("searches").update({ status: "skip_current_step" }).eq("id", searchId);
+      const { data, error } = await supabase.functions.invoke("request-skip-step", {
+        body: { searchId },
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data?.ok) {
+        throw new Error(data?.error || "Failed to request skip");
+      }
 
       toast({
         title: mode === "manual" ? "Skipping…" : "Taking too long",
@@ -510,6 +520,12 @@ export default function SearchResults() {
 
       abortReasonRef.current = "skip";
       abortControllerRef.current?.abort();
+    } catch (e: any) {
+      toast({
+        title: "Could not skip",
+        description: e?.message || "Skip request failed",
+        variant: "destructive",
+      });
     } finally {
       // let polling/watchdogs decide if we need to skip again
       window.setTimeout(() => {
