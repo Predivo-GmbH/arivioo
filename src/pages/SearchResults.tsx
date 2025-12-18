@@ -174,6 +174,7 @@ export default function SearchResults() {
   const actualDurationRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const abortModeRef = useRef<"cancel" | "skip">("cancel");
   const seenActivityKeysRef = useRef<Set<string>>(new Set());
   const tickerScrollRef = useRef<HTMLDivElement | null>(null);
   const activityIdCounterRef = useRef(0);
@@ -408,13 +409,41 @@ export default function SearchResults() {
              actualDurationRef.current = Date.now() - startedAt;
              setSearchPhase("animating");
            }
-        } catch (error: any) {
-          // User cancelled
-          if (error?.name === "AbortError") {
-            toast({ title: "Search cancelled", description: "No worries — you can try again anytime." });
-            navigate("/dashboard");
-            return;
-          }
+         } catch (error: any) {
+           // User cancelled / skipped
+           if (error?.name === "AbortError") {
+             const mode = abortModeRef.current;
+             abortModeRef.current = "cancel";
+
+             if (mode === "skip") {
+               toast({
+                 title: "Skipped",
+                 description: "Showing what we have so far. Some prices may be missing.",
+               });
+
+               const { data: updatedSearch } = await supabase
+                 .from("searches")
+                 .select("*")
+                 .eq("id", searchId)
+                 .single();
+
+               const { data: resultsData } = await supabase
+                 .from("search_results")
+                 .select("*")
+                 .eq("search_id", searchId)
+                 .order("savings_percentage", { ascending: false, nullsFirst: false });
+
+               setSearch(updatedSearch as SearchData);
+               setResults((resultsData || []) as SearchResult[]);
+               setSearchPhase("done");
+               setLoading(false);
+               return;
+             }
+
+             toast({ title: "Search cancelled", description: "No worries — you can try again anytime." });
+             navigate("/dashboard");
+             return;
+           }
 
           console.error("Search error:", error);
           toast({
@@ -840,6 +869,7 @@ export default function SearchResults() {
                     <Button
                       variant="outline"
                       onClick={() => {
+                        abortModeRef.current = "cancel";
                         abortControllerRef.current?.abort();
                       }}
                     >
@@ -852,6 +882,15 @@ export default function SearchResults() {
                       }}
                     >
                       Why is this taking time?
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        abortModeRef.current = "skip";
+                        abortControllerRef.current?.abort();
+                      }}
+                    >
+                      Skip this step
                     </Button>
                   </div>
                 </div>
