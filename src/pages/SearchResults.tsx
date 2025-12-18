@@ -168,6 +168,7 @@ export default function SearchResults() {
   const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string; id: string }>>([]);
   const [showMoreExpensive, setShowMoreExpensive] = useState(false);
   const [showNoPriceMatches, setShowNoPriceMatches] = useState(false);
+  const [streamDisconnected, setStreamDisconnected] = useState(false);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -181,6 +182,7 @@ export default function SearchResults() {
   const seenActivityKeysRef = useRef<Set<string>>(new Set());
   const tickerScrollRef = useRef<HTMLDivElement | null>(null);
   const activityIdCounterRef = useRef(0);
+  const heartbeatIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -534,22 +536,112 @@ export default function SearchResults() {
     }
   };
 
-  // Automatic skip if no progress events arrive for a while
+  // Backend heartbeat polling - detect stalls even if SSE stream disconnects
+  useEffect(() => {
+    if (!loading || searchPhase !== "thinking" || !searchId) return;
+
+    const pollHeartbeat = async () => {
+      try {
+        const { data } = await supabase
+          .from("searches")
+          .select("status, last_progress_at")
+          .eq("id", searchId)
+          .single();
+
+        if (!data) return;
+
+        // If search is done, update state
+        if (["completed", "price_unavailable", "dates_required"].includes(data.status)) {
+          // Fetch final results
+          const { data: updatedSearch } = await supabase
+            .from("searches")
+            .select("*")
+            .eq("id", searchId)
+            .single();
+
+          const { data: resultsData } = await supabase
+            .from("search_results")
+            .select("*")
+            .eq("search_id", searchId)
+            .order("savings_percentage", { ascending: false, nullsFirst: false });
+
+          setSearch(updatedSearch as SearchData);
+          setResults((resultsData || []) as SearchResult[]);
+          actualDurationRef.current = Date.now() - (searchStartTimeRef.current || Date.now());
+          setSearchPhase("animating");
+          return;
+        }
+
+        // Check backend heartbeat for stall detection
+        if (data.last_progress_at) {
+          const lastHeartbeat = new Date(data.last_progress_at).getTime();
+          const sinceHeartbeat = Date.now() - lastHeartbeat;
+
+          // If backend hasn't updated in 30 seconds, auto-skip
+          if (sinceHeartbeat > 30_000 && !autoSkipRequestedRef.current) {
+            console.log("Backend stalled (no heartbeat for 30s) - auto-skipping");
+            autoSkipRequestedRef.current = true;
+            void requestSkipCurrentStep("auto");
+          }
+        }
+      } catch (e) {
+        console.error("Heartbeat poll error:", e);
+      }
+    };
+
+    heartbeatIntervalRef.current = window.setInterval(pollHeartbeat, 5000);
+    pollHeartbeat(); // Initial check
+
+    return () => {
+      if (heartbeatIntervalRef.current) {
+        window.clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
+    };
+  }, [loading, searchPhase, searchId]);
+
+  // Automatic skip if no SSE progress events arrive for a while (stream may be alive but backend stuck)
   useEffect(() => {
     if (!loading || searchPhase !== "thinking") return;
 
     const id = window.setInterval(() => {
       const sinceProgress = Date.now() - lastProgressAtRef.current;
 
-      // If the stream is alive but nothing has happened for a while, skip the current backend step.
+      // If the stream is alive but nothing has happened for 25 seconds, skip the current backend step.
       if (sinceProgress > 25_000 && !autoSkipRequestedRef.current) {
         autoSkipRequestedRef.current = true;
         void requestSkipCurrentStep("auto");
+      }
+
+      // Mark stream as disconnected after 10s of no progress for UI feedback
+      if (sinceProgress > 10_000) {
+        setStreamDisconnected(true);
+      } else {
+        setStreamDisconnected(false);
       }
     }, 1000);
 
     return () => window.clearInterval(id);
   }, [loading, searchPhase, searchId]);
+
+  // Reconnect function to re-attach to a running search
+  const reconnectToSearch = async () => {
+    if (!searchId || !user) return;
+
+    toast({ title: "Reconnecting...", description: "Re-attaching to your search" });
+    
+    // Reset state
+    searchTriggeredRef.current = false;
+    setStreamDisconnected(false);
+    autoSkipRequestedRef.current = false;
+    skipInFlightRef.current = false;
+    lastProgressAtRef.current = Date.now();
+    seenActivityKeysRef.current.clear();
+    
+    // Trigger re-fetch which will reconnect to SSE
+    setLoading(true);
+    setSearchPhase("thinking");
+  };
 
   const getLiveActivity = (status?: string | null): { message: string; detail?: string } => {
     if (!status) return { message: "Starting search…" };

@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.verify-bypass-password]
 verify_jwt = false
+
+[functions.request-skip-step]
+verify_jwt = true
