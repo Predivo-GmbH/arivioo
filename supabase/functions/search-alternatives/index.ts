@@ -405,77 +405,73 @@ If you cannot find a reliable total, return "null".`;
 
 // Use AI to extract price from alternative booking platforms (Booking.com, TripAdvisor, etc.)
 async function extractAlternativePlatformPriceWithAI(
-  content: string, 
+  content: string,
   platformName: string,
   checkIn: string,
   checkOut: string,
-  nights: number
-): Promise<{ perNight: number | null; total: number | null; currency: string | null }> {
+  nights: number,
+): Promise<{
+  perNight: number | null;
+  total: number | null;
+  currency: string | null;
+  confidence: "high" | "medium" | "low";
+  datesConfirmed: boolean;
+  reasoning?: string;
+}> {
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
   if (!lovableApiKey) {
     console.log("LOVABLE_API_KEY not available for AI price extraction");
-    return { perNight: null, total: null, currency: null };
+    return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
   }
 
   try {
     const prompt = `You are analyzing text scraped from a ${platformName} booking page.
 The dates being checked are: ${checkIn} to ${checkOut} (${nights} night(s)).
 
-Goal: Extract the booking price for these specific dates.
+Goal: Extract the booking price for THESE specific dates.
 
-IMPORTANT RULES:
-1. Look for prices that are clearly associated with booking/staying at this property
-2. Prefer TOTAL price for the stay (including fees, taxes if shown)
-3. If only per-night price is shown, that's fine - indicate it clearly
-4. IGNORE prices that are:
-   - Review counts or ratings (like "8.5" or "4.7")
-   - Distance measurements
-   - Number of guests/rooms
-   - Prices for other properties on the same page
-   - "Starting from" prices without specific dates
+CRITICAL REQUIREMENT:
+- You must first decide if the page content indicates the property is available AND the page is showing pricing for the requested dates.
+- If you cannot CONFIRM the dates in the content, set datesConfirmed=false and do not guess a price.
 
-5. The price should be for the SPECIFIC PROPERTY on this page, not other listings
-
-Look for patterns like:
-- "€95 per night" or "$120/night" 
-- "Total: €190" or "2 nights: €190"
-- "Price for 2 nights: €190"
-- Price shown near "Book now" or "Reserve" buttons
+Rules:
+1) Look for prices clearly associated with booking this property.
+2) Prefer TOTAL price for the stay (incl. mandatory fees/taxes if shown).
+3) If only per-night is shown, return perNight.
+4) Ignore prices that are review counts, distances, guest counts, or prices for other properties.
+5) Be conservative: if you are not sure the price is for ${checkIn} to ${checkOut}, return nulls.
 
 Scraped content (first 10000 chars):
 ${content.slice(0, 10000)}
 
-Return your answer in this exact JSON format:
-{"total": <number or null>, "perNight": <number or null>, "currency": "<EUR/USD/CHF/GBP or null>", "confidence": "<high/medium/low>", "reasoning": "<brief explanation>"}
-
-If you cannot find a reliable price for this specific property and dates, return:
-{"total": null, "perNight": null, "currency": null, "confidence": "low", "reasoning": "Could not find price"}`;
+Return ONLY JSON in this exact format:
+{"total": <number|null>, "perNight": <number|null>, "currency": <string|null>, "confidence": "high"|"medium"|"low", "datesConfirmed": <true|false>, "reasoning": <string>}`;
 
     const response = await fetchWithTimeout(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
       {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${lovableApiKey}`,
+          Authorization: `Bearer ${lovableApiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
           model: "google/gemini-2.5-flash",
           messages: [{ role: "user", content: prompt }],
-          max_tokens: 200,
+          max_tokens: 240,
         }),
       },
-      20_000
+      20_000,
     );
 
     if (!response.ok) {
       console.error("AI price extraction failed:", response.status);
-      return { perNight: null, total: null, currency: null };
+      return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
     }
 
     const data = await response.json();
     const responseText = data.choices?.[0]?.message?.content?.trim() || "";
-    
+
     // Parse JSON from response (handle markdown code blocks)
     let jsonStr = responseText;
     const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -484,47 +480,69 @@ If you cannot find a reliable price for this specific property and dates, return
     } else if (responseText.startsWith("{")) {
       jsonStr = responseText;
     }
-    
+
     try {
       const parsed = JSON.parse(jsonStr);
       console.log(`AI price extraction for ${platformName}:`, parsed);
-      
+
+      const confidenceRaw = String(parsed.confidence || "low").toLowerCase();
+      const confidence = (confidenceRaw === "high" || confidenceRaw === "medium" || confidenceRaw === "low")
+        ? (confidenceRaw as "high" | "medium" | "low")
+        : "low";
+
+      const datesConfirmed = Boolean(parsed.datesConfirmed);
+
+      // If dates are not confirmed, do not accept any price.
+      if (!datesConfirmed) {
+        return {
+          perNight: null,
+          total: null,
+          currency: parsed.currency || null,
+          confidence,
+          datesConfirmed: false,
+          reasoning: parsed.reasoning || undefined,
+        };
+      }
+
       // Validate the extracted prices
-      let total = parsed.total;
-      let perNight = parsed.perNight;
-      
+      let total = typeof parsed.total === "number" ? parsed.total : null;
+      let perNight = typeof parsed.perNight === "number" ? parsed.perNight : null;
+
       // If only total is provided, calculate per-night
       if (total && !perNight && nights > 0) {
         perNight = Math.round(total / nights);
       }
-      
+
       // If only per-night is provided, calculate total
       if (perNight && !total && nights > 0) {
         total = perNight * nights;
       }
-      
+
       // Validate reasonable price ranges
       if (perNight && (perNight < 5 || perNight > 10000)) {
         console.log(`AI extracted unreasonable per-night price: ${perNight}`);
-        return { perNight: null, total: null, currency: null };
+        return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
       }
-      
-      if (parsed.confidence === "low" && !perNight && !total) {
-        return { perNight: null, total: null, currency: null };
+
+      if (confidence === "low" && !perNight && !total) {
+        return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
       }
-      
-      return { 
-        perNight: perNight || null, 
-        total: total || null, 
-        currency: parsed.currency || null 
+
+      return {
+        perNight: perNight || null,
+        total: total || null,
+        currency: parsed.currency || null,
+        confidence,
+        datesConfirmed,
+        reasoning: parsed.reasoning || undefined,
       };
     } catch (parseErr) {
       console.error("Failed to parse AI response:", responseText.slice(0, 200));
-      return { perNight: null, total: null, currency: null };
+      return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
     }
   } catch (error) {
     console.error("AI price extraction error:", error);
-    return { perNight: null, total: null, currency: null };
+    return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
   }
 }
 
@@ -1032,39 +1050,49 @@ function isValidBookablePropertyUrl(url: string): { valid: boolean; reason?: str
 
 // Add date parameters to a URL for a given platform
 function addDatesToUrl(url: string, checkIn: string, checkOut: string): string {
+  // Only attach dates to sites that are likely to actually *use* them.
+  // Adding checkin/checkout to random pages creates false "prices" and breaks date confidence.
+  const shouldAttach =
+    isBookingPlatform(url) ||
+    isRegionalHotelSite(url) ||
+    isDirectPropertySite(url) ||
+    /booking\.com|vrbo\.com|homeaway\.|expedia\.|hotels\.com|agoda\.|tripadvisor\.|holidaycheck\./i.test(url);
+
+  if (!shouldAttach) return url;
+
   try {
     const urlObj = new URL(url);
     const lowercaseUrl = url.toLowerCase();
-    
+
     // Platform-specific date parameter names
     if (lowercaseUrl.includes("booking.com")) {
-      urlObj.searchParams.set('checkin', checkIn);
-      urlObj.searchParams.set('checkout', checkOut);
+      urlObj.searchParams.set("checkin", checkIn);
+      urlObj.searchParams.set("checkout", checkOut);
     } else if (lowercaseUrl.includes("vrbo.com") || lowercaseUrl.includes("homeaway.")) {
-      urlObj.searchParams.set('arrival', checkIn);
-      urlObj.searchParams.set('departure', checkOut);
+      urlObj.searchParams.set("arrival", checkIn);
+      urlObj.searchParams.set("departure", checkOut);
     } else if (lowercaseUrl.includes("expedia.")) {
-      urlObj.searchParams.set('chkin', checkIn);
-      urlObj.searchParams.set('chkout', checkOut);
+      urlObj.searchParams.set("chkin", checkIn);
+      urlObj.searchParams.set("chkout", checkOut);
     } else if (lowercaseUrl.includes("hotels.com")) {
-      urlObj.searchParams.set('checkIn', checkIn);
-      urlObj.searchParams.set('checkOut', checkOut);
+      urlObj.searchParams.set("checkIn", checkIn);
+      urlObj.searchParams.set("checkOut", checkOut);
     } else if (lowercaseUrl.includes("agoda.")) {
-      urlObj.searchParams.set('checkIn', checkIn);
-      urlObj.searchParams.set('checkOut', checkOut);
+      urlObj.searchParams.set("checkIn", checkIn);
+      urlObj.searchParams.set("checkOut", checkOut);
     } else if (lowercaseUrl.includes("tripadvisor.")) {
       // TripAdvisor uses different format
-      urlObj.searchParams.set('checkin', checkIn);
-      urlObj.searchParams.set('checkout', checkOut);
+      urlObj.searchParams.set("checkin", checkIn);
+      urlObj.searchParams.set("checkout", checkOut);
     } else if (lowercaseUrl.includes("holidaycheck.")) {
-      urlObj.searchParams.set('checkin', checkIn);
-      urlObj.searchParams.set('checkout', checkOut);
+      urlObj.searchParams.set("checkin", checkIn);
+      urlObj.searchParams.set("checkout", checkOut);
     } else {
-      // Generic - try common parameter names
-      urlObj.searchParams.set('checkin', checkIn);
-      urlObj.searchParams.set('checkout', checkOut);
+      // Generic (but only for sites we consider bookable)
+      urlObj.searchParams.set("checkin", checkIn);
+      urlObj.searchParams.set("checkout", checkOut);
     }
-    
+
     return urlObj.toString();
   } catch {
     return url;
@@ -1271,26 +1299,29 @@ async function scrapePriceFromListing(
     return { markdown: "", html: "" };
   };
 
-  const tryScrapeDates = async (tryCheckIn: string, tryCheckOut: string): Promise<{ 
-    extracted: number | null; 
-    isPerNight: boolean; 
+  const tryScrapeDates = async (tryCheckIn: string, tryCheckOut: string): Promise<{
+    extracted: number | null;
+    isPerNight: boolean;
     isUnavailable: boolean;
   }> => {
     const urlWithDates = addDatesToUrl(url, tryCheckIn, tryCheckOut);
     const tryNights = calculateNights(tryCheckIn, tryCheckOut);
-    
-    console.log(`Scraping ${platformName} with dates ${tryCheckIn} to ${tryCheckOut}: ${urlWithDates.slice(0, 150)}`);
-    
+
+    console.log(
+      `Scraping ${platformName} with dates ${tryCheckIn} to ${tryCheckOut}: ${urlWithDates.slice(0, 150)}`,
+    );
+
     // Scrape with longer wait time for dynamic content
     const waitTime = url.toLowerCase().includes("booking.com") || url.toLowerCase().includes("tripadvisor.") ? 8000 : 5000;
-    const scrapeResult = await fetchFirecrawl(urlWithDates, { 
-      formats: ["markdown", "html"], 
-      onlyMainContent: false, 
-      waitFor: waitTime 
+    const scrapeResult = await fetchFirecrawl(urlWithDates, {
+      formats: ["markdown", "html"],
+      onlyMainContent: false,
+      waitFor: waitTime,
     });
-    
+
     let content = scrapeResult.markdown || "";
-    const htmlText = (scrapeResult.html || "").replace(/<script[\s\S]*?<\/script>/gi, " ")
+    const htmlText = (scrapeResult.html || "")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ");
@@ -1302,25 +1333,35 @@ async function scrapePriceFromListing(
       return { extracted: null, isPerNight: false, isUnavailable: true };
     }
 
-    // Use AI extraction for accurate price detection
+    // Use AI extraction for accurate price detection AND date confirmation
     console.log(`Using AI to extract price from ${platformName} content (${content.length} chars)`);
-    const aiResult = await extractAlternativePlatformPriceWithAI(
-      content,
-      platformName,
-      tryCheckIn,
-      tryCheckOut,
-      tryNights
-    );
-    
-    if (aiResult.perNight && aiResult.perNight >= 5) {
-      console.log(`AI extracted ${platformName} price: ${aiResult.perNight}/night (total: ${aiResult.total})`);
-      return { extracted: aiResult.perNight, isPerNight: true, isUnavailable: false };
+    const aiResult = await extractAlternativePlatformPriceWithAI(content, platformName, tryCheckIn, tryCheckOut, tryNights);
+
+    const aiAcceptable =
+      aiResult.datesConfirmed &&
+      (aiResult.confidence === "high" || aiResult.confidence === "medium") &&
+      !!aiResult.perNight &&
+      aiResult.perNight >= 5;
+
+    if (aiAcceptable) {
+      console.log(
+        `AI extracted ${platformName} price: ${aiResult.perNight}/night (total: ${aiResult.total}) (confidence: ${aiResult.confidence})`,
+      );
+      return { extracted: aiResult.perNight!, isPerNight: true, isUnavailable: false };
     }
-    
-    // Fallback to regex extraction if AI fails
-    console.log(`AI extraction failed for ${platformName}, trying regex fallback`);
+
+    console.log(
+      `AI did not return a date-confirmed price for ${platformName} (datesConfirmed=${aiResult.datesConfirmed}, confidence=${aiResult.confidence}).`,
+    );
+
+    // Regex fallback ONLY if the content actually mentions our ISO dates.
+    // (Otherwise we risk grabbing random prices / other properties.)
+    const mentionsDates = content.includes(tryCheckIn) || content.includes(tryCheckOut);
+    if (!mentionsDates) {
+      return { extracted: null, isPerNight: false, isUnavailable: false };
+    }
+
     const { extracted, isPerNight } = tryExtract(content);
-    
     if (extracted) {
       console.log(`Regex extracted ${platformName} price: ${extracted} (isPerNight: ${isPerNight})`);
     }
