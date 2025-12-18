@@ -165,8 +165,10 @@ export type Database = {
           check_out_date: string | null
           created_at: string
           id: string
+          last_progress_at: string | null
           nights_count: number | null
           public_demo_ok: boolean
+          skip_requested: boolean
           status: string
           updated_at: string
           user_id: string
@@ -181,8 +183,10 @@ export type Database = {
           check_out_date?: string | null
           created_at?: string
           id?: string
+          last_progress_at?: string | null
           nights_count?: number | null
           public_demo_ok?: boolean
+          skip_requested?: boolean
           status?: string
           updated_at?: string
           user_id: string
@@ -197,8 +201,10 @@ export type Database = {
           check_out_date?: string | null
           created_at?: string
           id?: string
+          last_progress_at?: string | null
           nights_count?: number | null
           public_demo_ok?: boolean
+          skip_requested?: boolean
           status?: string
           updated_at?: string
           user_id?: string

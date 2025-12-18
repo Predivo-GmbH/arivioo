@@ -64,7 +64,7 @@ serve(async (req) => {
 
     const { data: searchRow, error: searchErr } = await admin
       .from("searches")
-      .select("id,user_id,status")
+      .select("id,user_id,status,skip_requested")
       .eq("id", searchId)
       .maybeSingle();
 
@@ -90,23 +90,36 @@ serve(async (req) => {
       });
     }
 
+    // If already skip requested, acknowledge
+    if (searchRow.skip_requested === true) {
+      return new Response(JSON.stringify({ ok: true, status: searchRow.status, skipped: true, alreadyRequested: true }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Set skip_requested = true (backend will check this and skip current phase)
     const { error: updErr } = await admin
       .from("searches")
-      .update({ status: "skip_current_step" })
+      .update({ skip_requested: true })
       .eq("id", searchId);
 
     if (updErr) {
+      console.error("Failed to set skip_requested:", updErr);
       return new Response(JSON.stringify({ error: "Failed to request skip" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    return new Response(JSON.stringify({ ok: true, status: "skip_current_step", skipped: true }), {
+    console.log(`Skip requested for search ${searchId} by user ${userId}`);
+
+    return new Response(JSON.stringify({ ok: true, status: searchRow.status, skipped: true }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
+    console.error("request-skip-step error:", e);
     return new Response(JSON.stringify({ error: (e as Error)?.message ?? "Unknown error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },

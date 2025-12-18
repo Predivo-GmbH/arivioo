@@ -2048,19 +2048,32 @@ async function runSearchWithStreaming(
   let airbnbPrice: number | null = null;
   let imageUrls: string[] = [];
 
-  // Allow UI to request skipping a stuck step (manual/auto)
+  // Heartbeat helper - updates last_progress_at so UI can detect stalls
+  const heartbeat = async () => {
+    await supabase.from("searches").update({ last_progress_at: new Date().toISOString() }).eq("id", searchId);
+  };
+
+  // Allow UI to request skipping a stuck step (via skip_requested column)
   const shouldSkipNow = async (): Promise<boolean> => {
     const { data } = await supabase
       .from("searches")
-      .select("status")
+      .select("skip_requested")
       .eq("id", searchId)
       .single();
-    return data?.status === "skip_current_step";
+    return data?.skip_requested === true;
   };
+
+  // Clear skip flag and continue with next status
+  const clearSkipFlag = async () => {
+    await supabase.from("searches").update({ skip_requested: false }).eq("id", searchId);
+  };
+
+  // Heartbeat on start
+  await heartbeat();
 
   // Step 1: Extract Airbnb data
   sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
-  await supabase.from("searches").update({ status: "extracting_photos" }).eq("id", searchId);
+  await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
   if (firecrawlApiKey) {
     sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
@@ -2068,8 +2081,10 @@ async function runSearchWithStreaming(
 
     const scrapeWithFirecrawl = async (formats: string[], waitForMs: number) => {
       if (await shouldSkipNow()) {
+        await clearSkipFlag();
         return { ok: false as const, status: 499, errorText: "skipped" };
       }
+      await heartbeat();
 
       const resp = await fetchWithTimeout(
         "https://api.firecrawl.dev/v1/scrape",
@@ -2303,7 +2318,7 @@ async function runSearchWithStreaming(
 
   // Step 2: Google Lens visual search
   sendProgress(controller, "Starting visual search", `Searching ${imageUrls.length} images across booking platforms`);
-  await supabase.from("searches").update({ status: "searching_platforms" }).eq("id", searchId);
+  await supabase.from("searches").update({ status: "searching_platforms", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
   const searchStartTime = Date.now();
   const MAX_TIME = 120000;
@@ -2314,31 +2329,18 @@ async function runSearchWithStreaming(
   // Key: normalized platform name, Value: best alternative found so far
   const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
 
-  // Helper to check if user requested to skip current step (manual/auto skip from UI)
-  async function shouldSkipStep(): Promise<boolean> {
-    const { data } = await supabase
-      .from("searches")
-      .select("status")
-      .eq("id", searchId)
-      .single();
-    return data?.status === "skip_current_step";
-  }
-
-  async function clearSkipAndContinue(nextStatus: string) {
-    await supabase.from("searches").update({ status: nextStatus }).eq("id", searchId);
-  }
-
   for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
-    if (await shouldSkipStep()) {
+    if (await shouldSkipNow()) {
       console.log("SKIP requested - skipping remaining visual search");
       sendProgress(controller, "Skipped current step", "Skipping remaining image search and continuing", { skipped: true });
-      await clearSkipAndContinue("searching_platforms");
+      await clearSkipFlag();
       break;
     }
 
+    await heartbeat();
     const imageUrl = imageUrls[idx];
     sendProgress(controller, `Searching image ${idx + 1} of ${imageUrls.length}`, "Running AI reverse image search on Booking.com, Vrbo, TripAdvisor...", { imageIndex: idx + 1, totalImages: imageUrls.length });
-    await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}` }).eq("id", searchId);
+    await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
     try {
       const lensResponse = await fetch(`https://serpapi.com/search.json?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`);
       if (!lensResponse.ok) continue;
@@ -2349,10 +2351,10 @@ async function runSearchWithStreaming(
 
         let matchesThisImage = 0;
         for (const match of visualMatches) {
-          if (await shouldSkipStep()) {
+          if (await shouldSkipNow()) {
             console.log("SKIP requested - stopping match verification for this image");
             sendProgress(controller, "Skipped current step", "Skipping remaining match verification", { skipped: true });
-            await clearSkipAndContinue("searching_platforms");
+            await clearSkipFlag();
             matchesThisImage = 999;
             break;
           }
@@ -2376,7 +2378,8 @@ async function runSearchWithStreaming(
         }
 
         sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
-        await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}` }).eq("id", searchId);
+        await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
+        await heartbeat();
 
         aiCount++;
         matchesThisImage++;
@@ -2449,7 +2452,7 @@ async function runSearchWithStreaming(
 
   // Step 3: Scrape prices
   sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms for dates ${checkIn} to ${checkOut}`);
-  await supabase.from("searches").update({ status: "comparing_prices" }).eq("id", searchId);
+  await supabase.from("searches").update({ status: "comparing_prices", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
   // Keep it bounded: price scraping is the slowest + most rate-limited step.
   // Scrape more candidates (and prioritize major booking platforms) so we don't miss cheaper listings.
@@ -2468,6 +2471,15 @@ async function runSearchWithStreaming(
 
   const toScrape = prioritizedForPricing.slice(0, 20);
   for (let i = 0; i < toScrape.length; i++) {
+    // Check for skip request before each price scrape
+    if (await shouldSkipNow()) {
+      console.log("SKIP requested - stopping price scraping");
+      sendProgress(controller, "Skipped price collection", "Moving to results with data collected so far", { skipped: true });
+      await clearSkipFlag();
+      break;
+    }
+    await heartbeat();
+
     const alt = toScrape[i];
     
     // Validate URL is an actual bookable property page before scraping
@@ -2491,7 +2503,7 @@ async function runSearchWithStreaming(
     );
     await supabase
       .from("searches")
-      .update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}` })
+      .update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}`, last_progress_at: new Date().toISOString() })
       .eq("id", searchId);
 
     if (!firecrawlApiKey) continue;
