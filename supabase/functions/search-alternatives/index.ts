@@ -791,6 +791,120 @@ function formatDateForPlatform(date: string, platform: string): string {
   return d.toISOString().split('T')[0];
 }
 
+// Validate if a URL is an actual bookable property page (not category/search/info page)
+function isValidBookablePropertyUrl(url: string): { valid: boolean; reason?: string } {
+  const lowercaseUrl = url.toLowerCase();
+  
+  // Booking.com: must be /hotel/ path with specific property
+  if (lowercaseUrl.includes("booking.com")) {
+    // Valid: booking.com/hotel/xx/property-name.html
+    // Invalid: booking.com/searchresults.html, booking.com/city/xx/hotels/
+    if (lowercaseUrl.includes("/searchresults.")) {
+      return { valid: false, reason: "Booking.com search results page" };
+    }
+    if (lowercaseUrl.includes("/hotels/") && !lowercaseUrl.includes("/hotel/")) {
+      return { valid: false, reason: "Booking.com category page" };
+    }
+    if (!lowercaseUrl.includes("/hotel/") && !lowercaseUrl.includes(".html")) {
+      return { valid: false, reason: "Booking.com non-property page" };
+    }
+    return { valid: true };
+  }
+  
+  // TripAdvisor: must be Hotel_Review or VacationRentalReview
+  if (lowercaseUrl.includes("tripadvisor.")) {
+    // Valid: tripadvisor.com/Hotel_Review-xxx or VacationRentalReview-xxx
+    // Invalid: tripadvisor.com/Hotels-xxx (category), Tourism-xxx, Attractions-xxx
+    if (lowercaseUrl.includes("/hotel_review-") || lowercaseUrl.includes("/vacationrentalreview-")) {
+      return { valid: true };
+    }
+    if (lowercaseUrl.includes("/hotels-") || lowercaseUrl.includes("/tourism-")) {
+      return { valid: false, reason: "TripAdvisor category/search page" };
+    }
+    if (lowercaseUrl.includes("/attraction") || lowercaseUrl.includes("/restaurant")) {
+      return { valid: false, reason: "TripAdvisor non-accommodation page" };
+    }
+    // Generic TripAdvisor pages without review marker are likely not bookable
+    return { valid: false, reason: "TripAdvisor non-property page" };
+  }
+  
+  // HolidayCheck: must be hotel detail page
+  if (lowercaseUrl.includes("holidaycheck.")) {
+    // Valid: holidaycheck.de/hi/hotel-name/xxx
+    // Invalid: holidaycheck.de/hri/ (search), /dh/ (destination)
+    if (lowercaseUrl.includes("/hi/") || lowercaseUrl.includes("/hotel/")) {
+      return { valid: true };
+    }
+    if (lowercaseUrl.includes("/hri/") || lowercaseUrl.includes("/dh/") || lowercaseUrl.includes("/search")) {
+      return { valid: false, reason: "HolidayCheck search/category page" };
+    }
+    return { valid: false, reason: "HolidayCheck non-property page" };
+  }
+  
+  // Vrbo/HomeAway: must have property ID
+  if (lowercaseUrl.includes("vrbo.") || lowercaseUrl.includes("homeaway.")) {
+    // Valid: vrbo.com/123456 or vrbo.com/property-name/123456
+    // Invalid: vrbo.com/search/ or category pages
+    if (lowercaseUrl.includes("/search") || lowercaseUrl.includes("/results")) {
+      return { valid: false, reason: "Vrbo search results page" };
+    }
+    // Must have numeric property ID in path
+    if (/\/\d{4,}/.test(lowercaseUrl)) {
+      return { valid: true };
+    }
+    return { valid: false, reason: "Vrbo non-property page" };
+  }
+  
+  // Expedia: must be hotel detail page
+  if (lowercaseUrl.includes("expedia.")) {
+    if (lowercaseUrl.includes("/hotel-search") || lowercaseUrl.includes("/hotel-reviews")) {
+      return { valid: false, reason: "Expedia search/review page" };
+    }
+    // Valid pattern: /h12345.hotel-information or /Hotel-Name.h12345
+    if (/\.h\d+\./.test(lowercaseUrl) || /\.h\d+$/.test(lowercaseUrl)) {
+      return { valid: true };
+    }
+    return { valid: false, reason: "Expedia non-property page" };
+  }
+  
+  // Hotels.com: similar to Expedia
+  if (lowercaseUrl.includes("hotels.com")) {
+    if (lowercaseUrl.includes("/search.") || lowercaseUrl.includes("/hotel-search")) {
+      return { valid: false, reason: "Hotels.com search page" };
+    }
+    // Valid: hotels.com/ho123456/ 
+    if (/\/ho\d+/.test(lowercaseUrl)) {
+      return { valid: true };
+    }
+    return { valid: false, reason: "Hotels.com non-property page" };
+  }
+  
+  // Agoda: must have property path
+  if (lowercaseUrl.includes("agoda.")) {
+    if (lowercaseUrl.includes("/searchresults") || lowercaseUrl.includes("/search/")) {
+      return { valid: false, reason: "Agoda search results page" };
+    }
+    // Valid if has specific property path
+    if (lowercaseUrl.includes("/hotel/") || /\/[\w-]+-[\w-]+\//.test(lowercaseUrl)) {
+      return { valid: true };
+    }
+    return { valid: false, reason: "Agoda non-property page" };
+  }
+  
+  // For unknown platforms, be lenient but reject obvious non-property patterns
+  const invalidPatterns = [
+    "/search", "/results", "/list", "/category", "/browse", 
+    "/hotels/", "/properties/", "/listings/", "/destination/",
+    "?q=", "?query=", "?search="
+  ];
+  
+  if (invalidPatterns.some(p => lowercaseUrl.includes(p))) {
+    return { valid: false, reason: "Appears to be search/category page" };
+  }
+  
+  return { valid: true };
+}
+
 // Add date parameters to a URL for a given platform
 function addDatesToUrl(url: string, checkIn: string, checkOut: string): string {
   try {
@@ -1290,6 +1404,13 @@ async function addTargetedTextMatches(opts: {
         // Only accept URLs that match our platform heuristics and aren't blocked
         if (isBlockedNonBookingPlatform(url)) continue;
         if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) continue;
+        
+        // Validate URL is an actual bookable property page (not category/search page)
+        const urlValidation = isValidBookablePropertyUrl(url);
+        if (!urlValidation.valid) {
+          console.log(`Text search: Skipping non-bookable URL: ${urlValidation.reason} - ${url.slice(0, 100)}`);
+          continue;
+        }
 
         // If we have an image thumbnail + a reference Airbnb image, try to visually verify it.
         const thumb: string | null = r.thumbnail || null;
@@ -1696,6 +1817,20 @@ async function runSearchWithStreaming(
   const toScrape = prioritizedForPricing.slice(0, 20);
   for (let i = 0; i < toScrape.length; i++) {
     const alt = toScrape[i];
+    
+    // Validate URL is an actual bookable property page before scraping
+    const urlValidation = isValidBookablePropertyUrl(alt.listing_url);
+    if (!urlValidation.valid) {
+      console.log(`Skipping price scrape for ${alt.platform_name}: ${urlValidation.reason} - ${alt.listing_url.slice(0, 100)}`);
+      sendProgress(
+        controller,
+        `Skipped ${alt.platform_name}`,
+        urlValidation.reason || "Not a bookable property page",
+        { platform: alt.platform_name, skipped: true }
+      );
+      continue;
+    }
+    
     sendProgress(
       controller,
       `Getting price from ${alt.platform_name}`,
@@ -2483,6 +2618,13 @@ serve(async (req) => {
             // Quick filter: only check booking platforms and direct sites, exclude blocked platforms
             if (isBlockedNonBookingPlatform(url)) continue;
             if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) {
+              continue;
+            }
+            
+            // Validate URL is an actual bookable property page (not category/search page)
+            const urlValidation = isValidBookablePropertyUrl(url);
+            if (!urlValidation.valid) {
+              console.log(`Skipping non-bookable URL: ${urlValidation.reason} - ${url.slice(0, 100)}`);
               continue;
             }
 
