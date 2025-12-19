@@ -520,8 +520,9 @@ export default function SearchResults() {
         description: mode === "manual" ? "Skipping the current step" : "Automatically skipping the current step",
       });
 
-      abortReasonRef.current = "skip";
-      abortControllerRef.current?.abort();
+      // IMPORTANT: Do NOT abort the SSE stream here.
+      // Aborting causes the UI to lose progress events and can trigger repeated auto-skips.
+      // The backend will observe `skip_requested` and advance to the next phase.
     } catch (e: any) {
       toast({
         title: "Could not skip",
@@ -529,10 +530,10 @@ export default function SearchResults() {
         variant: "destructive",
       });
     } finally {
-      // let polling/watchdogs decide if we need to skip again
+      // prevent rapid re-tries
       window.setTimeout(() => {
         skipInFlightRef.current = false;
-      }, 1500);
+      }, 10_000);
     }
   };
 
@@ -577,9 +578,8 @@ export default function SearchResults() {
           const lastHeartbeat = new Date(data.last_progress_at).getTime();
           const sinceHeartbeat = Date.now() - lastHeartbeat;
 
-          // If backend hasn't updated in 30 seconds, auto-skip
-          if (sinceHeartbeat > 30_000 && !autoSkipRequestedRef.current) {
-            console.log("Backend stalled (no heartbeat for 30s) - auto-skipping");
+          // If backend hasn't updated in 45 seconds, auto-skip ONCE
+          if (sinceHeartbeat > 45_000 && !autoSkipRequestedRef.current && !skipInFlightRef.current) {
             autoSkipRequestedRef.current = true;
             void requestSkipCurrentStep("auto");
           }
@@ -600,29 +600,17 @@ export default function SearchResults() {
     };
   }, [loading, searchPhase, searchId]);
 
-  // Automatic skip if no SSE progress events arrive for a while (stream may be alive but backend stuck)
+  // Stream connection indicator (UI only)
   useEffect(() => {
     if (!loading || searchPhase !== "thinking") return;
 
     const id = window.setInterval(() => {
       const sinceProgress = Date.now() - lastProgressAtRef.current;
-
-      // If the stream is alive but nothing has happened for 25 seconds, skip the current backend step.
-      if (sinceProgress > 25_000 && !autoSkipRequestedRef.current) {
-        autoSkipRequestedRef.current = true;
-        void requestSkipCurrentStep("auto");
-      }
-
-      // Mark stream as disconnected after 10s of no progress for UI feedback
-      if (sinceProgress > 10_000) {
-        setStreamDisconnected(true);
-      } else {
-        setStreamDisconnected(false);
-      }
+      setStreamDisconnected(sinceProgress > 10_000);
     }, 1000);
 
     return () => window.clearInterval(id);
-  }, [loading, searchPhase, searchId]);
+  }, [loading, searchPhase]);
 
   // Reconnect function to re-attach to a running search
   const reconnectToSearch = async () => {

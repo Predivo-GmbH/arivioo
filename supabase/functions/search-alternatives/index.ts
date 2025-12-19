@@ -2181,6 +2181,7 @@ async function runSearchWithStreaming(
   let airbnbTitle = "Vacation Rental";
   let airbnbPrice: number | null = null;
   let imageUrls: string[] = [];
+  let skipAirbnbPrice = false;
 
   // Heartbeat helper - updates last_progress_at so UI can detect stalls
   const heartbeat = async () => {
@@ -2217,40 +2218,63 @@ async function runSearchWithStreaming(
     sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
     await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
 
+    // If the user clicks "Skip", we should advance to the next phase and keep going (even if Airbnb price is missing).
+
     const scrapeWithFirecrawl = async (formats: string[], waitForMs: number) => {
-      if (await claimSkipNow()) {
-        return { ok: false as const, status: 499, errorText: "skipped" };
-      }
-      await heartbeat();
+      // NOTE: Claiming skip here may occur while we're between attempts.
+      // For in-flight requests, we also poll and abort the fetch.
+      const fetchAbort = new AbortController();
+      const pollId = setInterval(async () => {
+        try {
+          if (await claimSkipNow()) {
+            skipAirbnbPrice = true;
+            fetchAbort.abort();
+          }
+        } catch {
+          // ignore
+        }
+      }, 750);
 
-      const resp = await fetchWithTimeout(
-        "https://api.firecrawl.dev/v1/scrape",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${firecrawlApiKey}`,
-            "Content-Type": "application/json",
+      try {
+        await heartbeat();
+
+        const resp = await fetchWithTimeout(
+          "https://api.firecrawl.dev/v1/scrape",
+          {
+            method: "POST",
+            signal: fetchAbort.signal,
+            headers: {
+              Authorization: `Bearer ${firecrawlApiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              url: search.airbnb_url,
+              formats,
+              onlyMainContent: false,
+              waitFor: waitForMs,
+              timeout: 60000,
+            }),
           },
-          body: JSON.stringify({
-            url: search.airbnb_url,
-            formats,
-            onlyMainContent: false,
-            waitFor: waitForMs,
-            timeout: 60000,
-          }),
-        },
-        // Keep this below the Firecrawl-side timeout; we just want to avoid hanging fetches.
-        65_000
-      );
+          // Keep this below the Firecrawl-side timeout; we just want to avoid hanging fetches.
+          65_000
+        );
 
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => "");
-        console.error("Firecrawl scrape failed:", resp.status, errText.slice(0, 800));
-        return { ok: false as const, status: resp.status, errorText: errText };
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => "");
+          console.error("Firecrawl scrape failed:", resp.status, errText.slice(0, 800));
+          return { ok: false as const, status: resp.status, errorText: errText };
+        }
+
+        const data = await resp.json().catch(() => null);
+        return { ok: true as const, data };
+      } catch (e) {
+        if ((e as any)?.name === "AbortError" && skipAirbnbPrice) {
+          return { ok: false as const, status: 499, errorText: "skipped" };
+        }
+        throw e;
+      } finally {
+        clearInterval(pollId);
       }
-
-      const data = await resp.json().catch(() => null);
-      return { ok: true as const, data };
     };
 
     try {
@@ -2259,10 +2283,10 @@ async function runSearchWithStreaming(
 
       if (attempt.status === 499) {
         console.log("SKIP requested during Airbnb scrape");
-        sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction", { skipped: true });
-        await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
-        sendSSE(controller, "complete", { searchId, status: "price_unavailable", success: true });
-        return;
+        sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction and continuing", { skipped: true });
+        // We'll fall back to direct fetch for images, but we won't block the entire run on Airbnb pricing.
+        skipAirbnbPrice = true;
+        throw new Error("__SKIP_AIRBNB_PRICE__");
       }
 
       // Attempt 2: retry with longer wait (Airbnb sometimes renders totals very late)
@@ -2273,10 +2297,9 @@ async function runSearchWithStreaming(
 
       if (attempt.status === 499) {
         console.log("SKIP requested during Airbnb scrape (retry)");
-        sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction", { skipped: true });
-        await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
-        sendSSE(controller, "complete", { searchId, status: "price_unavailable", success: true });
-        return;
+        sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction and continuing", { skipped: true });
+        skipAirbnbPrice = true;
+        throw new Error("__SKIP_AIRBNB_PRICE__");
       }
 
       if (attempt.ok) {
@@ -2319,63 +2342,69 @@ async function runSearchWithStreaming(
           imageCount: imageUrls.length,
         });
 
-        // Extract price
-        sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
-        await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
+        if (!skipAirbnbPrice) {
+          // Extract price
+          sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
+          await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
-        // 1) HTML/Raw HTML (JSON-LD / embedded data)
-        airbnbPrice = extractPriceWithRegex(rawHtml || html, nights);
+          // 1) HTML/Raw HTML (JSON-LD / embedded data)
+          airbnbPrice = extractPriceWithRegex(rawHtml || html, nights);
 
-        // 2) Markdown
-        if (!airbnbPrice && markdown.length > 100) {
-          airbnbPrice = extractPriceWithRegex(markdown, nights);
-        }
-
-        // 3) Screenshot (dynamic totals)
-        if (!airbnbPrice && screenshotBase64) {
-          sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading it from the rendered page");
-          const total = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
-          if (total) {
-            const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
-            airbnbPrice = perNight;
-            console.log("Derived per-night from screenshot total:", total, "->", perNight);
+          // 2) Markdown
+          if (!airbnbPrice && markdown.length > 100) {
+            airbnbPrice = extractPriceWithRegex(markdown, nights);
           }
-        }
 
-        // 4) AI over combined text
-        if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
-          sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
-          airbnbPrice = await extractAirbnbPriceWithAI(
-            [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
-            nights
-          );
-        }
+          // 3) Screenshot (dynamic totals)
+          if (!airbnbPrice && screenshotBase64) {
+            sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading it from the rendered page");
+            const total = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
+            if (total) {
+              const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
+              airbnbPrice = perNight;
+              console.log("Derived per-night from screenshot total:", total, "->", perNight);
+            }
+          }
 
-        if (airbnbPrice) {
-          sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
+          // 4) AI over combined text
+          if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
+            sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
+            airbnbPrice = await extractAirbnbPriceWithAI(
+              [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
+              nights
+            );
+          }
 
-          await supabase
-            .from("searches")
-            .update({
-              airbnb_title: airbnbTitle,
-              airbnb_price: airbnbPrice,
-              airbnb_image_url: imageUrls[0] || null,
-              airbnb_images: imageUrls.slice(0, 5),
-              check_in_date: checkIn,
-              check_out_date: checkOut,
-              nights_count: nights,
-            })
-            .eq("id", searchId);
-        } else {
-          console.log("Price extraction failed for URL:", search.airbnb_url);
+          if (airbnbPrice) {
+            sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
+
+            await supabase
+              .from("searches")
+              .update({
+                airbnb_title: airbnbTitle,
+                airbnb_price: airbnbPrice,
+                airbnb_image_url: imageUrls[0] || null,
+                airbnb_images: imageUrls.slice(0, 5),
+                check_in_date: checkIn,
+                check_out_date: checkOut,
+                nights_count: nights,
+              })
+              .eq("id", searchId);
+          } else {
+            console.log("Price extraction failed for URL:", search.airbnb_url);
+          }
         }
       } else {
         // Firecrawl failed twice; we'll fall back to direct fetch.
         sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
       }
     } catch (e) {
-      console.error("Firecrawl error:", e);
-      sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
+      if ((e as Error)?.message === "__SKIP_AIRBNB_PRICE__") {
+        // intentional; continue
+      } else {
+        console.error("Firecrawl error:", e);
+        sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
+      }
     }
   }
 
@@ -2417,15 +2446,34 @@ async function runSearchWithStreaming(
     }
   }
 
-  // Abort if no price
+  // Abort if no price (unless the user explicitly skipped this step)
   if (!airbnbPrice) {
-    sendProgress(controller, "Price unavailable", "We couldn't read the total price Airbnb shows for those dates. Try different dates or try again in a minute.");
-    await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
-    sendSSE(controller, "error", {
-      message: "We couldn't extract the Airbnb total for your selected dates. This can happen when Airbnb loads prices dynamically or blocks automated requests. Please try again, or change your dates and retry.",
-    });
-    sendSSE(controller, "complete", { success: false, error: "AIRBNB_PRICE_UNAVAILABLE" });
-    return;
+    if (typeof skipAirbnbPrice !== "undefined" && skipAirbnbPrice === true) {
+      sendProgress(controller, "Continuing without Airbnb price", "Proceeding to find alternatives (savings may be unavailable)", { skipped: true });
+      await supabase
+        .from("searches")
+        .update({
+          status: "searching_platforms",
+          airbnb_title: airbnbTitle,
+          airbnb_price: null,
+          airbnb_image_url: imageUrls[0] || null,
+          airbnb_images: imageUrls.slice(0, 5),
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          nights_count: nights,
+          last_progress_at: new Date().toISOString(),
+        })
+        .eq("id", searchId);
+      // Continue the pipeline.
+    } else {
+      sendProgress(controller, "Price unavailable", "We couldn't read the total price Airbnb shows for those dates. Try different dates or try again in a minute.");
+      await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
+      sendSSE(controller, "error", {
+        message: "We couldn't extract the Airbnb total for your selected dates. This can happen when Airbnb loads prices dynamically or blocks automated requests. Please try again, or change your dates and retry.",
+      });
+      sendSSE(controller, "complete", { success: false, error: "AIRBNB_PRICE_UNAVAILABLE" });
+      return;
+    }
   }
 
   // Abort if no images
