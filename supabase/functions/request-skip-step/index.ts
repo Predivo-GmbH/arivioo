@@ -90,12 +90,20 @@ serve(async (req) => {
       });
     }
 
-    // If already skip requested, acknowledge
+    // If already skip requested, acknowledge (but also refresh heartbeat so UI doesn't think nothing happened)
     if (searchRow.skip_requested === true) {
-      return new Response(JSON.stringify({ ok: true, status: searchRow.status, skipped: true, alreadyRequested: true }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      await admin
+        .from("searches")
+        .update({ last_progress_at: new Date().toISOString() })
+        .eq("id", searchId);
+
+      return new Response(
+        JSON.stringify({ ok: true, status: searchRow.status, skipped: true, alreadyRequested: true }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
     }
 
     // Set skip_requested = true (backend will check this and skip current phase)
