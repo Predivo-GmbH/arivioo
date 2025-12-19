@@ -1,5 +1,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
+// Declare EdgeRuntime for Supabase Edge Functions background tasks
+declare const EdgeRuntime: { waitUntil?: (promise: Promise<unknown>) => void } | undefined;
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -12,6 +15,7 @@ interface DeepLinkRequest {
   adults?: number;
   children?: number;
   rooms?: number;
+  skipPriceExtraction?: boolean; // Optional: skip auto price extraction
 }
 
 interface PlatformAdapter {
@@ -181,6 +185,45 @@ function detectPlatform(url: string): string | null {
   }
 }
 
+// Background task: Trigger price extraction for all pending extractions
+async function triggerPriceExtraction(searchId: string): Promise<void> {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+  if (!supabaseUrl || !supabaseServiceKey) {
+    console.error('Missing Supabase credentials for price extraction trigger');
+    return;
+  }
+
+  try {
+    console.log(`[BACKGROUND] Triggering automatic price extraction for search ${searchId}`);
+    
+    const response = await fetch(`${supabaseUrl}/functions/v1/extract-prices`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseServiceKey}`,
+      },
+      body: JSON.stringify({ searchId }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[BACKGROUND] Price extraction failed: ${response.status} - ${errorText}`);
+      return;
+    }
+
+    const result = await response.json();
+    console.log(`[BACKGROUND] Price extraction completed:`, {
+      total: result.summary?.total || 0,
+      successful: result.summary?.successful || 0,
+      failed: result.summary?.failed || 0,
+    });
+  } catch (error) {
+    console.error(`[BACKGROUND] Error triggering price extraction:`, error);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -192,10 +235,19 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    const { searchId, checkIn, checkOut, adults = 2, children = 0, rooms = 1 } = await req.json() as DeepLinkRequest;
+    const { 
+      searchId, 
+      checkIn, 
+      checkOut, 
+      adults = 2, 
+      children = 0, 
+      rooms = 1,
+      skipPriceExtraction = false 
+    } = await req.json() as DeepLinkRequest;
 
     console.log(`Generating deep links for search ${searchId}`);
     console.log(`Dates: ${checkIn} to ${checkOut}, Occupancy: ${adults} adults, ${children} children, ${rooms} rooms`);
+    console.log(`Auto price extraction: ${!skipPriceExtraction}`);
 
     // Fetch search results for this search
     const { data: searchResults, error: searchError } = await supabaseClient
@@ -298,7 +350,7 @@ Deno.serve(async (req) => {
         hasAdapter,
       });
 
-      // Create or update price extraction record
+      // Create or update price extraction record with 'pending' status
       await supabaseClient
         .from('price_extractions')
         .upsert({
@@ -318,6 +370,22 @@ Deno.serve(async (req) => {
 
     console.log(`Generated ${deepLinks.length} deep links`);
 
+    // AUTOMATIC PRICE EXTRACTION: Run in background without blocking response
+    // This ensures price extraction happens automatically after deep links are created
+    if (!skipPriceExtraction && deepLinks.length > 0) {
+      console.log(`Scheduling automatic price extraction for ${deepLinks.length} results`);
+      
+      // Use EdgeRuntime.waitUntil if available, otherwise fire-and-forget
+      if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {
+        EdgeRuntime.waitUntil(triggerPriceExtraction(searchId));
+      } else {
+        // Fallback: trigger without waiting (fire and forget)
+        triggerPriceExtraction(searchId).catch(err => 
+          console.error('Background price extraction error:', err)
+        );
+      }
+    }
+
     return new Response(
       JSON.stringify({
         success: true,
@@ -325,6 +393,7 @@ Deno.serve(async (req) => {
         totalResults: searchResults.length,
         withAdapters: deepLinks.filter(d => d.hasAdapter).length,
         unknownPlatforms: deepLinks.filter(d => !d.hasAdapter).map(d => d.platformName),
+        priceExtractionQueued: !skipPriceExtraction && deepLinks.length > 0,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
