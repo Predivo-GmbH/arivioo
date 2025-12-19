@@ -5,6 +5,17 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Extraction status lifecycle states
+type ExtractionStatus = 
+  | 'pending'           // Waiting to be processed
+  | 'running'           // Currently being extracted
+  | 'success'           // Price successfully extracted
+  | 'blocked_captcha'   // Blocked by CAPTCHA
+  | 'blocked_rate_limit'// Rate limited by platform
+  | 'dates_not_applied' // Could not apply requested dates
+  | 'price_not_found'   // Page loaded but no price found
+  | 'failed_unknown';   // Unknown failure
+
 interface ExtractionRequest {
   searchId: string;
   resultIds?: string[]; // Optional: specific results to extract, otherwise all pending
@@ -19,7 +30,62 @@ interface PriceExtractionResult {
   priceType: 'TOTAL_STAY' | 'NIGHTLY' | 'PARTIAL' | 'UNKNOWN';
   includesTaxesFees: boolean;
   success: boolean;
+  status: ExtractionStatus;
   error?: string;
+}
+
+// Determine extraction status based on error type
+function determineExtractionStatus(
+  price: number | null,
+  error?: string,
+  html?: string
+): ExtractionStatus {
+  if (price !== null && price > 0) {
+    return 'success';
+  }
+
+  if (!error && !html) {
+    return 'failed_unknown';
+  }
+
+  const errorLower = (error || '').toLowerCase();
+  const htmlLower = (html || '').toLowerCase();
+
+  // Check for CAPTCHA
+  if (
+    errorLower.includes('captcha') ||
+    htmlLower.includes('captcha') ||
+    htmlLower.includes('robot') ||
+    htmlLower.includes('verify you are human')
+  ) {
+    return 'blocked_captcha';
+  }
+
+  // Check for rate limiting
+  if (
+    errorLower.includes('rate limit') ||
+    errorLower.includes('too many requests') ||
+    errorLower.includes('429')
+  ) {
+    return 'blocked_rate_limit';
+  }
+
+  // Check for date issues
+  if (
+    errorLower.includes('date') ||
+    errorLower.includes('unavailable') ||
+    htmlLower.includes('dates not available') ||
+    htmlLower.includes('no availability')
+  ) {
+    return 'dates_not_applied';
+  }
+
+  // If we got HTML but no price
+  if (html && html.length > 1000) {
+    return 'price_not_found';
+  }
+
+  return 'failed_unknown';
 }
 
 // Use Browserless to load page and extract price
@@ -27,37 +93,30 @@ async function extractPriceWithBrowserless(
   deepLink: string,
   platformName: string,
   priceSelectors: Record<string, string>
-): Promise<{ price: number | null; currency: string; priceType: string; includesTaxesFees: boolean; error?: string }> {
+): Promise<{ 
+  price: number | null; 
+  currency: string; 
+  priceType: string; 
+  includesTaxesFees: boolean; 
+  status: ExtractionStatus;
+  error?: string;
+  html?: string;
+}> {
   const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
   
   if (!browserlessApiKey) {
-    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false, error: 'Browserless API key not configured' };
+    return { 
+      price: null, 
+      currency: 'USD', 
+      priceType: 'UNKNOWN', 
+      includesTaxesFees: false, 
+      status: 'failed_unknown',
+      error: 'Browserless API key not configured' 
+    };
   }
 
   try {
     console.log(`Extracting price from ${deepLink} for platform ${platformName}`);
-
-    // Construct the extraction script based on platform selectors
-    const selectors = priceSelectors || {};
-    const priceSelector = selectors.price || selectors.total || '[data-testid*="price"], .price, .rate-price';
-
-    const browserlessPayload = {
-      url: deepLink,
-      gotoOptions: {
-        waitUntil: 'networkidle2',
-        timeout: 30000,
-      },
-      waitForSelector: {
-        selector: priceSelector,
-        timeout: 15000,
-      },
-      elements: [
-        {
-          selector: priceSelector,
-          timeout: 10000,
-        }
-      ],
-    };
 
     // Use Browserless content API to get page content
     const response = await fetch(`https://chrome.browserless.io/content?token=${browserlessApiKey}`, {
@@ -77,24 +136,62 @@ async function extractPriceWithBrowserless(
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`Browserless error: ${response.status} - ${errorText}`);
-      return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false, error: `Browserless error: ${response.status}` };
+      
+      // Check for rate limiting from Browserless itself
+      if (response.status === 429) {
+        return { 
+          price: null, 
+          currency: 'USD', 
+          priceType: 'UNKNOWN', 
+          includesTaxesFees: false, 
+          status: 'blocked_rate_limit',
+          error: `Browserless rate limit: ${response.status}` 
+        };
+      }
+      
+      return { 
+        price: null, 
+        currency: 'USD', 
+        priceType: 'UNKNOWN', 
+        includesTaxesFees: false, 
+        status: 'failed_unknown',
+        error: `Browserless error: ${response.status}` 
+      };
     }
 
     const htmlContent = await response.text();
     
     // Extract price from HTML content
     const priceResult = extractPriceFromHtml(htmlContent, platformName);
+    const status = determineExtractionStatus(priceResult.price, undefined, htmlContent);
     
-    return priceResult;
+    return {
+      ...priceResult,
+      status,
+      html: htmlContent.substring(0, 5000), // Store truncated HTML for debugging
+    };
 
   } catch (error) {
     console.error(`Error extracting price from ${deepLink}:`, error);
-    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return { 
+      price: null, 
+      currency: 'USD', 
+      priceType: 'UNKNOWN', 
+      includesTaxesFees: false, 
+      status: determineExtractionStatus(null, errorMessage),
+      error: errorMessage 
+    };
   }
 }
 
 // Extract price from HTML content
-function extractPriceFromHtml(html: string, platformName: string): { price: number | null; currency: string; priceType: string; includesTaxesFees: boolean } {
+function extractPriceFromHtml(html: string, platformName: string): { 
+  price: number | null; 
+  currency: string; 
+  priceType: string; 
+  includesTaxesFees: boolean;
+} {
   // Common price patterns across platforms
   const pricePatterns = [
     // Currency symbol before number: $123, €123, £123
@@ -154,88 +251,6 @@ function extractPriceFromHtml(html: string, platformName: string): { price: numb
   return { price, currency, priceType: priceType === 'UNKNOWN' ? 'TOTAL_STAY' : priceType, includesTaxesFees };
 }
 
-// Alternative: Use function API for more control
-async function extractPriceWithFunction(
-  deepLink: string,
-  platformName: string,
-  priceSelectors: Record<string, string>
-): Promise<{ price: number | null; currency: string; priceType: string; includesTaxesFees: boolean; error?: string }> {
-  const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
-  
-  if (!browserlessApiKey) {
-    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false, error: 'Browserless API key not configured' };
-  }
-
-  const extractionScript = `
-    module.exports = async ({ page }) => {
-      await page.goto('${deepLink}', { waitUntil: 'networkidle2', timeout: 30000 });
-      
-      // Wait for any price elements to load
-      await page.waitForTimeout(3000);
-      
-      // Extract all text content
-      const bodyText = await page.evaluate(() => document.body.innerText);
-      
-      // Try to find price elements
-      const priceData = await page.evaluate(() => {
-        const priceSelectors = [
-          '[data-testid*="price"]',
-          '.price', '.rate-price', '.total-price',
-          '[class*="price"]', '[class*="Price"]',
-          '[data-price]', '[data-amount]',
-        ];
-        
-        let prices = [];
-        for (const selector of priceSelectors) {
-          const elements = document.querySelectorAll(selector);
-          elements.forEach(el => {
-            const text = el.textContent;
-            if (text) {
-              const matches = text.match(/[\$€£¥₹]?\s*([\d,]+(?:\.\d{2})?)/g);
-              if (matches) prices.push(...matches);
-            }
-          });
-        }
-        
-        return { prices, html: document.body.innerHTML.substring(0, 50000) };
-      });
-      
-      return priceData;
-    };
-  `;
-
-  try {
-    const response = await fetch(`https://chrome.browserless.io/function?token=${browserlessApiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        code: extractionScript,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`Browserless function error: ${response.status} - ${errorText}`);
-      return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false, error: `Browserless error: ${response.status}` };
-    }
-
-    const result = await response.json();
-    
-    // Parse the extracted HTML
-    if (result.html) {
-      return extractPriceFromHtml(result.html, platformName);
-    }
-
-    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false, error: 'No price data extracted' };
-
-  } catch (error) {
-    console.error(`Error in function extraction:`, error);
-    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false, error: error instanceof Error ? error.message : 'Unknown error' };
-  }
-}
-
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -249,7 +264,7 @@ Deno.serve(async (req) => {
 
     const { searchId, resultIds } = await req.json() as ExtractionRequest;
 
-    console.log(`Starting price extraction for search ${searchId}`);
+    console.log(`[EXTRACT-PRICES] Starting price extraction for search ${searchId}`);
 
     // Fetch pending price extractions
     let query = supabaseClient
@@ -269,11 +284,14 @@ Deno.serve(async (req) => {
     }
 
     if (!pendingExtractions || pendingExtractions.length === 0) {
+      console.log(`[EXTRACT-PRICES] No pending extractions found for search ${searchId}`);
       return new Response(
         JSON.stringify({ success: true, results: [], message: 'No pending extractions found' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
+
+    console.log(`[EXTRACT-PRICES] Found ${pendingExtractions.length} pending extractions`);
 
     // Fetch platform adapters for selectors
     const { data: adapters } = await supabaseClient
@@ -297,10 +315,10 @@ Deno.serve(async (req) => {
           const platformName = extraction.platform_name.toLowerCase();
           const priceSelectors = adapterMap.get(platformName) || {};
 
-          // Update status to processing
+          // Update status to 'running'
           await supabaseClient
             .from('price_extractions')
-            .update({ extraction_status: 'processing' })
+            .update({ extraction_status: 'running' })
             .eq('id', extraction.id);
 
           // Extract price using Browserless
@@ -310,7 +328,7 @@ Deno.serve(async (req) => {
             priceSelectors
           );
 
-          // Update extraction record
+          // Update extraction record with final status
           await supabaseClient
             .from('price_extractions')
             .update({
@@ -318,11 +336,12 @@ Deno.serve(async (req) => {
               currency: extractionResult.currency,
               price_type: extractionResult.priceType,
               includes_taxes_fees: extractionResult.includesTaxesFees,
-              extraction_status: extractionResult.price ? 'completed' : 'failed',
+              extraction_status: extractionResult.status,
               extraction_error: extractionResult.error,
               extraction_metadata: {
                 extracted_at: new Date().toISOString(),
                 method: 'browserless',
+                html_snippet: extractionResult.html?.substring(0, 1000),
               },
             })
             .eq('id', extraction.id);
@@ -337,6 +356,8 @@ Deno.serve(async (req) => {
               .eq('id', extraction.search_result_id);
           }
 
+          console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: ${extractionResult.status} - price: ${extractionResult.price}`);
+
           return {
             resultId: extraction.search_result_id,
             platformName: extraction.platform_name,
@@ -345,7 +366,8 @@ Deno.serve(async (req) => {
             currency: extractionResult.currency,
             priceType: extractionResult.priceType as any,
             includesTaxesFees: extractionResult.includesTaxesFees,
-            success: !!extractionResult.price,
+            success: extractionResult.status === 'success',
+            status: extractionResult.status,
             error: extractionResult.error,
           };
         })
@@ -362,7 +384,14 @@ Deno.serve(async (req) => {
     const successful = results.filter(r => r.success).length;
     const failed = results.filter(r => !r.success).length;
 
-    console.log(`Price extraction complete: ${successful} successful, ${failed} failed`);
+    // Group results by status for summary
+    const statusSummary: Record<string, number> = {};
+    for (const r of results) {
+      statusSummary[r.status] = (statusSummary[r.status] || 0) + 1;
+    }
+
+    console.log(`[EXTRACT-PRICES] Complete: ${successful} successful, ${failed} failed`);
+    console.log(`[EXTRACT-PRICES] Status breakdown:`, statusSummary);
 
     return new Response(
       JSON.stringify({
@@ -372,13 +401,14 @@ Deno.serve(async (req) => {
           total: results.length,
           successful,
           failed,
+          byStatus: statusSummary,
         },
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
   } catch (error) {
-    console.error('Error in price extraction:', error);
+    console.error('[EXTRACT-PRICES] Error:', error);
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
