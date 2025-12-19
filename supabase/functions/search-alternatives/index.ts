@@ -1201,6 +1201,19 @@ function isBlockedNonBookingPlatform(url: string): boolean {
     // Other non-booking sites
     "cloudflare.", "archive.org", "quora.", "medium.", "yelp.",
     ".gov", ".edu", "craigslist.",
+    // Travel magazines, blogs and editorial sites (can't book here)
+    "cntraveller.", "cntraveler.", "condenast.", "travelandleisure.", "afar.",
+    "lonelyplanet.", "fodors.", "frommers.", "roughguides.", "timeout.",
+    "theinfatuation.", "eater.", "departures.", "traveler.", "nationalgeographic.",
+    "culturetrip.", "atlasobscura.", "roadtrippers.", "matadornetwork.",
+    "nomadicmatt.", "theblondeabroad.", "handluggageonly.", "travelingmom.",
+    "travelweekly.", "skift.", "phocuswire.", "tnooz.", "webintravel.",
+    // Real estate and property info sites (listings, not bookable)
+    "zillow.", "trulia.", "realtor.", "redfin.", "rightmove.", "zoopla.",
+    "idealista.", "immobilienscout24.", "seloger.", "funda.", "daft.",
+    // Price comparison / aggregators without direct booking
+    "trivago.", "kayak.", "skyscanner.", "momondo.", "hipmunk.",
+    "hotelscombined.", "hotwire.", "priceline.",
   ];
   return blockedDomains.some(d => lowercaseUrl.includes(d));
 }
