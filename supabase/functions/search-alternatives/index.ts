@@ -2747,24 +2747,28 @@ async function runSearchWithStreaming(
     }
   }
 
-  // User requirement: ONLY keep alternatives that have a valid price
-  const resultsWithPrices = alternatives.filter((a) => !!a.price && a.price >= 10);
-
-  // Calculate savings
-  const resultsWithSavings = resultsWithPrices.map((alt) => ({
+  // Calculate savings for all alternatives (including those without prices)
+  const allResultsWithMeta = alternatives.map((alt) => ({
     ...alt,
     original_price: airbnbPrice,
     savings_amount: airbnbPrice && alt.price && alt.price < airbnbPrice ? airbnbPrice - alt.price : null,
     savings_percentage: airbnbPrice && alt.price && alt.price < airbnbPrice ? Math.round(((airbnbPrice - alt.price) / airbnbPrice) * 100) : null,
   }));
 
-  // Sort by savings
-  resultsWithSavings.sort((a, b) => (b.savings_percentage ?? 0) - (a.savings_percentage ?? 0));
+  // Separate results with and without prices for sorting
+  const resultsWithPrices = allResultsWithMeta.filter((a) => !!a.price && a.price >= 10);
+  const resultsWithoutPrices = allResultsWithMeta.filter((a) => !a.price || a.price < 10);
 
-  // Save to DB (only priced results)
-  console.log(`Attempting to save ${resultsWithSavings.length} priced results to DB for search ${searchId}`);
-  if (resultsWithSavings.length > 0) {
-    const insertData = resultsWithSavings.map((r) => ({
+  // Sort priced results by savings
+  resultsWithPrices.sort((a, b) => (b.savings_percentage ?? 0) - (a.savings_percentage ?? 0));
+
+  // Combine: priced results first, then priceless results (still valuable photo matches)
+  const allResultsSorted = [...resultsWithPrices, ...resultsWithoutPrices];
+
+  // Save ALL results to DB (including those without prices - they're still valuable photo matches)
+  console.log(`Attempting to save ${allResultsSorted.length} results to DB (${resultsWithPrices.length} with prices, ${resultsWithoutPrices.length} without) for search ${searchId}`);
+  if (allResultsSorted.length > 0) {
+    const insertData = allResultsSorted.map((r) => ({
       search_id: searchId,
       platform_name: r.platform_name,
       listing_url: r.listing_url,
@@ -2805,10 +2809,10 @@ async function runSearchWithStreaming(
     nights_count: nights,
   }).eq("id", searchId);
 
-  sendProgress(controller, "Search complete", resultsWithSavings.length > 0 ? `Found ${resultsWithSavings.length} priced alternatives` : "No priced alternatives found");
+  sendProgress(controller, "Search complete", allResultsSorted.length > 0 ? `Found ${allResultsSorted.length} alternatives (${resultsWithPrices.length} with prices)` : "No alternatives found");
   sendSSE(controller, "complete", {
     success: true,
-    results: resultsWithSavings,
+    results: allResultsSorted,
     airbnb: { title: airbnbTitle, price: airbnbPrice, url: search.airbnb_url, imageUrl: imageUrls[0], images: imageUrls },
     dates: { checkIn, checkOut, nights },
   });
