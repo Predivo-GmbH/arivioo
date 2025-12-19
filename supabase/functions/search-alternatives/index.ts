@@ -1666,6 +1666,7 @@ async function scrapePriceFromListing(
   checkOut: string,
   firecrawlApiKey: string,
   platformName: string = "Unknown Platform",
+  shouldSkip?: () => Promise<boolean>,
 ): Promise<{ 
   price: number | null; 
   totalPrice: number | null; 
@@ -1675,6 +1676,7 @@ async function scrapePriceFromListing(
   datesDiffer: boolean;
   extractionMethod?: string;
   reliability?: LinkReliability;
+  skipped?: boolean;
 }> {
   const nights = calculateNights(checkIn, checkOut);
   
@@ -1886,6 +1888,22 @@ async function scrapePriceFromListing(
       const alternatives = generateAlternativeDates(checkIn, checkOut);
       
       for (const alt of alternatives) {
+        // Check for skip request BEFORE each alternative date attempt
+        if (shouldSkip && await shouldSkip()) {
+          console.log(`SKIP requested during ${platformName} alternative date loop - aborting`);
+          return {
+            price: null,
+            totalPrice: null,
+            perNightRate: null,
+            usedCheckIn: checkIn,
+            usedCheckOut: checkOut,
+            datesDiffer: false,
+            extractionMethod: "skipped",
+            reliability: adapter.reliability,
+            skipped: true,
+          };
+        }
+        
         console.log(`Trying alternative dates: ${alt.checkIn} - ${alt.checkOut} (offset ${alt.offset > 0 ? '+' : ''}${alt.offset} days)`);
         result = await tryScrapeDates(alt.checkIn, alt.checkOut);
         extractionMethod = result.extractionMethod;
@@ -2694,7 +2712,15 @@ async function runSearchWithStreaming(
 
     if (!firecrawlApiKey) continue;
 
-    const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey, alt.platform_name);
+    const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey, alt.platform_name, claimSkipNow);
+    
+    // If price scraping was skipped, break out of the loop
+    if (priceData.skipped) {
+      console.log(`Price scraping skipped for ${alt.platform_name} - breaking out of loop`);
+      sendProgress(controller, "Skipped price collection", "Moving to results with data collected so far", { skipped: true });
+      break;
+    }
+    
     alt.price = priceData.perNightRate;
     alt.price_check_in = priceData.usedCheckIn;
     alt.price_check_out = priceData.usedCheckOut;
