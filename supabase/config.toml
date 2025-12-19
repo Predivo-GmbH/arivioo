@@ -14,3 +14,12 @@ verify_jwt = false
 
 [functions.request-skip-step]
 verify_jwt = true
+
+[functions.generate-deep-links]
+verify_jwt = true
+
+[functions.extract-prices]
+verify_jwt = true
+
+[functions.generate-platform-adapter]
+verify_jwt = false

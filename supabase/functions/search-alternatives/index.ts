@@ -2808,6 +2808,45 @@ async function runSearchWithStreaming(
       console.error("CRITICAL: Failed to insert search results:", insertError.message, insertError.details);
     } else {
       console.log(`SUCCESS: Inserted ${insertedData?.length || 0} results to search_results table`);
+      
+      // After saving results, trigger deep link generation for price extraction
+      // This runs in the background and doesn't block the response
+      if (insertedData && insertedData.length > 0) {
+        sendProgress(controller, "Generating booking links", "Creating deep links with dates for each platform");
+        
+        try {
+          // Call generate-deep-links function to create proper booking links
+          const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+          const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+          
+          const deepLinkResponse = await fetch(`${supabaseUrl}/functions/v1/generate-deep-links`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${supabaseServiceKey}`,
+            },
+            body: JSON.stringify({
+              searchId,
+              checkIn,
+              checkOut,
+              adults: 2, // Default occupancy
+              children: 0,
+              rooms: 1,
+            }),
+          });
+          
+          if (deepLinkResponse.ok) {
+            const deepLinkData = await deepLinkResponse.json();
+            console.log(`Generated ${deepLinkData.deepLinks?.length || 0} deep links`);
+            sendProgress(controller, "Booking links ready", `Created ${deepLinkData.deepLinks?.length || 0} platform-specific links`);
+          } else {
+            console.error("Failed to generate deep links:", await deepLinkResponse.text());
+          }
+        } catch (deepLinkError) {
+          console.error("Error generating deep links:", deepLinkError);
+          // Don't fail the search if deep link generation fails
+        }
+      }
     }
   }
 

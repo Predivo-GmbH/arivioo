@@ -169,6 +169,7 @@ export default function SearchResults() {
   const [showMoreExpensive, setShowMoreExpensive] = useState(false);
   const [showNoPriceMatches, setShowNoPriceMatches] = useState(false);
   const [streamDisconnected, setStreamDisconnected] = useState(false);
+  const [extractingPrices, setExtractingPrices] = useState(false);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);

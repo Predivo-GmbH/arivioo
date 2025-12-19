@@ -38,6 +38,27 @@ export type Database = {
         }
         Relationships: []
       }
+      blocked_platforms: {
+        Row: {
+          blocked_at: string
+          domain: string
+          id: string
+          reason: string
+        }
+        Insert: {
+          blocked_at?: string
+          domain: string
+          id?: string
+          reason: string
+        }
+        Update: {
+          blocked_at?: string
+          domain?: string
+          id?: string
+          reason?: string
+        }
+        Relationships: []
+      }
       launch_signups: {
         Row: {
           created_at: string
@@ -55,6 +76,135 @@ export type Database = {
           id?: string
         }
         Relationships: []
+      }
+      platform_adapters: {
+        Row: {
+          created_at: string
+          date_format: string
+          deep_link_template: string
+          id: string
+          is_active: boolean
+          is_ai_generated: boolean
+          occupancy_params: Json | null
+          platform_domain: string
+          platform_name: string
+          price_selectors: Json | null
+          reliability_score: number | null
+          requires_occupancy: boolean
+          updated_at: string
+          validation_rules: Json | null
+        }
+        Insert: {
+          created_at?: string
+          date_format?: string
+          deep_link_template: string
+          id?: string
+          is_active?: boolean
+          is_ai_generated?: boolean
+          occupancy_params?: Json | null
+          platform_domain: string
+          platform_name: string
+          price_selectors?: Json | null
+          reliability_score?: number | null
+          requires_occupancy?: boolean
+          updated_at?: string
+          validation_rules?: Json | null
+        }
+        Update: {
+          created_at?: string
+          date_format?: string
+          deep_link_template?: string
+          id?: string
+          is_active?: boolean
+          is_ai_generated?: boolean
+          occupancy_params?: Json | null
+          platform_domain?: string
+          platform_name?: string
+          price_selectors?: Json | null
+          reliability_score?: number | null
+          requires_occupancy?: boolean
+          updated_at?: string
+          validation_rules?: Json | null
+        }
+        Relationships: []
+      }
+      price_extractions: {
+        Row: {
+          assumed_adults: number | null
+          assumed_children: number | null
+          assumed_rooms: number | null
+          created_at: string
+          currency: string | null
+          deep_link: string
+          extracted_price: number | null
+          extraction_error: string | null
+          extraction_metadata: Json | null
+          extraction_status: string
+          id: string
+          includes_taxes_fees: boolean | null
+          occupancy_assumed: boolean | null
+          platform_name: string
+          price_type: string
+          search_id: string | null
+          search_result_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          assumed_adults?: number | null
+          assumed_children?: number | null
+          assumed_rooms?: number | null
+          created_at?: string
+          currency?: string | null
+          deep_link: string
+          extracted_price?: number | null
+          extraction_error?: string | null
+          extraction_metadata?: Json | null
+          extraction_status?: string
+          id?: string
+          includes_taxes_fees?: boolean | null
+          occupancy_assumed?: boolean | null
+          platform_name: string
+          price_type?: string
+          search_id?: string | null
+          search_result_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          assumed_adults?: number | null
+          assumed_children?: number | null
+          assumed_rooms?: number | null
+          created_at?: string
+          currency?: string | null
+          deep_link?: string
+          extracted_price?: number | null
+          extraction_error?: string | null
+          extraction_metadata?: Json | null
+          extraction_status?: string
+          id?: string
+          includes_taxes_fees?: boolean | null
+          occupancy_assumed?: boolean | null
+          platform_name?: string
+          price_type?: string
+          search_id?: string | null
+          search_result_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "price_extractions_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "price_extractions_search_result_id_fkey"
+            columns: ["search_result_id"]
+            isOneToOne: false
+            referencedRelation: "search_results"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       profiles: {
         Row: {
