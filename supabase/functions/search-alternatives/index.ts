@@ -2381,6 +2381,10 @@ async function runSearchWithStreaming(
             await supabase
               .from("searches")
               .update({
+                // Ensure DB reflects we're past the initial parsing stage.
+                // The UI stepper depends on status transitions; missing these makes it look stuck.
+                status: "searching_platforms",
+                last_progress_at: new Date().toISOString(),
                 airbnb_title: airbnbTitle,
                 airbnb_price: airbnbPrice,
                 airbnb_image_url: imageUrls[0] || null,
