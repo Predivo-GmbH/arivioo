@@ -49,6 +49,15 @@ interface SearchResult {
   dates_differ?: boolean; // True if different dates were used due to unavailability
 }
 
+interface PriceExtraction {
+  id: string;
+  search_result_id: string;
+  platform_name: string;
+  extraction_status: 'pending' | 'running' | 'success' | 'blocked_captcha' | 'blocked_rate_limit' | 'dates_not_applied' | 'price_not_found' | 'failed_unknown';
+  extracted_price: number | null;
+  extraction_error: string | null;
+}
+
 interface SearchData {
   id: string;
   airbnb_url: string;
@@ -158,6 +167,7 @@ export default function SearchResults() {
   const [user, setUser] = useState<User | null>(null);
   const [search, setSearch] = useState<SearchData | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [priceExtractions, setPriceExtractions] = useState<PriceExtraction[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchPhase, setSearchPhase] = useState<'thinking' | 'animating' | 'done'>('thinking');
   const [currentStep, setCurrentStep] = useState(-1); // -1 = thinking phase
@@ -810,6 +820,49 @@ export default function SearchResults() {
     }
   }, [loading, results.length, hasCelebrated]);
 
+  // Poll for price extraction status when search is done
+  useEffect(() => {
+    if (loading || !searchId) return;
+    
+    const fetchExtractionStatus = async () => {
+      const { data } = await supabase
+        .from('price_extractions')
+        .select('id, search_result_id, platform_name, extraction_status, extracted_price, extraction_error')
+        .eq('search_id', searchId);
+      
+      if (data) {
+        setPriceExtractions(data as PriceExtraction[]);
+        
+        // Check if any extractions are still in progress
+        const inProgress = data.some(e => e.extraction_status === 'pending' || e.extraction_status === 'running');
+        setExtractingPrices(inProgress);
+        
+        // Update results with extracted prices
+        if (data.length > 0) {
+          setResults(prev => prev.map(r => {
+            const extraction = data.find(e => e.search_result_id === r.id);
+            if (extraction?.extracted_price && (!r.price || r.price < 10)) {
+              return { ...r, price: extraction.extracted_price };
+            }
+            return r;
+          }));
+        }
+      }
+    };
+    
+    // Initial fetch
+    fetchExtractionStatus();
+    
+    // Poll every 5 seconds if extractions are in progress
+    const pollInterval = setInterval(() => {
+      if (extractingPrices) {
+        fetchExtractionStatus();
+      }
+    }, 5000);
+    
+    return () => clearInterval(pollInterval);
+  }, [loading, searchId, extractingPrices]);
+
   if (!user) return null;
   const airbnbImages = toStringArray(search?.airbnb_images);
 
@@ -1189,9 +1242,59 @@ export default function SearchResults() {
 
                 {/* Date Range Notice */}
                 {hasValidDates && (
-                  <div className="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+                  <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
                     <Calendar className="w-4 h-4" />
                     <span>Comparing prices for {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})</span>
+                  </div>
+                )}
+
+                {/* Price Extraction Status Indicator */}
+                {priceExtractions.length > 0 && (
+                  <div className="mb-6 p-3 rounded-xl bg-muted/50 border border-border">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
+                        {extractingPrices ? (
+                          <>
+                            <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                            <span className="text-sm font-medium text-foreground">Fetching live prices...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle className="w-4 h-4 text-success" />
+                            <span className="text-sm font-medium text-foreground">Price extraction complete</span>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        {(() => {
+                          const pending = priceExtractions.filter(e => e.extraction_status === 'pending' || e.extraction_status === 'running').length;
+                          const success = priceExtractions.filter(e => e.extraction_status === 'success').length;
+                          const failed = priceExtractions.filter(e => !['pending', 'running', 'success'].includes(e.extraction_status)).length;
+                          return (
+                            <>
+                              {pending > 0 && (
+                                <span className="flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                                  {pending} pending
+                                </span>
+                              )}
+                              {success > 0 && (
+                                <span className="flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-success" />
+                                  {success} fetched
+                                </span>
+                              )}
+                              {failed > 0 && (
+                                <span className="flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                  {failed} unavailable
+                                </span>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
                   </div>
                 )}
 
