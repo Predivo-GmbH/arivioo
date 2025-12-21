@@ -73,13 +73,13 @@ export function ExampleResult() {
     ? `${dynamicData.nights_count} nights`
     : STATIC_DATA.dates;
   
-  // Images - use source_airbnb_image and matched image from results if available
+  // Images - prefer dynamic data from last search
   const airbnbImages = useDynamic ? toStringArray(dynamicData.airbnb_images) : [];
-  const airbnbImage = useDynamic && dynamicData.cheapestResult?.source_airbnb_image
-    ? dynamicData.cheapestResult.source_airbnb_image
-    : (airbnbImages[0] || STATIC_DATA.airbnbImage);
-  const directImage = useDynamic && dynamicData.cheapestResult?.image_url
-    ? dynamicData.cheapestResult.image_url
+  const airbnbImage = useDynamic 
+    ? (dynamicData.cheapestResult?.source_airbnb_image || dynamicData.airbnb_image_url || airbnbImages[0] || STATIC_DATA.airbnbImage)
+    : STATIC_DATA.airbnbImage;
+  const directImage = useDynamic 
+    ? (dynamicData.cheapestResult?.image_url || STATIC_DATA.directImage)
     : STATIC_DATA.directImage;
 
   const { alignment, autoAlign } = useImageAlignment(airbnbImage, directImage);

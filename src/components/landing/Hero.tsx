@@ -50,13 +50,13 @@ export function Hero() {
     ? Math.round(dynamicData.potentialSavings / (dynamicData.nights_count || 1))
     : STATIC_DATA.savings;
 
-  // Images
+  // Images - prefer dynamic data from last search
   const airbnbImages = useDynamic ? toStringArray(dynamicData.airbnb_images) : [];
-  const airbnbImage = useDynamic && dynamicData.cheapestResult?.source_airbnb_image
-    ? dynamicData.cheapestResult.source_airbnb_image
-    : (airbnbImages[0] || STATIC_DATA.airbnbImage);
-  const directImage = useDynamic && dynamicData.cheapestResult?.image_url
-    ? dynamicData.cheapestResult.image_url
+  const airbnbImage = useDynamic 
+    ? (dynamicData.cheapestResult?.source_airbnb_image || dynamicData.airbnb_image_url || airbnbImages[0] || STATIC_DATA.airbnbImage)
+    : STATIC_DATA.airbnbImage;
+  const directImage = useDynamic 
+    ? (dynamicData.cheapestResult?.image_url || STATIC_DATA.directImage)
     : STATIC_DATA.directImage;
 
   // Align the direct image to the Airbnb reference image (persisted per pair)
