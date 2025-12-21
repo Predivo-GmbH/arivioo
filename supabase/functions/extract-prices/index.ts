@@ -251,6 +251,70 @@ function extractPriceFromHtml(html: string, platformName: string): {
   return { price, currency, priceType: priceType === 'UNKNOWN' ? 'TOTAL_STAY' : priceType, includesTaxesFees };
 }
 
+// Retry configuration
+const RETRY_DELAYS: Record<string, number> = {
+  failed_unknown: 30000,      // 30 seconds
+  blocked_rate_limit: 60000,  // 1 minute
+};
+const MAX_RETRIES = 2;
+
+// Check and trigger retries for failed extractions
+async function checkAndRetryFailedExtractions(
+  supabaseClient: any,
+  searchId: string
+): Promise<void> {
+  console.log(`[RETRY] Checking for retryable extractions for search ${searchId}`);
+
+  // Find extractions that need retry
+  const { data: failedExtractions, error } = await supabaseClient
+    .from('price_extractions')
+    .select('*')
+    .eq('search_id', searchId)
+    .in('extraction_status', ['failed_unknown', 'blocked_rate_limit']);
+
+  if (error || !failedExtractions || failedExtractions.length === 0) {
+    console.log(`[RETRY] No retryable extractions found`);
+    return;
+  }
+
+  console.log(`[RETRY] Found ${failedExtractions.length} extractions to potentially retry`);
+
+  for (const extraction of failedExtractions as any[]) {
+    const metadata = (extraction.extraction_metadata as Record<string, unknown>) || {};
+    const retryCount = (metadata.retry_count as number) || 0;
+
+    if (retryCount >= MAX_RETRIES) {
+      console.log(`[RETRY] Skipping ${extraction.platform_name} - max retries (${MAX_RETRIES}) reached`);
+      continue;
+    }
+
+    const lastAttempt = metadata.extracted_at ? new Date(metadata.extracted_at as string).getTime() : 0;
+    const retryDelay = RETRY_DELAYS[extraction.extraction_status] || 30000;
+    const now = Date.now();
+
+    if (now - lastAttempt < retryDelay) {
+      console.log(`[RETRY] Skipping ${extraction.platform_name} - retry delay not elapsed`);
+      continue;
+    }
+
+    console.log(`[RETRY] Scheduling retry for ${extraction.platform_name} (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+
+    // Reset to pending with incremented retry count
+    await supabaseClient
+      .from('price_extractions')
+      .update({
+        extraction_status: 'pending',
+        extraction_metadata: {
+          ...metadata,
+          retry_count: retryCount + 1,
+          last_retry_at: new Date().toISOString(),
+          previous_status: extraction.extraction_status,
+        },
+      })
+      .eq('id', extraction.id);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -265,6 +329,9 @@ Deno.serve(async (req) => {
     const { searchId, resultIds } = await req.json() as ExtractionRequest;
 
     console.log(`[EXTRACT-PRICES] Starting price extraction for search ${searchId}`);
+
+    // First, check for failed extractions that need retry
+    await checkAndRetryFailedExtractions(supabaseClient, searchId);
 
     // Fetch pending price extractions
     let query = supabaseClient
@@ -314,6 +381,8 @@ Deno.serve(async (req) => {
         batch.map(async (extraction) => {
           const platformName = extraction.platform_name.toLowerCase();
           const priceSelectors = adapterMap.get(platformName) || {};
+          const metadata = extraction.extraction_metadata as Record<string, unknown> || {};
+          const retryCount = (metadata.retry_count as number) || 0;
 
           // Update status to 'running'
           await supabaseClient
@@ -339,8 +408,10 @@ Deno.serve(async (req) => {
               extraction_status: extractionResult.status,
               extraction_error: extractionResult.error,
               extraction_metadata: {
+                ...metadata,
                 extracted_at: new Date().toISOString(),
                 method: 'browserless',
+                retry_count: retryCount,
                 html_snippet: extractionResult.html?.substring(0, 1000),
               },
             })
@@ -356,7 +427,7 @@ Deno.serve(async (req) => {
               .eq('id', extraction.search_result_id);
           }
 
-          console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: ${extractionResult.status} - price: ${extractionResult.price}`);
+          console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: ${extractionResult.status} - price: ${extractionResult.price} (retry: ${retryCount})`);
 
           return {
             resultId: extraction.search_result_id,
