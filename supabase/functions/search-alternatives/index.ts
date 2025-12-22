@@ -2214,6 +2214,15 @@ async function runSearchWithStreaming(
   let imageUrls: string[] = [];
   let skipAirbnbPrice = false;
 
+  // IMPORTANT: Save dates immediately after extraction so they're available even if search stalls
+  console.log(`Extracted dates from URL: checkIn=${checkIn}, checkOut=${checkOut}, nights=${nights}`);
+  await supabase.from("searches").update({ 
+    check_in_date: checkIn, 
+    check_out_date: checkOut, 
+    nights_count: nights,
+    last_progress_at: new Date().toISOString() 
+  }).eq("id", searchId);
+
   // Heartbeat helper - updates last_progress_at so UI can detect stalls
   const heartbeat = async () => {
     await supabase.from("searches").update({ last_progress_at: new Date().toISOString() }).eq("id", searchId);
@@ -3040,10 +3049,18 @@ serve(async (req) => {
       );
     }
     console.log("Using URL dates:", checkIn, "to", checkOut);
+    
+    // Calculate nights
+    const nights = calculateNights(checkIn, checkOut);
 
-    // Update status to step 1
+    // IMPORTANT: Save dates immediately after extraction so they're available even if search stalls
+    console.log(`Extracted dates from URL: checkIn=${checkIn}, checkOut=${checkOut}, nights=${nights}`);
     await supabase.from("searches").update({ 
-      status: "extracting_photos" 
+      check_in_date: checkIn, 
+      check_out_date: checkOut, 
+      nights_count: nights,
+      status: "extracting_photos",
+      last_progress_at: new Date().toISOString() 
     }).eq("id", searchId);
 
     const alternatives: SearchResult[] = [];
@@ -4019,8 +4036,7 @@ serve(async (req) => {
     console.log("Results breakdown - Visual matches:", alternatives.filter(a => a.match_type === 'visual').length,
                 "Text matches:", alternatives.filter(a => a.match_type === 'text').length);
 
-    // Calculate nights for price comparison
-    const nights = calculateNights(checkIn, checkOut);
+    // nights is already calculated above (line 3054)
     console.log(`Comparing prices for ${nights} nights: ${checkIn} to ${checkOut}`);
 
     // Step 4: Scrape prices from alternatives using Firecrawl (if available)
