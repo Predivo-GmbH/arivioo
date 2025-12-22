@@ -18,14 +18,12 @@ serve(async (req) => {
     // Use service role to bypass RLS
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Find the most recent completed search with visual matches
-    // SECURITY FIX: Only show searches where user has opted-in to public demo
+    // Find the most recent completed search that the user opted-in to show on the public demo
     const { data: searches, error: searchError } = await supabase
       .from("searches")
       .select("*")
       .eq("status", "completed")
-      .eq("public_demo_ok", true) // Only show user-consented searches
-      .not("airbnb_price", "is", null)
+      .eq("public_demo_ok", true)
       .not("airbnb_title", "is", null)
       .order("created_at", { ascending: false })
       .limit(10);
@@ -35,7 +33,8 @@ serve(async (req) => {
       throw searchError;
     }
 
-    // Find a search with good visual matches and savings
+    // Pick the most recent search that has at least one strong visual match.
+    // (Prices/savings may still be processing; landing should still show real images.)
     for (const search of searches || []) {
       const { data: results, error: resultsError } = await supabase
         .from("search_results")
@@ -43,65 +42,68 @@ serve(async (req) => {
         .eq("search_id", search.id)
         .eq("match_type", "visual")
         .gte("confidence_score", 0.90)
-        .not("price", "is", null)
-        .order("price", { ascending: true });
+        .order("confidence_score", { ascending: false })
+        .limit(25);
 
       if (resultsError) {
         console.error("Results query error:", resultsError);
         continue;
       }
 
-      if (results && results.length > 0) {
-        const cheapestResult = results[0];
-        const airbnbTotal = search.airbnb_price && search.nights_count 
-          ? search.airbnb_price * search.nights_count 
-          : null;
-        const cheapestTotal = cheapestResult.price && search.nights_count
-          ? cheapestResult.price * search.nights_count
-          : null;
-        
-        // Add service fee estimate (14%)
-        const airbnbWithFees = airbnbTotal ? airbnbTotal * 1.14 : null;
-        
-        const potentialSavings = airbnbWithFees && cheapestTotal 
-          ? Math.round(airbnbWithFees - cheapestTotal)
-          : null;
-        const savingsPercentage = airbnbWithFees && potentialSavings && potentialSavings > 0
-          ? Math.round((potentialSavings / airbnbWithFees) * 100)
-          : null;
+      if (!results || results.length === 0) continue;
 
-        // Only use if there are actual savings
-        if (potentialSavings && potentialSavings > 0) {
-          console.log("Found successful search:", search.id, "with savings:", potentialSavings);
-          
-          // Return sanitized data - no personal travel dates or IDs
-          // User has explicitly opted-in via public_demo_ok flag
-          return new Response(
-            JSON.stringify({
-              success: true,
-              data: {
-                // Omit search.id to prevent correlation attacks
-                airbnb_title: search.airbnb_title,
-                airbnb_price: search.airbnb_price,
-                airbnb_image_url: search.airbnb_image_url,
-                airbnb_images: search.airbnb_images,
-                // Omit specific dates - only show duration for demo
-                nights_count: search.nights_count,
-                cheapestResult: {
-                  platform_name: cheapestResult.platform_name,
-                  price: cheapestResult.price,
-                  confidence_score: cheapestResult.confidence_score,
-                  image_url: cheapestResult.image_url,
-                  source_airbnb_image: cheapestResult.source_airbnb_image,
-                },
-                potentialSavings,
-                savingsPercentage,
-              },
-            }),
-            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
-      }
+      // Prefer a result that has an image + a price (best demo), otherwise any with an image.
+      const bestResult =
+        results.find((r) => r.image_url && r.price !== null) ||
+        results.find((r) => r.image_url) ||
+        results[0];
+
+      const nightsCount = search.nights_count ?? null;
+      const airbnbTotal = search.airbnb_price && nightsCount ? search.airbnb_price * nightsCount : null;
+      const bestTotal = bestResult.price && nightsCount ? bestResult.price * nightsCount : null;
+
+      // Add service fee estimate (14%)
+      const airbnbWithFees = airbnbTotal ? airbnbTotal * 1.14 : null;
+
+      const potentialSavings = airbnbWithFees && bestTotal
+        ? Math.round(airbnbWithFees - bestTotal)
+        : null;
+      const savingsPercentage = airbnbWithFees && potentialSavings !== null
+        ? Math.round((potentialSavings / airbnbWithFees) * 100)
+        : null;
+
+      console.log("Found last successful visual match for landing demo:", {
+        created_at: search.created_at,
+        has_airbnb_image_url: Boolean(search.airbnb_image_url),
+        has_airbnb_images: Array.isArray(search.airbnb_images) && search.airbnb_images.length > 0,
+        result_platform: bestResult.platform_name,
+        has_result_image: Boolean(bestResult.image_url),
+        has_result_price: bestResult.price !== null,
+      });
+
+      // Return sanitized data - no personal travel dates or IDs
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            airbnb_title: search.airbnb_title,
+            airbnb_price: search.airbnb_price,
+            airbnb_image_url: search.airbnb_image_url,
+            airbnb_images: search.airbnb_images,
+            nights_count: nightsCount,
+            cheapestResult: {
+              platform_name: bestResult.platform_name,
+              price: bestResult.price,
+              confidence_score: bestResult.confidence_score,
+              image_url: bestResult.image_url,
+              source_airbnb_image: bestResult.source_airbnb_image,
+            },
+            potentialSavings,
+            savingsPercentage,
+          },
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     // No successful search found
