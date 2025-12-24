@@ -6,17 +6,70 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Allowed image URL domains for SSRF protection
+const ALLOWED_DOMAINS = [
+  'airbnb.com',
+  'airbnbusercontent.com',
+  'a0.muscache.com',
+  'booking.com',
+  'bstatic.com',
+  'vrbo.com',
+  'expedia.com',
+  'hotels.com',
+  'tripadvisor.com',
+  'agoda.com',
+  'trip.com',
+  'hostelworld.com',
+  'trivago.com',
+];
+
+function isAllowedUrl(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    const hostname = url.hostname.toLowerCase();
+    return ALLOWED_DOMAINS.some(domain => 
+      hostname === domain || hostname.endsWith('.' + domain)
+    );
+  } catch {
+    return false;
+  }
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
+    // JWT is now verified by Supabase Edge Functions runtime (verify_jwt = true)
+    // Extract user info from auth header for logging
+    const authHeader = req.headers.get('authorization');
+    const userId = authHeader ? 'authenticated' : 'unknown';
+    
     const { referenceImageUrl, targetImageUrl } = await req.json();
+    
+    console.log(`[analyze-image-alignment] Request from user: ${userId}`);
     
     if (!referenceImageUrl || !targetImageUrl) {
       return new Response(
         JSON.stringify({ error: 'Both referenceImageUrl and targetImageUrl are required' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate URLs are from allowed domains (SSRF protection)
+    if (!isAllowedUrl(referenceImageUrl)) {
+      console.warn(`[analyze-image-alignment] Blocked disallowed reference URL: ${referenceImageUrl}`);
+      return new Response(
+        JSON.stringify({ error: 'Reference image URL must be from a supported booking platform' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (!isAllowedUrl(targetImageUrl)) {
+      console.warn(`[analyze-image-alignment] Blocked disallowed target URL: ${targetImageUrl}`);
+      return new Response(
+        JSON.stringify({ error: 'Target image URL must be from a supported booking platform' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
