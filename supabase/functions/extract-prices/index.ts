@@ -19,6 +19,7 @@ type ExtractionStatus =
 interface ExtractionRequest {
   searchId: string;
   resultIds?: string[]; // Optional: specific results to extract, otherwise all pending
+  stream?: boolean; // Enable SSE streaming for real-time progress
 }
 
 interface PriceExtractionResult {
@@ -32,6 +33,20 @@ interface PriceExtractionResult {
   success: boolean;
   status: ExtractionStatus;
   error?: string;
+}
+
+// SSE helpers
+const encoder = new TextEncoder();
+
+function sendSSE(controller: ReadableStreamDefaultController<Uint8Array>, event: string, data: any): boolean {
+  try {
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    controller.enqueue(encoder.encode(message));
+    return true;
+  } catch (e) {
+    console.log("SSE send failed:", event, e);
+    return false;
+  }
 }
 
 // Determine extraction status based on error type
@@ -88,6 +103,89 @@ function determineExtractionStatus(
   return 'failed_unknown';
 }
 
+// Use Lovable AI to extract price from HTML when regex fails
+async function extractPriceWithAI(
+  html: string,
+  platformName: string,
+  deepLink: string
+): Promise<{ price: number | null; currency: string; priceType: string; includesTaxesFees: boolean }> {
+  const lovableApiKey = Deno.env.get('LOVABLE_API_KEY');
+  if (!lovableApiKey) {
+    console.log('[AI-FALLBACK] LOVABLE_API_KEY not available');
+    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false };
+  }
+
+  try {
+    console.log(`[AI-FALLBACK] Attempting AI price extraction for ${platformName}`);
+    
+    const prompt = `You are analyzing HTML content from a ${platformName} booking page.
+URL: ${deepLink}
+
+Goal: Extract the booking price shown on this page.
+
+Rules:
+1) Find the TOTAL price for the stay (preferred) or per-night rate
+2) Look for prices in common booking page patterns (booking summary, price breakdown, checkout total)
+3) Ignore prices that are review counts, distances, ratings, or unrelated numbers
+4) Extract the currency if visible ($, €, £, etc.)
+5) Determine if taxes and fees are included based on labels like "incl. taxes", "total with fees"
+
+HTML Content (first 8000 chars):
+${html.slice(0, 8000)}
+
+Return ONLY JSON in this exact format:
+{"price": <number|null>, "currency": "USD"|"EUR"|"GBP"|etc, "priceType": "TOTAL_STAY"|"NIGHTLY"|"UNKNOWN", "includesTaxesFees": <true|false>}`;
+
+    const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${lovableApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.5-flash',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 100,
+      }),
+    });
+
+    if (!response.ok) {
+      console.error('[AI-FALLBACK] Request failed:', response.status);
+      return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false };
+    }
+
+    const data = await response.json();
+    const resultText = data.choices?.[0]?.message?.content?.trim();
+
+    if (!resultText) {
+      console.log('[AI-FALLBACK] Empty response');
+      return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false };
+    }
+
+    // Parse JSON response
+    try {
+      const jsonMatch = resultText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        console.log(`[AI-FALLBACK] Extracted price: ${parsed.price} ${parsed.currency}`);
+        return {
+          price: parsed.price,
+          currency: parsed.currency || 'USD',
+          priceType: parsed.priceType || 'UNKNOWN',
+          includesTaxesFees: parsed.includesTaxesFees || false,
+        };
+      }
+    } catch (parseError) {
+      console.error('[AI-FALLBACK] Failed to parse response:', resultText);
+    }
+
+    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false };
+  } catch (error) {
+    console.error('[AI-FALLBACK] Error:', error);
+    return { price: null, currency: 'USD', priceType: 'UNKNOWN', includesTaxesFees: false };
+  }
+}
+
 // Use Browserless to load page and extract price
 async function extractPriceWithBrowserless(
   deepLink: string,
@@ -116,7 +214,7 @@ async function extractPriceWithBrowserless(
   }
 
   try {
-    console.log(`Extracting price from ${deepLink} for platform ${platformName}`);
+    console.log(`[EXTRACT] Fetching ${deepLink} for platform ${platformName}`);
 
     // Use Browserless content API to get page content
     const response = await fetch(`https://chrome.browserless.io/content?token=${browserlessApiKey}`, {
@@ -135,7 +233,7 @@ async function extractPriceWithBrowserless(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`Browserless error: ${response.status} - ${errorText}`);
+      console.error(`[EXTRACT] Browserless error: ${response.status} - ${errorText}`);
       
       // Check for rate limiting from Browserless itself
       if (response.status === 429) {
@@ -161,8 +259,18 @@ async function extractPriceWithBrowserless(
 
     const htmlContent = await response.text();
     
-    // Extract price from HTML content
-    const priceResult = extractPriceFromHtml(htmlContent, platformName);
+    // Extract price from HTML content using regex first
+    let priceResult = extractPriceFromHtml(htmlContent, platformName);
+    
+    // If regex fails, try AI extraction as fallback
+    if (priceResult.price === null) {
+      console.log(`[EXTRACT] Regex extraction failed for ${platformName}, trying AI fallback...`);
+      const aiResult = await extractPriceWithAI(htmlContent, platformName, deepLink);
+      if (aiResult.price !== null) {
+        priceResult = aiResult;
+      }
+    }
+    
     const status = determineExtractionStatus(priceResult.price, undefined, htmlContent);
     
     return {
@@ -172,7 +280,7 @@ async function extractPriceWithBrowserless(
     };
 
   } catch (error) {
-    console.error(`Error extracting price from ${deepLink}:`, error);
+    console.error(`[EXTRACT] Error extracting price from ${deepLink}:`, error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return { 
       price: null, 
@@ -315,6 +423,7 @@ async function checkAndRetryFailedExtractions(
   }
 }
 
+// Main handler with SSE streaming support
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -326,9 +435,9 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    const { searchId, resultIds } = await req.json() as ExtractionRequest;
+    const { searchId, resultIds, stream = false } = await req.json() as ExtractionRequest;
 
-    console.log(`[EXTRACT-PRICES] Starting price extraction for search ${searchId}`);
+    console.log(`[EXTRACT-PRICES] Starting price extraction for search ${searchId}, stream=${stream}`);
 
     // First, check for failed extractions that need retry
     await checkAndRetryFailedExtractions(supabaseClient, searchId);
@@ -370,6 +479,139 @@ Deno.serve(async (req) => {
       adapterMap.set(adapter.platform_name, adapter.price_selectors || {});
     }
 
+    // For SSE streaming
+    if (stream) {
+      const responseStream = new ReadableStream({
+        async start(controller) {
+          const platforms = pendingExtractions.map(e => e.platform_name);
+          
+          // Send start event
+          sendSSE(controller, 'price_extraction_start', {
+            totalPlatforms: pendingExtractions.length,
+            platforms,
+          });
+
+          const results: PriceExtractionResult[] = [];
+
+          // Process extractions sequentially for SSE progress
+          for (let i = 0; i < pendingExtractions.length; i++) {
+            const extraction = pendingExtractions[i];
+            const platformName = extraction.platform_name.toLowerCase();
+            const priceSelectors = adapterMap.get(platformName) || {};
+            const metadata = extraction.extraction_metadata as Record<string, unknown> || {};
+            const retryCount = (metadata.retry_count as number) || 0;
+
+            // Send running status
+            sendSSE(controller, 'price_extraction_progress', {
+              platformName: extraction.platform_name,
+              status: 'running',
+              index: i + 1,
+              total: pendingExtractions.length,
+            });
+
+            // Update status to 'running'
+            await supabaseClient
+              .from('price_extractions')
+              .update({ extraction_status: 'running' })
+              .eq('id', extraction.id);
+
+            // Extract price using Browserless
+            const extractionResult = await extractPriceWithBrowserless(
+              extraction.deep_link,
+              platformName,
+              priceSelectors
+            );
+
+            // Update extraction record with final status
+            await supabaseClient
+              .from('price_extractions')
+              .update({
+                extracted_price: extractionResult.price,
+                currency: extractionResult.currency,
+                price_type: extractionResult.priceType,
+                includes_taxes_fees: extractionResult.includesTaxesFees,
+                extraction_status: extractionResult.status,
+                extraction_error: extractionResult.error,
+                extraction_metadata: {
+                  ...metadata,
+                  extracted_at: new Date().toISOString(),
+                  method: extractionResult.price ? 'browserless' : 'browserless_with_ai_fallback',
+                  retry_count: retryCount,
+                  html_snippet: extractionResult.html?.substring(0, 1000),
+                },
+              })
+              .eq('id', extraction.id);
+
+            // If we got a price, update the search result as well
+            if (extractionResult.price) {
+              await supabaseClient
+                .from('search_results')
+                .update({
+                  price: extractionResult.price,
+                })
+                .eq('id', extraction.search_result_id);
+            }
+
+            // Send progress update
+            sendSSE(controller, 'price_extraction_progress', {
+              platformName: extraction.platform_name,
+              status: extractionResult.status,
+              price: extractionResult.price,
+              currency: extractionResult.currency,
+              error: extractionResult.error,
+              index: i + 1,
+              total: pendingExtractions.length,
+            });
+
+            console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: ${extractionResult.status} - price: ${extractionResult.price}`);
+
+            results.push({
+              resultId: extraction.search_result_id,
+              platformName: extraction.platform_name,
+              deepLink: extraction.deep_link,
+              price: extractionResult.price,
+              currency: extractionResult.currency,
+              priceType: extractionResult.priceType as any,
+              includesTaxesFees: extractionResult.includesTaxesFees,
+              success: extractionResult.status === 'success',
+              status: extractionResult.status,
+              error: extractionResult.error,
+            });
+
+            // Rate limiting: wait between extractions
+            if (i < pendingExtractions.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+          }
+
+          const successful = results.filter(r => r.success).length;
+          const failed = results.filter(r => !r.success).length;
+
+          // Send complete event
+          sendSSE(controller, 'price_extraction_complete', {
+            totalExtracted: results.length,
+            successful,
+            failed,
+            results,
+          });
+
+          console.log(`[EXTRACT-PRICES] Complete: ${successful} successful, ${failed} failed`);
+
+          controller.close();
+        },
+      });
+
+      return new Response(responseStream, {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
+    // Non-streaming mode (original batch processing)
     const results: PriceExtractionResult[] = [];
 
     // Process extractions with rate limiting (max 3 concurrent)
@@ -410,7 +652,7 @@ Deno.serve(async (req) => {
               extraction_metadata: {
                 ...metadata,
                 extracted_at: new Date().toISOString(),
-                method: 'browserless',
+                method: extractionResult.price ? 'browserless' : 'browserless_with_ai_fallback',
                 retry_count: retryCount,
                 html_snippet: extractionResult.html?.substring(0, 1000),
               },
