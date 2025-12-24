@@ -6,6 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import { ImageComparison } from "@/components/ImageComparison";
 import { quickCelebration } from "@/lib/confetti";
+import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -94,6 +95,13 @@ const loadingSteps = [
     title: "Comparing Prices",
     description: "Analyzing prices and calculating potential savings for your dates...",
     statuses: ["comparing_prices"]
+  },
+  {
+    id: "collecting",
+    icon: DollarSign,
+    title: "Collecting Prices",
+    description: "Fetching real-time prices from each platform for your exact dates...",
+    statuses: ["collecting_prices"]
   }
 ];
 
@@ -180,6 +188,9 @@ export default function SearchResults() {
   const [showNoPriceMatches, setShowNoPriceMatches] = useState(false);
   const [streamDisconnected, setStreamDisconnected] = useState(false);
   const [extractingPrices, setExtractingPrices] = useState(false);
+  const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
+  const [priceExtractionTotal, setPriceExtractionTotal] = useState(0);
+  const [priceExtractionCompleted, setPriceExtractionCompleted] = useState(0);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -357,6 +368,43 @@ export default function SearchResults() {
                         };
                         setActivityFeed((prev) => [...prev, newItem].slice(-12));
                       }
+                    } else if (eventType === "price_extraction_start") {
+                      // Starting price extraction phase
+                      setCurrentStep(3); // "Collecting Prices" step
+                      setExtractingPrices(true);
+                      setPriceExtractionTotal(data.totalPlatforms || 0);
+                      setPriceExtractionCompleted(0);
+                      setPriceExtractionPlatforms(
+                        (data.platforms || []).map((p: string) => ({
+                          platformName: p,
+                          status: 'pending' as const,
+                          price: null,
+                        }))
+                      );
+                    } else if (eventType === "price_extraction_progress") {
+                      // Update individual platform status
+                      setPriceExtractionPlatforms((prev) => {
+                        const updated = [...prev];
+                        const idx = updated.findIndex(p => p.platformName === data.platformName);
+                        if (idx >= 0) {
+                          updated[idx] = {
+                            ...updated[idx],
+                            status: data.status,
+                            price: data.price,
+                            currency: data.currency,
+                            error: data.error,
+                          };
+                        }
+                        return updated;
+                      });
+                      // Update completed count
+                      if (data.status !== 'pending' && data.status !== 'running') {
+                        setPriceExtractionCompleted((prev) => prev + 1);
+                      }
+                    } else if (eventType === "price_extraction_complete") {
+                      // Price extraction phase complete
+                      setExtractingPrices(false);
+                      setPriceExtractionCompleted(data.totalExtracted || priceExtractionTotal);
                     } else if (eventType === "complete") {
                       searchComplete = true;
                       actualDurationRef.current = Date.now() - startedAt;
@@ -1161,24 +1209,37 @@ export default function SearchResults() {
                           
                           {/* Progress bar for active step */}
                           {isActive && (
-                            <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
-                              <div 
-                                className="h-full bg-primary rounded-full"
-                                style={{ width: `${stepProgress}%`, transition: 'width 50ms linear' }}
-                              />
-                              <div
-                                className="absolute inset-0 pointer-events-none"
-                                aria-hidden="true"
-                              >
-                                <div
-                                  className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.25s_ease-in-out_infinite]"
-                                  style={{
-                                    backgroundImage:
-                                      'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
-                                  }}
-                                />
-                              </div>
-                            </div>
+                            <>
+                              {/* Show PriceExtractionProgress for the "collecting" step */}
+                              {step.id === 'collecting' && priceExtractionPlatforms.length > 0 ? (
+                                <div className="mt-4">
+                                  <PriceExtractionProgress
+                                    platforms={priceExtractionPlatforms}
+                                    totalPlatforms={priceExtractionTotal}
+                                    completedCount={priceExtractionCompleted}
+                                  />
+                                </div>
+                              ) : (
+                                <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
+                                  <div 
+                                    className="h-full bg-primary rounded-full"
+                                    style={{ width: `${stepProgress}%`, transition: 'width 50ms linear' }}
+                                  />
+                                  <div
+                                    className="absolute inset-0 pointer-events-none"
+                                    aria-hidden="true"
+                                  >
+                                    <div
+                                      className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.25s_ease-in-out_infinite]"
+                                      style={{
+                                        backgroundImage:
+                                          'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                              )}
+                            </>
                           )}
                           
                           {/* Completed progress bar */}
