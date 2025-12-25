@@ -21,6 +21,10 @@ const ALLOWED_DOMAINS = [
   'trip.com',
   'hostelworld.com',
   'trivago.com',
+  // Google image CDN domains (used for cached/thumbnail images in search results)
+  'gstatic.com',
+  'googleusercontent.com',
+  'ggpht.com',
 ];
 
 function isAllowedUrl(urlString: string): boolean {
