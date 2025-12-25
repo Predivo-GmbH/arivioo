@@ -15,19 +15,91 @@ interface DeepLinkRequest {
   adults?: number;
   children?: number;
   rooms?: number;
-  skipPriceExtraction?: boolean; // Optional: skip auto price extraction
+  skipPriceExtraction?: boolean;
 }
 
-interface PlatformAdapter {
-  platform_name: string;
-  platform_domain: string;
-  deep_link_template: string;
-  date_format: string;
-  requires_occupancy: boolean;
-  occupancy_params: Record<string, string>;
-  price_selectors: Record<string, string>;
-  is_active: boolean;
+interface UrlParameterRules {
+  checkin_param?: string;
+  checkout_param?: string;
+  adults_param?: string;
+  children_param?: string;
+  rooms_param?: string;
+  date_format?: string;
+  // Special rules for platforms with unique URL structures
+  preserve_params?: string[]; // Parameters to keep from original URL
+  remove_params?: string[];   // Parameters to remove
 }
+
+// Default URL parameter rules per platform
+const DEFAULT_URL_RULES: Record<string, UrlParameterRules> = {
+  'booking.com': {
+    checkin_param: 'checkin',
+    checkout_param: 'checkout',
+    adults_param: 'group_adults',
+    children_param: 'group_children',
+    rooms_param: 'no_rooms',
+    date_format: 'YYYY-MM-DD',
+    preserve_params: ['all_sr_blocks', 'highlighted_blocks', 'matching_block_id', 'sr_pri_blocks', 'srpvid', 'srepoch'],
+  },
+  'expedia.com': {
+    checkin_param: 'chkin',
+    checkout_param: 'chkout',
+    adults_param: 'adults',
+    children_param: 'children',
+    rooms_param: 'rooms',
+    date_format: 'YYYY-MM-DD',
+  },
+  'hotels.com': {
+    checkin_param: 'chkin',
+    checkout_param: 'chkout',
+    adults_param: 'adults',
+    children_param: 'children',
+    rooms_param: 'rooms',
+    date_format: 'YYYY-MM-DD',
+  },
+  'vrbo.com': {
+    checkin_param: 'startDate',
+    checkout_param: 'endDate',
+    adults_param: 'adults',
+    children_param: 'children',
+    date_format: 'YYYY-MM-DD',
+  },
+  'agoda.com': {
+    checkin_param: 'checkIn',
+    checkout_param: 'checkOut',
+    adults_param: 'adults',
+    children_param: 'children',
+    rooms_param: 'rooms',
+    date_format: 'YYYY-MM-DD',
+  },
+  'tripadvisor.com': {
+    checkin_param: 'checkin',
+    checkout_param: 'checkout',
+    adults_param: 'adults',
+    rooms_param: 'rooms',
+    date_format: 'YYYY/MM/DD',
+  },
+  'hostelworld.com': {
+    checkin_param: 'dateFrom',
+    checkout_param: 'dateTo',
+    adults_param: 'guests',
+    date_format: 'YYYY-MM-DD',
+  },
+  'hrs.com': {
+    checkin_param: 'checkinDate',
+    checkout_param: 'checkoutDate',
+    adults_param: 'adults',
+    rooms_param: 'rooms',
+    date_format: 'YYYY-MM-DD',
+  },
+  'holidaycheck.de': {
+    checkin_param: 'checkin',
+    checkout_param: 'checkout',
+    adults_param: 'adults',
+    children_param: 'children',
+    date_format: 'YYYY-MM-DD',
+  },
+};
 
 // Format date according to platform requirements
 function formatDate(dateStr: string, format: string): string {
@@ -45,108 +117,11 @@ function formatDate(dateStr: string, format: string): string {
       return `${year}/${month}/${day}`;
     case 'DD-MM-YYYY':
       return `${day}-${month}-${year}`;
+    case 'DD.MM.YYYY':
+      return `${day}.${month}.${year}`;
     default:
       return `${year}-${month}-${day}`;
   }
-}
-
-// Extract property ID from listing URL based on platform
-function extractPropertyId(url: string, platform: string): string | null {
-  try {
-    const urlObj = new URL(url);
-    const pathname = urlObj.pathname;
-    
-    switch (platform) {
-      case 'booking.com': {
-        // Format: /hotel/country/property-name.html or /hotel/country/property-name.en-gb.html
-        const match = pathname.match(/\/hotel\/[^\/]+\/([^\/\.]+)/);
-        return match ? match[1] : null;
-      }
-      case 'expedia.com': {
-        // Format: /Hotel-Search?destination=xxx or hotel ID in path
-        const hotelMatch = pathname.match(/\.h(\d+)\./);
-        return hotelMatch ? hotelMatch[1] : urlObj.searchParams.get('destination');
-      }
-      case 'hotels.com': {
-        // Format: /hoXXXXXX/
-        const match = pathname.match(/\/ho(\d+)/);
-        return match ? match[1] : null;
-      }
-      case 'vrbo.com': {
-        // Format: /XXXXXX or /unitId/
-        const match = pathname.match(/\/(\d+)/);
-        return match ? match[1] : null;
-      }
-      case 'agoda.com': {
-        // Format: /hotel/city/property-name.html
-        const match = pathname.match(/\/hotel\/[^\/]+\/([^\/\.]+)/);
-        return match ? match[1] : null;
-      }
-      case 'tripadvisor.com': {
-        // Format: /Hotel_Review-gXXX-dXXXXXXX
-        const match = pathname.match(/Hotel_Review-([^-]+-[^-]+)/);
-        return match ? match[1] : null;
-      }
-      case 'hostelworld.com': {
-        // Format: /st/hostels/p/XXXXXX
-        const match = pathname.match(/\/p\/(\d+)/);
-        return match ? match[1] : null;
-      }
-      case 'hrs.com': {
-        // Format: /hotel/xxx/property-id
-        const match = pathname.match(/\/hotel\/[^\/]+\/([^\/]+)/);
-        return match ? match[1] : null;
-      }
-      case 'holidaycheck.de': {
-        // Format: /hi/property-id
-        const match = pathname.match(/\/hi\/([^\/]+)/);
-        return match ? match[1] : null;
-      }
-      default:
-        // For unknown platforms, try to extract any ID-like pattern
-        const genericMatch = pathname.match(/\/(\d{5,})/);
-        return genericMatch ? genericMatch[1] : null;
-    }
-  } catch (e) {
-    console.error(`Error extracting property ID from ${url}:`, e);
-    return null;
-  }
-}
-
-// Build deep link for a platform
-function buildDeepLink(
-  adapter: PlatformAdapter,
-  propertyId: string,
-  checkIn: string,
-  checkOut: string,
-  adults: number,
-  children: number,
-  rooms: number,
-  originalUrl: string
-): string {
-  // If we can't extract a proper property ID, use the original URL with date params appended
-  if (!propertyId) {
-    console.log(`No property ID extracted, using original URL with params: ${originalUrl}`);
-    const urlObj = new URL(originalUrl);
-    urlObj.searchParams.set('checkin', formatDate(checkIn, adapter.date_format));
-    urlObj.searchParams.set('checkout', formatDate(checkOut, adapter.date_format));
-    if (adapter.requires_occupancy) {
-      urlObj.searchParams.set('adults', String(adults));
-      urlObj.searchParams.set('children', String(children));
-      urlObj.searchParams.set('rooms', String(rooms));
-    }
-    return urlObj.toString();
-  }
-
-  let deepLink = adapter.deep_link_template
-    .replace('{property_id}', propertyId)
-    .replace('{checkin}', formatDate(checkIn, adapter.date_format))
-    .replace('{checkout}', formatDate(checkOut, adapter.date_format))
-    .replace('{adults}', String(adults))
-    .replace('{children}', String(children))
-    .replace('{rooms}', String(rooms));
-
-  return deepLink;
 }
 
 // Detect platform from URL
@@ -185,13 +160,76 @@ function detectPlatform(url: string): string | null {
   }
 }
 
-// Background task: Trigger price extraction for all pending extractions
+// NEW: Build deep link by modifying the canonical URL (not from template)
+function buildDeepLinkFromUrl(
+  originalUrl: string,
+  rules: UrlParameterRules,
+  checkIn: string,
+  checkOut: string,
+  adults: number,
+  children: number,
+  rooms: number
+): string {
+  try {
+    const urlObj = new URL(originalUrl);
+    const dateFormat = rules.date_format || 'YYYY-MM-DD';
+
+    // Remove unwanted params if specified
+    if (rules.remove_params) {
+      for (const param of rules.remove_params) {
+        urlObj.searchParams.delete(param);
+      }
+    }
+
+    // Set date parameters
+    if (rules.checkin_param) {
+      urlObj.searchParams.set(rules.checkin_param, formatDate(checkIn, dateFormat));
+    }
+    if (rules.checkout_param) {
+      urlObj.searchParams.set(rules.checkout_param, formatDate(checkOut, dateFormat));
+    }
+
+    // Set occupancy parameters
+    if (rules.adults_param) {
+      urlObj.searchParams.set(rules.adults_param, String(adults));
+    }
+    if (rules.children_param && children > 0) {
+      urlObj.searchParams.set(rules.children_param, String(children));
+    }
+    if (rules.rooms_param) {
+      urlObj.searchParams.set(rules.rooms_param, String(rooms));
+    }
+
+    return urlObj.toString();
+  } catch (e) {
+    console.error(`Error building deep link from URL ${originalUrl}:`, e);
+    return originalUrl;
+  }
+}
+
+// Merge DB rules with defaults
+function mergeRules(dbRules: UrlParameterRules | null, platform: string): UrlParameterRules {
+  const defaults = DEFAULT_URL_RULES[platform] || {
+    checkin_param: 'checkin',
+    checkout_param: 'checkout',
+    adults_param: 'adults',
+    date_format: 'YYYY-MM-DD',
+  };
+
+  if (!dbRules) {
+    return defaults;
+  }
+
+  return { ...defaults, ...dbRules };
+}
+
+// Background task: Trigger price extraction
 async function triggerPriceExtraction(searchId: string): Promise<void> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
   if (!supabaseUrl || !supabaseServiceKey) {
-    console.error('Missing Supabase credentials for price extraction trigger');
+    console.error('Missing credentials for price extraction trigger');
     return;
   }
 
@@ -245,11 +283,10 @@ Deno.serve(async (req) => {
       skipPriceExtraction = false 
     } = await req.json() as DeepLinkRequest;
 
-    console.log(`Generating deep links for search ${searchId}`);
-    console.log(`Dates: ${checkIn} to ${checkOut}, Occupancy: ${adults} adults, ${children} children, ${rooms} rooms`);
-    console.log(`Auto price extraction: ${!skipPriceExtraction}`);
+    console.log(`[DEEP-LINKS] Generating for search ${searchId}`);
+    console.log(`[DEEP-LINKS] Dates: ${checkIn} to ${checkOut}, Occupancy: ${adults}a/${children}c/${rooms}r`);
 
-    // Fetch search results for this search
+    // Fetch search results
     const { data: searchResults, error: searchError } = await supabaseClient
       .from('search_results')
       .select('*')
@@ -266,19 +303,16 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Fetch platform adapters
-    const { data: adapters, error: adaptersError } = await supabaseClient
+    // Fetch platform adapters with new url_parameter_rules
+    const { data: adapters } = await supabaseClient
       .from('platform_adapters')
-      .select('*')
+      .select('platform_name, platform_domain, url_parameter_rules, is_active')
       .eq('is_active', true);
 
-    if (adaptersError) {
-      throw new Error(`Failed to fetch platform adapters: ${adaptersError.message}`);
-    }
-
-    const adapterMap = new Map<string, PlatformAdapter>();
+    const adapterMap = new Map<string, UrlParameterRules>();
     for (const adapter of (adapters || [])) {
-      adapterMap.set(adapter.platform_domain, adapter as PlatformAdapter);
+      const rules = adapter.url_parameter_rules as UrlParameterRules || null;
+      adapterMap.set(adapter.platform_domain, rules);
     }
 
     // Fetch blocked platforms
@@ -288,69 +322,50 @@ Deno.serve(async (req) => {
 
     const blockedDomains = new Set((blockedPlatforms || []).map(p => p.domain));
 
-    // Generate deep links for each search result
+    // Generate deep links using URL modification approach
     const deepLinks: Array<{
       resultId: string;
       platformName: string;
       originalUrl: string;
       deepLink: string;
-      propertyId: string | null;
       occupancyAssumed: boolean;
-      hasAdapter: boolean;
+      hasRules: boolean;
     }> = [];
 
     for (const result of searchResults) {
-      const platformName = detectPlatform(result.listing_url);
+      const platform = detectPlatform(result.listing_url);
       
       // Skip blocked platforms
       if (blockedDomains.has(result.platform_name.toLowerCase())) {
-        console.log(`Skipping blocked platform: ${result.platform_name}`);
+        console.log(`[DEEP-LINKS] Skipping blocked platform: ${result.platform_name}`);
         continue;
       }
 
-      const adapter = platformName ? adapterMap.get(platformName) : null;
-      const propertyId = platformName ? extractPropertyId(result.listing_url, platformName) : null;
+      // Get URL modification rules (from DB or defaults)
+      const dbRules = platform ? (adapterMap.get(platform) ?? null) : null;
+      const rules = mergeRules(dbRules, platform || '');
 
-      let deepLink = result.listing_url;
-      let hasAdapter = false;
-
-      if (adapter) {
-        deepLink = buildDeepLink(
-          adapter,
-          propertyId || '',
-          checkIn,
-          checkOut,
-          adults,
-          children,
-          rooms,
-          result.listing_url
-        );
-        hasAdapter = true;
-      } else {
-        // For unknown platforms, try to append dates as query params
-        try {
-          const urlObj = new URL(result.listing_url);
-          urlObj.searchParams.set('checkin', checkIn);
-          urlObj.searchParams.set('checkout', checkOut);
-          urlObj.searchParams.set('adults', String(adults));
-          deepLink = urlObj.toString();
-        } catch (e) {
-          // Keep original URL if parsing fails
-          deepLink = result.listing_url;
-        }
-      }
+      // Build deep link by modifying the original URL
+      const deepLink = buildDeepLinkFromUrl(
+        result.listing_url,
+        rules,
+        checkIn,
+        checkOut,
+        adults,
+        children,
+        rooms
+      );
 
       deepLinks.push({
         resultId: result.id,
         platformName: result.platform_name,
         originalUrl: result.listing_url,
         deepLink,
-        propertyId,
         occupancyAssumed: true,
-        hasAdapter,
+        hasRules: !!platform,
       });
 
-      // Create or update price extraction record with 'pending' status
+      // Create/update price extraction record
       await supabaseClient
         .from('price_extractions')
         .upsert({
@@ -368,18 +383,15 @@ Deno.serve(async (req) => {
         });
     }
 
-    console.log(`Generated ${deepLinks.length} deep links`);
+    console.log(`[DEEP-LINKS] Generated ${deepLinks.length} deep links`);
 
-    // AUTOMATIC PRICE EXTRACTION: Run in background without blocking response
-    // This ensures price extraction happens automatically after deep links are created
+    // Automatic price extraction (runs in background)
     if (!skipPriceExtraction && deepLinks.length > 0) {
-      console.log(`Scheduling automatic price extraction for ${deepLinks.length} results`);
+      console.log(`[DEEP-LINKS] Scheduling automatic price extraction`);
       
-      // Use EdgeRuntime.waitUntil if available, otherwise fire-and-forget
       if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {
         EdgeRuntime.waitUntil(triggerPriceExtraction(searchId));
       } else {
-        // Fallback: trigger without waiting (fire and forget)
         triggerPriceExtraction(searchId).catch(err => 
           console.error('Background price extraction error:', err)
         );
@@ -391,15 +403,15 @@ Deno.serve(async (req) => {
         success: true,
         deepLinks,
         totalResults: searchResults.length,
-        withAdapters: deepLinks.filter(d => d.hasAdapter).length,
-        unknownPlatforms: deepLinks.filter(d => !d.hasAdapter).map(d => d.platformName),
+        withRules: deepLinks.filter(d => d.hasRules).length,
+        unknownPlatforms: deepLinks.filter(d => !d.hasRules).map(d => d.platformName),
         priceExtractionQueued: !skipPriceExtraction && deepLinks.length > 0,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
   } catch (error) {
-    console.error('Error generating deep links:', error);
+    console.error('[DEEP-LINKS] Error:', error);
     return new Response(
       JSON.stringify({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

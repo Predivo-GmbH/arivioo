@@ -82,9 +82,11 @@ export type Database = {
           created_at: string
           date_format: string
           deep_link_template: string
+          extraction_schema_overrides: Json | null
           id: string
           is_active: boolean
           is_ai_generated: boolean
+          navigation_hints: Json | null
           occupancy_params: Json | null
           platform_domain: string
           platform_name: string
@@ -92,15 +94,18 @@ export type Database = {
           reliability_score: number | null
           requires_occupancy: boolean
           updated_at: string
+          url_parameter_rules: Json | null
           validation_rules: Json | null
         }
         Insert: {
           created_at?: string
           date_format?: string
           deep_link_template: string
+          extraction_schema_overrides?: Json | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          navigation_hints?: Json | null
           occupancy_params?: Json | null
           platform_domain: string
           platform_name: string
@@ -108,15 +113,18 @@ export type Database = {
           reliability_score?: number | null
           requires_occupancy?: boolean
           updated_at?: string
+          url_parameter_rules?: Json | null
           validation_rules?: Json | null
         }
         Update: {
           created_at?: string
           date_format?: string
           deep_link_template?: string
+          extraction_schema_overrides?: Json | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          navigation_hints?: Json | null
           occupancy_params?: Json | null
           platform_domain?: string
           platform_name?: string
@@ -124,6 +132,7 @@ export type Database = {
           reliability_score?: number | null
           requires_occupancy?: boolean
           updated_at?: string
+          url_parameter_rules?: Json | null
           validation_rules?: Json | null
         }
         Relationships: []
@@ -133,18 +142,24 @@ export type Database = {
           assumed_adults: number | null
           assumed_children: number | null
           assumed_rooms: number | null
+          confidence_score: number | null
           created_at: string
           currency: string | null
           deep_link: string
+          evidence_snippets: Json | null
           extracted_price: number | null
           extraction_error: string | null
           extraction_metadata: Json | null
+          extraction_stage: string | null
           extraction_status: string
+          final_resolved_url: string | null
           id: string
           includes_taxes_fees: boolean | null
           occupancy_assumed: boolean | null
+          page_content_hash: string | null
           platform_name: string
           price_type: string
+          provider_used: string | null
           search_id: string | null
           search_result_id: string | null
           updated_at: string
@@ -153,18 +168,24 @@ export type Database = {
           assumed_adults?: number | null
           assumed_children?: number | null
           assumed_rooms?: number | null
+          confidence_score?: number | null
           created_at?: string
           currency?: string | null
           deep_link: string
+          evidence_snippets?: Json | null
           extracted_price?: number | null
           extraction_error?: string | null
           extraction_metadata?: Json | null
+          extraction_stage?: string | null
           extraction_status?: string
+          final_resolved_url?: string | null
           id?: string
           includes_taxes_fees?: boolean | null
           occupancy_assumed?: boolean | null
+          page_content_hash?: string | null
           platform_name: string
           price_type?: string
+          provider_used?: string | null
           search_id?: string | null
           search_result_id?: string | null
           updated_at?: string
@@ -173,18 +194,24 @@ export type Database = {
           assumed_adults?: number | null
           assumed_children?: number | null
           assumed_rooms?: number | null
+          confidence_score?: number | null
           created_at?: string
           currency?: string | null
           deep_link?: string
+          evidence_snippets?: Json | null
           extracted_price?: number | null
           extraction_error?: string | null
           extraction_metadata?: Json | null
+          extraction_stage?: string | null
           extraction_status?: string
+          final_resolved_url?: string | null
           id?: string
           includes_taxes_fees?: boolean | null
           occupancy_assumed?: boolean | null
+          page_content_hash?: string | null
           platform_name?: string
           price_type?: string
+          provider_used?: string | null
           search_id?: string | null
           search_result_id?: string | null
           updated_at?: string
