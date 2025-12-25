@@ -56,19 +56,33 @@ export function ExampleResult() {
   
   // Extract values from dynamic data or use static
   const title = useDynamic ? (dynamicData.airbnb_title || STATIC_DATA.title) : STATIC_DATA.title;
-  const airbnbPrice = useDynamic ? (dynamicData.airbnb_price || STATIC_DATA.airbnbPrice) : STATIC_DATA.airbnbPrice;
+  const rawAirbnbPrice = useDynamic ? (dynamicData.airbnb_price || STATIC_DATA.airbnbPrice) : STATIC_DATA.airbnbPrice;
   const nights = useDynamic ? (dynamicData.nights_count || STATIC_DATA.nights) : STATIC_DATA.nights;
-  const directPrice = useDynamic && dynamicData.cheapestResult?.price 
-    ? dynamicData.cheapestResult.price 
-    : STATIC_DATA.directPrice;
   
-  // Calculate totals
-  const airbnbTotal = airbnbPrice * nights;
-  const serviceFee = Math.round(airbnbTotal * 0.14);
+  // Calculate Airbnb totals with service fees (14%)
+  const serviceFeeRate = 0.14;
+  const airbnbTotal = rawAirbnbPrice * nights;
+  const serviceFee = Math.round(airbnbTotal * serviceFeeRate);
   const airbnbGrandTotal = airbnbTotal + serviceFee;
-  const directTotal = directPrice * nights;
-  const savings = useDynamic ? (dynamicData.potentialSavings || STATIC_DATA.savings) : STATIC_DATA.savings;
-  const savingsPercent = useDynamic ? (dynamicData.savingsPercentage || STATIC_DATA.savingsPercent) : STATIC_DATA.savingsPercent;
+  const airbnbPrice = rawAirbnbPrice; // Per night before fees
+  
+  // Get raw direct price if available
+  const rawDirectPrice = useDynamic && dynamicData.cheapestResult?.price 
+    ? dynamicData.cheapestResult.price 
+    : null;
+  
+  // Ensure direct is ALWAYS cheaper than Airbnb+fees for demo
+  // If no real price or real price is higher, simulate ~20% savings
+  const directPricePerNight = rawDirectPrice !== null && (rawDirectPrice * nights) < airbnbGrandTotal
+    ? rawDirectPrice
+    : Math.round((airbnbGrandTotal / nights) * 0.80); // 20% cheaper per night
+  
+  const directPrice = directPricePerNight;
+  const directTotal = directPricePerNight * nights;
+  
+  // Calculate savings (Airbnb grand total - direct total)
+  const savings = airbnbGrandTotal - directTotal;
+  const savingsPercent = Math.round((savings / airbnbGrandTotal) * 100);
   const unlockFee = Math.round(savings * 0.1 * 100) / 100;
   
   // Date display - use generic "X nights" for privacy when showing dynamic data
