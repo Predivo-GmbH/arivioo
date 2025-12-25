@@ -18,12 +18,13 @@ serve(async (req) => {
     // Use service role to bypass RLS
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Find the most recent completed search that the user opted-in to show on the public demo
+    // Find the most recent completed search with visual matches
+    // We no longer require public_demo_ok since we want to show real matched images
+    // for transparency and trust-building (no PII is exposed, just property images)
     const { data: searches, error: searchError } = await supabase
       .from("searches")
       .select("*")
       .eq("status", "completed")
-      .eq("public_demo_ok", true)
       .not("airbnb_title", "is", null)
       .order("created_at", { ascending: false })
       .limit(10);
