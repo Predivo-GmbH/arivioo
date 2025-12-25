@@ -21,6 +21,8 @@ interface SuccessfulSearch {
   cheapestResult: SearchResult | null;
   potentialSavings: number | null;
   savingsPercentage: number | null;
+  /** True if savings are simulated for marketing/demo purposes (real image pair, but no live price data) */
+  savingsSimulated?: boolean;
 }
 
 type UseLastSuccessfulSearchOptions = {

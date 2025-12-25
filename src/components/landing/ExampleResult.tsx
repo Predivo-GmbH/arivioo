@@ -51,6 +51,9 @@ export function ExampleResult() {
   // Use dynamic data if available, otherwise static
   const useDynamic = !loading && dynamicData !== null;
   
+  // Check if savings are simulated (for demo/marketing purposes)
+  const savingsSimulated = useDynamic ? (dynamicData.savingsSimulated ?? false) : false;
+  
   // Extract values from dynamic data or use static
   const title = useDynamic ? (dynamicData.airbnb_title || STATIC_DATA.title) : STATIC_DATA.title;
   const airbnbPrice = useDynamic ? (dynamicData.airbnb_price || STATIC_DATA.airbnbPrice) : STATIC_DATA.airbnbPrice;
@@ -148,7 +151,11 @@ export function ExampleResult() {
             See the Savings in Action
           </h2>
           <p className="text-base sm:text-lg text-muted-foreground">
-            {useDynamic ? "A real comparison from a recent search" : "Here's what a typical Arivioo comparison looks like"}
+            {useDynamic 
+              ? (savingsSimulated 
+                  ? "A real verified match from a recent search — example savings shown" 
+                  : "A real comparison from a recent search")
+              : "Here's what a typical Arivioo comparison looks like"}
           </p>
         </div>
 
@@ -380,7 +387,9 @@ export function ExampleResult() {
 
               {/* Savings Summary */}
               <div className="border-2 border-success/30 bg-success/5 rounded-xl sm:rounded-2xl p-4 sm:p-8 text-center">
-                <p className="text-muted-foreground mb-2 sm:mb-3 text-base sm:text-lg">Your potential savings by booking direct</p>
+                <p className="text-muted-foreground mb-2 sm:mb-3 text-base sm:text-lg">
+                  {savingsSimulated ? "Typical savings by booking direct" : "Your potential savings by booking direct"}
+                </p>
                 <div className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-3 mb-2 sm:mb-3">
                   <p className="text-3xl sm:text-5xl font-bold text-success">${savings}</p>
                   <span className="text-success text-lg sm:text-xl font-semibold">({savingsPercent}% off)</span>
@@ -388,9 +397,16 @@ export function ExampleResult() {
                 <p className="text-sm sm:text-base text-muted-foreground mb-3 sm:mb-4">
                   Same property, same dates — just without the platform fees
                 </p>
-                <p className="text-xs sm:text-sm text-muted-foreground">
-                  <strong>Unlock fee:</strong> ${unlockFee.toFixed(2)} (10% of your savings) — Only pay when you save
-                </p>
+                {savingsSimulated ? (
+                  <p className="text-xs sm:text-sm text-muted-foreground italic">
+                    <Sparkles className="w-3 h-3 inline mr-1" />
+                    Example savings shown — actual savings vary by listing
+                  </p>
+                ) : (
+                  <p className="text-xs sm:text-sm text-muted-foreground">
+                    <strong>Unlock fee:</strong> ${unlockFee.toFixed(2)} (10% of your savings) — Only pay when you save
+                  </p>
+                )}
               </div>
 
               {/* Info note */}

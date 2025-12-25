@@ -38,6 +38,9 @@ export function Hero() {
 
   // Use dynamic data if available
   const useDynamic = !loading && dynamicData !== null;
+  
+  // Check if savings are simulated
+  const savingsSimulated = useDynamic ? (dynamicData.savingsSimulated ?? false) : false;
 
   // Extract values
   const title = useDynamic ? (dynamicData.airbnb_title || STATIC_DATA.title) : STATIC_DATA.title;
@@ -222,11 +225,16 @@ export function Hero() {
                 </div>
 
                 {/* Savings Badge */}
-                <div className="mt-6 flex justify-center">
+                <div className="mt-6 flex flex-col items-center gap-2">
                   <div className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-success text-success-foreground rounded-full font-bold text-lg">
                     <Sparkles className="w-5 h-5" />
                     Save ${savings} per night!
                   </div>
+                  {savingsSimulated && (
+                    <p className="text-xs text-muted-foreground">
+                      Example savings — actual results vary by listing
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
