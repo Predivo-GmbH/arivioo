@@ -531,7 +531,7 @@ Deno.serve(async (req) => {
     }
 
     // NOTIFY ME - OVERVIEW STATS
-    if (action === 'notify-me-stats' && req.method === 'GET') {
+    if (action === 'notify-me-stats' && (req.method === 'GET' || req.method === 'POST')) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const sevenDaysAgo = new Date(today);
@@ -658,7 +658,7 @@ Deno.serve(async (req) => {
     }
 
     // NOTIFY ME - LIST REGISTRATIONS
-    if (action === 'notify-me-list' && req.method === 'GET') {
+    if (action === 'notify-me-list' && (req.method === 'GET' || req.method === 'POST')) {
       const params = url.searchParams;
       const status = params.get('status');
       const startDate = params.get('startDate');
@@ -740,7 +740,7 @@ Deno.serve(async (req) => {
     }
 
     // NOTIFY ME - GET SINGLE REGISTRATION DETAIL
-    if (action === 'notify-me-detail' && req.method === 'GET') {
+    if (action === 'notify-me-detail' && (req.method === 'GET' || req.method === 'POST')) {
       const params = url.searchParams;
       const id = params.get('id');
 
@@ -924,7 +924,7 @@ Deno.serve(async (req) => {
     }
 
     // NOTIFY ME - QUOTA ATTRIBUTION
-    if (action === 'notify-me-quota' && req.method === 'GET') {
+    if (action === 'notify-me-quota' && (req.method === 'GET' || req.method === 'POST')) {
       const params = url.searchParams;
       const days = parseInt(params.get('days') || '30');
       const startDate = new Date();
@@ -997,7 +997,7 @@ Deno.serve(async (req) => {
     }
 
     // NOTIFY ME - NOTIFICATION HEALTH
-    if (action === 'notify-me-health' && req.method === 'GET') {
+    if (action === 'notify-me-health' && (req.method === 'GET' || req.method === 'POST')) {
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
