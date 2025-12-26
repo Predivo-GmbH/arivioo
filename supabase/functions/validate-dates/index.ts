@@ -357,9 +357,9 @@ async function validateWithZyte(
         url,
         browserHtml: true,
         javascript: true,
-        // Simple wait for page load
+        // Wait for page load - Zyte timeout is in seconds, max 15
         actions: [
-          { action: 'waitForTimeout', timeout: 5000 }
+          { action: 'waitForTimeout', timeout: 5 }
         ],
       }),
     });
