@@ -35,6 +35,7 @@ const navItems = [
   { title: 'Health Overview', url: '/admin', icon: LayoutDashboard },
   { title: 'Pipeline Status', url: '/admin/pipeline', icon: Activity },
   { title: 'Extractions', url: '/admin/extractions', icon: Database },
+  { title: 'Users & Notify Me', url: '/admin/notify-me', icon: User },
   { title: 'Platform Adapters', url: '/admin/adapters', icon: Settings },
   { title: 'Blocked Platforms', url: '/admin/blocked', icon: ShieldOff },
   { title: 'API Quotas', url: '/admin/quotas', icon: Gauge },
