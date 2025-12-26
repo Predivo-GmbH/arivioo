@@ -154,24 +154,45 @@ async function extractWithFirecrawl(
   try {
     console.log(`[FIRECRAWL] Scraping ${url} for ${platformName}`);
     
-    // Step A: Firecrawl scrape with JSON extraction
-    const scrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url,
-        formats: ['markdown', 'extract'],
-        extract: {
-          schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
-          prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
+    // Add timeout to Firecrawl request (25s) to allow time for Zyte fallback
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    
+    let scrapeResponse: Response;
+    try {
+      // Step A: Firecrawl scrape with JSON extraction
+      scrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${firecrawlApiKey}`,
+          'Content-Type': 'application/json',
         },
-        onlyMainContent: true,
-        waitFor: 3000,
-      }),
-    });
+        body: JSON.stringify({
+          url,
+          formats: ['markdown', 'extract'],
+          extract: {
+            schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
+            prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
+          },
+          onlyMainContent: true,
+          waitFor: 3000,
+        }),
+        signal: controller.signal,
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      const errorMsg = fetchError instanceof Error ? fetchError.message : 'Unknown error';
+      console.error(`[FIRECRAWL] Fetch error: ${errorMsg}`);
+      // Return render_failed to trigger Zyte fallback
+      return { 
+        success: false, 
+        status: 'render_failed', 
+        error: errorMsg.includes('aborted') ? 'Firecrawl timeout (25s)' : `Firecrawl fetch error: ${errorMsg}`,
+        provider: 'firecrawl'
+      };
+    }
+    
+    clearTimeout(timeoutId);
 
     if (!scrapeResponse.ok) {
       const errorText = await scrapeResponse.text();
@@ -582,7 +603,8 @@ async function extractPrice(
   }
 
   // Step 2: If Firecrawl fails with retryable status, try Zyte
-  const retryableStatuses: ExtractionStatus[] = ['price_not_found_after_dates_applied', 'dates_not_applied', 'render_failed'];
+  // Include failed_unknown and render_failed (500 errors, timeouts) in retryable statuses
+  const retryableStatuses: ExtractionStatus[] = ['price_not_found_after_dates_applied', 'dates_not_applied', 'render_failed', 'failed_unknown'];
   
   if (retryableStatuses.includes(firecrawlResult.status)) {
     console.log(`[EXTRACT] Firecrawl failed with ${firecrawlResult.status}, trying Zyte fallback`);
