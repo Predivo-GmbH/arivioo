@@ -133,7 +133,7 @@ async function validateWithFirecrawl(
   useNavigation: boolean,
   navigationHints: string[]
 ): Promise<ValidationResult> {
-  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY') || Deno.env.get('FIRECRAWL_API_KEY_1');
+  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
   
   if (!firecrawlApiKey) {
     console.log('[VALIDATE-DATES] Firecrawl API key not configured');

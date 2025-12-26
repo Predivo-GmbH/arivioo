@@ -181,7 +181,7 @@ Return ONLY valid JSON, no markdown or explanation.`;
 
 // Fetch page content using Firecrawl (primary) with fallback to simple fetch
 async function fetchPageContent(url: string): Promise<{ markdown: string; links: string[] }> {
-  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY') || Deno.env.get('FIRECRAWL_API_KEY_1');
+  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
   
   if (firecrawlApiKey) {
     try {
