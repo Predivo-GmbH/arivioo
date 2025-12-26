@@ -245,6 +245,7 @@ interface SearchResult {
 }
 
 // Use Lovable AI to compare two images and return similarity score (0-100)
+// STRICT COMPARISON: Prefers false negatives over false positives
 async function compareImagesWithAI(
   airbnbImageUrl: string, 
   alternativeImageUrl: string
@@ -256,35 +257,52 @@ async function compareImagesWithAI(
   }
   
   try {
-    const prompt = `You are an expert at comparing property photos to determine if they show the SAME physical property (room, house, apartment).
+    // Enhanced prompt with strict, evidence-driven comparison
+    const prompt = `You are a strict forensic image analyst. Your task is to determine whether these two property photos show the EXACT SAME real-world property (same apartment, room, house, building).
 
-Compare these two property images and determine if they show the SAME property:
+CRITICAL RULES - BE CONSERVATIVE:
+1. High trust scores (90%+) are RARE and require STRONG evidence
+2. It is BETTER to rate a match too LOW than to incorrectly confirm different properties as the same
+3. If you have ANY doubt, reduce the score significantly
+4. Similar-looking properties are NOT the same property
 
-Image 1 (Airbnb): ${airbnbImageUrl}
+FOCUS ON FIXED/PERMANENT FEATURES (these rarely change):
+- Room geometry: exact wall angles, ceiling height, room shape
+- Window placement: exact position, size, shape, number
+- Door placement and type
+- Architectural details: columns, beams, moldings, built-in shelving
+- Kitchen layout: counter shape, cabinet arrangement, appliance positions
+- Bathroom fixtures: exact toilet/sink/tub positions
+- Flooring pattern and type
+- View from windows (if visible)
+
+DO NOT rely heavily on:
+- Colors (can be edited, lighting changes)
+- Lighting conditions (photos at different times)
+- Movable furniture (beds, chairs, tables, decorations)
+- Plants, artwork, curtains, rugs (easily changed)
+- Photo angle alone (similar angles don't prove same property)
+
+STRUCTURAL DIFFERENCES = NOT THE SAME:
+If you see ANY structural difference (different window positions, different room shape, different ceiling, different floor plan), the score MUST be below 70%.
+
+SCORING GUIDELINES:
+- 95-100%: Absolutely certain - identical structural features, unmistakable match
+- 90-94%: Very confident - same structure, minor angle/lighting differences
+- 70-89%: Uncertain - similar but not confirmed (DO NOT mark as match)
+- 40-69%: Unlikely - some similarities but notable differences
+- 0-39%: Different properties
+
+Compare these images:
+Image 1 (Source/Airbnb): ${airbnbImageUrl}
 Image 2 (Alternative): ${alternativeImageUrl}
 
-Analyze:
-1. Room layout and structure (walls, windows, doors, ceiling height)
-2. Furniture placement and style (beds, sofas, tables, chairs)
-3. Distinctive features (fireplaces, artwork, light fixtures, architectural details)
-4. View from windows (if visible)
-5. Floor type and pattern
-6. Color scheme and decor elements
+Analyze the STRUCTURAL features carefully. List specific evidence for or against a match.
 
-IMPORTANT RULES:
-- Focus on STRUCTURAL elements that don't change (layout, windows, built-in features)
-- Furniture position may vary slightly between photos
-- Lighting and angle may differ
-- Ignore watermarks, logos, or text overlays
-- Return a CONSERVATIVE score - only high scores if you're certain it's the same place
+Return ONLY valid JSON in this format:
+{"score": NUMBER_0_TO_100, "isMatch": BOOLEAN, "explanation": "Evidence-based reason citing specific structural features"}
 
-Return a JSON response ONLY in this exact format:
-{"score": NUMBER_0_TO_100, "isMatch": BOOLEAN, "explanation": "Brief reason"}
-
-Where:
-- score: 0-100 (100 = definitely same property, 0 = definitely different)
-- isMatch: true only if score >= 90
-- explanation: 1-2 sentence reason for your assessment`;
+isMatch must be true ONLY if score >= 90 AND you have strong structural evidence.`;
 
     const response = await fetchWithTimeout(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
@@ -306,10 +324,10 @@ Where:
               ],
             },
           ],
-          max_tokens: 200,
+          max_tokens: 300,
         }),
       },
-      12_000
+      15_000
     );
     
     if (!response.ok) {
@@ -331,10 +349,20 @@ Where:
       const jsonMatch = resultText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        const score = Number(parsed.score) || 0;
+        let score = Number(parsed.score) || 0;
+        score = Math.min(100, Math.max(0, score));
+        
+        // Extra conservative check: only mark as match if BOTH score >= 90 AND AI explicitly said isMatch
+        const aiSaidMatch = parsed.isMatch === true;
+        const scoreIsHigh = score >= 90;
+        const isMatch = aiSaidMatch && scoreIsHigh;
+        
+        // Log comparison result for debugging
+        console.log(`AI comparison: score=${score}, aiSaidMatch=${aiSaidMatch}, final isMatch=${isMatch}`);
+        
         return {
-          score: Math.min(100, Math.max(0, score)),
-          isMatch: score >= 90,
+          score,
+          isMatch,
           explanation: parsed.explanation || "No explanation provided"
         };
       }
