@@ -11,6 +11,17 @@ import Pricing from "./pages/Pricing";
 import UnlockDeal from "./pages/UnlockDeal";
 import NotFound from "./pages/NotFound";
 
+// Admin pages
+import AdminLogin from "./pages/AdminLogin";
+import AdminLayout from "./components/admin/AdminLayout";
+import HealthOverview from "./pages/admin/HealthOverview";
+import Pipeline from "./pages/admin/Pipeline";
+import Extractions from "./pages/admin/Extractions";
+import Adapters from "./pages/admin/Adapters";
+import BlockedPlatforms from "./pages/admin/BlockedPlatforms";
+import Quotas from "./pages/admin/Quotas";
+import AuditLogs from "./pages/admin/AuditLogs";
+
 const queryClient = new QueryClient();
 
 const App = () => (
@@ -26,6 +37,19 @@ const App = () => (
           <Route path="/search/:searchId" element={<SearchResults />} />
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/unlock" element={<UnlockDeal />} />
+          
+          {/* Admin routes */}
+          <Route path="/admin/login" element={<AdminLogin />} />
+          <Route path="/admin" element={<AdminLayout />}>
+            <Route index element={<HealthOverview />} />
+            <Route path="pipeline" element={<Pipeline />} />
+            <Route path="extractions" element={<Extractions />} />
+            <Route path="adapters" element={<Adapters />} />
+            <Route path="blocked" element={<BlockedPlatforms />} />
+            <Route path="quotas" element={<Quotas />} />
+            <Route path="audit" element={<AuditLogs />} />
+          </Route>
+          
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
