@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Navbar } from "@/components/landing/Navbar";
 import { Hero } from "@/components/landing/Hero";
 import { HowItWorks } from "@/components/landing/HowItWorks";
@@ -9,10 +10,15 @@ import { Trust } from "@/components/landing/Trust";
 import { FAQ } from "@/components/landing/FAQ";
 import { FinalCTA } from "@/components/landing/FinalCTA";
 import { Footer } from "@/components/landing/Footer";
-// UnderConstructionModal is preserved for future use - just import and use when needed:
-// import { UnderConstructionModal } from "@/components/UnderConstructionModal";
+import { UnderConstructionModal } from "@/components/UnderConstructionModal";
 
 const Index = () => {
+  const [accessGranted, setAccessGranted] = useState(false);
+
+  if (!accessGranted) {
+    return <UnderConstructionModal onAccessGranted={() => setAccessGranted(true)} />;
+  }
+
   return (
     <div className="min-h-screen">
       <Navbar />
