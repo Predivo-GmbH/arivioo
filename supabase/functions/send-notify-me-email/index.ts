@@ -94,59 +94,10 @@ const handler = async (req: Request): Promise<Response> => {
 
     console.log("[NOTIFY-ME-EMAIL] Admin notification sent:", adminEmailResponse);
 
-    // Send confirmation to user
-    const userEmailResponse = await resend.emails.send({
-      from: "Arivioo <noreply@updates.arivioo.com>",
-      to: [email],
-      subject: "You're on the list! 🎉",
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="utf-8">
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; border-radius: 10px 10px 0 0; text-align: center; }
-            .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; }
-            .highlight { background: white; padding: 25px; border-radius: 8px; margin: 20px 0; text-align: center; }
-            .footer { text-align: center; margin-top: 20px; color: #6b7280; font-size: 14px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1 style="margin: 0; font-size: 28px;">You're In!</h1>
-              <p style="margin: 15px 0 0 0; opacity: 0.9; font-size: 16px;">We'll notify you when we find better prices</p>
-            </div>
-            <div class="content">
-              <div class="highlight">
-                <p style="font-size: 18px; margin: 0;">Thanks for signing up! We're scanning multiple booking platforms to find you the best deals.</p>
-              </div>
-              <p>Here's what happens next:</p>
-              <ul>
-                <li>We continuously monitor prices across Booking.com, Vrbo, and direct booking sites</li>
-                <li>When we find a better price for your property, we'll email you immediately</li>
-                <li>You'll get a direct link to book at the lower price</li>
-              </ul>
-              <div class="footer">
-                <p>Happy travels! 🌍</p>
-                <p style="font-size: 12px; color: #9ca3af;">The Arivioo Team</p>
-              </div>
-            </div>
-          </div>
-        </body>
-        </html>
-      `,
-    });
-
-    console.log("[NOTIFY-ME-EMAIL] User confirmation sent:", userEmailResponse);
-
     return new Response(
       JSON.stringify({ 
         success: true, 
-        adminEmail: adminEmailResponse,
-        userEmail: userEmailResponse 
+        adminEmail: adminEmailResponse
       }),
       { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
     );
