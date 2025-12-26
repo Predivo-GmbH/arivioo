@@ -203,14 +203,35 @@ Return the exact dates you see on the page, not the requested dates.`,
       requestBody.actions = buildFirecrawlActions(navigationHints);
     }
 
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    });
+    // Add timeout to Firecrawl request (25s) to allow time for Zyte fallback
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    
+    let response: Response;
+    try {
+      response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${firecrawlApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      const errorMsg = fetchError instanceof Error ? fetchError.message : 'Unknown error';
+      console.error(`[VALIDATE-DATES] Firecrawl fetch error: ${errorMsg}`);
+      // Return render_failed to trigger Zyte fallback
+      return { 
+        success: false, 
+        status: 'render_failed', 
+        strategyUsed: useNavigation ? 'url_then_navigate' : 'url_only', 
+        error: errorMsg.includes('aborted') ? 'Firecrawl timeout (25s)' : `Firecrawl fetch error: ${errorMsg}` 
+      };
+    }
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -341,25 +362,45 @@ async function validateWithZyte(
   try {
     console.log(`[VALIDATE-DATES] Zyte validation for ${url}`);
     
-    // Simple Zyte request - just render the page and extract HTML
-    // Zyte's actions API has strict selector requirements, so we skip complex navigation
-    // and rely on the rendered HTML + AI analysis
-    const response = await fetch('https://api.zyte.com/v1/extract', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${btoa(zyteApiKey + ':')}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url,
-        browserHtml: true,
-        javascript: true,
-        // Wait for page load - Zyte timeout is in seconds, max 15
-        actions: [
-          { action: 'waitForTimeout', timeout: 5 }
-        ],
-      }),
-    });
+    // Add timeout to Zyte request (25s)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    
+    let response: Response;
+    try {
+      // Simple Zyte request - just render the page and extract HTML
+      // Zyte's actions API has strict selector requirements, so we skip complex navigation
+      // and rely on the rendered HTML + AI analysis
+      response = await fetch('https://api.zyte.com/v1/extract', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${btoa(zyteApiKey + ':')}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url,
+          browserHtml: true,
+          javascript: true,
+          // Wait for page load - Zyte timeout is in seconds, max 15
+          actions: [
+            { action: 'waitForTimeout', timeout: 5 }
+          ],
+        }),
+        signal: controller.signal,
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      const errorMsg = fetchError instanceof Error ? fetchError.message : 'Unknown error';
+      console.error(`[VALIDATE-DATES] Zyte fetch error: ${errorMsg}`);
+      return { 
+        success: false, 
+        status: 'render_failed', 
+        strategyUsed: 'navigate_only', 
+        error: errorMsg.includes('aborted') ? 'Zyte timeout (25s)' : `Zyte fetch error: ${errorMsg}` 
+      };
+    }
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -534,8 +575,33 @@ async function validateDates(
     return zyteResult;
   }
   
-  // Return the best error we have
-  return navResult.status !== 'dates_not_applied' ? navResult : zyteResult;
+  // Return the best error - prefer more specific/informative status
+  // Priority: blocked > no_availability > render_failed > dates_not_applied > failed_unknown
+  const statusPriority: Record<string, number> = {
+    'blocked_captcha_or_bot': 5,
+    'blocked_rate_limit': 5,
+    'no_availability_for_dates': 4,
+    'listing_unavailable': 4,
+    'render_failed': 2,
+    'dates_not_applied': 3,
+    'failed_unknown': 1,
+  };
+  
+  const navPriority = statusPriority[navResult.status] || 0;
+  const zytePriority = statusPriority[zyteResult.status] || 0;
+  
+  // Return whichever has higher priority status, or Zyte if equal (it ran later)
+  if (zytePriority >= navPriority) {
+    // Include both errors for debugging
+    return {
+      ...zyteResult,
+      error: `Firecrawl: ${navResult.error || navResult.status}; Zyte: ${zyteResult.error || zyteResult.status}`,
+    };
+  }
+  return {
+    ...navResult,
+    error: `Firecrawl: ${navResult.error || navResult.status}; Zyte: ${zyteResult.error || zyteResult.status}`,
+  };
 }
 
 // Main handler

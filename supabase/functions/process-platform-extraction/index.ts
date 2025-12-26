@@ -52,9 +52,9 @@ interface WorkerResult {
   elapsedMs: number;
 }
 
-// Per-phase timeout (35 seconds for Phase A, 45 seconds for Phase B)
-const PHASE_A_TIMEOUT = 35000;
-const PHASE_B_TIMEOUT = 45000;
+// Per-phase timeout - increased to allow Firecrawl + Zyte fallback
+const PHASE_A_TIMEOUT = 60000;  // 60s for Phase A (Firecrawl ~25s + Zyte ~25s + buffer)
+const PHASE_B_TIMEOUT = 60000;  // 60s for Phase B
 
 // Call validate-dates with timeout
 async function runPhaseA(
