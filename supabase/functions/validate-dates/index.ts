@@ -344,21 +344,9 @@ async function validateWithZyte(
   try {
     console.log(`[VALIDATE-DATES] Zyte validation for ${url}`);
     
-    // Build browser actions for navigation
-    const browserActions = [
-      { action: 'waitForTimeout', timeout: 3000 },
-    ];
-    
-    // Add click actions for navigation hints
-    for (const hint of navigationHints.slice(0, 2)) {
-      browserActions.push({
-        action: 'click',
-        selector: { type: 'text', value: hint },
-        onError: 'ignore',
-      } as any);
-      browserActions.push({ action: 'waitForTimeout', timeout: 2000 } as any);
-    }
-
+    // Simple Zyte request - just render the page and extract HTML
+    // Zyte's actions API has strict selector requirements, so we skip complex navigation
+    // and rely on the rendered HTML + AI analysis
     const response = await fetch('https://api.zyte.com/v1/extract', {
       method: 'POST',
       headers: {
@@ -369,7 +357,10 @@ async function validateWithZyte(
         url,
         browserHtml: true,
         javascript: true,
-        actions: browserActions,
+        // Simple wait for page load
+        actions: [
+          { action: 'waitForTimeout', timeout: 5000 }
+        ],
       }),
     });
 
