@@ -38,6 +38,309 @@ export type Database = {
         }
         Relationships: []
       }
+      admin_audit_logs: {
+        Row: {
+          action: string
+          admin_email: string
+          admin_user_id: string | null
+          created_at: string
+          id: string
+          ip_address: string | null
+          new_values: Json | null
+          old_values: Json | null
+          resource_id: string | null
+          resource_type: string
+          user_agent: string | null
+        }
+        Insert: {
+          action: string
+          admin_email: string
+          admin_user_id?: string | null
+          created_at?: string
+          id?: string
+          ip_address?: string | null
+          new_values?: Json | null
+          old_values?: Json | null
+          resource_id?: string | null
+          resource_type: string
+          user_agent?: string | null
+        }
+        Update: {
+          action?: string
+          admin_email?: string
+          admin_user_id?: string | null
+          created_at?: string
+          id?: string
+          ip_address?: string | null
+          new_values?: Json | null
+          old_values?: Json | null
+          resource_id?: string | null
+          resource_type?: string
+          user_agent?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "admin_audit_logs_admin_user_id_fkey"
+            columns: ["admin_user_id"]
+            isOneToOne: false
+            referencedRelation: "admin_users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      admin_sessions: {
+        Row: {
+          admin_user_id: string
+          created_at: string
+          expires_at: string
+          id: string
+          ip_address: string | null
+          session_token: string
+          user_agent: string | null
+        }
+        Insert: {
+          admin_user_id: string
+          created_at?: string
+          expires_at: string
+          id?: string
+          ip_address?: string | null
+          session_token: string
+          user_agent?: string | null
+        }
+        Update: {
+          admin_user_id?: string
+          created_at?: string
+          expires_at?: string
+          id?: string
+          ip_address?: string | null
+          session_token?: string
+          user_agent?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "admin_sessions_admin_user_id_fkey"
+            columns: ["admin_user_id"]
+            isOneToOne: false
+            referencedRelation: "admin_users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      admin_users: {
+        Row: {
+          created_at: string
+          email: string
+          failed_login_attempts: number
+          full_name: string | null
+          id: string
+          is_active: boolean
+          last_login_at: string | null
+          locked_until: string | null
+          password_hash: string
+          role: Database["public"]["Enums"]["admin_role"]
+          two_factor_enabled: boolean
+          two_factor_secret: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+          failed_login_attempts?: number
+          full_name?: string | null
+          id?: string
+          is_active?: boolean
+          last_login_at?: string | null
+          locked_until?: string | null
+          password_hash: string
+          role?: Database["public"]["Enums"]["admin_role"]
+          two_factor_enabled?: boolean
+          two_factor_secret?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
+          failed_login_attempts?: number
+          full_name?: string | null
+          id?: string
+          is_active?: boolean
+          last_login_at?: string | null
+          locked_until?: string | null
+          password_hash?: string
+          role?: Database["public"]["Enums"]["admin_role"]
+          two_factor_enabled?: boolean
+          two_factor_secret?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      api_providers: {
+        Row: {
+          auth_secret_name: string
+          base_url: string | null
+          cost_per_request: number | null
+          created_at: string
+          display_name: string
+          id: string
+          is_active: boolean
+          name: string
+          plan_limit: number | null
+          plan_type: string | null
+          quota_api_endpoint: string | null
+          quota_api_method: string | null
+          supports_quota_api: boolean
+          updated_at: string
+        }
+        Insert: {
+          auth_secret_name: string
+          base_url?: string | null
+          cost_per_request?: number | null
+          created_at?: string
+          display_name: string
+          id?: string
+          is_active?: boolean
+          name: string
+          plan_limit?: number | null
+          plan_type?: string | null
+          quota_api_endpoint?: string | null
+          quota_api_method?: string | null
+          supports_quota_api?: boolean
+          updated_at?: string
+        }
+        Update: {
+          auth_secret_name?: string
+          base_url?: string | null
+          cost_per_request?: number | null
+          created_at?: string
+          display_name?: string
+          id?: string
+          is_active?: boolean
+          name?: string
+          plan_limit?: number | null
+          plan_type?: string | null
+          quota_api_endpoint?: string | null
+          quota_api_method?: string | null
+          supports_quota_api?: boolean
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      api_quota_snapshots: {
+        Row: {
+          created_at: string
+          id: string
+          is_estimated: boolean
+          plan_limit: number | null
+          provider_id: string
+          raw_response: Json | null
+          remaining: number | null
+          reset_at: string | null
+          used: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_estimated?: boolean
+          plan_limit?: number | null
+          provider_id: string
+          raw_response?: Json | null
+          remaining?: number | null
+          reset_at?: string | null
+          used?: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_estimated?: boolean
+          plan_limit?: number | null
+          provider_id?: string
+          raw_response?: Json | null
+          remaining?: number | null
+          reset_at?: string | null
+          used?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_quota_snapshots_provider_id_fkey"
+            columns: ["provider_id"]
+            isOneToOne: false
+            referencedRelation: "api_providers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      api_request_logs: {
+        Row: {
+          correlation_id: string | null
+          cost_units: number | null
+          created_at: string
+          duration_ms: number | null
+          endpoint_type: string
+          error_message: string | null
+          extraction_id: string | null
+          failure_category: string | null
+          id: string
+          metadata: Json | null
+          provider_name: string
+          request_timestamp: string
+          request_url: string | null
+          response_status: number | null
+          search_id: string | null
+          success: boolean
+        }
+        Insert: {
+          correlation_id?: string | null
+          cost_units?: number | null
+          created_at?: string
+          duration_ms?: number | null
+          endpoint_type: string
+          error_message?: string | null
+          extraction_id?: string | null
+          failure_category?: string | null
+          id?: string
+          metadata?: Json | null
+          provider_name: string
+          request_timestamp?: string
+          request_url?: string | null
+          response_status?: number | null
+          search_id?: string | null
+          success?: boolean
+        }
+        Update: {
+          correlation_id?: string | null
+          cost_units?: number | null
+          created_at?: string
+          duration_ms?: number | null
+          endpoint_type?: string
+          error_message?: string | null
+          extraction_id?: string | null
+          failure_category?: string | null
+          id?: string
+          metadata?: Json | null
+          provider_name?: string
+          request_timestamp?: string
+          request_url?: string | null
+          response_status?: number | null
+          search_id?: string | null
+          success?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_request_logs_extraction_id_fkey"
+            columns: ["extraction_id"]
+            isOneToOne: false
+            referencedRelation: "price_extractions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "api_request_logs_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       blocked_platforms: {
         Row: {
           blocked_at: string
@@ -76,6 +379,81 @@ export type Database = {
           id?: string
         }
         Relationships: []
+      }
+      pipeline_jobs: {
+        Row: {
+          backoff_until: string | null
+          completed_at: string | null
+          created_at: string
+          duration_ms: number | null
+          error_category: string | null
+          error_message: string | null
+          extraction_id: string | null
+          id: string
+          job_type: string
+          max_retries: number
+          metadata: Json | null
+          priority: number
+          retry_count: number
+          search_id: string | null
+          started_at: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          backoff_until?: string | null
+          completed_at?: string | null
+          created_at?: string
+          duration_ms?: number | null
+          error_category?: string | null
+          error_message?: string | null
+          extraction_id?: string | null
+          id?: string
+          job_type: string
+          max_retries?: number
+          metadata?: Json | null
+          priority?: number
+          retry_count?: number
+          search_id?: string | null
+          started_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          backoff_until?: string | null
+          completed_at?: string | null
+          created_at?: string
+          duration_ms?: number | null
+          error_category?: string | null
+          error_message?: string | null
+          extraction_id?: string | null
+          id?: string
+          job_type?: string
+          max_retries?: number
+          metadata?: Json | null
+          priority?: number
+          retry_count?: number
+          search_id?: string | null
+          started_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pipeline_jobs_extraction_id_fkey"
+            columns: ["extraction_id"]
+            isOneToOne: false
+            referencedRelation: "price_extractions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pipeline_jobs_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       platform_adapters: {
         Row: {
@@ -402,7 +780,7 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      admin_role: "super_admin" | "admin" | "viewer"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -529,6 +907,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      admin_role: ["super_admin", "admin", "viewer"],
+    },
   },
 } as const

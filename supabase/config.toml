@@ -23,3 +23,12 @@ verify_jwt = true
 
 [functions.generate-platform-adapter]
 verify_jwt = false
+
+[functions.admin-auth]
+verify_jwt = false
+
+[functions.admin-dashboard]
+verify_jwt = false
+
+[functions.admin-quotas]
+verify_jwt = false
