@@ -338,6 +338,8 @@ export type Database = {
           airbnb_price: number | null
           airbnb_title: string | null
           airbnb_url: string
+          api_error: string | null
+          api_error_code: string | null
           check_in_date: string | null
           check_out_date: string | null
           created_at: string
@@ -356,6 +358,8 @@ export type Database = {
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url: string
+          api_error?: string | null
+          api_error_code?: string | null
           check_in_date?: string | null
           check_out_date?: string | null
           created_at?: string
@@ -374,6 +378,8 @@ export type Database = {
           airbnb_price?: number | null
           airbnb_title?: string | null
           airbnb_url?: string
+          api_error?: string | null
+          api_error_code?: string | null
           check_in_date?: string | null
           check_out_date?: string | null
           created_at?: string

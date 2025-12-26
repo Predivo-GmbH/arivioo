@@ -79,6 +79,154 @@ function markControllerInvalid(controller: SSEController) {
   controllerValid.delete(controller);
 }
 
+// SerpAPI error types for proper error handling
+type SerpApiErrorType = 
+  | 'invalid_key'      // 401 - Invalid API key
+  | 'quota_exceeded'   // 402 - Account quota exhausted
+  | 'rate_limited'     // 429 - Too many requests
+  | 'server_error'     // 5xx - SerpAPI server error
+  | 'timeout'          // Request timeout
+  | 'network_error'    // Network/fetch error
+  | 'unknown';         // Unknown error
+
+interface SerpApiResult<T> {
+  success: boolean;
+  data?: T;
+  error?: {
+    type: SerpApiErrorType;
+    message: string;
+    statusCode?: number;
+  };
+}
+
+// Helper function to make SerpAPI requests with proper error handling
+async function fetchSerpApi<T = any>(
+  endpoint: string,
+  apiKey: string,
+  timeoutMs = 30000
+): Promise<SerpApiResult<T>> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    
+    const response = await fetch(`https://serpapi.com/search.json?${endpoint}&api_key=${apiKey}`, {
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+    
+    // Handle specific HTTP error codes
+    if (!response.ok) {
+      const statusCode = response.status;
+      let errorType: SerpApiErrorType = 'unknown';
+      let message = `SerpAPI request failed with status ${statusCode}`;
+      
+      switch (statusCode) {
+        case 401:
+          errorType = 'invalid_key';
+          message = 'SerpAPI key is invalid or expired';
+          break;
+        case 402:
+          errorType = 'quota_exceeded';
+          message = 'SerpAPI account quota has been exhausted';
+          break;
+        case 429:
+          errorType = 'rate_limited';
+          message = 'SerpAPI rate limit exceeded - too many requests';
+          break;
+        default:
+          if (statusCode >= 500) {
+            errorType = 'server_error';
+            message = `SerpAPI server error (${statusCode})`;
+          }
+      }
+      
+      console.error(`SERPAPI_ERROR [${errorType}]: ${message}`);
+      return { success: false, error: { type: errorType, message, statusCode } };
+    }
+    
+    const data = await response.json();
+    
+    // Check for error in response body (SerpAPI sometimes returns 200 with error)
+    if (data.error) {
+      console.error(`SERPAPI_RESPONSE_ERROR: ${data.error}`);
+      return { 
+        success: false, 
+        error: { 
+          type: 'unknown', 
+          message: typeof data.error === 'string' ? data.error : JSON.stringify(data.error) 
+        } 
+      };
+    }
+    
+    return { success: true, data: data as T };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    let errorType: SerpApiErrorType = 'network_error';
+    
+    if (errorMessage.includes('aborted') || errorMessage.includes('timeout')) {
+      errorType = 'timeout';
+    }
+    
+    console.error(`SERPAPI_FETCH_ERROR [${errorType}]: ${errorMessage}`);
+    return { success: false, error: { type: errorType, message: errorMessage } };
+  }
+}
+
+// Track SerpAPI errors during a search session
+interface ApiErrorTracker {
+  serpApiErrors: Array<{ type: SerpApiErrorType; message: string; timestamp: number }>;
+  hasQuotaError: boolean;
+  hasRateLimitError: boolean;
+  consecutiveErrors: number;
+}
+
+function createApiErrorTracker(): ApiErrorTracker {
+  return {
+    serpApiErrors: [],
+    hasQuotaError: false,
+    hasRateLimitError: false,
+    consecutiveErrors: 0,
+  };
+}
+
+function recordApiError(tracker: ApiErrorTracker, error: { type: SerpApiErrorType; message: string }): void {
+  tracker.serpApiErrors.push({ ...error, timestamp: Date.now() });
+  tracker.consecutiveErrors++;
+  
+  if (error.type === 'quota_exceeded') {
+    tracker.hasQuotaError = true;
+  }
+  if (error.type === 'rate_limited') {
+    tracker.hasRateLimitError = true;
+  }
+}
+
+function resetConsecutiveErrors(tracker: ApiErrorTracker): void {
+  tracker.consecutiveErrors = 0;
+}
+
+function shouldAbortDueToApiErrors(tracker: ApiErrorTracker): boolean {
+  // Abort if we hit quota or have too many consecutive errors
+  return tracker.hasQuotaError || tracker.consecutiveErrors >= 5;
+}
+
+function getApiErrorSummary(tracker: ApiErrorTracker): string | null {
+  if (tracker.serpApiErrors.length === 0) return null;
+  
+  if (tracker.hasQuotaError) {
+    return 'Search service quota exceeded - please try again later';
+  }
+  if (tracker.hasRateLimitError) {
+    return 'Search service temporarily rate limited';
+  }
+  if (tracker.consecutiveErrors >= 5) {
+    return 'Search service experiencing connectivity issues';
+  }
+  
+  return `Search API errors: ${tracker.serpApiErrors.length}`;
+}
+
 interface SearchResult {
   platform_name: string;
   listing_url: string;
@@ -2100,8 +2248,9 @@ async function addTargetedTextMatches(opts: {
   alternatives: SearchResult[];
   foundUrls: Set<string>;
   controller?: SSEController;
+  errorTracker?: ApiErrorTracker;
 }) {
-  const { serpApiKey, title, cityHint, imageUrlForVerification, alternatives, foundUrls, controller } = opts;
+  const { serpApiKey, title, cityHint, imageUrlForVerification, alternatives, foundUrls, controller, errorTracker } = opts;
 
   const cleanTitle = title.replace(/\s+/g, " ").trim();
   const queries = [
@@ -2111,64 +2260,78 @@ async function addTargetedTextMatches(opts: {
   ].map(q => q.replace(/\s+/g, " ").trim());
 
   for (const q of queries) {
+    // Check if we should abort due to API errors
+    if (errorTracker && shouldAbortDueToApiErrors(errorTracker)) {
+      console.log("Aborting text search due to API errors");
+      controller && sendProgress(controller, "Search paused", getApiErrorSummary(errorTracker) || "API error");
+      break;
+    }
+
     controller && sendProgress(controller, "Running text search", q);
 
-    try {
-      const res = await fetch(
-        `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(q)}&api_key=${serpApiKey}&num=10`
-      );
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      const organic = (data.organic_results || []) as Array<any>;
-
-      for (const r of organic) {
-        const url: string | undefined = r.link;
-        if (!url) continue;
-        if (url.toLowerCase().includes("airbnb.")) continue;
-        if (foundUrls.has(url)) continue;
-
-        // Only accept URLs that match our platform heuristics and aren't blocked
-        if (isBlockedNonBookingPlatform(url)) continue;
-        if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) continue;
-        
-        // Validate URL is an actual bookable property page (not category/search page)
-        const urlValidation = isValidBookablePropertyUrl(url);
-        if (!urlValidation.valid) {
-          console.log(`Text search: Skipping non-bookable URL: ${urlValidation.reason} - ${url.slice(0, 100)}`);
-          continue;
-        }
-
-        // If we have an image thumbnail + a reference Airbnb image, try to visually verify it.
-        const thumb: string | null = r.thumbnail || null;
-        let match_type: 'visual' | 'text' = 'text';
-        let confidence_score: number | null = null;
-
-        if (imageUrlForVerification && thumb) {
-          const ai = await compareImagesWithAI(imageUrlForVerification, thumb);
-          if (ai.isMatch && ai.score >= 90) {
-            match_type = 'visual';
-            confidence_score = ai.score;
-          }
-        }
-
-        foundUrls.add(url);
-        alternatives.push({
-          platform_name: getPlatformName(url),
-          listing_url: url,
-          listing_title: r.title || r.snippet || null,
-          price: null,
-          confidence_score,
-          image_url: thumb,
-          images: thumb ? [thumb] : [],
-          match_type,
-          source_airbnb_image: imageUrlForVerification || null,
+    const result = await fetchSerpApi(`engine=google&q=${encodeURIComponent(q)}&num=10`, serpApiKey);
+    
+    if (!result.success) {
+      if (errorTracker && result.error) {
+        recordApiError(errorTracker, result.error);
+        controller && sendProgress(controller, "Search API issue", result.error.message, { 
+          errorType: result.error.type,
+          isQuotaError: result.error.type === 'quota_exceeded'
         });
-
-        controller && sendProgress(controller, "Found candidate listing", `${getPlatformName(url)} · ${match_type === 'visual' ? `${confidence_score}% verified` : 'text-only'}`);
       }
-    } catch (e) {
-      console.error("Targeted text search error:", e);
+      continue;
+    }
+    
+    // Reset consecutive errors on success
+    if (errorTracker) resetConsecutiveErrors(errorTracker);
+
+    const data = result.data;
+    const organic = (data?.organic_results || []) as Array<any>;
+
+    for (const r of organic) {
+      const url: string | undefined = r.link;
+      if (!url) continue;
+      if (url.toLowerCase().includes("airbnb.")) continue;
+      if (foundUrls.has(url)) continue;
+
+      // Only accept URLs that match our platform heuristics and aren't blocked
+      if (isBlockedNonBookingPlatform(url)) continue;
+      if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) continue;
+      
+      // Validate URL is an actual bookable property page (not category/search page)
+      const urlValidation = isValidBookablePropertyUrl(url);
+      if (!urlValidation.valid) {
+        console.log(`Text search: Skipping non-bookable URL: ${urlValidation.reason} - ${url.slice(0, 100)}`);
+        continue;
+      }
+
+      // If we have an image thumbnail + a reference Airbnb image, try to visually verify it.
+      const thumb: string | null = r.thumbnail || null;
+      let match_type: 'visual' | 'text' = 'text';
+      let confidence_score: number | null = null;
+
+      if (imageUrlForVerification && thumb) {
+        const ai = await compareImagesWithAI(imageUrlForVerification, thumb);
+        if (ai.isMatch && ai.score >= 90) {
+          match_type = 'visual';
+          confidence_score = ai.score;
+        }
+      }
+
+      foundUrls.add(url);
+      alternatives.push({
+        platform_name: getPlatformName(url),
+        listing_url: url,
+        listing_title: r.title || r.snippet || null,
+        price: null,
+        confidence_score,
+        image_url: thumb,
+        images: thumb ? [thumb] : [],
+        match_type,
+        source_airbnb_image: imageUrlForVerification || null,
+      });
+
+      controller && sendProgress(controller, "Found candidate listing", `${getPlatformName(url)} · ${match_type === 'visual' ? `${confidence_score}% verified` : 'text-only'}`);
     }
   }
 }
@@ -2554,11 +2717,30 @@ async function runSearchWithStreaming(
   const MAX_AI = 30;
   let aiCount = 0;
 
+  // Initialize API error tracker
+  const apiErrorTracker = createApiErrorTracker();
+
   // Track the best match per platform (by confidence score)
   // Key: normalized platform name, Value: best alternative found so far
   const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
 
   for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
+    // Check if we should abort due to API errors
+    if (shouldAbortDueToApiErrors(apiErrorTracker)) {
+      console.log("Aborting visual search due to API errors:", getApiErrorSummary(apiErrorTracker));
+      sendProgress(controller, "Search API issue", getApiErrorSummary(apiErrorTracker) || "API error", { 
+        isQuotaError: apiErrorTracker.hasQuotaError,
+        errorCount: apiErrorTracker.serpApiErrors.length
+      });
+      // Store the error in database
+      await supabase.from("searches").update({ 
+        api_error: getApiErrorSummary(apiErrorTracker),
+        api_error_code: apiErrorTracker.hasQuotaError ? 'quota_exceeded' : 'api_error',
+        last_progress_at: new Date().toISOString() 
+      }).eq("id", searchId);
+      break;
+    }
+
     if (await claimSkipNow()) {
       console.log("SKIP requested - skipping remaining visual search");
       sendProgress(controller, "Skipped current step", "Skipping remaining image search and continuing", { skipped: true });
@@ -2569,80 +2751,96 @@ async function runSearchWithStreaming(
     const imageUrl = imageUrls[idx];
     sendProgress(controller, `Searching image ${idx + 1} of ${imageUrls.length}`, "Running AI reverse image search on Booking.com, Vrbo, TripAdvisor...", { imageIndex: idx + 1, totalImages: imageUrls.length });
     await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
-    try {
-      const lensResponse = await fetch(`https://serpapi.com/search.json?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`);
-      if (!lensResponse.ok) continue;
+    
+    // Use the new SerpAPI helper with proper error handling
+    const lensResult = await fetchSerpApi(
+      `engine=google_lens&url=${encodeURIComponent(imageUrl)}`,
+      serpApiKey
+    );
 
-      const lensData = await lensResponse.json();
-      const visualMatches = lensData.visual_matches || [];
-      sendProgress(controller, `Found ${visualMatches.length} potential matches`, "Verifying with AI comparison", { matchCount: visualMatches.length });
+    if (!lensResult.success) {
+      if (lensResult.error) {
+        recordApiError(apiErrorTracker, lensResult.error);
+        console.error(`Google Lens API error for image ${idx + 1}:`, lensResult.error.message);
+        sendProgress(controller, "Search API issue", lensResult.error.message, { 
+          errorType: lensResult.error.type,
+          isQuotaError: lensResult.error.type === 'quota_exceeded'
+        });
+      }
+      continue;
+    }
+    
+    // Reset consecutive errors on success
+    resetConsecutiveErrors(apiErrorTracker);
+    
+    const lensData = lensResult.data;
+    const visualMatches = lensData?.visual_matches || [];
+    sendProgress(controller, `Found ${visualMatches.length} potential matches`, "Verifying with AI comparison", { matchCount: visualMatches.length });
 
-        let matchesThisImage = 0;
-        for (const match of visualMatches) {
-          if (await claimSkipNow()) {
-            console.log("SKIP requested - stopping match verification for this image");
-            sendProgress(controller, "Skipped current step", "Skipping remaining match verification", { skipped: true });
-            matchesThisImage = 999;
-            break;
-          }
+    let matchesThisImage = 0;
+    for (const match of visualMatches) {
+      if (await claimSkipNow()) {
+        console.log("SKIP requested - stopping match verification for this image");
+        sendProgress(controller, "Skipped current step", "Skipping remaining match verification", { skipped: true });
+        matchesThisImage = 999;
+        break;
+      }
 
-          if (aiCount >= MAX_AI || matchesThisImage >= 8) break;
-          if (Date.now() - searchStartTime > MAX_TIME) break;
+      if (aiCount >= MAX_AI || matchesThisImage >= 8) break;
+      if (Date.now() - searchStartTime > MAX_TIME) break;
 
-          const matchUrl = match.link;
-          if (!matchUrl || matchUrl.toLowerCase().includes("airbnb.") || foundUrls.has(matchUrl)) continue;
-          if (isBlockedNonBookingPlatform(matchUrl)) continue;
-          if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
-        const platformName = getPlatformName(matchUrl);
-        const platformKey = platformName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const matchUrl = match.link;
+      if (!matchUrl || matchUrl.toLowerCase().includes("airbnb.") || foundUrls.has(matchUrl)) continue;
+      if (isBlockedNonBookingPlatform(matchUrl)) continue;
+      if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
+      
+      const platformName = getPlatformName(matchUrl);
+      const platformKey = platformName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      
+      // Check if we already have a match for this platform with high confidence
+      const existingMatch = bestMatchPerPlatform.get(platformKey);
+      if (existingMatch && existingMatch.confidence_score && existingMatch.confidence_score >= 0.98) {
+        // Already have an excellent match for this platform, skip
+        console.log(`Skipping ${platformName} verification - already have 98%+ match`);
+        continue;
+      }
+
+      sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
+      await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
+      await heartbeat();
+
+      aiCount++;
+      matchesThisImage++;
+      foundUrls.add(matchUrl);
+
+      const aiResult = await compareImagesWithAI(imageUrl, match.thumbnail || matchUrl);
+      
+      if (aiResult.isMatch && aiResult.score >= 90) {
+        const newConfidence = aiResult.score / 100;
         
-        // Check if we already have a match for this platform with high confidence
-        const existingMatch = bestMatchPerPlatform.get(platformKey);
-        if (existingMatch && existingMatch.confidence_score && existingMatch.confidence_score >= 0.98) {
-          // Already have an excellent match for this platform, skip
-          console.log(`Skipping ${platformName} verification - already have 98%+ match`);
-          continue;
-        }
-
-        sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
-        await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
-        await heartbeat();
-
-        aiCount++;
-        matchesThisImage++;
-        foundUrls.add(matchUrl);
-
-        const aiResult = await compareImagesWithAI(imageUrl, match.thumbnail || matchUrl);
-        
-        if (aiResult.isMatch && aiResult.score >= 90) {
-          const newConfidence = aiResult.score / 100;
+        // Only keep this match if it's better than what we have for this platform
+        if (!existingMatch || newConfidence > (existingMatch.confidence_score || 0)) {
+          const newMatch = {
+            platform_name: platformName,
+            listing_url: matchUrl,
+            listing_title: match.title || null,
+            price: null,
+            confidence_score: newConfidence,
+            image_url: match.thumbnail || null,
+            images: match.thumbnail ? [match.thumbnail] : [],
+            match_type: 'visual' as const,
+            source_airbnb_image: imageUrl,
+          };
           
-          // Only keep this match if it's better than what we have for this platform
-          if (!existingMatch || newConfidence > (existingMatch.confidence_score || 0)) {
-            const newMatch = {
-              platform_name: platformName,
-              listing_url: matchUrl,
-              listing_title: match.title || null,
-              price: null,
-              confidence_score: newConfidence,
-              image_url: match.thumbnail || null,
-              images: match.thumbnail ? [match.thumbnail] : [],
-              match_type: 'visual' as const,
-              source_airbnb_image: imageUrl,
-            };
-            
-            bestMatchPerPlatform.set(platformKey, newMatch);
-            
-            if (existingMatch) {
-              sendProgress(controller, `Better match on ${platformName}`, `${aiResult.score}% confidence (was ${Math.round((existingMatch.confidence_score || 0) * 100)}%)`, { platform: platformName, confidence: aiResult.score });
-            } else {
-              sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, { platform: platformName, confidence: aiResult.score });
-            }
+          bestMatchPerPlatform.set(platformKey, newMatch);
+          
+          if (existingMatch) {
+            sendProgress(controller, `Better match on ${platformName}`, `${aiResult.score}% confidence (was ${Math.round((existingMatch.confidence_score || 0) * 100)}%)`, { platform: platformName, confidence: aiResult.score });
+          } else {
+            sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, { platform: platformName, confidence: aiResult.score });
           }
         }
       }
-    } catch (e) {
-      console.error("Lens search error:", e);
     }
   }
 
@@ -2663,7 +2861,18 @@ async function runSearchWithStreaming(
       alternatives,
       foundUrls,
       controller,
+      errorTracker: apiErrorTracker,
     });
+  }
+
+  // Store any API errors that occurred during the search
+  if (apiErrorTracker.serpApiErrors.length > 0) {
+    const errorSummary = getApiErrorSummary(apiErrorTracker);
+    await supabase.from("searches").update({ 
+      api_error: errorSummary,
+      api_error_code: apiErrorTracker.hasQuotaError ? 'quota_exceeded' : 
+                      apiErrorTracker.hasRateLimitError ? 'rate_limited' : 'api_error',
+    }).eq("id", searchId);
   }
 
   const visualCountAfterFallback = alternatives.filter(a => a.match_type === 'visual').length;
@@ -3546,23 +3755,27 @@ serve(async (req) => {
         try {
           console.log("Google Lens searching:", imageUrl.slice(0, 80));
 
-          // Use Google Lens engine - MUCH better at finding same place across sites
-          // Wrap with timeout to prevent stuck API calls (30s max)
-          const lensResponse = await withTimeout(
-            () => fetch(
-              `https://serpapi.com/search.json?engine=google_lens&url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`,
-            ),
-            30_000,
-            null,
-            `Google Lens search for image ${idx + 1}`
+          // Use Google Lens engine with proper error handling
+          const lensResult = await fetchSerpApi(
+            `engine=google_lens&url=${encodeURIComponent(imageUrl)}`,
+            serpApiKey!
           );
 
-          if (!lensResponse || !lensResponse.ok) {
-            console.log("Lens search failed:", lensResponse?.status || "timeout");
+          if (!lensResult.success) {
+            console.log("Lens search failed:", lensResult.error?.message || "unknown error");
+            // Check for quota/rate limit errors
+            if (lensResult.error?.type === 'quota_exceeded' || lensResult.error?.type === 'rate_limited') {
+              console.error(`SERPAPI ${lensResult.error.type.toUpperCase()}: ${lensResult.error.message}`);
+              await supabase.from("searches").update({ 
+                api_error: lensResult.error.message,
+                api_error_code: lensResult.error.type,
+              }).eq("id", searchId);
+              break; // Stop searching if quota exceeded
+            }
             continue;
           }
 
-          const lensData = await lensResponse.json();
+          const lensData = lensResult.data;
 
           // Log what we got
           console.log(
@@ -3784,14 +3997,25 @@ serve(async (req) => {
           try {
             console.log("Reverse searching:", imageUrl.slice(0, 80));
             
-            const reverseResponse = await fetch(
-              `https://serpapi.com/search.json?engine=google_reverse_image&image_url=${encodeURIComponent(imageUrl)}&api_key=${serpApiKey}`
+            const reverseResult = await fetchSerpApi(
+              `engine=google_reverse_image&image_url=${encodeURIComponent(imageUrl)}`,
+              serpApiKey!
             );
             
-            if (!reverseResponse.ok) continue;
+            if (!reverseResult.success) {
+              if (reverseResult.error?.type === 'quota_exceeded' || reverseResult.error?.type === 'rate_limited') {
+                console.error(`SERPAPI ${reverseResult.error.type.toUpperCase()}: ${reverseResult.error.message}`);
+                await supabase.from("searches").update({ 
+                  api_error: reverseResult.error.message,
+                  api_error_code: reverseResult.error.type,
+                }).eq("id", searchId);
+                break;
+              }
+              continue;
+            }
             
-            const reverseData = await reverseResponse.json();
-            console.log("Reverse results - image:", reverseData.image_results?.length || 0);
+            const reverseData = reverseResult.data;
+            console.log("Reverse results - image:", reverseData?.image_results?.length || 0);
             
             // LIMIT results to check
             const allResults = [
@@ -3964,14 +4188,25 @@ serve(async (req) => {
         console.log("Text search:", searchQuery);
         
         try {
-          const textResponse = await fetch(
-            `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(searchQuery)}&api_key=${serpApiKey}&num=20`
+          const textResult = await fetchSerpApi(
+            `engine=google&q=${encodeURIComponent(searchQuery)}&num=20`,
+            serpApiKey!
           );
           
-          if (!textResponse.ok) continue;
+          if (!textResult.success) {
+            if (textResult.error?.type === 'quota_exceeded' || textResult.error?.type === 'rate_limited') {
+              console.error(`SERPAPI ${textResult.error.type.toUpperCase()}: ${textResult.error.message}`);
+              await supabase.from("searches").update({ 
+                api_error: textResult.error.message,
+                api_error_code: textResult.error.type,
+              }).eq("id", searchId);
+              break;
+            }
+            continue;
+          }
           
-          const textData = await textResponse.json();
-          const results = textData.organic_results || [];
+          const textData = textResult.data;
+          const results = textData?.organic_results || [];
           
           for (const result of results) {
             const url = result.link;
