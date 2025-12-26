@@ -539,42 +539,36 @@ Deno.serve(async (req) => {
       const thirtyDaysAgo = new Date(today);
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-      // Total registrations
+      // Total registrations from launch_signups (the original notify-me table)
       const { count: totalRegistrations } = await supabase
-        .from('notify_me_registrations')
+        .from('launch_signups')
         .select('*', { count: 'exact', head: true });
-
-      // Active registrations
-      const { count: activeRegistrations } = await supabase
-        .from('notify_me_registrations')
-        .select('*', { count: 'exact', head: true })
-        .eq('is_active', true);
 
       // Registrations today
       const { count: registrationsToday } = await supabase
-        .from('notify_me_registrations')
+        .from('launch_signups')
         .select('*', { count: 'exact', head: true })
         .gte('created_at', today.toISOString());
 
       // Registrations last 7 days
       const { count: registrationsWeek } = await supabase
-        .from('notify_me_registrations')
+        .from('launch_signups')
         .select('*', { count: 'exact', head: true })
         .gte('created_at', sevenDaysAgo.toISOString());
 
       // Registrations last 30 days
       const { count: registrationsMonth } = await supabase
-        .from('notify_me_registrations')
+        .from('launch_signups')
         .select('*', { count: 'exact', head: true })
         .gte('created_at', thirtyDaysAgo.toISOString());
 
-      // Notification status counts
+      // Extended tracking data from notify_me_registrations
       const { data: statusCounts } = await supabase
         .from('notify_me_registrations')
         .select('notification_status');
 
       const statusBreakdown: Record<string, number> = {
-        pending: 0,
+        pending: totalRegistrations || 0, // All launch_signups are pending by default
         sent: 0,
         failed: 0,
         disabled: 0
@@ -582,6 +576,10 @@ Deno.serve(async (req) => {
       statusCounts?.forEach(r => {
         if (statusBreakdown[r.notification_status] !== undefined) {
           statusBreakdown[r.notification_status]++;
+          // Reduce pending count for each tracked registration
+          if (r.notification_status !== 'pending') {
+            statusBreakdown.pending = Math.max(0, statusBreakdown.pending - 1);
+          }
         }
       });
 
@@ -610,9 +608,9 @@ Deno.serve(async (req) => {
         .not('notify_me_registration_id', 'is', null)
         .eq('extraction_status', 'success');
 
-      // Daily registration trend
+      // Daily registration trend from launch_signups
       const { data: dailyRegistrations } = await supabase
-        .from('notify_me_registrations')
+        .from('launch_signups')
         .select('created_at')
         .gte('created_at', sevenDaysAgo.toISOString());
 
@@ -633,7 +631,7 @@ Deno.serve(async (req) => {
         JSON.stringify({
           registrations: {
             total: totalRegistrations || 0,
-            active: activeRegistrations || 0,
+            active: totalRegistrations || 0, // All are active in launch_signups
             today: registrationsToday || 0,
             last7Days: registrationsWeek || 0,
             last30Days: registrationsMonth || 0
@@ -657,89 +655,116 @@ Deno.serve(async (req) => {
       );
     }
 
-    // NOTIFY ME - LIST REGISTRATIONS
+    // NOTIFY ME - LIST REGISTRATIONS (uses launch_signups as primary source)
     if (action === 'notify-me-list' && (req.method === 'GET' || req.method === 'POST')) {
       const params = url.searchParams;
       const status = params.get('status');
       const startDate = params.get('startDate');
       const endDate = params.get('endDate');
-      const searchId = params.get('searchId');
       const page = parseInt(params.get('page') || '1');
       const limit = parseInt(params.get('limit') || '50');
 
+      // Query launch_signups as the primary source
       let query = supabase
-        .from('notify_me_registrations')
-        .select('*, searches(airbnb_title, airbnb_url, status)', { count: 'exact' });
+        .from('launch_signups')
+        .select('*', { count: 'exact' });
 
-      if (status) query = query.eq('notification_status', status);
       if (startDate) query = query.gte('created_at', startDate);
       if (endDate) query = query.lte('created_at', endDate);
-      if (searchId) query = query.eq('search_id', searchId);
 
-      const { data: registrations, count } = await query
+      const { data: signups, count } = await query
         .order('created_at', { ascending: false })
         .range((page - 1) * limit, page * limit - 1);
 
-      // Get extraction counts for each registration
+      // Enrich with data from notify_me_registrations if available
       const enrichedRegistrations = await Promise.all(
-        (registrations || []).map(async (reg) => {
-          const { count: extractionCount } = await supabase
-            .from('price_extractions')
-            .select('*', { count: 'exact', head: true })
-            .eq('notify_me_registration_id', reg.id);
-
-          const { data: lastExtraction } = await supabase
-            .from('price_extractions')
-            .select('extraction_status, created_at, extracted_price, platform_name')
-            .eq('notify_me_registration_id', reg.id)
-            .order('created_at', { ascending: false })
-            .limit(1)
+        (signups || []).map(async (signup) => {
+          // Check if there's extended tracking data
+          const { data: extendedData } = await supabase
+            .from('notify_me_registrations')
+            .select('*, searches(airbnb_title, airbnb_url, status)')
+            .eq('email', signup.email)
             .single();
 
           // Mask email for privacy (show first 3 chars + domain)
-          const emailParts = reg.email.split('@');
+          const emailParts = signup.email.split('@');
           const maskedEmail = emailParts[0].slice(0, 3) + '***@' + emailParts[1];
 
+          // Default status is pending unless we have extended tracking
+          let notificationStatus = 'pending';
+          let extractionCount = 0;
+          let lastExtraction = null;
+
+          if (extendedData) {
+            notificationStatus = extendedData.notification_status || 'pending';
+            
+            const { count: extCount } = await supabase
+              .from('price_extractions')
+              .select('*', { count: 'exact', head: true })
+              .eq('notify_me_registration_id', extendedData.id);
+            extractionCount = extCount || 0;
+
+            const { data: lastExt } = await supabase
+              .from('price_extractions')
+              .select('extraction_status, created_at, extracted_price, platform_name')
+              .eq('notify_me_registration_id', extendedData.id)
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .single();
+            
+            if (lastExt) {
+              lastExtraction = {
+                status: lastExt.extraction_status,
+                createdAt: lastExt.created_at,
+                price: lastExt.extracted_price,
+                platform: lastExt.platform_name
+              };
+            }
+          }
+
+          // Filter by status if specified
+          if (status && notificationStatus !== status) {
+            return null;
+          }
+
           return {
-            id: reg.id,
+            id: signup.id,
             email: maskedEmail,
-            emailHash: reg.email_hash,
-            sourceAirbnbUrl: reg.source_airbnb_url,
-            sourceAirbnbTitle: reg.source_airbnb_title,
-            sourceAirbnbPrice: reg.source_airbnb_price,
-            searchId: reg.search_id,
-            searchStatus: reg.searches?.status,
-            searchTitle: reg.searches?.airbnb_title,
-            notificationStatus: reg.notification_status,
-            lastNotifiedAt: reg.last_notified_at,
-            notificationCount: reg.notification_count,
-            priceThreshold: reg.price_threshold_percentage,
-            isActive: reg.is_active,
-            createdAt: reg.created_at,
-            extractionCount: extractionCount || 0,
-            lastExtraction: lastExtraction ? {
-              status: lastExtraction.extraction_status,
-              createdAt: lastExtraction.created_at,
-              price: lastExtraction.extracted_price,
-              platform: lastExtraction.platform_name
-            } : null
+            emailHash: null,
+            sourceAirbnbUrl: extendedData?.source_airbnb_url || null,
+            sourceAirbnbTitle: extendedData?.source_airbnb_title || null,
+            sourceAirbnbPrice: extendedData?.source_airbnb_price || null,
+            searchId: extendedData?.search_id || null,
+            searchStatus: extendedData?.searches?.status || null,
+            searchTitle: extendedData?.searches?.airbnb_title || null,
+            notificationStatus,
+            lastNotifiedAt: extendedData?.last_notified_at || null,
+            notificationCount: extendedData?.notification_count || 0,
+            priceThreshold: extendedData?.price_threshold_percentage || 10,
+            isActive: extendedData?.is_active ?? true,
+            createdAt: signup.created_at,
+            extractionCount,
+            lastExtraction
           };
         })
       );
 
+      // Filter out nulls (from status filter)
+      const filteredRegistrations = enrichedRegistrations.filter(r => r !== null);
+
       return new Response(
         JSON.stringify({
-          registrations: enrichedRegistrations,
-          total: count,
+          registrations: filteredRegistrations,
+          total: status ? filteredRegistrations.length : count,
           page,
           limit,
-          totalPages: Math.ceil((count || 0) / limit)
+          totalPages: Math.ceil((status ? filteredRegistrations.length : (count || 0)) / limit)
         }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // NOTIFY ME - GET SINGLE REGISTRATION DETAIL
+    // NOTIFY ME - GET SINGLE REGISTRATION DETAIL (uses launch_signups as primary)
     if (action === 'notify-me-detail' && (req.method === 'GET' || req.method === 'POST')) {
       const params = url.searchParams;
       const id = params.get('id');
@@ -751,49 +776,61 @@ Deno.serve(async (req) => {
         );
       }
 
-      // Get registration with full email (for admin drill-down)
-      const { data: registration, error: regError } = await supabase
-        .from('notify_me_registrations')
-        .select('*, searches(*)')
+      // First try to get from launch_signups
+      const { data: signup, error: signupError } = await supabase
+        .from('launch_signups')
+        .select('*')
         .eq('id', id)
         .single();
 
-      if (regError || !registration) {
+      if (signupError || !signup) {
         return new Response(
           JSON.stringify({ error: 'Registration not found' }),
           { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
 
-      // Get timeline events
-      const { data: events } = await supabase
-        .from('notification_events')
-        .select('*')
-        .eq('registration_id', id)
-        .order('created_at', { ascending: false });
+      // Get extended data if available
+      const { data: extendedData } = await supabase
+        .from('notify_me_registrations')
+        .select('*, searches(*)')
+        .eq('email', signup.email)
+        .single();
 
-      // Get all extractions for this registration
-      const { data: extractions } = await supabase
-        .from('price_extractions')
-        .select('*')
-        .eq('notify_me_registration_id', id)
-        .order('created_at', { ascending: false });
+      // Get timeline events if we have extended data
+      let events: any[] = [];
+      let extractions: any[] = [];
+      let apiUsage: Record<string, { requests: number; cost: number; successes: number }> = {};
 
-      // Get API usage for this registration
-      const { data: apiLogs } = await supabase
-        .from('api_request_logs')
-        .select('provider_name, cost_units, success, created_at')
-        .eq('notify_me_registration_id', id);
+      if (extendedData) {
+        const { data: eventsData } = await supabase
+          .from('notification_events')
+          .select('*')
+          .eq('registration_id', extendedData.id)
+          .order('created_at', { ascending: false });
+        events = eventsData || [];
 
-      const apiUsage: Record<string, { requests: number; cost: number; successes: number }> = {};
-      apiLogs?.forEach(log => {
-        if (!apiUsage[log.provider_name]) {
-          apiUsage[log.provider_name] = { requests: 0, cost: 0, successes: 0 };
-        }
-        apiUsage[log.provider_name].requests++;
-        apiUsage[log.provider_name].cost += parseFloat(log.cost_units || '0');
-        if (log.success) apiUsage[log.provider_name].successes++;
-      });
+        const { data: extractionsData } = await supabase
+          .from('price_extractions')
+          .select('*')
+          .eq('notify_me_registration_id', extendedData.id)
+          .order('created_at', { ascending: false });
+        extractions = extractionsData || [];
+
+        const { data: apiLogs } = await supabase
+          .from('api_request_logs')
+          .select('provider_name, cost_units, success, created_at')
+          .eq('notify_me_registration_id', extendedData.id);
+
+        apiLogs?.forEach(log => {
+          if (!apiUsage[log.provider_name]) {
+            apiUsage[log.provider_name] = { requests: 0, cost: 0, successes: 0 };
+          }
+          apiUsage[log.provider_name].requests++;
+          apiUsage[log.provider_name].cost += parseFloat(log.cost_units || '0');
+          if (log.success) apiUsage[log.provider_name].successes++;
+        });
+      }
 
       // Log admin access
       const ip = req.headers.get('x-forwarded-for') || 'unknown';
@@ -802,7 +839,7 @@ Deno.serve(async (req) => {
         admin_user_id: authResult.admin.id,
         admin_email: authResult.admin.email,
         action: 'view_notify_me_user',
-        resource_type: 'notify_me_registration',
+        resource_type: 'launch_signup',
         resource_id: id,
         ip_address: ip,
         user_agent: userAgent
@@ -811,24 +848,24 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({
           registration: {
-            id: registration.id,
-            email: registration.email,
-            sourceAirbnbUrl: registration.source_airbnb_url,
-            sourceAirbnbTitle: registration.source_airbnb_title,
-            sourceAirbnbPrice: registration.source_airbnb_price,
-            searchId: registration.search_id,
-            search: registration.searches,
-            notificationStatus: registration.notification_status,
-            lastNotifiedAt: registration.last_notified_at,
-            notificationCount: registration.notification_count,
-            lastNotificationError: registration.last_notification_error,
-            priceThreshold: registration.price_threshold_percentage,
-            isActive: registration.is_active,
-            metadata: registration.metadata,
-            createdAt: registration.created_at,
-            updatedAt: registration.updated_at
+            id: signup.id,
+            email: signup.email,
+            sourceAirbnbUrl: extendedData?.source_airbnb_url || null,
+            sourceAirbnbTitle: extendedData?.source_airbnb_title || null,
+            sourceAirbnbPrice: extendedData?.source_airbnb_price || null,
+            searchId: extendedData?.search_id || null,
+            search: extendedData?.searches || null,
+            notificationStatus: extendedData?.notification_status || 'pending',
+            lastNotifiedAt: extendedData?.last_notified_at || null,
+            notificationCount: extendedData?.notification_count || 0,
+            lastNotificationError: extendedData?.last_notification_error || null,
+            priceThreshold: extendedData?.price_threshold_percentage || 10,
+            isActive: extendedData?.is_active ?? true,
+            metadata: extendedData?.metadata || {},
+            createdAt: signup.created_at,
+            updatedAt: extendedData?.updated_at || signup.created_at
           },
-          events: events?.map(e => ({
+          events: events.map(e => ({
             id: e.id,
             type: e.event_type,
             searchId: e.search_id,
@@ -840,7 +877,7 @@ Deno.serve(async (req) => {
             metadata: e.metadata,
             createdAt: e.created_at
           })),
-          extractions: extractions?.map(e => ({
+          extractions: extractions.map(e => ({
             id: e.id,
             platform: e.platform_name,
             status: e.extraction_status,
