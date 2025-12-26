@@ -281,6 +281,7 @@ export type Database = {
           failure_category: string | null
           id: string
           metadata: Json | null
+          notify_me_registration_id: string | null
           provider_name: string
           request_timestamp: string
           request_url: string | null
@@ -299,6 +300,7 @@ export type Database = {
           failure_category?: string | null
           id?: string
           metadata?: Json | null
+          notify_me_registration_id?: string | null
           provider_name: string
           request_timestamp?: string
           request_url?: string | null
@@ -317,6 +319,7 @@ export type Database = {
           failure_category?: string | null
           id?: string
           metadata?: Json | null
+          notify_me_registration_id?: string | null
           provider_name?: string
           request_timestamp?: string
           request_url?: string | null
@@ -330,6 +333,13 @@ export type Database = {
             columns: ["extraction_id"]
             isOneToOne: false
             referencedRelation: "price_extractions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "api_request_logs_notify_me_registration_id_fkey"
+            columns: ["notify_me_registration_id"]
+            isOneToOne: false
+            referencedRelation: "notify_me_registrations"
             referencedColumns: ["id"]
           },
           {
@@ -379,6 +389,135 @@ export type Database = {
           id?: string
         }
         Relationships: []
+      }
+      notification_events: {
+        Row: {
+          created_at: string
+          error_message: string | null
+          event_type: string
+          extracted_price: number | null
+          extraction_id: string | null
+          id: string
+          metadata: Json | null
+          platform_name: string | null
+          registration_id: string
+          savings_amount: number | null
+          search_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          error_message?: string | null
+          event_type: string
+          extracted_price?: number | null
+          extraction_id?: string | null
+          id?: string
+          metadata?: Json | null
+          platform_name?: string | null
+          registration_id: string
+          savings_amount?: number | null
+          search_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          error_message?: string | null
+          event_type?: string
+          extracted_price?: number | null
+          extraction_id?: string | null
+          id?: string
+          metadata?: Json | null
+          platform_name?: string | null
+          registration_id?: string
+          savings_amount?: number | null
+          search_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "notification_events_extraction_id_fkey"
+            columns: ["extraction_id"]
+            isOneToOne: false
+            referencedRelation: "price_extractions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "notification_events_registration_id_fkey"
+            columns: ["registration_id"]
+            isOneToOne: false
+            referencedRelation: "notify_me_registrations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "notification_events_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      notify_me_registrations: {
+        Row: {
+          created_at: string
+          email: string
+          email_hash: string | null
+          id: string
+          is_active: boolean
+          last_notification_error: string | null
+          last_notified_at: string | null
+          metadata: Json | null
+          notification_count: number
+          notification_status: string
+          price_threshold_percentage: number | null
+          search_id: string | null
+          source_airbnb_price: number | null
+          source_airbnb_title: string | null
+          source_airbnb_url: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+          email_hash?: string | null
+          id?: string
+          is_active?: boolean
+          last_notification_error?: string | null
+          last_notified_at?: string | null
+          metadata?: Json | null
+          notification_count?: number
+          notification_status?: string
+          price_threshold_percentage?: number | null
+          search_id?: string | null
+          source_airbnb_price?: number | null
+          source_airbnb_title?: string | null
+          source_airbnb_url?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
+          email_hash?: string | null
+          id?: string
+          is_active?: boolean
+          last_notification_error?: string | null
+          last_notified_at?: string | null
+          metadata?: Json | null
+          notification_count?: number
+          notification_status?: string
+          price_threshold_percentage?: number | null
+          search_id?: string | null
+          source_airbnb_price?: number | null
+          source_airbnb_title?: string | null
+          source_airbnb_url?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "notify_me_registrations_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       pipeline_jobs: {
         Row: {
@@ -533,6 +672,7 @@ export type Database = {
           final_resolved_url: string | null
           id: string
           includes_taxes_fees: boolean | null
+          notify_me_registration_id: string | null
           occupancy_assumed: boolean | null
           page_content_hash: string | null
           platform_name: string
@@ -559,6 +699,7 @@ export type Database = {
           final_resolved_url?: string | null
           id?: string
           includes_taxes_fees?: boolean | null
+          notify_me_registration_id?: string | null
           occupancy_assumed?: boolean | null
           page_content_hash?: string | null
           platform_name: string
@@ -585,6 +726,7 @@ export type Database = {
           final_resolved_url?: string | null
           id?: string
           includes_taxes_fees?: boolean | null
+          notify_me_registration_id?: string | null
           occupancy_assumed?: boolean | null
           page_content_hash?: string | null
           platform_name?: string
@@ -595,6 +737,13 @@ export type Database = {
           updated_at?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "price_extractions_notify_me_registration_id_fkey"
+            columns: ["notify_me_registration_id"]
+            isOneToOne: false
+            referencedRelation: "notify_me_registrations"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "price_extractions_search_id_fkey"
             columns: ["search_id"]

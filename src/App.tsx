@@ -21,6 +21,7 @@ import Adapters from "./pages/admin/Adapters";
 import BlockedPlatforms from "./pages/admin/BlockedPlatforms";
 import Quotas from "./pages/admin/Quotas";
 import AuditLogs from "./pages/admin/AuditLogs";
+import NotifyMeUsers from "./pages/admin/NotifyMeUsers";
 
 const queryClient = new QueryClient();
 
@@ -48,6 +49,7 @@ const App = () => (
             <Route path="blocked" element={<BlockedPlatforms />} />
             <Route path="quotas" element={<Quotas />} />
             <Route path="audit" element={<AuditLogs />} />
+            <Route path="notify-me" element={<NotifyMeUsers />} />
           </Route>
           
           <Route path="*" element={<NotFound />} />

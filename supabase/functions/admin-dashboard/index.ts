@@ -528,6 +528,584 @@ Deno.serve(async (req) => {
       );
     }
 
+    // NOTIFY ME - OVERVIEW STATS
+    if (action === 'notify-me-stats' && req.method === 'GET') {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const sevenDaysAgo = new Date(today);
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      const thirtyDaysAgo = new Date(today);
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+      // Total registrations
+      const { count: totalRegistrations } = await supabase
+        .from('notify_me_registrations')
+        .select('*', { count: 'exact', head: true });
+
+      // Active registrations
+      const { count: activeRegistrations } = await supabase
+        .from('notify_me_registrations')
+        .select('*', { count: 'exact', head: true })
+        .eq('is_active', true);
+
+      // Registrations today
+      const { count: registrationsToday } = await supabase
+        .from('notify_me_registrations')
+        .select('*', { count: 'exact', head: true })
+        .gte('created_at', today.toISOString());
+
+      // Registrations last 7 days
+      const { count: registrationsWeek } = await supabase
+        .from('notify_me_registrations')
+        .select('*', { count: 'exact', head: true })
+        .gte('created_at', sevenDaysAgo.toISOString());
+
+      // Registrations last 30 days
+      const { count: registrationsMonth } = await supabase
+        .from('notify_me_registrations')
+        .select('*', { count: 'exact', head: true })
+        .gte('created_at', thirtyDaysAgo.toISOString());
+
+      // Notification status counts
+      const { data: statusCounts } = await supabase
+        .from('notify_me_registrations')
+        .select('notification_status');
+
+      const statusBreakdown: Record<string, number> = {
+        pending: 0,
+        sent: 0,
+        failed: 0,
+        disabled: 0
+      };
+      statusCounts?.forEach(r => {
+        if (statusBreakdown[r.notification_status] !== undefined) {
+          statusBreakdown[r.notification_status]++;
+        }
+      });
+
+      // Total notifications sent
+      const { count: notificationsSent } = await supabase
+        .from('notification_events')
+        .select('*', { count: 'exact', head: true })
+        .eq('event_type', 'notification_sent');
+
+      // Failed notifications
+      const { count: notificationsFailed } = await supabase
+        .from('notification_events')
+        .select('*', { count: 'exact', head: true })
+        .eq('event_type', 'notification_failed');
+
+      // Extractions triggered by notify-me
+      const { count: notifyMeExtractions } = await supabase
+        .from('price_extractions')
+        .select('*', { count: 'exact', head: true })
+        .not('notify_me_registration_id', 'is', null);
+
+      // Successful extractions from notify-me
+      const { count: notifyMeSuccesses } = await supabase
+        .from('price_extractions')
+        .select('*', { count: 'exact', head: true })
+        .not('notify_me_registration_id', 'is', null)
+        .eq('extraction_status', 'success');
+
+      // Daily registration trend
+      const { data: dailyRegistrations } = await supabase
+        .from('notify_me_registrations')
+        .select('created_at')
+        .gte('created_at', sevenDaysAgo.toISOString());
+
+      const dailyTrend: Record<string, number> = {};
+      for (let i = 0; i < 7; i++) {
+        const day = new Date(today);
+        day.setDate(day.getDate() - i);
+        dailyTrend[day.toISOString().split('T')[0]] = 0;
+      }
+      dailyRegistrations?.forEach(r => {
+        const dayStr = r.created_at.split('T')[0];
+        if (dailyTrend[dayStr] !== undefined) {
+          dailyTrend[dayStr]++;
+        }
+      });
+
+      return new Response(
+        JSON.stringify({
+          registrations: {
+            total: totalRegistrations || 0,
+            active: activeRegistrations || 0,
+            today: registrationsToday || 0,
+            last7Days: registrationsWeek || 0,
+            last30Days: registrationsMonth || 0
+          },
+          notifications: {
+            pending: statusBreakdown.pending,
+            sent: notificationsSent || 0,
+            failed: notificationsFailed || 0,
+            disabled: statusBreakdown.disabled
+          },
+          extractions: {
+            triggered: notifyMeExtractions || 0,
+            successful: notifyMeSuccesses || 0,
+            successRate: notifyMeExtractions ? Math.round(((notifyMeSuccesses || 0) / notifyMeExtractions) * 100) : 0
+          },
+          dailyTrend: Object.entries(dailyTrend)
+            .map(([date, count]) => ({ date, registrations: count }))
+            .sort((a, b) => a.date.localeCompare(b.date))
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // NOTIFY ME - LIST REGISTRATIONS
+    if (action === 'notify-me-list' && req.method === 'GET') {
+      const params = url.searchParams;
+      const status = params.get('status');
+      const startDate = params.get('startDate');
+      const endDate = params.get('endDate');
+      const searchId = params.get('searchId');
+      const page = parseInt(params.get('page') || '1');
+      const limit = parseInt(params.get('limit') || '50');
+
+      let query = supabase
+        .from('notify_me_registrations')
+        .select('*, searches(airbnb_title, airbnb_url, status)', { count: 'exact' });
+
+      if (status) query = query.eq('notification_status', status);
+      if (startDate) query = query.gte('created_at', startDate);
+      if (endDate) query = query.lte('created_at', endDate);
+      if (searchId) query = query.eq('search_id', searchId);
+
+      const { data: registrations, count } = await query
+        .order('created_at', { ascending: false })
+        .range((page - 1) * limit, page * limit - 1);
+
+      // Get extraction counts for each registration
+      const enrichedRegistrations = await Promise.all(
+        (registrations || []).map(async (reg) => {
+          const { count: extractionCount } = await supabase
+            .from('price_extractions')
+            .select('*', { count: 'exact', head: true })
+            .eq('notify_me_registration_id', reg.id);
+
+          const { data: lastExtraction } = await supabase
+            .from('price_extractions')
+            .select('extraction_status, created_at, extracted_price, platform_name')
+            .eq('notify_me_registration_id', reg.id)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+
+          // Mask email for privacy (show first 3 chars + domain)
+          const emailParts = reg.email.split('@');
+          const maskedEmail = emailParts[0].slice(0, 3) + '***@' + emailParts[1];
+
+          return {
+            id: reg.id,
+            email: maskedEmail,
+            emailHash: reg.email_hash,
+            sourceAirbnbUrl: reg.source_airbnb_url,
+            sourceAirbnbTitle: reg.source_airbnb_title,
+            sourceAirbnbPrice: reg.source_airbnb_price,
+            searchId: reg.search_id,
+            searchStatus: reg.searches?.status,
+            searchTitle: reg.searches?.airbnb_title,
+            notificationStatus: reg.notification_status,
+            lastNotifiedAt: reg.last_notified_at,
+            notificationCount: reg.notification_count,
+            priceThreshold: reg.price_threshold_percentage,
+            isActive: reg.is_active,
+            createdAt: reg.created_at,
+            extractionCount: extractionCount || 0,
+            lastExtraction: lastExtraction ? {
+              status: lastExtraction.extraction_status,
+              createdAt: lastExtraction.created_at,
+              price: lastExtraction.extracted_price,
+              platform: lastExtraction.platform_name
+            } : null
+          };
+        })
+      );
+
+      return new Response(
+        JSON.stringify({
+          registrations: enrichedRegistrations,
+          total: count,
+          page,
+          limit,
+          totalPages: Math.ceil((count || 0) / limit)
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // NOTIFY ME - GET SINGLE REGISTRATION DETAIL
+    if (action === 'notify-me-detail' && req.method === 'GET') {
+      const params = url.searchParams;
+      const id = params.get('id');
+
+      if (!id) {
+        return new Response(
+          JSON.stringify({ error: 'Registration ID is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Get registration with full email (for admin drill-down)
+      const { data: registration, error: regError } = await supabase
+        .from('notify_me_registrations')
+        .select('*, searches(*)')
+        .eq('id', id)
+        .single();
+
+      if (regError || !registration) {
+        return new Response(
+          JSON.stringify({ error: 'Registration not found' }),
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Get timeline events
+      const { data: events } = await supabase
+        .from('notification_events')
+        .select('*')
+        .eq('registration_id', id)
+        .order('created_at', { ascending: false });
+
+      // Get all extractions for this registration
+      const { data: extractions } = await supabase
+        .from('price_extractions')
+        .select('*')
+        .eq('notify_me_registration_id', id)
+        .order('created_at', { ascending: false });
+
+      // Get API usage for this registration
+      const { data: apiLogs } = await supabase
+        .from('api_request_logs')
+        .select('provider_name, cost_units, success, created_at')
+        .eq('notify_me_registration_id', id);
+
+      const apiUsage: Record<string, { requests: number; cost: number; successes: number }> = {};
+      apiLogs?.forEach(log => {
+        if (!apiUsage[log.provider_name]) {
+          apiUsage[log.provider_name] = { requests: 0, cost: 0, successes: 0 };
+        }
+        apiUsage[log.provider_name].requests++;
+        apiUsage[log.provider_name].cost += parseFloat(log.cost_units || '0');
+        if (log.success) apiUsage[log.provider_name].successes++;
+      });
+
+      // Log admin access
+      const ip = req.headers.get('x-forwarded-for') || 'unknown';
+      const userAgent = req.headers.get('user-agent') || 'unknown';
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin.id,
+        admin_email: authResult.admin.email,
+        action: 'view_notify_me_user',
+        resource_type: 'notify_me_registration',
+        resource_id: id,
+        ip_address: ip,
+        user_agent: userAgent
+      });
+
+      return new Response(
+        JSON.stringify({
+          registration: {
+            id: registration.id,
+            email: registration.email,
+            sourceAirbnbUrl: registration.source_airbnb_url,
+            sourceAirbnbTitle: registration.source_airbnb_title,
+            sourceAirbnbPrice: registration.source_airbnb_price,
+            searchId: registration.search_id,
+            search: registration.searches,
+            notificationStatus: registration.notification_status,
+            lastNotifiedAt: registration.last_notified_at,
+            notificationCount: registration.notification_count,
+            lastNotificationError: registration.last_notification_error,
+            priceThreshold: registration.price_threshold_percentage,
+            isActive: registration.is_active,
+            metadata: registration.metadata,
+            createdAt: registration.created_at,
+            updatedAt: registration.updated_at
+          },
+          events: events?.map(e => ({
+            id: e.id,
+            type: e.event_type,
+            searchId: e.search_id,
+            extractionId: e.extraction_id,
+            platform: e.platform_name,
+            price: e.extracted_price,
+            savings: e.savings_amount,
+            error: e.error_message,
+            metadata: e.metadata,
+            createdAt: e.created_at
+          })),
+          extractions: extractions?.map(e => ({
+            id: e.id,
+            platform: e.platform_name,
+            status: e.extraction_status,
+            price: e.extracted_price,
+            currency: e.currency,
+            provider: e.provider_used,
+            error: e.extraction_error,
+            createdAt: e.created_at
+          })),
+          apiUsage
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // NOTIFY ME - UPDATE REGISTRATION
+    if (action === 'notify-me-update' && req.method === 'PATCH') {
+      const ip = req.headers.get('x-forwarded-for') || 'unknown';
+      const userAgent = req.headers.get('user-agent') || 'unknown';
+      const { id, ...updates } = await req.json();
+
+      if (!id) {
+        return new Response(
+          JSON.stringify({ error: 'Registration ID is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Only allow specific fields to be updated
+      const allowedUpdates: Record<string, any> = {};
+      if (updates.is_active !== undefined) allowedUpdates.is_active = updates.is_active;
+      if (updates.notification_status) allowedUpdates.notification_status = updates.notification_status;
+      if (updates.price_threshold_percentage) allowedUpdates.price_threshold_percentage = updates.price_threshold_percentage;
+
+      const { data: oldReg } = await supabase
+        .from('notify_me_registrations')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      const { data: updatedReg, error } = await supabase
+        .from('notify_me_registrations')
+        .update(allowedUpdates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        return new Response(
+          JSON.stringify({ error: error.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Log the event
+      if (updates.notification_status === 'disabled' || updates.is_active === false) {
+        await supabase.from('notification_events').insert({
+          registration_id: id,
+          event_type: 'user_disabled',
+          metadata: { admin_action: true, admin_email: authResult.admin.email }
+        });
+      }
+
+      // Audit log
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin.id,
+        admin_email: authResult.admin.email,
+        action: 'update_notify_me_user',
+        resource_type: 'notify_me_registration',
+        resource_id: id,
+        old_values: oldReg,
+        new_values: updatedReg,
+        ip_address: ip,
+        user_agent: userAgent
+      });
+
+      return new Response(
+        JSON.stringify({ registration: updatedReg }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // NOTIFY ME - QUOTA ATTRIBUTION
+    if (action === 'notify-me-quota' && req.method === 'GET') {
+      const params = url.searchParams;
+      const days = parseInt(params.get('days') || '30');
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      // Get all API requests in period
+      const { data: allRequests } = await supabase
+        .from('api_request_logs')
+        .select('provider_name, cost_units, notify_me_registration_id')
+        .gte('created_at', startDate.toISOString());
+
+      // Calculate attribution
+      const providers: Record<string, { total: number; notifyMe: number; other: number; totalCost: number; notifyMeCost: number }> = {};
+      
+      allRequests?.forEach(req => {
+        if (!providers[req.provider_name]) {
+          providers[req.provider_name] = { total: 0, notifyMe: 0, other: 0, totalCost: 0, notifyMeCost: 0 };
+        }
+        const cost = parseFloat(req.cost_units || '0');
+        providers[req.provider_name].total++;
+        providers[req.provider_name].totalCost += cost;
+        
+        if (req.notify_me_registration_id) {
+          providers[req.provider_name].notifyMe++;
+          providers[req.provider_name].notifyMeCost += cost;
+        } else {
+          providers[req.provider_name].other++;
+        }
+      });
+
+      // Calculate totals
+      let totalRequests = 0;
+      let totalNotifyMe = 0;
+      let totalCost = 0;
+      let notifyMeCost = 0;
+
+      Object.values(providers).forEach(p => {
+        totalRequests += p.total;
+        totalNotifyMe += p.notifyMe;
+        totalCost += p.totalCost;
+        notifyMeCost += p.notifyMeCost;
+      });
+
+      return new Response(
+        JSON.stringify({
+          period: {
+            days,
+            startDate: startDate.toISOString()
+          },
+          totals: {
+            requests: totalRequests,
+            notifyMeRequests: totalNotifyMe,
+            notifyMePercentage: totalRequests > 0 ? Math.round((totalNotifyMe / totalRequests) * 100) : 0,
+            estimatedCost: totalCost,
+            notifyMeCost,
+            notifyMeCostPercentage: totalCost > 0 ? Math.round((notifyMeCost / totalCost) * 100) : 0
+          },
+          byProvider: Object.entries(providers).map(([name, data]) => ({
+            provider: name,
+            totalRequests: data.total,
+            notifyMeRequests: data.notifyMe,
+            otherRequests: data.other,
+            notifyMePercentage: data.total > 0 ? Math.round((data.notifyMe / data.total) * 100) : 0,
+            estimatedCost: data.totalCost,
+            notifyMeCost: data.notifyMeCost
+          }))
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // NOTIFY ME - NOTIFICATION HEALTH
+    if (action === 'notify-me-health' && req.method === 'GET') {
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      // Pending queue size
+      const { count: pendingCount } = await supabase
+        .from('notify_me_registrations')
+        .select('*', { count: 'exact', head: true })
+        .eq('notification_status', 'pending')
+        .eq('is_active', true);
+
+      // Get failed notifications with reasons
+      const { data: failedEvents } = await supabase
+        .from('notification_events')
+        .select('error_message, created_at, registration_id')
+        .eq('event_type', 'notification_failed')
+        .gte('created_at', sevenDaysAgo.toISOString());
+
+      // Group failures by reason
+      const failureReasons: Record<string, number> = {};
+      failedEvents?.forEach(e => {
+        const reason = e.error_message || 'unknown';
+        failureReasons[reason] = (failureReasons[reason] || 0) + 1;
+      });
+
+      // Calculate average time from extraction to notification
+      const { data: sentEvents } = await supabase
+        .from('notification_events')
+        .select('registration_id, created_at, metadata')
+        .eq('event_type', 'notification_sent')
+        .gte('created_at', sevenDaysAgo.toISOString())
+        .limit(100);
+
+      // Get registrations with retry info
+      const { data: failedRegistrations } = await supabase
+        .from('notify_me_registrations')
+        .select('id, email, notification_status, last_notification_error, notification_count, last_notified_at')
+        .eq('notification_status', 'failed')
+        .order('updated_at', { ascending: false })
+        .limit(20);
+
+      return new Response(
+        JSON.stringify({
+          queue: {
+            pendingCount: pendingCount || 0
+          },
+          failures: {
+            totalLast7Days: failedEvents?.length || 0,
+            byReason: failureReasons,
+            recentFailures: failedRegistrations?.map(r => ({
+              id: r.id,
+              email: r.email.split('@')[0].slice(0, 3) + '***@' + r.email.split('@')[1],
+              error: r.last_notification_error,
+              retryCount: r.notification_count,
+              lastAttempt: r.last_notified_at
+            }))
+          },
+          performance: {
+            notificationsSentLast7Days: sentEvents?.length || 0
+          }
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // NOTIFY ME - RETRY NOTIFICATION
+    if (action === 'notify-me-retry' && req.method === 'POST') {
+      const ip = req.headers.get('x-forwarded-for') || 'unknown';
+      const userAgent = req.headers.get('user-agent') || 'unknown';
+      const { id } = await req.json();
+
+      if (!id) {
+        return new Response(
+          JSON.stringify({ error: 'Registration ID is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Reset to pending status
+      const { error } = await supabase
+        .from('notify_me_registrations')
+        .update({
+          notification_status: 'pending',
+          last_notification_error: null
+        })
+        .eq('id', id);
+
+      if (error) {
+        return new Response(
+          JSON.stringify({ error: error.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Audit log
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin.id,
+        admin_email: authResult.admin.email,
+        action: 'retry_notification',
+        resource_type: 'notify_me_registration',
+        resource_id: id,
+        ip_address: ip,
+        user_agent: userAgent
+      });
+
+      return new Response(
+        JSON.stringify({ success: true }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
