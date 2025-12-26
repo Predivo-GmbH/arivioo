@@ -19,7 +19,7 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.extract-prices]
-verify_jwt = true
+verify_jwt = false
 
 [functions.generate-platform-adapter]
 verify_jwt = false
@@ -39,5 +39,5 @@ verify_jwt = false
 [functions.run-pipeline-test]
 verify_jwt = false
 
-[functions.extract-prices]
+[functions.run-price-pipeline]
 verify_jwt = false
