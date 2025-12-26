@@ -180,18 +180,20 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     const supabaseClient = createClient(supabaseUrl, supabaseKey);
     
-    const { 
-      searchId, 
-      requestedCheckIn, 
-      requestedCheckOut, 
-      occupancy,
-      waitForCompletion = true, // Default to waiting for testing
-      stuckTimeoutMinutes = 5,
-    } = await req.json() as PipelineRequest;
+    const body = await req.json() as PipelineRequest & { checkIn?: string; checkOut?: string; adults?: number; children?: number; rooms?: number };
+    const searchId = body.searchId;
+    // Support both parameter styles for backward compatibility
+    const requestedCheckIn = body.requestedCheckIn || body.checkIn || '';
+    const requestedCheckOut = body.requestedCheckOut || body.checkOut || '';
+    const adults = body.occupancy?.adults ?? body.adults ?? 2;
+    const children = body.occupancy?.children ?? body.children ?? 0;
+    const rooms = body.occupancy?.rooms ?? body.rooms ?? 1;
+    const waitForCompletion = body.waitForCompletion ?? true;
+    const stuckTimeoutMinutes = body.stuckTimeoutMinutes ?? 5;
     
-    const adults = occupancy?.adults ?? 2;
-    const children = occupancy?.children ?? 0;
-    const rooms = occupancy?.rooms ?? 1;
+    if (!requestedCheckIn || !requestedCheckOut) {
+      throw new Error('Check-in and check-out dates are required');
+    }
     
     console.log(`[DISPATCHER] Starting pipeline for search ${searchId}`);
     console.log(`[DISPATCHER] Dates: ${requestedCheckIn} to ${requestedCheckOut}, occupancy: ${adults}a/${children}c/${rooms}r`);
