@@ -361,6 +361,7 @@ Deno.serve(async (req) => {
     // Generate deep links using URL modification approach
     const deepLinks: Array<{
       resultId: string;
+      extractionId: string;
       platformName: string;
       originalUrl: string;
       deepLink: string;
@@ -392,17 +393,8 @@ Deno.serve(async (req) => {
         rooms
       );
 
-      deepLinks.push({
-        resultId: result.id,
-        platformName: result.platform_name,
-        originalUrl: result.listing_url,
-        deepLink,
-        occupancyAssumed: true,
-        hasRules: !!platform,
-      });
-
-      // Create/update price extraction record
-      await supabaseClient
+      // Create/update price extraction record and get the actual extraction ID
+      const { data: extractionData, error: upsertError } = await supabaseClient
         .from('price_extractions')
         .upsert({
           search_result_id: result.id,
@@ -414,9 +406,27 @@ Deno.serve(async (req) => {
           assumed_rooms: rooms,
           occupancy_assumed: true,
           extraction_status: 'pending',
+          dates_validated: false,
         }, {
           onConflict: 'search_result_id'
-        });
+        })
+        .select('id')
+        .single();
+
+      if (upsertError) {
+        console.error(`[DEEP-LINKS] Upsert error for ${result.platform_name}:`, upsertError);
+        continue;
+      }
+
+      deepLinks.push({
+        resultId: result.id,
+        extractionId: extractionData.id,
+        platformName: result.platform_name,
+        originalUrl: result.listing_url,
+        deepLink,
+        occupancyAssumed: true,
+        hasRules: !!platform,
+      });
     }
 
     console.log(`[DEEP-LINKS] Generated ${deepLinks.length} deep links`);
@@ -425,8 +435,9 @@ Deno.serve(async (req) => {
     if (!skipPriceExtraction && deepLinks.length > 0) {
       console.log(`[DEEP-LINKS] Scheduling two-phase extraction (validate-dates → extract-prices)`);
       
+      // Use actual price_extractions.id, not search_result.id
       const extractionData = deepLinks.map(d => ({
-        id: d.resultId,
+        id: d.extractionId,
         deepLink: d.deepLink,
         platformName: d.platformName,
       }));
