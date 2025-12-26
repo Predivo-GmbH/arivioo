@@ -5,23 +5,21 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Terminal status values - no platform should remain outside these after pipeline completes
+// Terminal statuses - used for cleanup
 const TERMINAL_STATUSES = [
-  'success',                          // Price extracted
-  'dates_not_applied',                // Phase A failed - dates not applied
-  'no_availability_for_dates',        // Phase A - dates unavailable
-  'blocked_captcha_or_bot',           // Blocked by anti-bot
-  'blocked_rate_limit',               // Rate limited
-  'render_failed',                    // Page didn't render
-  'listing_unavailable',              // 404 or listing removed
-  'price_not_found_after_dates_applied', // Phase B - no price found
-  'total_not_available_pre_checkout', // Price only at payment step
-  'validation_error',                 // Validation logic error
-  'extraction_error',                 // Extraction logic error
-  'failed_unknown',                   // Unknown failure
+  'success',
+  'dates_not_applied',
+  'no_availability_for_dates',
+  'blocked_captcha_or_bot',
+  'blocked_rate_limit',
+  'render_failed',
+  'listing_unavailable',
+  'price_not_found_after_dates_applied',
+  'total_not_available_pre_checkout',
+  'validation_error',
+  'extraction_error',
+  'timeout',
 ] as const;
-
-type TerminalStatus = typeof TERMINAL_STATUSES[number];
 
 interface PipelineRequest {
   searchId: string;
@@ -32,80 +30,87 @@ interface PipelineRequest {
     children: number;
     rooms: number;
   };
+  // If true, waits for all workers to complete (useful for testing)
+  waitForCompletion?: boolean;
+  // Timeout threshold for stuck extractions cleanup (default 5 minutes)
+  stuckTimeoutMinutes?: number;
 }
 
-interface PlatformResult {
-  platform: string;
-  extractionId: string;
-  deepLink: string;
-  phaseA: {
-    datesValidated: boolean;
-    detectedCheckIn: string | null;
-    detectedCheckOut: string | null;
-    status: string;
-    strategyUsed: string | null;
-    evidence: string | null;
-  };
-  phaseB: {
-    ran: boolean;
-    extractedPrice: number | null;
-    currency: string | null;
-    includesTaxesFees: boolean | null;
-    finalStatus: string;
-    evidence: string | null;
-  };
-}
-
-// Helper to apply date parameters to deep link based on platform
+// Apply date parameters to deep link based on platform
 function applyDatesToDeepLink(url: string, platform: string, checkIn: string, checkOut: string, adults: number): string {
-  const urlObj = new URL(url);
-  const lowerPlatform = platform.toLowerCase();
-  
-  // Platform-specific date parameter mappings
-  if (lowerPlatform.includes('vrbo')) {
-    urlObj.searchParams.set('arrival', checkIn);
-    urlObj.searchParams.set('departure', checkOut);
-    urlObj.searchParams.set('adults', adults.toString());
-  } else if (lowerPlatform.includes('expedia')) {
-    urlObj.searchParams.set('chkin', checkIn);
-    urlObj.searchParams.set('chkout', checkOut);
-    urlObj.searchParams.set('adults', adults.toString());
-  } else if (lowerPlatform.includes('agoda')) {
-    urlObj.searchParams.set('checkIn', checkIn);
-    urlObj.searchParams.set('checkOut', checkOut);
-    urlObj.searchParams.set('adults', adults.toString());
-  } else if (lowerPlatform.includes('booking')) {
-    urlObj.searchParams.set('checkin', checkIn);
-    urlObj.searchParams.set('checkout', checkOut);
-    urlObj.searchParams.set('group_adults', adults.toString());
-  } else if (lowerPlatform.includes('houfy')) {
-    urlObj.searchParams.set('check_in', checkIn);
-    urlObj.searchParams.set('check_out', checkOut);
-  } else {
-    // Generic fallback - try common patterns
-    urlObj.searchParams.set('check_in', checkIn);
-    urlObj.searchParams.set('check_out', checkOut);
-    urlObj.searchParams.set('adults', adults.toString());
+  try {
+    const urlObj = new URL(url);
+    const lowerPlatform = platform.toLowerCase();
+    
+    if (lowerPlatform.includes('vrbo')) {
+      urlObj.searchParams.set('arrival', checkIn);
+      urlObj.searchParams.set('departure', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    } else if (lowerPlatform.includes('expedia')) {
+      urlObj.searchParams.set('chkin', checkIn);
+      urlObj.searchParams.set('chkout', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    } else if (lowerPlatform.includes('agoda')) {
+      urlObj.searchParams.set('checkIn', checkIn);
+      urlObj.searchParams.set('checkOut', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    } else if (lowerPlatform.includes('booking')) {
+      urlObj.searchParams.set('checkin', checkIn);
+      urlObj.searchParams.set('checkout', checkOut);
+      urlObj.searchParams.set('group_adults', adults.toString());
+    } else if (lowerPlatform.includes('houfy')) {
+      urlObj.searchParams.set('check_in', checkIn);
+      urlObj.searchParams.set('check_out', checkOut);
+    } else {
+      // Generic fallback
+      urlObj.searchParams.set('check_in', checkIn);
+      urlObj.searchParams.set('check_out', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    }
+    
+    return urlObj.toString();
+  } catch {
+    return url;
   }
-  
-  return urlObj.toString();
 }
 
-// Call validate-dates edge function with timeout
-async function runPhaseA(
+// Trigger worker for a single platform (fire-and-forget or await)
+async function triggerWorker(
   supabaseUrl: string,
   supabaseKey: string,
   extractionId: string,
-  deepLink: string,
-  platformName: string,
   requestedCheckIn: string,
-  requestedCheckOut: string
-): Promise<{ success: boolean; result: any; error?: string }> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout
-    
-    const response = await fetch(`${supabaseUrl}/functions/v1/validate-dates`, {
+  requestedCheckOut: string,
+  wait: boolean
+): Promise<any> {
+  const workerUrl = `${supabaseUrl}/functions/v1/process-platform-extraction`;
+  
+  if (wait) {
+    // Wait for completion
+    try {
+      const response = await fetch(workerUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          extractionId,
+          requestedCheckIn,
+          requestedCheckOut,
+        }),
+      });
+      
+      if (response.ok) {
+        return await response.json();
+      }
+      return { success: false, error: `HTTP ${response.status}` };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  } else {
+    // Fire-and-forget - just start the request without waiting
+    fetch(workerUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${supabaseKey}`,
@@ -113,72 +118,54 @@ async function runPhaseA(
       },
       body: JSON.stringify({
         extractionId,
-        deepLink,
-        platformName,
         requestedCheckIn,
         requestedCheckOut,
-        strategy: 'url_then_navigate',
       }),
-      signal: controller.signal,
+    }).then(async (r) => {
+      console.log(`[DISPATCHER] Worker triggered for ${extractionId}: ${r.status}`);
+    }).catch((e) => {
+      console.error(`[DISPATCHER] Worker trigger failed for ${extractionId}:`, e);
     });
     
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      return { success: false, result: null, error: `HTTP ${response.status}: ${errorText}` };
-    }
-    
-    const result = await response.json();
-    return { success: true, result };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-    // On timeout, return explicit failure
-    if (errorMsg.includes('aborted')) {
-      return { success: false, result: null, error: 'Phase A timeout - marking as render_failed' };
-    }
-    return { success: false, result: null, error: errorMsg };
+    return { triggered: true };
   }
 }
 
-// Call extract-prices edge function for Phase B
-async function runPhaseB(
-  supabaseUrl: string,
-  supabaseKey: string,
+// Clean up stuck pending extractions
+async function cleanupStuckExtractions(
+  supabaseClient: any,
   searchId: string,
-  resultIds: string[]
-): Promise<{ success: boolean; results: any[]; error?: string }> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
-    
-    const response = await fetch(`${supabaseUrl}/functions/v1/extract-prices`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${supabaseKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        searchId,
-        resultIds,
-        requireValidation: true,
-      }),
-      signal: controller.signal,
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      return { success: false, results: [], error: `HTTP ${response.status}: ${errorText}` };
-    }
-    
-    const data = await response.json();
-    return { success: true, results: data.results || [] };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-    return { success: false, results: [], error: errorMsg };
+  stuckTimeoutMinutes: number
+): Promise<{ cleaned: number; ids: string[] }> {
+  const cutoffTime = new Date(Date.now() - stuckTimeoutMinutes * 60 * 1000).toISOString();
+  
+  // Find extractions still pending past the timeout
+  const { data: stuckExtractions } = await supabaseClient
+    .from('price_extractions')
+    .select('id, platform_name')
+    .eq('search_id', searchId)
+    .eq('extraction_status', 'pending')
+    .lt('updated_at', cutoffTime);
+  
+  if (!stuckExtractions || stuckExtractions.length === 0) {
+    return { cleaned: 0, ids: [] };
   }
+  
+  const stuckIds = stuckExtractions.map((e: any) => e.id);
+  
+  // Mark as timeout
+  await supabaseClient
+    .from('price_extractions')
+    .update({
+      extraction_status: 'timeout',
+      extraction_error: `Extraction stuck pending for over ${stuckTimeoutMinutes} minutes`,
+      updated_at: new Date().toISOString(),
+    })
+    .in('id', stuckIds);
+  
+  console.log(`[DISPATCHER] Cleaned up ${stuckIds.length} stuck extractions`);
+  
+  return { cleaned: stuckExtractions.length, ids: stuckIds };
 }
 
 Deno.serve(async (req) => {
@@ -191,18 +178,26 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-    
     const supabaseClient = createClient(supabaseUrl, supabaseKey);
     
-    const { searchId, requestedCheckIn, requestedCheckOut, occupancy } = await req.json() as PipelineRequest;
+    const { 
+      searchId, 
+      requestedCheckIn, 
+      requestedCheckOut, 
+      occupancy,
+      waitForCompletion = true, // Default to waiting for testing
+      stuckTimeoutMinutes = 5,
+    } = await req.json() as PipelineRequest;
     
     const adults = occupancy?.adults ?? 2;
     const children = occupancy?.children ?? 0;
     const rooms = occupancy?.rooms ?? 1;
     
-    console.log(`[PIPELINE] Starting for search ${searchId}, dates: ${requestedCheckIn} to ${requestedCheckOut}`);
+    console.log(`[DISPATCHER] Starting pipeline for search ${searchId}`);
+    console.log(`[DISPATCHER] Dates: ${requestedCheckIn} to ${requestedCheckOut}, occupancy: ${adults}a/${children}c/${rooms}r`);
+    console.log(`[DISPATCHER] Mode: ${waitForCompletion ? 'synchronous' : 'fire-and-forget'}`);
     
-    // Step 1: Fetch all search results for this search (matched platforms)
+    // Step 1: Fetch all high-confidence search results (matched platforms)
     const { data: searchResults, error: fetchError } = await supabaseClient
       .from('search_results')
       .select('id, platform_name, listing_url, confidence_score')
@@ -216,15 +211,19 @@ Deno.serve(async (req) => {
     
     if (!searchResults || searchResults.length === 0) {
       return new Response(
-        JSON.stringify({ success: true, message: 'No matched platforms found', results: [] }),
+        JSON.stringify({ 
+          success: true, 
+          message: 'No matched platforms found',
+          summary: { totalPlatforms: 0 },
+        }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
     
-    console.log(`[PIPELINE] Found ${searchResults.length} matched platforms`);
+    console.log(`[DISPATCHER] Found ${searchResults.length} matched platforms`);
     
-    // Step 2: Create or update price_extractions for each platform
-    const extractionIds: Map<string, { id: string; deepLink: string; platform: string }> = new Map();
+    // Step 2: Create or reset price_extractions for each platform (idempotent)
+    const extractions: Array<{ id: string; platform: string; deepLink: string }> = [];
     
     for (const result of searchResults) {
       const deepLink = applyDatesToDeepLink(
@@ -238,13 +237,14 @@ Deno.serve(async (req) => {
       // Check for existing extraction
       const { data: existing } = await supabaseClient
         .from('price_extractions')
-        .select('id')
+        .select('id, extraction_status')
         .eq('search_result_id', result.id)
         .eq('search_id', searchId)
         .single();
       
       if (existing) {
-        // Reset to pending for re-run
+        // Only reset if not already in terminal state OR if we want to re-run
+        // For now, always reset to pending to re-run the pipeline
         await supabaseClient
           .from('price_extractions')
           .update({
@@ -263,7 +263,7 @@ Deno.serve(async (req) => {
           })
           .eq('id', existing.id);
         
-        extractionIds.set(result.id, { id: existing.id, deepLink, platform: result.platform_name });
+        extractions.push({ id: existing.id, platform: result.platform_name, deepLink });
       } else {
         // Create new extraction
         const { data: newExtraction } = await supabaseClient
@@ -283,194 +283,101 @@ Deno.serve(async (req) => {
           .single();
         
         if (newExtraction) {
-          extractionIds.set(result.id, { id: newExtraction.id, deepLink, platform: result.platform_name });
+          extractions.push({ id: newExtraction.id, platform: result.platform_name, deepLink });
         }
       }
     }
     
-    console.log(`[PIPELINE] Created/updated ${extractionIds.size} price_extractions`);
+    console.log(`[DISPATCHER] Created/reset ${extractions.length} price_extractions`);
     
-    // Step 3: Run Phase A (validate-dates) for each platform
-    // This is the ONLY way dates_validated can become true
-    const phaseAResults: Map<string, PlatformResult> = new Map();
-    const validatedResultIds: string[] = [];
+    // Step 3: Trigger workers for each platform
+    const workerResults: any[] = [];
     
-    for (const [resultId, extraction] of extractionIds) {
-      console.log(`[PIPELINE] Phase A: ${extraction.platform}`);
-      
-      const phaseAResponse = await runPhaseA(
-        supabaseUrl,
-        supabaseKey,
-        extraction.id,
-        extraction.deepLink,
-        extraction.platform,
-        requestedCheckIn,
-        requestedCheckOut
+    if (waitForCompletion) {
+      // Run workers in parallel with Promise.allSettled for resilience
+      const workerPromises = extractions.map(ext => 
+        triggerWorker(supabaseUrl, supabaseKey, ext.id, requestedCheckIn, requestedCheckOut, true)
+          .then(result => ({ platform: ext.platform, extractionId: ext.id, ...result }))
+          .catch(error => ({ platform: ext.platform, extractionId: ext.id, success: false, error: String(error) }))
       );
       
-      const platformResult: PlatformResult = {
-        platform: extraction.platform,
-        extractionId: extraction.id,
-        deepLink: extraction.deepLink,
-        phaseA: {
-          datesValidated: false,
-          detectedCheckIn: null,
-          detectedCheckOut: null,
-          status: 'failed_unknown',
-          strategyUsed: null,
-          evidence: null,
-        },
-        phaseB: {
-          ran: false,
-          extractedPrice: null,
-          currency: null,
-          includesTaxesFees: null,
-          finalStatus: 'pending',
-          evidence: null,
-        },
-      };
+      const results = await Promise.allSettled(workerPromises);
       
-      if (phaseAResponse.success && phaseAResponse.result) {
-        const r = phaseAResponse.result;
-        platformResult.phaseA = {
-          datesValidated: r.success === true,
-          detectedCheckIn: r.detectedCheckIn || null,
-          detectedCheckOut: r.detectedCheckOut || null,
-          status: r.status || 'failed_unknown',
-          strategyUsed: r.strategyUsed || null,
-          evidence: r.error || null,
-        };
-        
-        if (r.success) {
-          validatedResultIds.push(resultId);
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          workerResults.push(result.value);
+        } else {
+          workerResults.push({ success: false, error: result.reason });
         }
-      } else {
-        // Phase A call failed entirely - mark as render_failed
-        platformResult.phaseA.status = 'render_failed';
-        platformResult.phaseA.evidence = phaseAResponse.error || 'Phase A call failed';
-        
-        // Update DB with failure status
-        await supabaseClient
-          .from('price_extractions')
-          .update({
-            extraction_status: 'render_failed',
-            extraction_error: phaseAResponse.error || 'Phase A timeout or network error',
-            dates_validated: false,
-          })
-          .eq('id', extraction.id);
-      }
-      
-      phaseAResults.set(extraction.id, platformResult);
-    }
-    
-    console.log(`[PIPELINE] Phase A complete: ${validatedResultIds.length}/${extractionIds.size} validated`);
-    
-    // Step 4: Run Phase B (extract-prices) ONLY for validated platforms
-    // Phase B MUST NOT run if dates_validated=false - this is enforced by requireValidation=true
-    if (validatedResultIds.length > 0) {
-      console.log(`[PIPELINE] Running Phase B for ${validatedResultIds.length} validated platforms`);
-      
-      const phaseBResponse = await runPhaseB(supabaseUrl, supabaseKey, searchId, validatedResultIds);
-      
-      if (!phaseBResponse.success) {
-        console.error(`[PIPELINE] Phase B failed: ${phaseBResponse.error}`);
       }
     } else {
-      console.log(`[PIPELINE] Skipping Phase B - no validated platforms`);
+      // Fire-and-forget mode
+      for (const ext of extractions) {
+        await triggerWorker(supabaseUrl, supabaseKey, ext.id, requestedCheckIn, requestedCheckOut, false);
+        workerResults.push({ platform: ext.platform, extractionId: ext.id, triggered: true });
+      }
     }
     
-    // Step 5: Fetch final state and ensure no pending statuses remain
+    // Step 4: Clean up any stuck pending extractions
+    const cleanup = await cleanupStuckExtractions(supabaseClient, searchId, stuckTimeoutMinutes);
+    
+    // Step 5: Fetch final state and build summary
     const { data: finalExtractions } = await supabaseClient
       .from('price_extractions')
       .select('*')
       .eq('search_id', searchId);
     
-    const results: PlatformResult[] = [];
+    // Count terminal vs pending
+    const statusCounts: Record<string, number> = {};
     let pendingCount = 0;
+    const platformSummaries: any[] = [];
     
-    for (const extraction of (finalExtractions || [])) {
-      const existing = phaseAResults.get(extraction.id);
+    for (const ext of (finalExtractions || [])) {
+      const status = ext.extraction_status;
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
       
-      // Check if status is terminal
-      const isTerminal = TERMINAL_STATUSES.includes(extraction.extraction_status as TerminalStatus);
-      
-      if (!isTerminal) {
+      if (!TERMINAL_STATUSES.includes(status as any)) {
         pendingCount++;
-        // Force terminal status for any remaining pending
-        console.log(`[PIPELINE] Forcing terminal status for ${extraction.platform_name}`);
-        await supabaseClient
-          .from('price_extractions')
-          .update({
-            extraction_status: 'validation_error',
-            extraction_error: 'Pipeline completed without reaching terminal status',
-          })
-          .eq('id', extraction.id);
       }
       
-      const finalResult: PlatformResult = existing || {
-        platform: extraction.platform_name,
-        extractionId: extraction.id,
-        deepLink: extraction.deep_link,
-        phaseA: {
-          datesValidated: extraction.dates_validated,
-          detectedCheckIn: extraction.detected_checkin,
-          detectedCheckOut: extraction.detected_checkout,
-          status: extraction.dates_validated ? 'dates_validated' : extraction.extraction_status,
-          strategyUsed: extraction.extraction_metadata?.strategy_used || null,
-          evidence: extraction.extraction_error,
-        },
-        phaseB: {
-          ran: extraction.dates_validated && extraction.extraction_status !== 'pending',
-          extractedPrice: extraction.extracted_price,
-          currency: extraction.currency,
-          includesTaxesFees: extraction.includes_taxes_fees,
-          finalStatus: extraction.extraction_status,
-          evidence: extraction.extraction_error,
-        },
-      };
-      
-      // Update Phase B info from final extraction
-      finalResult.phaseB = {
-        ran: extraction.dates_validated === true && extraction.extraction_status !== 'pending',
-        extractedPrice: extraction.extracted_price,
-        currency: extraction.currency,
-        includesTaxesFees: extraction.includes_taxes_fees,
-        finalStatus: extraction.extraction_status,
-        evidence: extraction.extraction_error,
-      };
-      
-      results.push(finalResult);
-    }
-    
-    // Summary statistics
-    const successCount = results.filter(r => r.phaseB.finalStatus === 'success').length;
-    const validatedCount = results.filter(r => r.phaseA.datesValidated).length;
-    const failureBreakdown: Record<string, number> = {};
-    
-    for (const r of results) {
-      if (r.phaseB.finalStatus !== 'success') {
-        failureBreakdown[r.phaseB.finalStatus] = (failureBreakdown[r.phaseB.finalStatus] || 0) + 1;
-      }
+      platformSummaries.push({
+        platform: ext.platform_name,
+        deepLink: ext.deep_link,
+        datesValidated: ext.dates_validated,
+        detectedCheckIn: ext.detected_checkin,
+        detectedCheckOut: ext.detected_checkout,
+        validationStatus: ext.dates_validated ? 'dates_validated' : (ext.extraction_status || 'pending'),
+        validationEvidence: ext.dates_validated ? null : ext.extraction_error,
+        phaseBStatus: ext.extraction_status,
+        extractedPrice: ext.extracted_price,
+        currency: ext.currency,
+        includesTaxesFees: ext.includes_taxes_fees,
+        phaseBEvidence: ext.extraction_error,
+      });
     }
     
     const elapsedMs = Date.now() - startTime;
     
-    console.log(`[PIPELINE] Complete in ${elapsedMs}ms: ${successCount} success, ${validatedCount} validated, ${pendingCount} forced terminal`);
+    const summary = {
+      totalPlatforms: finalExtractions?.length || 0,
+      statusBreakdown: statusCounts,
+      pendingRemaining: pendingCount,
+      successCount: statusCounts['success'] || 0,
+      cleanedUpStuck: cleanup.cleaned,
+      cleanedUpIds: cleanup.ids,
+      elapsedMs,
+    };
+    
+    console.log(`[DISPATCHER] Complete in ${elapsedMs}ms`);
+    console.log(`[DISPATCHER] Summary: ${summary.successCount} success, ${pendingCount} pending, ${cleanup.cleaned} cleaned`);
     
     return new Response(
       JSON.stringify({
         success: true,
-        summary: {
-          totalPlatforms: results.length,
-          phasaAValidated: validatedCount,
-          phaseBSuccess: successCount,
-          pendingForced: pendingCount,
-          elapsedMs,
-          failureBreakdown,
-        },
-        results,
+        summary,
+        platformSummaries,
         confirmations: {
-          zeroPending: pendingCount === 0 || `${pendingCount} forced to terminal`,
+          zeroPending: pendingCount === 0,
           noManualDbUpdates: true,
           phaseBOnlyWhenValidated: true,
         },
@@ -479,7 +386,7 @@ Deno.serve(async (req) => {
     );
     
   } catch (error) {
-    console.error('[PIPELINE] Fatal error:', error);
+    console.error('[DISPATCHER] Fatal error:', error);
     return new Response(
       JSON.stringify({ 
         success: false, 
