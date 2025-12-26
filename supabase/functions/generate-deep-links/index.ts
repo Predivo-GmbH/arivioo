@@ -223,42 +223,78 @@ function mergeRules(dbRules: UrlParameterRules | null, platform: string): UrlPar
   return { ...defaults, ...dbRules };
 }
 
-// Background task: Trigger price extraction
-async function triggerPriceExtraction(searchId: string): Promise<void> {
+// Background task: Trigger date validation (Phase A) then price extraction (Phase B)
+async function triggerTwoPhaseExtraction(searchId: string, extractions: Array<{ id: string; deepLink: string; platformName: string }>, checkIn: string, checkOut: string): Promise<void> {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
   if (!supabaseUrl || !supabaseServiceKey) {
-    console.error('Missing credentials for price extraction trigger');
+    console.error('Missing credentials for two-phase extraction');
     return;
   }
 
   try {
-    console.log(`[BACKGROUND] Triggering automatic price extraction for search ${searchId}`);
+    console.log(`[BACKGROUND] Starting two-phase extraction for search ${searchId}`);
     
-    const response = await fetch(`${supabaseUrl}/functions/v1/extract-prices`, {
+    // Phase A: Validate dates for each extraction
+    for (const extraction of extractions) {
+      console.log(`[BACKGROUND] Phase A: Validating dates for ${extraction.platformName}`);
+      
+      try {
+        const validateResponse = await fetch(`${supabaseUrl}/functions/v1/validate-dates`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseServiceKey}`,
+          },
+          body: JSON.stringify({
+            extractionId: extraction.id,
+            deepLink: extraction.deepLink,
+            platformName: extraction.platformName,
+            requestedCheckIn: checkIn,
+            requestedCheckOut: checkOut,
+          }),
+        });
+
+        if (!validateResponse.ok) {
+          console.error(`[BACKGROUND] Date validation failed for ${extraction.platformName}`);
+        } else {
+          const result = await validateResponse.json();
+          console.log(`[BACKGROUND] ${extraction.platformName} validation: ${result.status}`);
+        }
+      } catch (err) {
+        console.error(`[BACKGROUND] Validation error for ${extraction.platformName}:`, err);
+      }
+
+      // Rate limiting between validations
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    // Phase B: Extract prices from validated extractions
+    console.log(`[BACKGROUND] Phase B: Triggering price extraction for validated extractions`);
+    
+    const extractResponse = await fetch(`${supabaseUrl}/functions/v1/extract-prices`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${supabaseServiceKey}`,
       },
-      body: JSON.stringify({ searchId }),
+      body: JSON.stringify({ searchId, requireValidation: true }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[BACKGROUND] Price extraction failed: ${response.status} - ${errorText}`);
+    if (!extractResponse.ok) {
+      console.error(`[BACKGROUND] Price extraction failed: ${extractResponse.status}`);
       return;
     }
 
-    const result = await response.json();
-    console.log(`[BACKGROUND] Price extraction completed:`, {
+    const result = await extractResponse.json();
+    console.log(`[BACKGROUND] Two-phase extraction completed:`, {
       total: result.summary?.total || 0,
       successful: result.summary?.successful || 0,
       failed: result.summary?.failed || 0,
     });
   } catch (error) {
-    console.error(`[BACKGROUND] Error triggering price extraction:`, error);
+    console.error(`[BACKGROUND] Two-phase extraction error:`, error);
   }
 }
 
@@ -385,15 +421,21 @@ Deno.serve(async (req) => {
 
     console.log(`[DEEP-LINKS] Generated ${deepLinks.length} deep links`);
 
-    // Automatic price extraction (runs in background)
+    // Automatic two-phase extraction (runs in background)
     if (!skipPriceExtraction && deepLinks.length > 0) {
-      console.log(`[DEEP-LINKS] Scheduling automatic price extraction`);
+      console.log(`[DEEP-LINKS] Scheduling two-phase extraction (validate-dates → extract-prices)`);
+      
+      const extractionData = deepLinks.map(d => ({
+        id: d.resultId,
+        deepLink: d.deepLink,
+        platformName: d.platformName,
+      }));
       
       if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime?.waitUntil) {
-        EdgeRuntime.waitUntil(triggerPriceExtraction(searchId));
+        EdgeRuntime.waitUntil(triggerTwoPhaseExtraction(searchId, extractionData, checkIn, checkOut));
       } else {
-        triggerPriceExtraction(searchId).catch(err => 
-          console.error('Background price extraction error:', err)
+        triggerTwoPhaseExtraction(searchId, extractionData, checkIn, checkOut).catch((err: Error) => 
+          console.error('Background two-phase extraction error:', err)
         );
       }
     }

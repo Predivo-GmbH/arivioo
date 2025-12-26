@@ -597,12 +597,16 @@ export type Database = {
       platform_adapters: {
         Row: {
           created_at: string
+          date_application_strategy: string | null
           date_format: string
+          date_validation_required: boolean | null
           deep_link_template: string
           extraction_schema_overrides: Json | null
           id: string
           is_active: boolean
           is_ai_generated: boolean
+          last_successful_strategy: string | null
+          learned_navigation_steps: Json | null
           navigation_hints: Json | null
           occupancy_params: Json | null
           platform_domain: string
@@ -610,18 +614,23 @@ export type Database = {
           price_selectors: Json | null
           reliability_score: number | null
           requires_occupancy: boolean
+          strategy_updated_at: string | null
           updated_at: string
           url_parameter_rules: Json | null
           validation_rules: Json | null
         }
         Insert: {
           created_at?: string
+          date_application_strategy?: string | null
           date_format?: string
+          date_validation_required?: boolean | null
           deep_link_template: string
           extraction_schema_overrides?: Json | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          last_successful_strategy?: string | null
+          learned_navigation_steps?: Json | null
           navigation_hints?: Json | null
           occupancy_params?: Json | null
           platform_domain: string
@@ -629,18 +638,23 @@ export type Database = {
           price_selectors?: Json | null
           reliability_score?: number | null
           requires_occupancy?: boolean
+          strategy_updated_at?: string | null
           updated_at?: string
           url_parameter_rules?: Json | null
           validation_rules?: Json | null
         }
         Update: {
           created_at?: string
+          date_application_strategy?: string | null
           date_format?: string
+          date_validation_required?: boolean | null
           deep_link_template?: string
           extraction_schema_overrides?: Json | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          last_successful_strategy?: string | null
+          learned_navigation_steps?: Json | null
           navigation_hints?: Json | null
           occupancy_params?: Json | null
           platform_domain?: string
@@ -648,6 +662,7 @@ export type Database = {
           price_selectors?: Json | null
           reliability_score?: number | null
           requires_occupancy?: boolean
+          strategy_updated_at?: string | null
           updated_at?: string
           url_parameter_rules?: Json | null
           validation_rules?: Json | null
@@ -662,7 +677,11 @@ export type Database = {
           confidence_score: number | null
           created_at: string
           currency: string | null
+          date_validation_attempts: number | null
+          dates_validated: boolean | null
           deep_link: string
+          detected_checkin: string | null
+          detected_checkout: string | null
           evidence_snippets: Json | null
           extracted_price: number | null
           extraction_error: string | null
@@ -689,7 +708,11 @@ export type Database = {
           confidence_score?: number | null
           created_at?: string
           currency?: string | null
+          date_validation_attempts?: number | null
+          dates_validated?: boolean | null
           deep_link: string
+          detected_checkin?: string | null
+          detected_checkout?: string | null
           evidence_snippets?: Json | null
           extracted_price?: number | null
           extraction_error?: string | null
@@ -716,7 +739,11 @@ export type Database = {
           confidence_score?: number | null
           created_at?: string
           currency?: string | null
+          date_validation_attempts?: number | null
+          dates_validated?: boolean | null
           deep_link?: string
+          detected_checkin?: string | null
+          detected_checkout?: string | null
           evidence_snippets?: Json | null
           extracted_price?: number | null
           extraction_error?: string | null
