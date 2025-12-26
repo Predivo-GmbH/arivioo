@@ -51,6 +51,8 @@ Deno.serve(async (req) => {
 
   const url = new URL(req.url);
   const action = url.pathname.split('/').pop();
+  
+  console.log('[Admin Dashboard] Request:', { method: req.method, action, pathname: url.pathname });
 
   try {
     // SYSTEM HEALTH OVERVIEW
