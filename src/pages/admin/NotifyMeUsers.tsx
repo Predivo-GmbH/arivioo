@@ -197,7 +197,8 @@ export default function NotifyMeUsers() {
   const fetchStats = async () => {
     const token = getToken();
     const { data, error } = await supabase.functions.invoke('admin-dashboard/notify-me-stats', {
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Authorization: `Bearer ${token}` },
+      method: 'GET',
     });
     if (error) throw error;
     setStats(data);
@@ -212,7 +213,8 @@ export default function NotifyMeUsers() {
     if (statusFilter !== 'all') params.set('status', statusFilter);
 
     const { data, error } = await supabase.functions.invoke(`admin-dashboard/notify-me-list?${params}`, {
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Authorization: `Bearer ${token}` },
+      method: 'GET',
     });
     if (error) throw error;
     setRegistrations(data.registrations);
@@ -223,7 +225,8 @@ export default function NotifyMeUsers() {
   const fetchQuotaData = async () => {
     const token = getToken();
     const { data, error } = await supabase.functions.invoke('admin-dashboard/notify-me-quota?days=30', {
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Authorization: `Bearer ${token}` },
+      method: 'GET',
     });
     if (error) throw error;
     setQuotaData(data);
@@ -232,7 +235,8 @@ export default function NotifyMeUsers() {
   const fetchHealthData = async () => {
     const token = getToken();
     const { data, error } = await supabase.functions.invoke('admin-dashboard/notify-me-health', {
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { Authorization: `Bearer ${token}` },
+      method: 'GET',
     });
     if (error) throw error;
     setHealthData(data);
@@ -245,7 +249,8 @@ export default function NotifyMeUsers() {
     try {
       const token = getToken();
       const { data, error } = await supabase.functions.invoke(`admin-dashboard/notify-me-detail?id=${id}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
+        method: 'GET',
       });
       if (error) throw error;
       setSelectedDetail(data);
