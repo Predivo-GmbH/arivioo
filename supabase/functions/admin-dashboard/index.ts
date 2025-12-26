@@ -1108,6 +1108,137 @@ Deno.serve(async (req) => {
       );
     }
 
+    // NOTIFY ME - SEED DEMO DATA
+    if (action === 'notify-me-seed' && req.method === 'POST') {
+      const ip = req.headers.get('x-forwarded-for') || 'unknown';
+      const userAgent = req.headers.get('user-agent') || 'unknown';
+
+      // Check if demo data already exists
+      const { count: existingCount } = await supabase
+        .from('notify_me_registrations')
+        .select('*', { count: 'exact', head: true })
+        .ilike('email', '%demo-user%');
+
+      if ((existingCount || 0) > 0) {
+        return new Response(
+          JSON.stringify({ success: false, message: 'Demo data already exists' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Sample Airbnb URLs and titles for demo
+      const demoListings = [
+        { url: 'https://www.airbnb.com/rooms/12345678', title: 'Cozy Beach House in Malibu', price: 450 },
+        { url: 'https://www.airbnb.com/rooms/23456789', title: 'Modern Loft Downtown NYC', price: 320 },
+        { url: 'https://www.airbnb.com/rooms/34567890', title: 'Mountain Cabin with Hot Tub', price: 275 },
+        { url: 'https://www.airbnb.com/rooms/45678901', title: 'Oceanfront Villa in Miami', price: 890 },
+        { url: 'https://www.airbnb.com/rooms/56789012', title: 'Charming Cottage in Vermont', price: 185 },
+      ];
+
+      const statuses = ['pending', 'sent', 'failed', 'pending', 'pending'];
+      const registrations: any[] = [];
+
+      // Create demo registrations
+      for (let i = 0; i < 5; i++) {
+        const listing = demoListings[i];
+        const daysAgo = Math.floor(Math.random() * 30);
+        const createdAt = new Date();
+        createdAt.setDate(createdAt.getDate() - daysAgo);
+
+        const { data: reg, error: regError } = await supabase
+          .from('notify_me_registrations')
+          .insert({
+            email: `demo-user-${i + 1}@example.com`,
+            source_airbnb_url: listing.url,
+            source_airbnb_title: listing.title,
+            source_airbnb_price: listing.price,
+            notification_status: statuses[i],
+            notification_count: statuses[i] === 'sent' ? 1 : (statuses[i] === 'failed' ? 2 : 0),
+            last_notified_at: statuses[i] === 'sent' ? new Date().toISOString() : null,
+            last_notification_error: statuses[i] === 'failed' ? 'Email delivery failed: recipient mailbox full' : null,
+            price_threshold_percentage: 10 + (i * 5),
+            is_active: statuses[i] !== 'failed',
+            created_at: createdAt.toISOString()
+          })
+          .select()
+          .single();
+
+        if (regError) {
+          console.error('Error creating demo registration:', regError);
+          continue;
+        }
+
+        registrations.push(reg);
+
+        // Create events for each registration
+        const events = [
+          { type: 'registered', createdAt: createdAt }
+        ];
+
+        // Add more events based on status
+        if (statuses[i] === 'sent') {
+          const searchTriggeredAt = new Date(createdAt);
+          searchTriggeredAt.setHours(searchTriggeredAt.getHours() + 1);
+          events.push({ type: 'search_triggered', createdAt: searchTriggeredAt });
+          
+          const extractionAt = new Date(searchTriggeredAt);
+          extractionAt.setMinutes(extractionAt.getMinutes() + 5);
+          events.push({ type: 'extraction_completed', createdAt: extractionAt });
+          
+          const priceFoundAt = new Date(extractionAt);
+          priceFoundAt.setMinutes(priceFoundAt.getMinutes() + 1);
+          events.push({ type: 'price_found', createdAt: priceFoundAt });
+          
+          const notificationSentAt = new Date(priceFoundAt);
+          notificationSentAt.setMinutes(notificationSentAt.getMinutes() + 2);
+          events.push({ type: 'notification_sent', createdAt: notificationSentAt });
+        } else if (statuses[i] === 'failed') {
+          const searchTriggeredAt = new Date(createdAt);
+          searchTriggeredAt.setHours(searchTriggeredAt.getHours() + 1);
+          events.push({ type: 'search_triggered', createdAt: searchTriggeredAt });
+          
+          const failedAt = new Date(searchTriggeredAt);
+          failedAt.setMinutes(failedAt.getMinutes() + 10);
+          events.push({ type: 'notification_failed', createdAt: failedAt });
+        } else if (statuses[i] === 'pending' && i > 2) {
+          const searchTriggeredAt = new Date(createdAt);
+          searchTriggeredAt.setHours(searchTriggeredAt.getHours() + 2);
+          events.push({ type: 'search_triggered', createdAt: searchTriggeredAt });
+        }
+
+        // Insert events
+        for (const event of events) {
+          await supabase.from('notification_events').insert({
+            registration_id: reg.id,
+            event_type: event.type,
+            platform_name: event.type === 'price_found' ? 'Booking.com' : null,
+            extracted_price: event.type === 'price_found' ? Math.round(listing.price * 0.85) : null,
+            savings_amount: event.type === 'price_found' ? Math.round(listing.price * 0.15) : null,
+            error_message: event.type === 'notification_failed' ? 'Email delivery failed: recipient mailbox full' : null,
+            created_at: event.createdAt.toISOString()
+          });
+        }
+      }
+
+      // Audit log
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin.id,
+        admin_email: authResult.admin.email,
+        action: 'seed_demo_data',
+        resource_type: 'notify_me_registration',
+        new_values: { registrations_created: registrations.length },
+        ip_address: ip,
+        user_agent: userAgent
+      });
+
+      console.log('[Admin Dashboard] Seeded demo data:', { count: registrations.length });
+
+      return new Response(
+        JSON.stringify({ success: true, count: registrations.length }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

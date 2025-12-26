@@ -295,6 +295,31 @@ export default function NotifyMeUsers() {
     }
   };
 
+  const [isSeeding, setIsSeeding] = useState(false);
+
+  const handleSeedDemoData = async () => {
+    setIsSeeding(true);
+    try {
+      const token = getToken();
+      const { data, error } = await supabase.functions.invoke('admin-dashboard/notify-me-seed', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: {}
+      });
+      if (error) throw error;
+      if (data.success) {
+        toast({ title: 'Success', description: `Created ${data.count} demo registrations` });
+        loadData();
+      } else {
+        toast({ title: 'Info', description: data.message || 'Demo data may already exist', variant: 'default' });
+      }
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setIsSeeding(false);
+    }
+  };
+
   const loadData = async () => {
     setIsLoading(true);
     setError(null);
@@ -360,10 +385,20 @@ export default function NotifyMeUsers() {
           <h1 className="text-2xl font-bold">Users & Notify Me Registrations</h1>
           <p className="text-muted-foreground">Monitor and manage notification subscribers</p>
         </div>
-        <Button onClick={loadData} variant="outline" size="sm">
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleSeedDemoData} variant="outline" size="sm" disabled={isSeeding}>
+            {isSeeding ? (
+              <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <Users className="h-4 w-4 mr-2" />
+            )}
+            Seed Demo Data
+          </Button>
+          <Button onClick={loadData} variant="outline" size="sm">
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Overview Stats */}
