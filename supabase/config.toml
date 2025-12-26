@@ -32,3 +32,12 @@ verify_jwt = false
 
 [functions.admin-quotas]
 verify_jwt = false
+
+[functions.validate-dates]
+verify_jwt = false
+
+[functions.run-pipeline-test]
+verify_jwt = false
+
+[functions.extract-prices]
+verify_jwt = false
