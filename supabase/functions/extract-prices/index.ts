@@ -5,17 +5,19 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Extraction status lifecycle states
+// Extraction status lifecycle states (Phase B: only after dates validated)
 type ExtractionStatus = 
-  | 'pending'
-  | 'running'
-  | 'success'
-  | 'blocked_captcha_or_bot'
-  | 'blocked_rate_limit'
-  | 'dates_not_applied'
-  | 'price_not_found'
-  | 'render_failed'
-  | 'failed_unknown';
+  | 'pending'                      // Initial state
+  | 'awaiting_validation'          // Waiting for Phase A
+  | 'running'                      // Phase B in progress
+  | 'success'                      // Price extracted successfully
+  | 'dates_not_applied'            // Phase A failed - dates not applied
+  | 'no_availability_for_dates'    // Phase A found dates unavailable
+  | 'price_not_found_after_dates_applied'  // Phase B: dates OK but no price
+  | 'blocked_captcha_or_bot'       // Blocked by anti-bot
+  | 'blocked_rate_limit'           // Rate limited
+  | 'render_failed'                // Page didn't render
+  | 'failed_unknown';              // Unknown failure
 
 type PriceType = 'TOTAL_STAY' | 'NIGHTLY' | 'TOTAL_EXCL_TAX' | 'UNKNOWN';
 type ExtractionStage = 'LISTING_PAGE' | 'ROOMS_PAGE' | 'CHECKOUT_REVIEW' | 'UNKNOWN';
@@ -25,6 +27,7 @@ interface ExtractionRequest {
   searchId: string;
   resultIds?: string[];
   stream?: boolean;
+  requireValidation?: boolean;  // If true, only process validated extractions
 }
 
 interface ExtractionSchema {
@@ -343,7 +346,7 @@ async function extractWithFirecrawl(
     console.log('[FIRECRAWL] Price not found after all attempts');
     return {
       success: false,
-      status: 'price_not_found',
+      status: 'price_not_found_after_dates_applied',
       error: 'No price found in page content',
       provider: 'firecrawl',
       contentHash,
@@ -481,7 +484,7 @@ async function extractWithZyte(
 
     return {
       success: false,
-      status: 'price_not_found',
+      status: 'price_not_found_after_dates_applied',
       error: 'No price found by Zyte',
       provider: 'zyte',
       contentHash
@@ -585,7 +588,7 @@ async function extractPrice(
   }
 
   // Step 2: If Firecrawl fails with retryable status, try Zyte
-  const retryableStatuses: ExtractionStatus[] = ['price_not_found', 'dates_not_applied', 'render_failed'];
+  const retryableStatuses: ExtractionStatus[] = ['price_not_found_after_dates_applied', 'dates_not_applied', 'render_failed'];
   
   if (retryableStatuses.includes(firecrawlResult.status)) {
     console.log(`[EXTRACT] Firecrawl failed with ${firecrawlResult.status}, trying Zyte fallback`);
@@ -637,9 +640,9 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    const { searchId, resultIds, stream = false } = await req.json() as ExtractionRequest;
+    const { searchId, resultIds, stream = false, requireValidation = false } = await req.json() as ExtractionRequest;
 
-    console.log(`[EXTRACT-PRICES] Starting Firecrawl-first extraction for search ${searchId}`);
+    console.log(`[EXTRACT-PRICES] Starting Phase B extraction for search ${searchId} (requireValidation: ${requireValidation})`);
 
     // Fetch search info for dates
     const { data: searchData } = await supabaseClient
@@ -656,11 +659,16 @@ Deno.serve(async (req) => {
     }
 
     // Fetch pending price extractions
+    // If requireValidation is true, only process extractions where dates_validated = true
     let query = supabaseClient
       .from('price_extractions')
       .select('*, search_results(*)')
       .eq('search_id', searchId)
       .eq('extraction_status', 'pending');
+
+    if (requireValidation) {
+      query = query.eq('dates_validated', true);
+    }
 
     if (resultIds && resultIds.length > 0) {
       query = query.in('search_result_id', resultIds);
@@ -673,6 +681,27 @@ Deno.serve(async (req) => {
     }
 
     if (!pendingExtractions || pendingExtractions.length === 0) {
+      // Check if there are unvalidated extractions
+      const { count: unvalidatedCount } = await supabaseClient
+        .from('price_extractions')
+        .select('*', { count: 'exact', head: true })
+        .eq('search_id', searchId)
+        .eq('dates_validated', false)
+        .in('extraction_status', ['pending', 'awaiting_validation']);
+
+      if (unvalidatedCount && unvalidatedCount > 0) {
+        console.log(`[EXTRACT-PRICES] ${unvalidatedCount} extractions awaiting date validation`);
+        return new Response(
+          JSON.stringify({ 
+            success: true, 
+            results: [], 
+            message: `${unvalidatedCount} extractions awaiting date validation (Phase A)`,
+            awaitingValidation: unvalidatedCount,
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
       console.log(`[EXTRACT-PRICES] No pending extractions found`);
       return new Response(
         JSON.stringify({ success: true, results: [], message: 'No pending extractions' }),
@@ -680,7 +709,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log(`[EXTRACT-PRICES] Processing ${pendingExtractions.length} extractions`);
+    console.log(`[EXTRACT-PRICES] Processing ${pendingExtractions.length} validated extractions`);
 
     // Fetch platform adapters for navigation hints and schema overrides
     const { data: adapters } = await supabaseClient
