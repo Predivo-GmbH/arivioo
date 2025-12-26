@@ -139,7 +139,7 @@ async function extractWithFirecrawl(
   navigationHints?: string[],
   schemaOverrides?: Record<string, any>
 ): Promise<ProviderResult> {
-  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY') || Deno.env.get('FIRECRAWL_API_KEY_1');
+  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
   
   if (!firecrawlApiKey) {
     console.log('[FIRECRAWL] API key not configured');
