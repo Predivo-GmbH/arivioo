@@ -136,6 +136,46 @@ CRITICAL: If unsure or no clear total visible, return total_price as null.
 Return valid JSON matching the schema.`;
 }
 
+// Build date selection actions for platforms that require JS interaction
+function buildDateSelectionActions(platformName: string, checkIn: string, checkOut: string): any[] {
+  const platformLower = platformName.toLowerCase();
+  
+  // Agoda-specific date selection
+  if (platformLower.includes('agoda')) {
+    return [
+      { type: 'wait', milliseconds: 2000 },
+      // Click on check-in field
+      { type: 'click', selector: '[data-selenium="checkInInput"], #check-in-box, .SearchBoxTextDescription__title' },
+      { type: 'wait', milliseconds: 1000 },
+      // Type check-in date
+      { type: 'write', selector: 'input[data-selenium="checkInDate"], input[placeholder*="Check"]', text: checkIn },
+      { type: 'wait', milliseconds: 500 },
+      // Press enter to confirm
+      { type: 'press', key: 'Enter' },
+      { type: 'wait', milliseconds: 1000 },
+      // Type check-out date
+      { type: 'write', selector: 'input[data-selenium="checkOutDate"]', text: checkOut },
+      { type: 'press', key: 'Enter' },
+      { type: 'wait', milliseconds: 2000 },
+      // Click search/update button
+      { type: 'click', selector: 'button[data-selenium="searchButton"], button:contains("Update"), .SearchBoxSubmit' },
+      { type: 'wait', milliseconds: 3000 },
+    ];
+  }
+  
+  // Booking.com date selection
+  if (platformLower.includes('booking')) {
+    return [
+      { type: 'wait', milliseconds: 2000 },
+      { type: 'click', selector: '[data-testid="date-display-field-start"], .bui-calendar' },
+      { type: 'wait', milliseconds: 1000 },
+    ];
+  }
+  
+  // Default: no actions, rely on URL params
+  return [];
+}
+
 // ============= FIRECRAWL PROVIDER =============
 async function extractWithFirecrawl(
   url: string,
@@ -143,7 +183,8 @@ async function extractWithFirecrawl(
   requestedCheckIn: string,
   requestedCheckOut: string,
   navigationHints?: string[],
-  schemaOverrides?: Record<string, any>
+  schemaOverrides?: Record<string, any>,
+  useActions: boolean = false
 ): Promise<ProviderResult> {
   const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
   
@@ -158,31 +199,46 @@ async function extractWithFirecrawl(
   }
 
   try {
-    console.log(`[FIRECRAWL] Scraping ${url} for ${platformName}`);
+    console.log(`[FIRECRAWL] Scraping ${url} for ${platformName} (useActions: ${useActions})`);
     
-    // Add timeout to Firecrawl request (25s) to allow time for Zyte fallback
+    // Build actions if platform requires JS interaction for date selection
+    const actions = useActions ? buildDateSelectionActions(platformName, requestedCheckIn, requestedCheckOut) : [];
+    
+    if (actions.length > 0) {
+      console.log(`[FIRECRAWL] Using ${actions.length} actions for date selection on ${platformName}`);
+    }
+    
+    // Add timeout to Firecrawl request (35s when using actions, 25s otherwise)
+    const timeoutMs = actions.length > 0 ? 35000 : 25000;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     
     let scrapeResponse: Response;
     try {
-      // Step A: Firecrawl scrape with JSON extraction
+      // Firecrawl scrape with optional actions and JSON extraction
+      const requestBody: any = {
+        url,
+        formats: ['markdown', 'extract'],
+        extract: {
+          schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
+          prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
+        },
+        onlyMainContent: true,
+        waitFor: actions.length > 0 ? 5000 : 3000,
+      };
+      
+      // Add actions if we have them
+      if (actions.length > 0) {
+        requestBody.actions = actions;
+      }
+      
       scrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${firecrawlApiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          url,
-          formats: ['markdown', 'extract'],
-          extract: {
-            schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
-            prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
-          },
-          onlyMainContent: true,
-          waitFor: 3000,
-        }),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
     } catch (fetchError) {
@@ -640,7 +696,7 @@ async function extractPrice(
   navigationHints?: string[],
   schemaOverrides?: Record<string, any>
 ): Promise<ProviderResult> {
-  // Step 1: Try Firecrawl (primary)
+  // Step 1: Try Firecrawl without actions first (URL params may work)
   console.log(`[EXTRACT] Starting extraction for ${platformName}: ${url}`);
   
   const firecrawlResult = await extractWithFirecrawl(
@@ -649,16 +705,57 @@ async function extractPrice(
     requestedCheckIn,
     requestedCheckOut,
     navigationHints,
-    schemaOverrides
+    schemaOverrides,
+    false // no actions first
   );
 
   if (firecrawlResult.success) {
     return firecrawlResult;
   }
 
-  // Step 2: If Firecrawl fails with retryable status, try Zyte
-  // Include failed_unknown and render_failed (500 errors, timeouts) in retryable statuses
-  const retryableStatuses: ExtractionStatus[] = ['price_not_found_after_dates_applied', 'dates_not_applied', 'render_failed', 'failed_unknown'];
+  // Step 2: If price not found, retry with actions for date selection
+  const needsActionsStatuses: ExtractionStatus[] = ['price_not_found_after_dates_applied', 'dates_not_applied'];
+  
+  if (needsActionsStatuses.includes(firecrawlResult.status)) {
+    console.log(`[EXTRACT] Firecrawl found no price, retrying WITH date selection actions for ${platformName}`);
+    
+    const firecrawlWithActionsResult = await extractWithFirecrawl(
+      url,
+      platformName,
+      requestedCheckIn,
+      requestedCheckOut,
+      navigationHints,
+      schemaOverrides,
+      true // use actions
+    );
+    
+    if (firecrawlWithActionsResult.success) {
+      return firecrawlWithActionsResult;
+    }
+    
+    // If actions also failed, try Zyte
+    console.log(`[EXTRACT] Firecrawl with actions failed with ${firecrawlWithActionsResult.status}, trying Zyte fallback`);
+    
+    const zyteResult = await extractWithZyte(url, platformName, requestedCheckIn, requestedCheckOut);
+    
+    if (zyteResult.success) {
+      return zyteResult;
+    }
+
+    // If Zyte also fails with CAPTCHA/bot, use that status
+    if (zyteResult.status === 'blocked_captcha_or_bot') {
+      return zyteResult;
+    }
+
+    // Return firecrawl with actions result if both failed
+    return {
+      ...firecrawlWithActionsResult,
+      error: `Firecrawl: ${firecrawlWithActionsResult.error}; Zyte: ${zyteResult.error}`
+    };
+  }
+
+  // Step 3: If Firecrawl fails with other retryable status, try Zyte
+  const retryableStatuses: ExtractionStatus[] = ['render_failed', 'failed_unknown'];
   
   if (retryableStatuses.includes(firecrawlResult.status)) {
     console.log(`[EXTRACT] Firecrawl failed with ${firecrawlResult.status}, trying Zyte fallback`);
