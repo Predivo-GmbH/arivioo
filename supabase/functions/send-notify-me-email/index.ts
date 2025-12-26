@@ -34,7 +34,7 @@ const handler = async (req: Request): Promise<Response> => {
 
     // Send notification to admin
     const adminEmailResponse = await resend.emails.send({
-      from: "Arivioo <noreply@arivioo.com>",
+      from: "Arivioo <noreply@updates.arivioo.com>",
       to: ["lakeviewer1976@gmail.com"],
       subject: "🔔 New Notify Me Registration",
       html: `
@@ -96,7 +96,7 @@ const handler = async (req: Request): Promise<Response> => {
 
     // Send confirmation to user
     const userEmailResponse = await resend.emails.send({
-      from: "Arivioo <noreply@arivioo.com>",
+      from: "Arivioo <noreply@updates.arivioo.com>",
       to: [email],
       subject: "You're on the list! 🎉",
       html: `
