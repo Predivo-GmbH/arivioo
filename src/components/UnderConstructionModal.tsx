@@ -70,6 +70,16 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
           throw error;
         }
       } else {
+        // Send email notification
+        try {
+          await supabase.functions.invoke('send-notify-me-email', {
+            body: { email: email.toLowerCase().trim() }
+          });
+        } catch (emailError) {
+          console.error("Error sending notification email:", emailError);
+          // Don't fail the signup if email fails
+        }
+        
         setIsEmailSubmitted(true);
         toast.success("You're on the list! We'll notify you when we launch.");
       }
