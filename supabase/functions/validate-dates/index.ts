@@ -150,38 +150,36 @@ async function validateWithFirecrawl(
     
     const requestBody: any = {
       url,
-      formats: [
-        'markdown',
-        {
-          type: 'json',
-          schema: {
-            type: 'object',
-            properties: {
-              checkin_date_detected: { 
-                type: 'string', 
-                description: 'Check-in date shown on page (any format)' 
-              },
-              checkout_date_detected: { 
-                type: 'string', 
-                description: 'Check-out date shown on page (any format)' 
-              },
-              dates_visible: { 
-                type: 'boolean', 
-                description: 'Are the booking dates clearly visible on the page?' 
-              },
-              availability_status: {
-                type: 'string',
-                enum: ['available', 'unavailable', 'unknown'],
-                description: 'Is the property available for these dates?'
-              },
-              price_visible: {
-                type: 'boolean',
-                description: 'Is a price visible for the detected dates?'
-              },
+      formats: ['markdown', 'extract'],
+      extract: {
+        schema: {
+          type: 'object',
+          properties: {
+            checkin_date_detected: { 
+              type: 'string', 
+              description: 'Check-in date shown on page (any format)' 
             },
-            required: ['dates_visible', 'availability_status'],
+            checkout_date_detected: { 
+              type: 'string', 
+              description: 'Check-out date shown on page (any format)' 
+            },
+            dates_visible: { 
+              type: 'boolean', 
+              description: 'Are the booking dates clearly visible on the page?' 
+            },
+            availability_status: {
+              type: 'string',
+              enum: ['available', 'unavailable', 'unknown'],
+              description: 'Is the property available for these dates?'
+            },
+            price_visible: {
+              type: 'boolean',
+              description: 'Is a price visible for the detected dates?'
+            },
           },
-          prompt: `Analyze this ${platformName} booking page.
+          required: ['dates_visible', 'availability_status'],
+        },
+        prompt: `Analyze this ${platformName} booking page.
 
 CRITICAL: Look for the CHECK-IN and CHECK-OUT dates that are currently selected/displayed on this page.
 
@@ -195,8 +193,7 @@ Report:
 5. Is a price visible for these dates (price_visible)
 
 Return the exact dates you see on the page, not the requested dates.`,
-        },
-      ],
+      },
       onlyMainContent: true,
       waitFor: 3000,
     };
@@ -228,7 +225,7 @@ Return the exact dates you see on the page, not the requested dates.`,
 
     const data = await response.json();
     const markdown = data.data?.markdown || data.markdown || '';
-    const extractedJson = data.data?.json || data.json;
+    const extractedJson = data.data?.extract || data.extract;
     const finalUrl = data.data?.metadata?.sourceURL || url;
     const contentHash = simpleHash(markdown.slice(0, 5000));
 

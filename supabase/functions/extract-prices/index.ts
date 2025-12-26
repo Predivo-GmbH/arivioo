@@ -163,14 +163,11 @@ async function extractWithFirecrawl(
       },
       body: JSON.stringify({
         url,
-        formats: [
-          'markdown',
-          { 
-            type: 'json', 
-            schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
-            prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
-          }
-        ],
+        formats: ['markdown', 'extract'],
+        extract: {
+          schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
+          prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
+        },
         onlyMainContent: true,
         waitFor: 3000,
       }),
@@ -192,7 +189,7 @@ async function extractWithFirecrawl(
 
     const scrapeData = await scrapeResponse.json();
     const markdown = scrapeData.data?.markdown || scrapeData.markdown || '';
-    const extractedJson = scrapeData.data?.json || scrapeData.json;
+    const extractedJson = scrapeData.data?.extract || scrapeData.extract;
     const finalUrl = scrapeData.data?.metadata?.sourceURL || url;
     const contentHash = simpleHash(markdown.slice(0, 5000));
 
@@ -302,14 +299,11 @@ async function extractWithFirecrawl(
             },
             body: JSON.stringify({
               url: followLink,
-              formats: [
-                'markdown',
-                { 
-                  type: 'json', 
-                  schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
-                  prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
-                }
-              ],
+              formats: ['markdown', 'extract'],
+              extract: {
+                schema: schemaOverrides || DEFAULT_EXTRACTION_SCHEMA,
+                prompt: buildExtractionPrompt(platformName, requestedCheckIn, requestedCheckOut)
+              },
               onlyMainContent: true,
               waitFor: 2000,
             }),
@@ -317,7 +311,7 @@ async function extractWithFirecrawl(
 
           if (followResult.ok) {
             const followData = await followResult.json();
-            const followJson = followData.data?.json || followData.json;
+            const followJson = followData.data?.extract || followData.extract;
             
             if (followJson?.total_price) {
               const price = typeof followJson.total_price === 'string'
