@@ -107,25 +107,31 @@ const DEFAULT_EXTRACTION_SCHEMA = {
   required: ["total_price", "currency", "includes_taxes_fees", "price_type"]
 };
 
-// AI prompt for extraction
+// AI prompt for extraction - CRITICAL: Must extract ONLY from actual page content
 function buildExtractionPrompt(platformName: string, requestedCheckIn: string, requestedCheckOut: string): string {
   return `You are extracting booking price information from a ${platformName} property page.
 
 REQUESTED DATES: Check-in ${requestedCheckIn}, Check-out ${requestedCheckOut}
 
-CRITICAL VALIDATION:
-1. First verify if the page shows the SAME dates as requested (${requestedCheckIn} to ${requestedCheckOut})
-2. If dates don't match or aren't shown, set checkin_date_detected and checkout_date_detected to what you see (or null)
-3. Only extract price if you're confident it's for the shown dates
+CRITICAL EXTRACTION RULES:
+1. ONLY extract prices that are EXPLICITLY visible in the page content
+2. DO NOT invent, guess, or fabricate any prices
+3. If you cannot find a clear total price, set total_price to null
+4. evidence_snippets MUST be EXACT quotes copied verbatim from the page content
+
+PRICE EXTRACTION PRIORITY:
+1. Look for "total", "trip total", "stay total", "for X nights", "final price" labels
+2. If only per-night price is visible without a total, set total_price to null and note this in evidence
+3. NEVER multiply per-night by nights yourself - only use totals shown on page
 
 EXTRACT:
-- total_price: The TOTAL price for the full stay (prefer total over per-night)
+- total_price: The TOTAL price for the full stay (ONLY if explicitly shown as a total, otherwise null)
 - currency: Currency code (USD, EUR, GBP, etc.)
-- includes_taxes_fees: true if price includes "taxes & fees" or "final price"
-- price_type: TOTAL_STAY (full stay), NIGHTLY (per night), TOTAL_EXCL_TAX, or UNKNOWN
-- evidence_snippets: 3-5 short text snippets showing price and dates
+- includes_taxes_fees: true ONLY if page explicitly says "includes taxes" or "final price"
+- price_type: TOTAL_STAY (explicit total), NIGHTLY (only per-night shown), UNKNOWN
+- evidence_snippets: 3-5 EXACT VERBATIM quotes from the page showing price text
 
-IGNORE: Review counts, ratings, distances, unrelated prices
+CRITICAL: If unsure or no clear total visible, return total_price as null.
 
 Return valid JSON matching the schema.`;
 }
@@ -214,6 +220,10 @@ async function extractWithFirecrawl(
     const finalUrl = scrapeData.data?.metadata?.sourceURL || url;
     const contentHash = simpleHash(markdown.slice(0, 5000));
 
+    // Log actual content sample for debugging variance issues
+    console.log(`[FIRECRAWL] Content sample (first 500 chars): ${markdown.slice(0, 500)}`);
+    console.log(`[FIRECRAWL] Content hash: ${contentHash}, length: ${markdown.length}`);
+
     // Check for bot detection patterns
     const lowerMarkdown = markdown.toLowerCase();
     if (
@@ -241,6 +251,50 @@ async function extractWithFirecrawl(
         : extractedJson.total_price;
 
       if (price && price > 0) {
+        // CRITICAL: Validate evidence snippets exist in actual markdown
+        const evidence = extractedJson.evidence_snippets || [];
+        const validatedEvidence: string[] = [];
+        let evidenceValidationPassed = false;
+        
+        for (const snippet of evidence) {
+          // Check if snippet text (ignoring whitespace/formatting) appears in markdown
+          const normalizedSnippet = snippet.toLowerCase().replace(/[\s\n\r]+/g, ' ').trim();
+          const normalizedMarkdown = markdown.toLowerCase().replace(/[\s\n\r]+/g, ' ');
+          
+          // Look for key price text from snippet in actual content
+          const priceMatch = normalizedSnippet.match(/\$[\d,]+(?:\.\d{2})?/);
+          if (priceMatch && normalizedMarkdown.includes(priceMatch[0])) {
+            validatedEvidence.push(snippet);
+            evidenceValidationPassed = true;
+          } else if (normalizedMarkdown.includes(normalizedSnippet.slice(0, 30))) {
+            // Partial match on beginning of snippet
+            validatedEvidence.push(snippet);
+            evidenceValidationPassed = true;
+          }
+        }
+        
+        // Also search markdown directly for the extracted price
+        const priceStr = `$${price}`;
+        const priceInContent = markdown.includes(priceStr) || 
+                              markdown.includes(price.toString()) ||
+                              markdown.includes(price.toLocaleString());
+        
+        console.log(`[FIRECRAWL] Price validation - Price in content: ${priceInContent}, Evidence validated: ${evidenceValidationPassed}`);
+        console.log(`[FIRECRAWL] Looking for price: ${priceStr} or ${price}`);
+        
+        if (!priceInContent && !evidenceValidationPassed) {
+          console.log(`[FIRECRAWL] REJECTED: Price ${price} not found in actual page content - likely AI hallucination`);
+          return {
+            success: false,
+            status: 'price_not_found_after_dates_applied',
+            error: `Extracted price $${price} not found in actual page content (likely AI hallucination)`,
+            provider: 'firecrawl',
+            contentHash,
+            finalUrl,
+            evidence: [`Content sample: ${markdown.slice(0, 300)}`]
+          };
+        }
+
         // Validate dates if detected
         const detectedCheckIn = extractedJson.checkin_date_detected;
         const detectedCheckOut = extractedJson.checkout_date_detected;
@@ -261,20 +315,20 @@ async function extractWithFirecrawl(
               error: `Dates don't match: expected ${reqIn} to ${reqOut}, got ${detIn} to ${detOut}`,
               provider: 'firecrawl',
               data: extractedJson,
-              evidence: extractedJson.evidence_snippets,
+              evidence: validatedEvidence.length > 0 ? validatedEvidence : extractedJson.evidence_snippets,
               contentHash,
               finalUrl
             };
           }
         }
 
-        console.log(`[FIRECRAWL] Success: ${price} ${extractedJson.currency}`);
+        console.log(`[FIRECRAWL] Success: ${price} ${extractedJson.currency} (verified in content)`);
         return {
           success: true,
           status: 'success',
           provider: 'firecrawl',
           data: { ...extractedJson, total_price: price },
-          evidence: extractedJson.evidence_snippets || [],
+          evidence: validatedEvidence.length > 0 ? validatedEvidence : extractedJson.evidence_snippets,
           contentHash,
           finalUrl
         };
