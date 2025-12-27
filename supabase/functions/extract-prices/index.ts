@@ -136,6 +136,125 @@ CRITICAL: If unsure or no clear total visible, return total_price as null.
 Return valid JSON matching the schema.`;
 }
 
+// ============= BOOKING.COM GROUND-TRUTH EXTRACTION =============
+// This is the golden path: extract real, verified prices with hallucination protection
+
+interface BookingComTotal {
+  amount: number;
+  currency: string;
+  context: string;
+  nightCount: number;
+}
+
+/**
+ * Extract all "for N nights" totals from Booking.com content
+ * This uses regex patterns to find real prices, not AI inference
+ */
+function extractBookingComTotals(markdown: string, expectedNights: number): { 
+  allTotals: BookingComTotal[];
+  lowestTotal: BookingComTotal | null;
+} {
+  const patterns = [
+    // $1,234 for 4 nights
+    /(\$|US\$|USD\s*)([\d,]+(?:\.\d{2})?)\s*(?:for|\/)\s*(\d+)\s*nights?/gi,
+    // US$ 1,234 for 4 nights  
+    /(US\$|USD)\s*([\d,]+(?:\.\d{2})?)\s*(?:for|\/)\s*(\d+)\s*nights?/gi,
+  ];
+  
+  const totals: BookingComTotal[] = [];
+  const seen = new Set<string>();
+  
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(markdown)) !== null) {
+      const currency = 'USD'; // Booking.com US shows USD
+      const amount = parseFloat(match[2].replace(/,/g, ''));
+      const nights = parseInt(match[3]);
+      
+      // Only include if nights match expected AND amount is reasonable
+      if (nights === expectedNights && amount > 50 && amount < 100000) {
+        const key = `${amount}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          
+          // Get context snippet (verbatim from content)
+          const matchIndex = match.index;
+          const contextStart = Math.max(0, matchIndex - 20);
+          const contextEnd = Math.min(markdown.length, matchIndex + match[0].length + 40);
+          const context = markdown.slice(contextStart, contextEnd).replace(/\n/g, ' ').trim();
+          
+          totals.push({ amount, currency, context, nightCount: nights });
+        }
+      }
+    }
+  }
+  
+  // Sort by amount to find lowest
+  totals.sort((a, b) => a.amount - b.amount);
+  
+  return {
+    allTotals: totals,
+    lowestTotal: totals.length > 0 ? totals[0] : null,
+  };
+}
+
+/**
+ * Validate that extracted price exists verbatim in content (hallucination guard)
+ */
+function validatePriceVerbatimInContent(markdown: string, price: number): {
+  found: boolean;
+  evidenceSnippet: string | null;
+} {
+  const priceStr = price.toLocaleString('en-US');
+  const priceFormats = [
+    `$${priceStr}`,
+    `$${price}`,
+    `US$${priceStr}`,
+    `US$ ${priceStr}`,
+    priceStr,
+    price.toString(),
+  ];
+  
+  for (const format of priceFormats) {
+    const index = markdown.indexOf(format);
+    if (index >= 0) {
+      const start = Math.max(0, index - 30);
+      const end = Math.min(markdown.length, index + format.length + 50);
+      const snippet = markdown.slice(start, end).replace(/\n/g, ' ').trim();
+      return { found: true, evidenceSnippet: snippet };
+    }
+  }
+  
+  return { found: false, evidenceSnippet: null };
+}
+
+/**
+ * Check if page is in price-eligible state (Booking.com specific)
+ */
+function isBookingComPriceEligible(markdown: string): { eligible: boolean; reason: string } {
+  const lowerMarkdown = markdown.toLowerCase();
+  
+  // Negative: page needs dates
+  const needsDates = [
+    'enter dates to see prices',
+    'select dates to see prices',
+    'enter your dates',
+    'choose your dates',
+  ];
+  for (const phrase of needsDates) {
+    if (lowerMarkdown.includes(phrase)) {
+      return { eligible: false, reason: `Page shows "${phrase}"` };
+    }
+  }
+  
+  // Positive: has price totals
+  if (/\$[\d,]+\s*(?:for|\/)\s*\d+\s*nights?/i.test(markdown)) {
+    return { eligible: true, reason: 'Found total price patterns' };
+  }
+  
+  return { eligible: false, reason: 'No price patterns detected' };
+}
+
 // Build date selection actions for platforms that require JS interaction
 function buildDateSelectionActions(platformName: string, checkIn: string, checkOut: string): any[] {
   const platformLower = platformName.toLowerCase();
@@ -300,7 +419,94 @@ async function extractWithFirecrawl(
       };
     }
 
-    // Validate extracted data
+    // ============= BOOKING.COM GOLDEN PATH: GROUND-TRUTH EXTRACTION =============
+    // For Booking.com, use regex-based extraction with hallucination guard
+    // This bypasses AI extraction to ensure grounded, verifiable prices
+    const platformLower = platformName.toLowerCase();
+    if (platformLower.includes('booking.com') || platformLower === 'booking') {
+      console.log('[FIRECRAWL] Using Booking.com golden path extraction');
+      
+      // Check if page is in price-eligible state
+      const priceEligible = isBookingComPriceEligible(markdown);
+      if (!priceEligible.eligible) {
+        console.log(`[FIRECRAWL] Booking.com not price-eligible: ${priceEligible.reason}`);
+        return {
+          success: false,
+          status: 'dates_not_applied',
+          error: priceEligible.reason,
+          provider: 'firecrawl',
+          contentHash,
+          finalUrl
+        };
+      }
+      
+      // Calculate expected nights
+      const checkInDate = new Date(requestedCheckIn);
+      const checkOutDate = new Date(requestedCheckOut);
+      const expectedNights = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
+      
+      console.log(`[FIRECRAWL] Looking for prices "for ${expectedNights} nights"`);
+      
+      // Extract all totals using ground-truth regex
+      const { allTotals, lowestTotal } = extractBookingComTotals(markdown, expectedNights);
+      
+      console.log(`[FIRECRAWL] Found ${allTotals.length} total prices: ${allTotals.map(t => `$${t.amount}`).join(', ')}`);
+      
+      if (!lowestTotal) {
+        console.log('[FIRECRAWL] No "for N nights" totals found');
+        return {
+          success: false,
+          status: 'price_not_found_after_dates_applied',
+          error: `No "for ${expectedNights} nights" total prices found in content`,
+          provider: 'firecrawl',
+          contentHash,
+          finalUrl,
+          evidence: [`Content sample: ${markdown.slice(0, 500)}`]
+        };
+      }
+      
+      // HALLUCINATION GUARD: Verify price exists verbatim
+      const validation = validatePriceVerbatimInContent(markdown, lowestTotal.amount);
+      if (!validation.found) {
+        console.log(`[FIRECRAWL] HALLUCINATION GUARD FAILED: $${lowestTotal.amount} not found verbatim`);
+        return {
+          success: false,
+          status: 'price_not_found_after_dates_applied',
+          error: `Price $${lowestTotal.amount} not found verbatim in content`,
+          provider: 'firecrawl',
+          contentHash,
+          finalUrl
+        };
+      }
+      
+      // Check for taxes/fees indicator
+      const taxPatterns = [/includes taxes/i, /incl\. taxes/i, /taxes and fees included/i];
+      const includesTaxesFees = taxPatterns.some(p => p.test(markdown));
+      
+      console.log(`[FIRECRAWL] Booking.com SUCCESS: $${lowestTotal.amount} (verified, lowest of ${allTotals.length} options)`);
+      
+      return {
+        success: true,
+        status: 'success',
+        provider: 'firecrawl',
+        data: {
+          total_price: lowestTotal.amount,
+          currency: lowestTotal.currency,
+          includes_taxes_fees: includesTaxesFees,
+          price_type: 'TOTAL_STAY' as PriceType,
+          extraction_stage: 'LISTING_PAGE' as ExtractionStage,
+          checkin_date_detected: requestedCheckIn,
+          checkout_date_detected: requestedCheckOut,
+          evidence_snippets: [validation.evidenceSnippet || lowestTotal.context]
+        },
+        evidence: [validation.evidenceSnippet || lowestTotal.context],
+        contentHash,
+        finalUrl
+      };
+    }
+    // ============= END BOOKING.COM GOLDEN PATH =============
+
+    // Validate extracted data (for non-Booking.com platforms)
     if (extractedJson && extractedJson.total_price) {
       const price = typeof extractedJson.total_price === 'string' 
         ? parseFloat(extractedJson.total_price.replace(/[^0-9.]/g, ''))

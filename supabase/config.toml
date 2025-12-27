@@ -53,3 +53,6 @@ verify_jwt = false
 
 [functions.firecrawl-simple]
 verify_jwt = false
+
+[functions.booking-golden-path-test]
+verify_jwt = false

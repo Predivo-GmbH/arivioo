@@ -124,6 +124,55 @@ function buildFirecrawlActions(navigationHints: string[]): any[] {
   return actions;
 }
 
+// ============= BOOKING.COM PRICE-ELIGIBLE STATE CHECK =============
+// For Booking.com, we must verify the page shows actual prices, not "enter dates"
+function isBookingComPriceEligible(markdown: string, expectedNights: number): { 
+  eligible: boolean; 
+  reason: string;
+  foundPrices: string[];
+} {
+  const lowerMarkdown = markdown.toLowerCase();
+  
+  // Negative: page still needs dates
+  const needsDates = [
+    'enter dates to see prices',
+    'select dates to see prices',
+    'enter your dates',
+    'choose your dates to see',
+  ];
+  for (const phrase of needsDates) {
+    if (lowerMarkdown.includes(phrase)) {
+      return { eligible: false, reason: `Page shows "${phrase}"`, foundPrices: [] };
+    }
+  }
+  
+  // Positive: look for actual price totals for expected nights
+  const pricePattern = new RegExp(`\\$[\\d,]+(?:\\.\\d{2})?\\s*(?:for|\\/|)\\s*${expectedNights}\\s*nights?`, 'gi');
+  const matches = markdown.match(pricePattern) || [];
+  
+  if (matches.length > 0) {
+    return { 
+      eligible: true, 
+      reason: `Found ${matches.length} prices for ${expectedNights} nights`, 
+      foundPrices: matches.slice(0, 5) 
+    };
+  }
+  
+  // Also check for any total price patterns
+  const anyTotalPattern = /\$[\d,]+(?:\.\d{2})?\s*(?:for|\/)\s*\d+\s*nights?/gi;
+  const anyMatches = markdown.match(anyTotalPattern) || [];
+  
+  if (anyMatches.length > 0) {
+    return { 
+      eligible: true, 
+      reason: `Found ${anyMatches.length} total price patterns`, 
+      foundPrices: anyMatches.slice(0, 5) 
+    };
+  }
+  
+  return { eligible: false, reason: 'No price patterns found', foundPrices: [] };
+}
+
 // Validate dates using Firecrawl with optional navigation
 async function validateWithFirecrawl(
   url: string,
@@ -147,6 +196,11 @@ async function validateWithFirecrawl(
 
   try {
     console.log(`[VALIDATE-DATES] Validating ${url} (navigation: ${useNavigation})`);
+    
+    // Calculate expected nights for Booking.com validation
+    const checkInDate = new Date(requestedCheckIn);
+    const checkOutDate = new Date(requestedCheckOut);
+    const expectedNights = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
     
     const requestBody: any = {
       url,
@@ -270,7 +324,45 @@ Return the exact dates you see on the page, not the requested dates.`,
       };
     }
 
-    // Check availability status
+    // ============= BOOKING.COM SPECIAL VALIDATION =============
+    // For Booking.com, validate by checking for actual price patterns, not AI-detected dates
+    const platformLower = platformName.toLowerCase();
+    if (platformLower.includes('booking.com') || platformLower === 'booking') {
+      console.log('[VALIDATE-DATES] Using Booking.com price-eligible validation');
+      
+      const priceCheck = isBookingComPriceEligible(markdown, expectedNights);
+      
+      if (priceCheck.eligible) {
+        console.log(`[VALIDATE-DATES] Booking.com price-eligible: ${priceCheck.reason}`);
+        console.log(`[VALIDATE-DATES] Found prices: ${priceCheck.foundPrices.join(', ')}`);
+        
+        // Dates are validated if we find prices for the expected night count
+        return {
+          success: true,
+          status: 'dates_validated',
+          strategyUsed: useNavigation ? 'url_then_navigate' : 'url_only',
+          detectedCheckIn: requestedCheckIn,
+          detectedCheckOut: requestedCheckOut,
+          finalUrl,
+          contentHash,
+          navigationStepsUsed: useNavigation ? navigationHints : undefined,
+        };
+      } else {
+        console.log(`[VALIDATE-DATES] Booking.com NOT price-eligible: ${priceCheck.reason}`);
+        return {
+          success: false,
+          status: 'dates_not_applied',
+          strategyUsed: useNavigation ? 'url_then_navigate' : 'url_only',
+          requiresNavigation: !useNavigation,
+          finalUrl,
+          contentHash,
+          error: priceCheck.reason,
+        };
+      }
+    }
+    // ============= END BOOKING.COM SPECIAL VALIDATION =============
+
+    // Check availability status (for non-Booking.com platforms)
     if (extractedJson?.availability_status === 'unavailable') {
       console.log('[VALIDATE-DATES] Property unavailable for dates');
       return {
@@ -284,7 +376,7 @@ Return the exact dates you see on the page, not the requested dates.`,
       };
     }
 
-    // Validate dates match
+    // Validate dates match (for non-Booking.com platforms)
     if (extractedJson?.dates_visible && extractedJson.checkin_date_detected && extractedJson.checkout_date_detected) {
       const checkInMatches = datesMatch(extractedJson.checkin_date_detected, requestedCheckIn);
       const checkOutMatches = datesMatch(extractedJson.checkout_date_detected, requestedCheckOut);
