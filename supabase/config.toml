@@ -62,3 +62,6 @@ verify_jwt = false
 
 [functions.extract-hotelscom]
 verify_jwt = false
+
+[functions.extract-expedia]
+verify_jwt = false
