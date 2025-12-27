@@ -140,10 +140,10 @@ Do NOT expand to a new platform if:
 | Platform | Classification | Status | Notes |
 |----------|---------------|--------|-------|
 | **Hotels.com** | A | ✅ **REFERENCE** | Golden path proven, 3/3 runs |
-| **Expedia** | A | ✅ **PROVEN** | 3/3 runs ($326, hash `70f6e2eb`) |
+| **Expedia** | A | ✅ **PROVEN** | 3/3 runs ($630, hash `631f3b1a`) |
 | Booking.com | B | ❌ Unsupported | Prices require reserve flow |
 | Agoda | C | ❌ Unsupported | Prices not exposed pre-interaction |
-| Vrbo | TBD | ⏳ Pending | Not yet tested |
+| Vrbo | TBD | ⏳ Pending | Next in queue for go/no-go check |
 
 ---
 
