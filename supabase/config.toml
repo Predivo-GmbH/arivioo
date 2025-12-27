@@ -59,3 +59,6 @@ verify_jwt = false
 
 [functions.hotelscom-diagnostic]
 verify_jwt = false
+
+[functions.extract-hotelscom]
+verify_jwt = false
