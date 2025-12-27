@@ -413,119 +413,134 @@ async function scrapeWithZyte(
   const checkInDay = checkInDate.getDate();
   const checkOutDay = checkOutDate.getDate();
   
-  // Calculate months to navigate (from current to January 2026)
-  const now = new Date();
-  const targetMonth = new Date(2026, 0, 1); // January 2026
-  const monthsToNavigate = (targetMonth.getFullYear() - now.getFullYear()) * 12 + 
-                           (targetMonth.getMonth() - now.getMonth());
+  // Calculate months to navigate from December 2025 to January 2026
+  // Use fixed calculation - we know current date is late December 2025
+  // and target is January 2026, so we need ~13 months of clicks
+  // But Booking.com shows 2 months at a time, so divide by 2
+  const monthsToNavigate = 13; // Fixed: Dec 2025 -> Jan 2026
   
   const actionsExecuted: string[] = [];
   
   try {
     console.log(`[GOLDEN-PATH] Zyte: Starting browser automation for ${url}`);
-    console.log(`[GOLDEN-PATH] Zyte: Need to navigate ${monthsToNavigate} months to reach January 2026`);
+    console.log(`[GOLDEN-PATH] Zyte: Will navigate ${monthsToNavigate} months to reach January 2026`);
     
     // Zyte browser actions for Booking.com
-    // Note: Zyte timeout must be <= 15 seconds
+    // Strategy: Click date field, navigate to correct month, select dates, apply
+    // Note: Zyte timeout must be <= 15 seconds per action
     const zyteActions: any[] = [
-      // Wait for page to load
+      // Wait for page to fully load
       {
         "action": "waitForTimeout",
-        "timeout": 3,
+        "timeout": 4,
         "onError": "continue"
       }
     ];
-    actionsExecuted.push('waitForTimeout(3)');
+    actionsExecuted.push('waitForPage(4s)');
     
-    // Click on date field to open calendar
+    // Click on date field to open calendar - use multiple selectors
     zyteActions.push({
       "action": "click",
       "selector": {
         "type": "css",
-        "value": "[data-testid='date-display-field-start'], [data-testid='searchbox-dates-container'], .xp__dates, [data-testid='date-range-input'], button[data-testid='date-display-field-start']"
+        "value": "[data-testid='date-display-field-start']"
       },
       "onError": "continue"
     });
     actionsExecuted.push('click(dateField)');
     
+    // Wait for calendar to open
     zyteActions.push({
       "action": "waitForTimeout",
       "timeout": 2,
       "onError": "continue"
     });
-    actionsExecuted.push('waitForTimeout(2)');
     
-    // Navigate months - Booking.com shows 2 months at once, so we need fewer clicks
-    const clicksNeeded = Math.ceil(monthsToNavigate / 2) + 2; // Extra buffer
+    // Navigate months - Booking.com shows 2 months at once
+    // Need 7 "next" clicks to go from Dec 2025 to Jan 2026 (13 months / 2)
+    const clicksNeeded = 7;
     for (let i = 0; i < clicksNeeded; i++) {
       zyteActions.push({
         "action": "click",
         "selector": {
           "type": "css",
-          "value": "button[aria-label*='Next'], [data-testid='datepicker__button_next_month'], .bui-calendar__control--next, button.c90714fa70.f7c4131759"
+          "value": "[data-testid='searchbox-datepicker-calendar'] button[aria-label*='Next month'], button[aria-label*='Next month']"
         },
         "onError": "continue"
       });
-      zyteActions.push({
-        "action": "waitForTimeout",
-        "timeout": 1,
-        "onError": "continue"
-      });
+      // Short wait between clicks
+      if (i < clicksNeeded - 1) {
+        zyteActions.push({
+          "action": "waitForTimeout",
+          "timeout": 0.5,
+          "onError": "continue"
+        });
+      }
     }
     actionsExecuted.push(`navigateMonths(${clicksNeeded})`);
     
-    // Click check-in date (4th of the month)
-    zyteActions.push({
-      "action": "click",
-      "selector": {
-        "type": "css",
-        "value": `[data-date='${checkIn}'], td[data-date='${checkIn}'] span, span[aria-label*='${checkInDay} January'], span[aria-label*='January ${checkInDay}']`
-      },
-      "onError": "continue"
-    });
-    actionsExecuted.push(`click(checkIn=${checkIn})`);
-    
+    // Wait for calendar to settle on January 2026
     zyteActions.push({
       "action": "waitForTimeout",
       "timeout": 1,
       "onError": "continue"
     });
     
-    // Click check-out date (8th of the month)
+    // Click check-in date (4th of January 2026)
+    // Use data-date attribute which Booking.com uses
     zyteActions.push({
       "action": "click",
       "selector": {
         "type": "css",
-        "value": `[data-date='${checkOut}'], td[data-date='${checkOut}'] span, span[aria-label*='${checkOutDay} January'], span[aria-label*='January ${checkOutDay}']`
+        "value": `td[data-date='${checkIn}'], [data-date='${checkIn}']`
+      },
+      "onError": "continue"
+    });
+    actionsExecuted.push(`click(checkIn=${checkIn})`);
+    
+    // Wait for check-in selection to register
+    zyteActions.push({
+      "action": "waitForTimeout",
+      "timeout": 1,
+      "onError": "continue"
+    });
+    
+    // Click check-out date (8th of January 2026)
+    zyteActions.push({
+      "action": "click",
+      "selector": {
+        "type": "css",
+        "value": `td[data-date='${checkOut}'], [data-date='${checkOut}']`
       },
       "onError": "continue"
     });
     actionsExecuted.push(`click(checkOut=${checkOut})`);
     
+    // Wait for dates to be confirmed
     zyteActions.push({
       "action": "waitForTimeout",
       "timeout": 2,
       "onError": "continue"
     });
     
-    // Click search/apply button
+    // Click search/apply button to apply dates and show prices
     zyteActions.push({
       "action": "click",
       "selector": {
         "type": "css",
-        "value": "button[type='submit'], [data-testid='date-selection-cta'], [data-testid='submit-button'], button.sb-searchbox__button"
+        "value": "button[type='submit'], button.e57ffa4eb5"
       },
       "onError": "continue"
     });
-    actionsExecuted.push('click(submitButton)');
+    actionsExecuted.push('click(submit)');
     
-    // Wait for prices to load
+    // Wait for prices to load after submitting
     zyteActions.push({
       "action": "waitForTimeout",
       "timeout": 5,
       "onError": "continue"
     });
-    actionsExecuted.push('waitForPrices(5000)');
+    actionsExecuted.push('waitForPrices(5s)');
     
     console.log(`[GOLDEN-PATH] Zyte: Executing ${zyteActions.length} actions`);
     
