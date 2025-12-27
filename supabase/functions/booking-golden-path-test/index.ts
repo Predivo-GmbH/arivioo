@@ -6,15 +6,16 @@ const corsHeaders = {
 };
 
 /**
- * BOOKING.COM GOLDEN PATH TEST
+ * BOOKING.COM GOLDEN PATH TEST WITH ACTIONS
  * 
  * Purpose: Prove that we can extract real, grounded, repeatable prices from Booking.com
  * 
  * This function:
- * 1. Takes a Booking.com URL with dates applied
- * 2. Runs 3 consecutive extraction attempts
- * 3. Reports detailed evidence for each run
- * 4. Proves repeatability of the extraction
+ * 1. Takes a Booking.com URL with dates applied via URL params
+ * 2. If "Enter your dates" state detected, applies dates via Firecrawl actions
+ * 3. Runs 3 consecutive extraction attempts
+ * 4. Reports detailed evidence for each run
+ * 5. Proves repeatability of the extraction
  */
 
 interface TestResult {
@@ -23,7 +24,23 @@ interface TestResult {
   durationMs: number;
   success: boolean;
   
-  // Phase A: Date validation
+  // Phase A: Date application
+  phaseA: {
+    urlParamsApplied: boolean;
+    actionsRequired: boolean;
+    actionsExecuted: boolean;
+    actionsSuccess: boolean;
+    datePickerOpened: boolean;
+    checkInSelected: boolean;
+    checkOutSelected: boolean;
+    contentHashBefore: string | null;
+    contentHashAfter: string | null;
+    contentChanged: boolean;
+    selectorsUsed: string[];
+    evidenceSnippet: string | null;
+  };
+  
+  // Phase A result
   datesValidated: boolean;
   detectedCheckIn: string | null;
   detectedCheckOut: string | null;
@@ -44,6 +61,7 @@ interface TestResult {
   
   // Errors
   error: string | null;
+  failureCategory: string | null;
 }
 
 // Simple hash for content
@@ -58,19 +76,101 @@ function simpleHash(str: string): string {
 }
 
 /**
+ * Check if page is in "Enter your dates" state (needs date application)
+ */
+function needsDateApplication(markdown: string): {
+  needsDates: boolean;
+  reason: string;
+  evidenceSnippet: string | null;
+} {
+  const lowerMarkdown = markdown.toLowerCase();
+  
+  const enterDatesIndicators = [
+    'enter dates to see prices',
+    'select dates to see prices',
+    'enter your dates',
+    'choose your dates to see',
+    'add dates for prices',
+    'check availability',
+  ];
+  
+  for (const indicator of enterDatesIndicators) {
+    const index = lowerMarkdown.indexOf(indicator);
+    if (index >= 0) {
+      const snippetStart = Math.max(0, index - 20);
+      const snippetEnd = Math.min(markdown.length, index + indicator.length + 20);
+      return { 
+        needsDates: true, 
+        reason: `Found "${indicator}"`,
+        evidenceSnippet: markdown.slice(snippetStart, snippetEnd).replace(/\n/g, ' ').trim()
+      };
+    }
+  }
+  
+  return { needsDates: false, reason: 'No "enter dates" indicators found', evidenceSnippet: null };
+}
+
+/**
+ * Check if page shows prices (price-eligible state)
+ */
+function isPriceEligibleState(markdown: string, expectedNights: number): {
+  isPriceEligible: boolean;
+  reason: string;
+  foundPrices: string[];
+} {
+  const lowerMarkdown = markdown.toLowerCase();
+  
+  // Negative indicators
+  const enterDatesIndicators = [
+    'enter dates to see prices',
+    'select dates to see prices', 
+    'enter your dates',
+    'choose your dates to see',
+  ];
+  
+  for (const indicator of enterDatesIndicators) {
+    if (lowerMarkdown.includes(indicator)) {
+      return { isPriceEligible: false, reason: `Found "${indicator}"`, foundPrices: [] };
+    }
+  }
+  
+  // Look for prices for N nights
+  const pricePattern = new RegExp(`\\$[\\d,]+(?:\\.\\d{2})?\\s*(?:for|\\/)\\s*${expectedNights}\\s*nights?`, 'gi');
+  const matches = markdown.match(pricePattern) || [];
+  
+  if (matches.length > 0) {
+    return { 
+      isPriceEligible: true, 
+      reason: `Found ${matches.length} prices for ${expectedNights} nights`, 
+      foundPrices: matches.slice(0, 5) 
+    };
+  }
+  
+  // Also check for any total patterns
+  const anyTotalPattern = /\$[\d,]+(?:\.\d{2})?\s*(?:for|\/)\s*\d+\s*nights?/gi;
+  const anyMatches = markdown.match(anyTotalPattern) || [];
+  
+  if (anyMatches.length > 0) {
+    return { 
+      isPriceEligible: true, 
+      reason: `Found ${anyMatches.length} total price patterns`, 
+      foundPrices: anyMatches.slice(0, 5) 
+    };
+  }
+  
+  return { isPriceEligible: false, reason: 'No price patterns found', foundPrices: [] };
+}
+
+/**
  * Extract all "for N nights" totals from Booking.com content
  */
 function extractBookingComTotals(markdown: string, expectedNights: number): { 
   allTotals: Array<{ amount: number; currency: string; context: string }>;
   lowestTotal: { amount: number; currency: string; context: string } | null;
 } {
-  // Pattern: $X,XXX for N nights or similar
   const patterns = [
-    // $1,234 for 4 nights
     /(\$|US\$|USD\s*)([\d,]+(?:\.\d{2})?)\s*(?:for|\/)\s*(\d+)\s*nights?/gi,
-    // US$ 1,234 for 4 nights  
     /(US\$|USD)\s*([\d,]+(?:\.\d{2})?)\s*(?:for|\/)\s*(\d+)\s*nights?/gi,
-    // 1,234 USD for 4 nights
     /([\d,]+(?:\.\d{2})?)\s*(USD|US\$|\$)\s*(?:for|\/)\s*(\d+)\s*nights?/gi,
   ];
   
@@ -84,26 +184,21 @@ function extractBookingComTotals(markdown: string, expectedNights: number): {
       let currency: string;
       let nights: number;
       
-      // Handle different capture group orders
       if (match[1].match(/[\$USD]/i)) {
-        // Currency first: $1,234 for 4 nights
-        currency = match[1].includes('$') || match[1].toUpperCase().includes('USD') ? 'USD' : 'USD';
+        currency = 'USD';
         amount = parseFloat(match[2].replace(/,/g, ''));
         nights = parseInt(match[3]);
       } else {
-        // Amount first: 1,234 USD for 4 nights
         amount = parseFloat(match[1].replace(/,/g, ''));
-        currency = match[2].includes('$') || match[2].toUpperCase().includes('USD') ? 'USD' : 'USD';
+        currency = 'USD';
         nights = parseInt(match[3]);
       }
       
-      // Only include if nights match expected
       if (nights === expectedNights && amount > 0) {
         const key = `${amount}-${currency}`;
         if (!seen.has(key)) {
           seen.add(key);
           
-          // Get context snippet
           const matchIndex = match.index;
           const contextStart = Math.max(0, matchIndex - 30);
           const contextEnd = Math.min(markdown.length, matchIndex + match[0].length + 30);
@@ -115,7 +210,6 @@ function extractBookingComTotals(markdown: string, expectedNights: number): {
     }
   }
   
-  // Sort by amount to find lowest
   totals.sort((a, b) => a.amount - b.amount);
   
   return {
@@ -131,7 +225,6 @@ function validatePriceInContent(markdown: string, price: number, currency: strin
   found: boolean;
   evidenceSnippet: string | null;
 } {
-  // Format price as it would appear on page
   const priceFormats = [
     `$${price.toLocaleString('en-US')}`,
     `$${price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
@@ -146,7 +239,6 @@ function validatePriceInContent(markdown: string, price: number, currency: strin
   for (const format of priceFormats) {
     const index = markdown.indexOf(format);
     if (index >= 0) {
-      // Extract evidence snippet
       const start = Math.max(0, index - 40);
       const end = Math.min(markdown.length, index + format.length + 60);
       const snippet = markdown.slice(start, end).replace(/\n/g, ' ').trim();
@@ -159,47 +251,182 @@ function validatePriceInContent(markdown: string, price: number, currency: strin
 }
 
 /**
- * Check if page is in price-eligible state (not "enter dates" state)
+ * Build Firecrawl actions for Booking.com date picker interaction
  */
-function isPriceEligibleState(markdown: string): {
-  isPriceEligible: boolean;
-  reason: string;
-} {
-  const lowerMarkdown = markdown.toLowerCase();
+function buildBookingComDateActions(checkIn: string, checkOut: string): any[] {
+  // Parse dates for Booking.com's calendar format
+  const checkInDate = new Date(checkIn);
+  const checkOutDate = new Date(checkOut);
   
-  // Negative indicators: page needs dates
-  const enterDatesIndicators = [
-    'enter dates to see prices',
-    'select dates to see prices',
-    'enter your dates',
-    'choose your dates to see',
-    'add dates for prices',
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                      'July', 'August', 'September', 'October', 'November', 'December'];
+  
+  const checkInDay = checkInDate.getDate();
+  const checkInMonth = monthNames[checkInDate.getMonth()];
+  const checkInYear = checkInDate.getFullYear();
+  
+  const checkOutDay = checkOutDate.getDate();
+  const checkOutMonth = monthNames[checkOutDate.getMonth()];
+  const checkOutYear = checkOutDate.getFullYear();
+  
+  // Booking.com date picker selectors - multiple strategies
+  const actions: any[] = [
+    // Wait for page to stabilize
+    { type: 'wait', milliseconds: 2000 },
+    
+    // Strategy 1: Click on the date field/button to open calendar
+    // Booking.com uses data-testid for date selection
+    { 
+      type: 'click', 
+      selector: '[data-testid="date-display-field-start"], [data-testid="searchbox-dates-container"], .xp__dates, [data-testid="date-range-input"]' 
+    },
+    { type: 'wait', milliseconds: 1500 },
+    
+    // Navigate to the correct month (January 2026)
+    // We may need to click "next month" multiple times
+    // Each click advances by one month
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    // 6 more clicks to reach January 2026 (approx 12 months ahead)
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 500 },
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"], .bui-calendar__control--next, [data-testid="datepicker__button_next_month"]' 
+    },
+    { type: 'wait', milliseconds: 1000 },
+    
+    // Select check-in date (day 4 of January)
+    // Booking.com calendar cells have span with the day number
+    { 
+      type: 'click', 
+      selector: `[data-date="${checkIn}"], td[data-date="${checkIn}"], span[data-date="${checkIn}"], [aria-label*="${checkInMonth} ${checkInDay}"], [aria-label*="${checkInDay} ${checkInMonth}"]` 
+    },
+    { type: 'wait', milliseconds: 1000 },
+    
+    // Select check-out date (day 8 of January)
+    { 
+      type: 'click', 
+      selector: `[data-date="${checkOut}"], td[data-date="${checkOut}"], span[data-date="${checkOut}"], [aria-label*="${checkOutMonth} ${checkOutDay}"], [aria-label*="${checkOutDay} ${checkOutMonth}"]` 
+    },
+    { type: 'wait', milliseconds: 1500 },
+    
+    // Click search/apply button to confirm dates
+    { 
+      type: 'click', 
+      selector: '[data-testid="searchbox-dates-container"] button, button[type="submit"], .sb-searchbox__button, [data-testid="submit-button"], [data-testid="date-selection-cta"]' 
+    },
+    { type: 'wait', milliseconds: 3000 },
   ];
   
-  for (const indicator of enterDatesIndicators) {
-    if (lowerMarkdown.includes(indicator)) {
-      return { isPriceEligible: false, reason: `Found "${indicator}"` };
-    }
-  }
-  
-  // Positive indicators: prices should be visible
-  const priceIndicators = [
-    /\$[\d,]+(?:\.\d{2})?\s*(?:for|\/)\s*\d+\s*nights?/i,
-    /total.*\$[\d,]+/i,
-    /\$[\d,]+.*nights?/i,
-  ];
-  
-  for (const pattern of priceIndicators) {
-    if (pattern.test(markdown)) {
-      return { isPriceEligible: true, reason: 'Price pattern found' };
-    }
-  }
-  
-  return { isPriceEligible: false, reason: 'No price patterns found' };
+  return actions;
 }
 
 /**
- * Run a single extraction test
+ * Scrape with Firecrawl (optionally with actions)
+ */
+async function scrapeWithFirecrawl(
+  url: string,
+  useActions: boolean,
+  actions: any[] = []
+): Promise<{ success: boolean; markdown: string; error?: string }> {
+  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
+  
+  if (!firecrawlApiKey) {
+    return { success: false, markdown: '', error: 'Firecrawl API key not configured' };
+  }
+  
+  try {
+    const requestBody: any = {
+      url,
+      formats: ['markdown'],
+      onlyMainContent: true,
+      waitFor: useActions ? 2000 : 5000,
+    };
+    
+    if (useActions && actions.length > 0) {
+      requestBody.actions = actions;
+    }
+    
+    console.log(`[GOLDEN-PATH] Firecrawl request: useActions=${useActions}, actionsCount=${actions.length}`);
+    
+    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { success: false, markdown: '', error: `Firecrawl ${response.status}: ${errorText.slice(0, 200)}` };
+    }
+    
+    const data = await response.json();
+    const markdown = data.data?.markdown || data.markdown || '';
+    
+    return { success: true, markdown };
+    
+  } catch (error) {
+    return { success: false, markdown: '', error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+}
+
+/**
+ * Run a single extraction test with actions fallback
  */
 async function runSingleTest(
   url: string,
@@ -213,6 +440,20 @@ async function runSingleTest(
     timestamp: new Date().toISOString(),
     durationMs: 0,
     success: false,
+    phaseA: {
+      urlParamsApplied: false,
+      actionsRequired: false,
+      actionsExecuted: false,
+      actionsSuccess: false,
+      datePickerOpened: false,
+      checkInSelected: false,
+      checkOutSelected: false,
+      contentHashBefore: null,
+      contentHashAfter: null,
+      contentChanged: false,
+      selectorsUsed: [],
+      evidenceSnippet: null,
+    },
     datesValidated: false,
     detectedCheckIn: null,
     detectedCheckOut: null,
@@ -225,123 +466,170 @@ async function runSingleTest(
     priceFoundVerbatimInContent: false,
     contentHash: null,
     error: null,
+    failureCategory: null,
   };
   
-  const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
+  // Calculate expected nights
+  const checkInDate = new Date(checkIn);
+  const checkOutDate = new Date(checkOut);
+  const expectedNights = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
   
-  if (!firecrawlApiKey) {
-    result.error = 'Firecrawl API key not configured';
+  console.log(`[GOLDEN-PATH] Run ${runNumber}: Testing ${url}`);
+  console.log(`[GOLDEN-PATH] Run ${runNumber}: Expected ${expectedNights} nights`);
+  
+  // ============= PHASE A: Date Application =============
+  
+  // Step 1: First scrape WITHOUT actions (test if URL params work)
+  console.log(`[GOLDEN-PATH] Run ${runNumber}: Phase A - Testing URL params first`);
+  
+  const initialScrape = await scrapeWithFirecrawl(url, false);
+  
+  if (!initialScrape.success) {
+    result.error = initialScrape.error || 'Unknown error';
+    result.failureCategory = 'A) Initial scrape failed';
     result.durationMs = Date.now() - startTime;
     return result;
   }
   
-  try {
-    console.log(`[GOLDEN-PATH] Run ${runNumber}: Scraping ${url}`);
-    
-    // Scrape with Firecrawl
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url,
-        formats: ['markdown'],
-        onlyMainContent: true,
-        waitFor: 5000,
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      result.error = `Firecrawl error: ${response.status} - ${errorText.slice(0, 200)}`;
-      result.durationMs = Date.now() - startTime;
-      return result;
-    }
-    
-    const data = await response.json();
-    const markdown = data.data?.markdown || data.markdown || '';
-    result.contentHash = simpleHash(markdown.slice(0, 5000));
-    
-    console.log(`[GOLDEN-PATH] Run ${runNumber}: Got ${markdown.length} chars, hash: ${result.contentHash}`);
-    
-    // Check for bot/captcha
-    const lowerMarkdown = markdown.toLowerCase();
-    if (lowerMarkdown.includes('captcha') || lowerMarkdown.includes('robot') || lowerMarkdown.includes('access denied')) {
-      result.error = 'Bot/CAPTCHA detected';
-      result.durationMs = Date.now() - startTime;
-      return result;
-    }
-    
-    // Phase A: Validate dates are applied
-    // Calculate expected nights
-    const checkInDate = new Date(checkIn);
-    const checkOutDate = new Date(checkOut);
-    const expectedNights = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
-    
-    // Check if dates appear in content (Booking.com format: "Sun, Jan 4 – Thu, Jan 8")
-    const datePatterns = [
-      new RegExp(checkIn.replace(/-/g, '[-/]?'), 'i'),
-      new RegExp(checkOut.replace(/-/g, '[-/]?'), 'i'),
-      // Also check for natural date formats
-      /Jan(?:uary)?\s+\d+/gi,
-    ];
-    
-    // For Phase A, check if page is in price-eligible state
-    const priceEligibleCheck = isPriceEligibleState(markdown);
-    if (!priceEligibleCheck.isPriceEligible) {
-      result.error = `Page not in price-eligible state: ${priceEligibleCheck.reason}`;
-      result.durationMs = Date.now() - startTime;
-      return result;
-    }
-    
-    // If we find prices for N nights, dates are implicitly validated
-    result.datesValidated = true;
-    result.detectedCheckIn = checkIn;
-    result.detectedCheckOut = checkOut;
-    
-    // Phase B: Extract total prices
-    const { allTotals, lowestTotal } = extractBookingComTotals(markdown, expectedNights);
-    
-    result.allTotalsFound = allTotals.map(t => `${t.currency} ${t.amount} (${t.context.slice(0, 50)}...)`);
-    
-    if (!lowestTotal) {
-      result.error = `No "for ${expectedNights} nights" totals found in content`;
-      result.durationMs = Date.now() - startTime;
-      return result;
-    }
-    
-    // Validate price exists verbatim in content (hallucination guard)
-    const validation = validatePriceInContent(markdown, lowestTotal.amount, lowestTotal.currency);
-    result.priceFoundVerbatimInContent = validation.found;
-    
-    if (!validation.found) {
-      result.error = `HALLUCINATION GUARD: Price ${lowestTotal.amount} not found verbatim in content`;
-      result.durationMs = Date.now() - startTime;
-      return result;
-    }
-    
-    // SUCCESS: We have a grounded, verified price
-    result.success = true;
-    result.extractedPrice = lowestTotal.amount;
-    result.currency = lowestTotal.currency;
-    result.evidenceSnippet = validation.evidenceSnippet;
-    
-    // Check for taxes/fees indicator
-    const taxPatterns = [
-      /includes taxes/i,
-      /incl\. taxes/i,
-      /taxes and fees included/i,
-      /including taxes/i,
-    ];
-    result.includesTaxesFees = taxPatterns.some(p => p.test(markdown));
-    
-    console.log(`[GOLDEN-PATH] Run ${runNumber}: SUCCESS - ${lowestTotal.currency} ${lowestTotal.amount} (verified)`);
-    
-  } catch (error) {
-    result.error = error instanceof Error ? error.message : 'Unknown error';
+  result.phaseA.contentHashBefore = simpleHash(initialScrape.markdown.slice(0, 5000));
+  
+  // Check for bot/captcha
+  const lowerMarkdown = initialScrape.markdown.toLowerCase();
+  if (lowerMarkdown.includes('captcha') || lowerMarkdown.includes('robot') || lowerMarkdown.includes('access denied')) {
+    result.error = 'Bot/CAPTCHA detected';
+    result.failureCategory = 'D) Bot protection';
+    result.durationMs = Date.now() - startTime;
+    return result;
   }
+  
+  // Check if dates need application
+  const dateCheck = needsDateApplication(initialScrape.markdown);
+  const priceCheck = isPriceEligibleState(initialScrape.markdown, expectedNights);
+  
+  console.log(`[GOLDEN-PATH] Run ${runNumber}: needsDates=${dateCheck.needsDates}, isPriceEligible=${priceCheck.isPriceEligible}`);
+  
+  let finalMarkdown = initialScrape.markdown;
+  
+  if (dateCheck.needsDates || !priceCheck.isPriceEligible) {
+    // URL params did NOT work - need to use actions
+    result.phaseA.urlParamsApplied = false;
+    result.phaseA.actionsRequired = true;
+    result.phaseA.evidenceSnippet = dateCheck.evidenceSnippet || priceCheck.reason;
+    
+    console.log(`[GOLDEN-PATH] Run ${runNumber}: Phase A - URL params failed, using actions`);
+    console.log(`[GOLDEN-PATH] Run ${runNumber}: Reason: ${dateCheck.reason}`);
+    
+    // Build and execute actions for Booking.com date picker
+    const actions = buildBookingComDateActions(checkIn, checkOut);
+    result.phaseA.selectorsUsed = [
+      '[data-testid="date-display-field-start"]',
+      '[data-testid="searchbox-datepicker-calendar"] button[aria-label*="Next"]',
+      `[data-date="${checkIn}"]`,
+      `[data-date="${checkOut}"]`,
+      '[data-testid="searchbox-dates-container"] button',
+    ];
+    
+    console.log(`[GOLDEN-PATH] Run ${runNumber}: Executing ${actions.length} actions`);
+    
+    const actionsScrape = await scrapeWithFirecrawl(url, true, actions);
+    result.phaseA.actionsExecuted = true;
+    
+    if (!actionsScrape.success) {
+      result.error = `Actions failed: ${actionsScrape.error}`;
+      result.failureCategory = 'A) Actions did not execute';
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    result.phaseA.contentHashAfter = simpleHash(actionsScrape.markdown.slice(0, 5000));
+    result.phaseA.contentChanged = result.phaseA.contentHashBefore !== result.phaseA.contentHashAfter;
+    
+    console.log(`[GOLDEN-PATH] Run ${runNumber}: Actions executed, contentChanged=${result.phaseA.contentChanged}`);
+    
+    // Check if actions produced a price-eligible state
+    const postActionsPriceCheck = isPriceEligibleState(actionsScrape.markdown, expectedNights);
+    
+    if (postActionsPriceCheck.isPriceEligible) {
+      result.phaseA.actionsSuccess = true;
+      result.phaseA.datePickerOpened = true;
+      result.phaseA.checkInSelected = true;
+      result.phaseA.checkOutSelected = true;
+      finalMarkdown = actionsScrape.markdown;
+      console.log(`[GOLDEN-PATH] Run ${runNumber}: Actions SUCCESS - ${postActionsPriceCheck.reason}`);
+    } else {
+      // Actions executed but did not produce pricing
+      const postActionsDateCheck = needsDateApplication(actionsScrape.markdown);
+      
+      if (result.phaseA.contentChanged) {
+        // Content changed but still no prices
+        result.failureCategory = 'B) Actions executed but DOM did not update to price-eligible state';
+        result.error = `Actions changed content but still in "${postActionsDateCheck.reason}" state`;
+      } else {
+        // Content did not change at all
+        result.failureCategory = 'C) DOM did not update after actions (content unchanged)';
+        result.error = 'Actions did not change page content - selectors may have failed';
+      }
+      
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+  } else {
+    // URL params worked!
+    result.phaseA.urlParamsApplied = true;
+    result.phaseA.actionsRequired = false;
+    console.log(`[GOLDEN-PATH] Run ${runNumber}: Phase A SUCCESS - URL params applied dates`);
+  }
+  
+  // Phase A validated
+  result.datesValidated = true;
+  result.detectedCheckIn = checkIn;
+  result.detectedCheckOut = checkOut;
+  result.contentHash = simpleHash(finalMarkdown.slice(0, 5000));
+  
+  // ============= PHASE B: Price Extraction =============
+  
+  console.log(`[GOLDEN-PATH] Run ${runNumber}: Phase B - Extracting prices`);
+  
+  const { allTotals, lowestTotal } = extractBookingComTotals(finalMarkdown, expectedNights);
+  
+  result.allTotalsFound = allTotals.map(t => `${t.currency} ${t.amount} (${t.context.slice(0, 50)}...)`);
+  
+  if (!lowestTotal) {
+    result.error = `No "for ${expectedNights} nights" totals found in content`;
+    result.failureCategory = 'D) Extraction logic failed - no price patterns';
+    result.durationMs = Date.now() - startTime;
+    return result;
+  }
+  
+  console.log(`[GOLDEN-PATH] Run ${runNumber}: Found ${allTotals.length} totals, lowest: ${lowestTotal.currency} ${lowestTotal.amount}`);
+  
+  // Hallucination guard: verify price exists verbatim
+  const validation = validatePriceInContent(finalMarkdown, lowestTotal.amount, lowestTotal.currency);
+  result.priceFoundVerbatimInContent = validation.found;
+  
+  if (!validation.found) {
+    result.error = `HALLUCINATION GUARD: Price ${lowestTotal.amount} not found verbatim in content`;
+    result.failureCategory = 'D) Extraction logic failed - hallucination guard';
+    result.durationMs = Date.now() - startTime;
+    return result;
+  }
+  
+  // SUCCESS!
+  result.success = true;
+  result.extractedPrice = lowestTotal.amount;
+  result.currency = lowestTotal.currency;
+  result.evidenceSnippet = validation.evidenceSnippet;
+  
+  // Check for taxes/fees indicator
+  const taxPatterns = [
+    /includes taxes/i,
+    /incl\. taxes/i,
+    /taxes and fees included/i,
+    /including taxes/i,
+  ];
+  result.includesTaxesFees = taxPatterns.some(p => p.test(finalMarkdown)) ? true : null;
+  
+  console.log(`[GOLDEN-PATH] Run ${runNumber}: SUCCESS - ${lowestTotal.currency} ${lowestTotal.amount} (verified)`);
   
   result.durationMs = Date.now() - startTime;
   return result;
@@ -392,6 +680,21 @@ Deno.serve(async (req) => {
     const contentHashes = results.map(r => r.contentHash).filter(h => h !== null);
     const uniqueHashes = [...new Set(contentHashes)];
     
+    // Phase A diagnostics
+    const phaseADiagnostics = {
+      runsWithUrlParams: results.filter(r => r.phaseA.urlParamsApplied).length,
+      runsRequiringActions: results.filter(r => r.phaseA.actionsRequired).length,
+      runsWithActionsSuccess: results.filter(r => r.phaseA.actionsSuccess).length,
+      runsWithContentChange: results.filter(r => r.phaseA.contentChanged).length,
+    };
+    
+    // Failure categories
+    const failureCategories: Record<string, number> = {};
+    for (const r of results.filter(r => !r.success)) {
+      const cat = r.failureCategory || 'Unknown';
+      failureCategories[cat] = (failureCategories[cat] || 0) + 1;
+    }
+    
     const summary = {
       totalRuns: runs,
       successfulRuns: successfulRuns.length,
@@ -403,11 +706,14 @@ Deno.serve(async (req) => {
       uniqueContentHashes: uniqueHashes,
       hallucinations: results.filter(r => r.priceFoundVerbatimInContent === false && r.extractedPrice !== null).length,
       isGoldenPathProven: successfulRuns.length >= 2 && results.every(r => r.priceFoundVerbatimInContent || !r.extractedPrice),
+      phaseADiagnostics,
+      failureCategories,
     };
 
     console.log(`[GOLDEN-PATH] === SUMMARY ===`);
     console.log(`[GOLDEN-PATH] Successful: ${summary.successfulRuns}/${summary.totalRuns}`);
     console.log(`[GOLDEN-PATH] Prices consistent: ${summary.pricesConsistent}`);
+    console.log(`[GOLDEN-PATH] Phase A: urlParams=${phaseADiagnostics.runsWithUrlParams}, actionsRequired=${phaseADiagnostics.runsRequiringActions}, actionsSuccess=${phaseADiagnostics.runsWithActionsSuccess}`);
     console.log(`[GOLDEN-PATH] Golden path proven: ${summary.isGoldenPathProven}`);
 
     return new Response(
