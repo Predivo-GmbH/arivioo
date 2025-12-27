@@ -56,3 +56,6 @@ verify_jwt = false
 
 [functions.booking-golden-path-test]
 verify_jwt = false
+
+[functions.hotelscom-diagnostic]
+verify_jwt = false
