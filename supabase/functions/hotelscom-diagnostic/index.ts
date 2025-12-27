@@ -46,7 +46,9 @@ interface DiagnosticResult {
   priceEligible: boolean;
   extractedPrice: number | null;
   currency: string | null;
+  includesTaxesFees: boolean | null;
   priceVerified: boolean;
+  contentHash: string | null;
   
   // Evidence
   evidenceSnippets: string[];
@@ -126,52 +128,70 @@ function detectReserveFlowRequired(markdown: string): boolean {
   return indicators.some(ind => lowerMarkdown.includes(ind));
 }
 
-function extractPrices(markdown: string, expectedNights: number): {
-  prices: Array<{ amount: number; context: string }>;
-  lowest: number | null;
+function extractHotelsComPrices(markdown: string, expectedNights: number): {
+  prices: Array<{ amount: number; context: string; priceType: 'total' | 'nightly' | 'unknown' }>;
+  lowestTotal: { amount: number; context: string } | null;
+  includesTaxesFees: boolean | null;
 } {
-  // Hotels.com price patterns
-  const patterns = [
-    // "$X,XXX for 4 nights"
-    /\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:for|\/)\s*(\d+)\s*nights?/gi,
-    // "$X,XXX total"
-    /\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*total/gi,
-    // "Total: $X,XXX"
-    /total[:\s]*\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi,
-    // "$X,XXX" near "nights" context
-    /\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/gi,
-  ];
-  
-  const prices: Array<{ amount: number; context: string }> = [];
+  const prices: Array<{ amount: number; context: string; priceType: 'total' | 'nightly' | 'unknown' }> = [];
   const seen = new Set<number>();
   
-  // First try to find "for N nights" patterns
-  const nightsPattern = new RegExp(`\\$(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)\\s*(?:for|\\/)\\s*${expectedNights}\\s*nights?`, 'gi');
-  let match;
-  while ((match = nightsPattern.exec(markdown)) !== null) {
-    const amount = parseFloat(match[1].replace(/,/g, ''));
-    if (!seen.has(amount) && amount > 50 && amount < 50000) {
-      seen.add(amount);
-      const start = Math.max(0, match.index - 30);
-      const end = Math.min(markdown.length, match.index + match[0].length + 30);
-      prices.push({ amount, context: markdown.slice(start, end).replace(/\n/g, ' ').trim() });
-    }
-  }
-  
-  // Also check for "total" patterns
+  // Priority 1: "$X total" pattern (most explicit)
   const totalPattern = /\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*total/gi;
+  let match;
   while ((match = totalPattern.exec(markdown)) !== null) {
     const amount = parseFloat(match[1].replace(/,/g, ''));
-    if (!seen.has(amount) && amount > 50 && amount < 50000) {
+    if (!seen.has(amount) && amount >= 50 && amount <= 50000) {
       seen.add(amount);
-      const start = Math.max(0, match.index - 30);
-      const end = Math.min(markdown.length, match.index + match[0].length + 30);
-      prices.push({ amount, context: markdown.slice(start, end).replace(/\n/g, ' ').trim() });
+      const start = Math.max(0, match.index - 40);
+      const end = Math.min(markdown.length, match.index + match[0].length + 40);
+      prices.push({ 
+        amount, 
+        context: markdown.slice(start, end).replace(/\n/g, ' ').trim(),
+        priceType: 'total'
+      });
     }
   }
   
+  // Priority 2: "$X for N nights" pattern
+  const nightsPattern = new RegExp(`\\$(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?)\\s*(?:for|\\/)\\s*${expectedNights}\\s*nights?`, 'gi');
+  while ((match = nightsPattern.exec(markdown)) !== null) {
+    const amount = parseFloat(match[1].replace(/,/g, ''));
+    if (!seen.has(amount) && amount >= 50 && amount <= 50000) {
+      seen.add(amount);
+      const start = Math.max(0, match.index - 40);
+      const end = Math.min(markdown.length, match.index + match[0].length + 40);
+      prices.push({ 
+        amount, 
+        context: markdown.slice(start, end).replace(/\n/g, ' ').trim(),
+        priceType: 'total'
+      });
+    }
+  }
+  
+  // Sort by amount (lowest first) - selection rule: lowest total
   prices.sort((a, b) => a.amount - b.amount);
-  return { prices, lowest: prices.length > 0 ? prices[0].amount : null };
+  
+  // Filter to totals only
+  const totals = prices.filter(p => p.priceType === 'total');
+  const lowestTotal = totals.length > 0 ? { amount: totals[0].amount, context: totals[0].context } : null;
+  
+  // Check for taxes/fees inclusion
+  const lowerMarkdown = markdown.toLowerCase();
+  let includesTaxesFees: boolean | null = null;
+  if (lowerMarkdown.includes('includes taxes') || 
+      lowerMarkdown.includes('including taxes') ||
+      lowerMarkdown.includes('taxes included') ||
+      lowerMarkdown.includes('incl. taxes')) {
+    includesTaxesFees = true;
+  } else if (lowerMarkdown.includes('excludes taxes') || 
+             lowerMarkdown.includes('plus taxes') ||
+             lowerMarkdown.includes('+ taxes')) {
+    includesTaxesFees = false;
+  }
+  // If not explicitly stated, leave as null
+  
+  return { prices, lowestTotal, includesTaxesFees };
 }
 
 function verifyPriceInContent(markdown: string, price: number): boolean {
@@ -405,7 +425,9 @@ async function runDiagnostic(
     priceEligible: false,
     extractedPrice: null,
     currency: null,
+    includesTaxesFees: null,
     priceVerified: false,
+    contentHash: null,
     evidenceSnippets: [],
     enterDatesFound: false,
     reserveFlowRequired: false,
@@ -447,11 +469,11 @@ async function runDiagnostic(
   
   // Check if URL params worked
   const enterDates = detectEnterDatesState(urlScrape.markdown);
-  const { prices } = extractPrices(urlScrape.markdown, expectedNights);
+  const urlExtraction = extractHotelsComPrices(urlScrape.markdown, expectedNights);
   
-  console.log(`[HOTELS] URL params: enterDatesFound=${enterDates.found}, pricesFound=${prices.length}`);
+  console.log(`[HOTELS] URL params: enterDatesFound=${enterDates.found}, pricesFound=${urlExtraction.prices.length}`);
   
-  if (!enterDates.found && prices.length > 0) {
+  if (!enterDates.found && urlExtraction.prices.length > 0) {
     result.phaseA.urlParamsSuccess = true;
     result.phaseA.strategyUsed = 'URL_PARAMS';
     finalMarkdown = urlScrape.markdown;
@@ -474,11 +496,11 @@ async function runDiagnostic(
       result.phaseA.contentChanged = result.phaseA.contentHashBefore !== result.phaseA.contentHashAfter;
       
       const fcEnterDates = detectEnterDatesState(firecrawlResult.markdown);
-      const fcPrices = extractPrices(firecrawlResult.markdown, expectedNights);
+      const fcExtraction = extractHotelsComPrices(firecrawlResult.markdown, expectedNights);
       
-      console.log(`[HOTELS] Firecrawl: contentChanged=${result.phaseA.contentChanged}, enterDates=${fcEnterDates.found}, prices=${fcPrices.prices.length}`);
+      console.log(`[HOTELS] Firecrawl: contentChanged=${result.phaseA.contentChanged}, enterDates=${fcEnterDates.found}, prices=${fcExtraction.prices.length}`);
       
-      if (!fcEnterDates.found && fcPrices.prices.length > 0) {
+      if (!fcEnterDates.found && fcExtraction.prices.length > 0) {
         result.phaseA.firecrawlSuccess = true;
         result.phaseA.strategyUsed = 'FIRECRAWL_ACTIONS';
         finalMarkdown = firecrawlResult.markdown;
@@ -502,11 +524,11 @@ async function runDiagnostic(
       result.phaseA.contentChanged = result.phaseA.contentHashBefore !== result.phaseA.contentHashAfter;
       
       const zyteEnterDates = detectEnterDatesState(zyteResult.markdown);
-      const zytePrices = extractPrices(zyteResult.markdown, expectedNights);
+      const zyteExtraction = extractHotelsComPrices(zyteResult.markdown, expectedNights);
       
-      console.log(`[HOTELS] Zyte: contentChanged=${result.phaseA.contentChanged}, enterDates=${zyteEnterDates.found}, prices=${zytePrices.prices.length}`);
+      console.log(`[HOTELS] Zyte: contentChanged=${result.phaseA.contentChanged}, enterDates=${zyteEnterDates.found}, prices=${zyteExtraction.prices.length}`);
       
-      if (!zyteEnterDates.found && zytePrices.prices.length > 0) {
+      if (!zyteEnterDates.found && zyteExtraction.prices.length > 0) {
         result.phaseA.zyteSuccess = true;
         result.phaseA.strategyUsed = 'ZYTE_BROWSER';
         finalMarkdown = zyteResult.markdown;
@@ -528,18 +550,20 @@ async function runDiagnostic(
   if (priceEligible) {
     result.datesApplied = true;
     result.priceEligible = true;
+    result.contentHash = simpleHash(finalMarkdown.slice(0, 5000));
     
-    const { prices, lowest } = extractPrices(finalMarkdown, expectedNights);
+    const extraction = extractHotelsComPrices(finalMarkdown, expectedNights);
     
-    if (lowest) {
-      result.extractedPrice = lowest;
+    if (extraction.lowestTotal) {
+      result.extractedPrice = extraction.lowestTotal.amount;
       result.currency = 'USD';
-      result.priceVerified = verifyPriceInContent(finalMarkdown, lowest);
+      result.priceVerified = verifyPriceInContent(finalMarkdown, extraction.lowestTotal.amount);
+      result.includesTaxesFees = extraction.includesTaxesFees;
       
       if (result.priceVerified) {
         result.classification = 'A';
         result.classificationDescription = 'Prices visible and extractable pre-payment - GOLDEN SUCCESS PATH';
-        result.evidenceSnippets.push(prices[0].context);
+        result.evidenceSnippets.push(extraction.lowestTotal.context);
       } else {
         result.classification = 'C';
         result.classificationDescription = 'Price extracted but failed hallucination guard';
@@ -585,21 +609,65 @@ Deno.serve(async (req) => {
       url = 'https://www.hotels.com/ho227622/hyatt-regency-san-francisco-san-francisco-united-states-of-america/?chkin=2026-01-04&chkout=2026-01-08&x_pwa=1&q-room-0-adults=2&q-room-0-children=0',
       checkIn = '2026-01-04', 
       checkOut = '2026-01-08',
+      runs = 1,
     } = await req.json();
 
-    console.log(`[HOTELS] === HOTELS.COM DIAGNOSTIC TEST ===`);
+    console.log(`[HOTELS] === HOTELS.COM GOLDEN PATH TEST ===`);
     console.log(`[HOTELS] URL: ${url}`);
     console.log(`[HOTELS] Dates: ${checkIn} to ${checkOut}`);
+    console.log(`[HOTELS] Runs: ${runs}`);
 
-    const result = await runDiagnostic(url, checkIn, checkOut);
+    const results: DiagnosticResult[] = [];
+    
+    for (let i = 1; i <= runs; i++) {
+      console.log(`[HOTELS] === Run ${i} of ${runs} ===`);
+      const result = await runDiagnostic(url, checkIn, checkOut);
+      results.push(result);
+      
+      // Wait between runs to avoid rate limiting
+      if (i < runs) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+    
+    // Generate stability summary for multi-run tests
+    const successfulRuns = results.filter(r => r.classification === 'A');
+    const prices = successfulRuns.map(r => r.extractedPrice).filter(p => p !== null) as number[];
+    const contentHashes = results.map(r => r.contentHash).filter(h => h !== null);
+    const uniqueHashes = [...new Set(contentHashes)];
+    const uniquePrices = [...new Set(prices)];
+    
+    const stabilitySummary = {
+      totalRuns: runs,
+      successfulRuns: successfulRuns.length,
+      failedRuns: results.filter(r => r.classification !== 'A').length,
+      pricesExtracted: prices,
+      pricesIdentical: uniquePrices.length <= 1,
+      priceRange: prices.length > 0 ? { min: Math.min(...prices), max: Math.max(...prices) } : null,
+      contentHashesChanged: uniqueHashes.length > 1,
+      uniqueContentHashes: uniqueHashes,
+      allHallucinationGuardsPassed: results.every(r => r.priceVerified || r.extractedPrice === null),
+      deterministic: uniquePrices.length <= 1 && results.every(r => r.classification === 'A'),
+    };
+    
+    const goldenPathProven = successfulRuns.length === runs && stabilitySummary.allHallucinationGuardsPassed;
+    
+    console.log(`[HOTELS] === STABILITY SUMMARY ===`);
+    console.log(`[HOTELS] Successful: ${stabilitySummary.successfulRuns}/${stabilitySummary.totalRuns}`);
+    console.log(`[HOTELS] Prices identical: ${stabilitySummary.pricesIdentical}`);
+    console.log(`[HOTELS] Golden path proven: ${goldenPathProven}`);
 
     return new Response(
       JSON.stringify({
         success: true,
-        result,
-        conclusion: result.classification === 'A' 
-          ? 'GOLDEN PATH FOUND: Hotels.com prices are extractable pre-payment'
-          : `CLASSIFICATION ${result.classification}: ${result.classificationDescription}`,
+        results: runs === 1 ? results[0] : results,
+        stabilitySummary: runs > 1 ? stabilitySummary : undefined,
+        goldenPathProven,
+        conclusion: goldenPathProven 
+          ? 'GOLDEN PATH PROVEN: Hotels.com extraction is reliable, grounded, and repeatable'
+          : successfulRuns.length > 0
+            ? `PARTIAL SUCCESS: ${successfulRuns.length}/${runs} runs succeeded`
+            : `FAILED: ${results[0]?.classificationDescription || 'Unknown error'}`,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
