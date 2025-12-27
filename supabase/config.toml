@@ -47,3 +47,9 @@ verify_jwt = false
 
 [functions.send-notify-me-email]
 verify_jwt = false
+
+[functions.firecrawl-diagnostic]
+verify_jwt = false
+
+[functions.firecrawl-simple]
+verify_jwt = false
