@@ -228,7 +228,7 @@ export default function SearchResults() {
       }
 
       setSearch(searchData as SearchData);
-      setCurrentStep(getCurrentStepIndex(searchData.status));
+      setCurrentStep(getStageIndexFromStatus(searchData.status));
 
       // Handle dates_required status
       if (searchData.status === "dates_required") {
@@ -1211,8 +1211,8 @@ export default function SearchResults() {
                           {/* Progress bar for active step */}
                           {isActive && (
                             <>
-                              {/* Show PriceExtractionProgress for the "collecting" step */}
-                              {step.id === 'collecting' && priceExtractionPlatforms.length > 0 ? (
+                              {/* Show PriceExtractionProgress for the "collect_prices" step */}
+                              {step.id === 'collect_prices' && priceExtractionPlatforms.length > 0 ? (
                                 <div className="mt-4">
                                   <PriceExtractionProgress
                                     platforms={priceExtractionPlatforms}
