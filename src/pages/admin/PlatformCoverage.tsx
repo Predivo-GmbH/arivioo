@@ -39,6 +39,9 @@ interface PlatformAdapter {
   platform_domain: string;
   coverage_status: string;
   coverage_reason: string | null;
+  coverage_tier: string | null;
+  tier_reason: string | null;
+  tier_updated_at: string | null;
   dedicated_extractor: string | null;
   reliability_score: number;
   retry_policy: string;
@@ -50,6 +53,28 @@ interface PlatformAdapter {
   created_at: string;
   updated_at: string;
 }
+
+// Tier configuration with descriptions
+const TIER_CONFIG: Record<string, { label: string; color: string; bgColor: string; description: string }> = {
+  A: { 
+    label: 'Tier A', 
+    color: 'text-green-700', 
+    bgColor: 'bg-green-100',
+    description: 'Production-supported with dedicated extractor, proven repeatability'
+  },
+  B: { 
+    label: 'Tier B', 
+    color: 'text-yellow-700', 
+    bgColor: 'bg-yellow-100',
+    description: 'Best effort extraction, no SLA on success'
+  },
+  C: { 
+    label: 'Tier C', 
+    color: 'text-red-700', 
+    bgColor: 'bg-red-100',
+    description: 'Unsupported - blocked, requires login, or non-compliant'
+  },
+};
 
 interface PipelineRun {
   search_id: string;
@@ -90,6 +115,16 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function TierBadge({ tier }: { tier: string | null }) {
+  const config = TIER_CONFIG[tier || 'B'] || TIER_CONFIG['B'];
+  
+  return (
+    <Badge variant="outline" className={`${config.bgColor} ${config.color} font-semibold`}>
+      {config.label}
+    </Badge>
+  );
+}
+
 function ReliabilityBar({ score }: { score: number }) {
   const percentage = Math.round(score * 100);
   let colorClass = 'bg-red-500';
@@ -107,6 +142,28 @@ function ReliabilityBar({ score }: { score: number }) {
       </div>
       <span className="text-sm text-muted-foreground">{percentage}%</span>
     </div>
+  );
+}
+
+function TierLegend() {
+  return (
+    <Card className="mb-4">
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm font-medium">Coverage Tier Legend</CardTitle>
+      </CardHeader>
+      <CardContent className="py-2">
+        <div className="grid gap-2 md:grid-cols-3">
+          {Object.entries(TIER_CONFIG).map(([tier, config]) => (
+            <div key={tier} className="flex items-start gap-2">
+              <Badge variant="outline" className={`${config.bgColor} ${config.color} font-semibold shrink-0`}>
+                {config.label}
+              </Badge>
+              <span className="text-xs text-muted-foreground">{config.description}</span>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -287,9 +344,9 @@ export default function PlatformCoverage() {
     fetchData();
   }, []);
 
-  const supportedCount = platforms.filter(p => p.coverage_status === 'supported').length;
-  const blockedCount = platforms.filter(p => p.coverage_status === 'blocked').length;
-  const unknownCount = platforms.filter(p => p.coverage_status === 'unknown').length;
+  const tierACount = platforms.filter(p => p.coverage_tier === 'A').length;
+  const tierBCount = platforms.filter(p => p.coverage_tier === 'B').length;
+  const tierCCount = platforms.filter(p => p.coverage_tier === 'C').length;
 
   if (isLoading) {
     return (
@@ -349,34 +406,34 @@ export default function PlatformCoverage() {
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Supported</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Tier A (Supported)</CardTitle>
             <CheckCircle2 className="h-4 w-4 text-green-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-green-600">{supportedCount}</div>
-            <p className="text-xs text-muted-foreground">Production-ready platforms</p>
+            <div className="text-2xl font-bold text-green-600">{tierACount}</div>
+            <p className="text-xs text-muted-foreground">Production-proven extractors</p>
           </CardContent>
         </Card>
         
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Blocked</CardTitle>
-            <Ban className="h-4 w-4 text-red-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-red-600">{blockedCount}</div>
-            <p className="text-xs text-muted-foreground">Network/bot blocked</p>
-          </CardContent>
-        </Card>
-        
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Pending Eval</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Tier B (Attempted)</CardTitle>
             <AlertTriangle className="h-4 w-4 text-yellow-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-yellow-600">{unknownCount}</div>
-            <p className="text-xs text-muted-foreground">Awaiting classification</p>
+            <div className="text-2xl font-bold text-yellow-600">{tierBCount}</div>
+            <p className="text-xs text-muted-foreground">Best effort, no SLA</p>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Tier C (Unsupported)</CardTitle>
+            <Ban className="h-4 w-4 text-red-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-red-600">{tierCCount}</div>
+            <p className="text-xs text-muted-foreground">Blocked or non-compliant</p>
           </CardContent>
         </Card>
         
@@ -405,11 +462,12 @@ export default function PlatformCoverage() {
         </TabsList>
 
         <TabsContent value="coverage">
+          <TierLegend />
           <Card>
             <CardHeader>
               <CardTitle>Platform Coverage Overview</CardTitle>
               <CardDescription>
-                Which platforms do we support today, which do we not, and why?
+                Which platforms do we support, which do we attempt, which are unsupported, and why?
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -418,12 +476,12 @@ export default function PlatformCoverage() {
                   <TableRow>
                     <TableHead>Platform</TableHead>
                     <TableHead>Domain</TableHead>
+                    <TableHead>Tier</TableHead>
                     <TableHead>Status</TableHead>
-                    <TableHead>Reason</TableHead>
+                    <TableHead>Tier Reason</TableHead>
                     <TableHead>Extractor</TableHead>
                     <TableHead>Reliability</TableHead>
                     <TableHead>Last Success</TableHead>
-                    <TableHead>Last Failure</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -434,10 +492,13 @@ export default function PlatformCoverage() {
                         {platform.platform_domain}
                       </TableCell>
                       <TableCell>
+                        <TierBadge tier={platform.coverage_tier} />
+                      </TableCell>
+                      <TableCell>
                         <StatusBadge status={platform.coverage_status} />
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground max-w-xs">
-                        {platform.coverage_reason || '-'}
+                        {platform.tier_reason || platform.coverage_reason || '-'}
                       </TableCell>
                       <TableCell>
                         {platform.dedicated_extractor ? (
@@ -454,11 +515,6 @@ export default function PlatformCoverage() {
                       <TableCell className="text-xs text-muted-foreground">
                         {platform.last_success_at 
                           ? new Date(platform.last_success_at).toLocaleDateString()
-                          : '-'}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {platform.last_failure_at 
-                          ? new Date(platform.last_failure_at).toLocaleDateString()
                           : '-'}
                       </TableCell>
                     </TableRow>
