@@ -493,6 +493,53 @@ POST /functions/v1/backfill-platform-evidence
 
 ---
 
+## API Quotas Admin Page
+
+### How Usage Values Are Computed
+
+| Field | Source | Calculation |
+|-------|--------|-------------|
+| `used` | SerpAPI: Provider API | Direct from `total_searches_this_month` |
+| `used` | Other providers: Telemetry | Count of rows in `api_request_logs` for current billing period |
+| `remaining` | Known limit providers | `limit - used` |
+| `remaining` | Unknown/unlimited | `null` (not displayed) |
+| `limit` | Provider API (SerpAPI) | From `searches_per_month` |
+| `limit` | Configured | From `api_providers.plan_limit` column |
+| `limit` | Unknown | `null`, displayed as "Unknown limit" |
+
+### Limit Types
+
+| Type | Meaning | Display |
+|------|---------|---------|
+| `known_limit` | Exact quota available | Progress bar with remaining |
+| `unlimited` | No quota enforced | "Unlimited" badge, usage shown |
+| `unknown` | Limit not determinable | "Limit Unknown" badge, usage shown |
+
+### Limit Source
+
+| Source | Meaning |
+|--------|---------|
+| `provider_api` | Queried from provider's quota API (most accurate) |
+| `configured` | Manually set in `api_providers.plan_limit` |
+| `inferred` | Derived from plan documentation |
+| `unknown` | No reliable source available |
+
+### Firecrawl Aggregation
+
+Firecrawl usage is aggregated across all active keys:
+- Log entries for both `firecrawl` and `firecrawl_1` are combined
+- Single "Firecrawl" row shown in UI with total usage
+- `keysActive` field indicates number of configured keys
+
+### Key Invariant
+
+**Used count must never show 0 if API calls happened.** This is ensured by:
+1. Counting `api_request_logs` rows as telemetry source of truth
+2. For SerpAPI, using provider's own usage counter
+3. For other providers, request count = used count
+
+---
+
 ## TODO: Future Coverage Program Hooks
 
 These are planned but not yet implemented:

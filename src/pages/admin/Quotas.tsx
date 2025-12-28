@@ -39,11 +39,14 @@ interface ProviderQuota {
     planLimit: number | null;
     costPerRequest: number;
     supportsQuotaApi: boolean;
+    keysActive?: number;
   };
   quota: {
     used: number;
     remaining: number | null;
     limit: number | null;
+    limitType: 'known_limit' | 'unlimited' | 'unknown';
+    limitSource: 'provider_api' | 'configured' | 'inferred' | 'unknown';
     resetAt: string | null;
     isEstimated: boolean;
   };
@@ -108,9 +111,23 @@ function QuotaCard({
               {quota.quota.isEstimated && (
                 <Badge variant="outline" className="text-xs">Estimated</Badge>
               )}
+              {quota.quota.limitType === 'unknown' && (
+                <Badge variant="secondary" className="text-xs">Limit Unknown</Badge>
+              )}
+              {quota.quota.limitType === 'unlimited' && (
+                <Badge variant="secondary" className="text-xs">Unlimited</Badge>
+              )}
+              {quota.provider.keysActive && quota.provider.keysActive > 1 && (
+                <Badge variant="outline" className="text-xs">{quota.provider.keysActive} keys</Badge>
+              )}
             </CardTitle>
             <CardDescription className="text-xs">
               {quota.provider.planType} plan • {quota.provider.name}
+              {quota.quota.limitSource !== 'unknown' && (
+                <span className="ml-1 text-muted-foreground/60">
+                  (source: {quota.quota.limitSource.replace('_', ' ')})
+                </span>
+              )}
             </CardDescription>
           </div>
           <Button variant="ghost" size="sm" onClick={onRefresh} disabled={isRefreshing}>
@@ -122,14 +139,38 @@ function QuotaCard({
         {/* Usage Bar */}
         <div>
           <div className="flex justify-between text-sm mb-1">
-            <span>{quota.quota.used.toLocaleString()} used</span>
-            <span>{quota.quota.limit?.toLocaleString() || '∞'} limit</span>
+            <span className={quota.quota.used === 0 && quota.estimated.requestCount > 0 ? 'text-yellow-600' : ''}>
+              {quota.quota.used.toLocaleString()} used
+              {quota.quota.used === 0 && quota.estimated.requestCount > 0 && (
+                <span className="text-xs text-muted-foreground ml-1">
+                  ({quota.estimated.requestCount} in logs)
+                </span>
+              )}
+            </span>
+            <span>
+              {quota.quota.limitType === 'known_limit' 
+                ? quota.quota.limit?.toLocaleString() + ' limit'
+                : quota.quota.limitType === 'unlimited'
+                  ? 'Unlimited'
+                  : 'Unknown limit'
+              }
+            </span>
           </div>
-          <Progress 
-            value={usagePercent} 
-            className={usagePercent > 80 ? 'bg-destructive/20' : usagePercent > 50 ? 'bg-yellow-500/20' : ''}
-          />
-          {quota.quota.remaining !== null && (
+          {quota.quota.limitType === 'known_limit' && (
+            <Progress 
+              value={usagePercent} 
+              className={usagePercent > 80 ? 'bg-destructive/20' : usagePercent > 50 ? 'bg-yellow-500/20' : ''}
+            />
+          )}
+          {quota.quota.limitType !== 'known_limit' && (
+            <div className="h-2 bg-muted rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-primary/40" 
+                style={{ width: quota.quota.used > 0 ? '100%' : '0%' }}
+              />
+            </div>
+          )}
+          {quota.quota.remaining !== null && quota.quota.limitType === 'known_limit' && (
             <p className="text-xs text-muted-foreground mt-1">
               {quota.quota.remaining.toLocaleString()} remaining
             </p>
