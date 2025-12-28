@@ -234,6 +234,7 @@ export default function SearchResults() {
       if (searchData.status === "completed") {
         const enrichedResults = await fetchEnrichedResults(searchId);
         setResults(enrichedResults as unknown as SearchResult[]);
+        setSearchPhase("done");
         setLoading(false);
         return;
       }
@@ -394,7 +395,8 @@ export default function SearchResults() {
 
                       setSearch(updatedSearch as SearchData);
                       setResults(enrichedResults as unknown as SearchResult[]);
-                      setSearchPhase("animating");
+                      setSearchPhase("done");
+                      setLoading(false);
                     } else if (eventType === "error") {
                       throw new Error(data.message || "Search failed");
                     }
@@ -417,43 +419,45 @@ export default function SearchResults() {
                .eq("id", searchId)
                .single();
 
-              // Handle terminal failure states (DB constraint only allows 'error', not 'failed')
-              if (updatedSearch?.status === "error") {
-                const errorMessage = updatedSearch.api_error || "Search failed unexpectedly";
-                toast({
-                  title: "Search Failed",
-                  description: errorMessage,
-                  variant: "destructive",
-                });
-                setSearch(updatedSearch as SearchData);
-                setLoading(false);
-                return;
-              }
-              
-              // Handle dates_required status
-              if (updatedSearch?.status === "dates_required") {
-                toast({
-                  title: "Dates Required",
-                  description: "Please include check-in and check-out dates in your Airbnb URL to compare prices.",
-                  variant: "destructive",
-                });
-                navigate("/dashboard");
-                return;
-              }
+             // Handle terminal failure states (DB constraint only allows 'error', not 'failed')
+             if (updatedSearch?.status === "error") {
+               const errorMessage = updatedSearch.api_error || "Search failed unexpectedly";
+               toast({
+                 title: "Search Failed",
+                 description: errorMessage,
+                 variant: "destructive",
+               });
+               setSearch(updatedSearch as SearchData);
+               setSearchPhase("done");
+               setLoading(false);
+               return;
+             }
 
-              // If the backend is still running, keep the user in the loading state
-              if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
-                setSearch(updatedSearch as SearchData);
-                setSearchPhase("thinking");
-                return;
-              }
+             // Handle dates_required status
+             if (updatedSearch?.status === "dates_required") {
+               toast({
+                 title: "Dates Required",
+                 description: "Please include check-in and check-out dates in your Airbnb URL to compare prices.",
+                 variant: "destructive",
+               });
+               navigate("/dashboard");
+               return;
+             }
+
+             // If the backend is still running, keep the user in the loading state
+             if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
+               setSearch(updatedSearch as SearchData);
+               setSearchPhase("thinking");
+               return;
+             }
 
              const enrichedResults = await fetchEnrichedResults(searchId);
 
              setSearch(updatedSearch as SearchData);
              setResults(enrichedResults as unknown as SearchResult[]);
              actualDurationRef.current = Date.now() - startedAt;
-             setSearchPhase("animating");
+             setSearchPhase("done");
+             setLoading(false);
            }
         } catch (error: any) {
           // Cancel/skip via AbortController
@@ -579,27 +583,24 @@ export default function SearchResults() {
       try {
         const { data } = await supabase
           .from("searches")
-          .select("status, last_progress_at")
+          .select("*")
           .eq("id", searchId)
           .single();
 
         if (!data) return;
 
+        // Keep local UI in sync with backend status so the stepper advances even if SSE is silent
+        setSearch((prev) => (prev ? ({ ...prev, ...data } as SearchData) : (data as SearchData)));
+
         // Handle terminal failure state (DB constraint only allows 'error', not 'failed')
         if (data.status === "error") {
-          const { data: updatedSearch } = await supabase
-            .from("searches")
-            .select("*")
-            .eq("id", searchId)
-            .single();
-
-          const errorMessage = updatedSearch?.api_error || "Search failed unexpectedly";
+          const errorMessage = data.api_error || "Search failed unexpectedly";
           toast({
             title: "Search Failed",
             description: errorMessage,
             variant: "destructive",
           });
-          setSearch(updatedSearch as SearchData);
+          setSearchPhase("done");
           setLoading(false);
           return;
         }
@@ -607,19 +608,12 @@ export default function SearchResults() {
         // If search is done, update state
         if (["completed", "price_unavailable", "dates_required"].includes(data.status)) {
           // Fetch final results
-          const { data: updatedSearch } = await supabase
-            .from("searches")
-            .select("*")
-            .eq("id", searchId)
-            .single();
-
-          // Use enriched results to properly handle Tier C platforms
           const enrichedResults = await fetchEnrichedResults(searchId);
 
-          setSearch(updatedSearch as SearchData);
           setResults(enrichedResults as unknown as SearchResult[]);
           actualDurationRef.current = Date.now() - (searchStartTimeRef.current || Date.now());
-          setSearchPhase("animating");
+          setSearchPhase("done");
+          setLoading(false);
           return;
         }
 
