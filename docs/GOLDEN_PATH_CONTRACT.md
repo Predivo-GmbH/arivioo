@@ -53,6 +53,43 @@ All platforms are classified into exactly ONE coverage tier. Tier classification
 
 **Default for new platforms.**
 
+#### Tier B Handling Rules
+
+1. **Self-Triaging**: Every Tier B extraction automatically updates:
+   - `last_attempt_at` - timestamp of last extraction attempt
+   - `last_outcome_type` - outcome classification (success, dates_not_applied, blocked, etc.)
+   - `total_attempts` / `total_successes` / `total_failures` - cumulative counters
+
+2. **Evidence Accumulation**: The system tracks outcomes over time without manual intervention
+   - Successful extractions increment `total_successes`
+   - Failures increment `total_failures` and update `last_failure_at`
+
+3. **Promotion Readiness Signals** (computed, not stored):
+   - `success_rate` = successes / attempts
+   - `dominant_failure_reason` = most recent failure type
+   - `promotion_candidate` = true if:
+     - At least one successful extraction
+     - Failure reasons are NOT blocking/login/payment-flow
+     - ≥3 attempts with ≥50% success rate
+
+4. **Why Tier B Platforms Are Not Manually Tuned**:
+   - Manual tuning creates technical debt
+   - Evidence must drive promotion decisions
+   - "Dead ends" self-identify through failure patterns
+   - Dashboard visibility replaces ad-hoc investigation
+
+5. **When a Tier B Platform Becomes Eligible for Promotion Work**:
+   - `promotion_candidate = true` visible in dashboard
+   - Consistent success pattern (multiple runs)
+   - No blocking failure reasons in recent attempts
+   - Business value justifies extractor investment
+
+6. **When a Tier B Platform Is Likely Demoted to Tier C**:
+   - Consistent `blocked` outcomes across Firecrawl + Zyte
+   - `login_required` or `reserve_required` patterns emerge
+   - Zero successes after ≥5 attempts
+   - Network blocking confirmed (403, CAPTCHA)
+
 ---
 
 ### Tier C – Unsupported (Short-Circuited)

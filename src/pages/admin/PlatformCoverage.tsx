@@ -12,6 +12,8 @@ import {
   Globe,
   Zap,
   Shield,
+  TrendingUp,
+  Target,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -48,10 +50,73 @@ interface PlatformAdapter {
   next_review: string | null;
   last_success_at: string | null;
   last_failure_at: string | null;
+  last_attempt_at: string | null;
+  last_outcome_type: string | null;
+  total_attempts: number;
+  total_successes: number;
+  total_failures: number;
   proven_deterministic: boolean;
   is_active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+// Compute promotion readiness for Tier B platforms
+function getPromotionReadiness(platform: PlatformAdapter): { 
+  isCandidate: boolean; 
+  reason: string;
+  successRate: number;
+} {
+  if (platform.coverage_tier !== 'B') {
+    return { isCandidate: false, reason: 'Not Tier B', successRate: 0 };
+  }
+  
+  const attempts = platform.total_attempts || 0;
+  const successes = platform.total_successes || 0;
+  const successRate = attempts > 0 ? (successes / attempts) * 100 : 0;
+  
+  // Must have at least one real price extraction success
+  if (successes === 0) {
+    return { isCandidate: false, reason: 'No successful extractions yet', successRate };
+  }
+  
+  // Check if last outcome was a blocking issue
+  const blockingOutcomes = ['blocked', 'login_required', 'reserve_required', 'platform_unsupported'];
+  if (platform.last_outcome_type && blockingOutcomes.includes(platform.last_outcome_type)) {
+    return { isCandidate: false, reason: `Last attempt: ${platform.last_outcome_type}`, successRate };
+  }
+  
+  // Promotion candidate if success rate > 50% with at least 3 attempts
+  if (attempts >= 3 && successRate >= 50) {
+    return { isCandidate: true, reason: `${successRate.toFixed(0)}% success rate (${successes}/${attempts})`, successRate };
+  }
+  
+  // Has potential but needs more data
+  if (successes > 0 && attempts < 3) {
+    return { isCandidate: false, reason: `Needs more data (${attempts} attempts)`, successRate };
+  }
+  
+  return { isCandidate: false, reason: `Low success rate: ${successRate.toFixed(0)}%`, successRate };
+}
+
+// Get dominant failure reason from last_outcome_type
+function getDominantFailureReason(platform: PlatformAdapter): string {
+  if (!platform.last_outcome_type || platform.last_outcome_type === 'success') {
+    return '-';
+  }
+  
+  const outcomeLabels: Record<string, string> = {
+    dates_not_applied: 'Dates not applied',
+    no_availability: 'No availability',
+    price_not_found: 'Price not found',
+    blocked: 'Blocked/Bot detection',
+    login_required: 'Login required',
+    reserve_required: 'Reserve required',
+    platform_unsupported: 'Unsupported',
+    other_failure: 'Other failure',
+  };
+  
+  return outcomeLabels[platform.last_outcome_type] || platform.last_outcome_type;
 }
 
 // Tier configuration with descriptions
@@ -347,6 +412,7 @@ export default function PlatformCoverage() {
   const tierACount = platforms.filter(p => p.coverage_tier === 'A').length;
   const tierBCount = platforms.filter(p => p.coverage_tier === 'B').length;
   const tierCCount = platforms.filter(p => p.coverage_tier === 'C').length;
+  const tierBPlatforms = platforms.filter(p => p.coverage_tier === 'B');
 
   if (isLoading) {
     return (
@@ -471,6 +537,58 @@ export default function PlatformCoverage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
+              {/* Tier B Evidence Section */}
+              {tierBPlatforms.length > 0 && (
+                <div className="mb-6">
+                  <h3 className="text-sm font-semibold text-muted-foreground mb-3 flex items-center gap-2">
+                    <Target className="h-4 w-4" />
+                    Tier B Promotion Readiness
+                  </h3>
+                  <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                    {tierBPlatforms.map((platform) => {
+                      const readiness = getPromotionReadiness(platform);
+                      return (
+                        <Card key={platform.id} className={`border ${readiness.isCandidate ? 'border-green-300 bg-green-50/50' : ''}`}>
+                          <CardContent className="pt-4 pb-3">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="font-medium text-sm">{platform.platform_name}</span>
+                              {readiness.isCandidate ? (
+                                <Badge className="bg-green-500 text-white text-xs gap-1">
+                                  <TrendingUp className="h-3 w-3" /> Candidate
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className="text-xs">Not Ready</Badge>
+                              )}
+                            </div>
+                            <div className="space-y-1 text-xs">
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Attempts:</span>
+                                <span className="font-medium">{platform.total_attempts || 0}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Successes:</span>
+                                <span className="font-medium text-green-600">{platform.total_successes || 0}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Success Rate:</span>
+                                <span className="font-medium">{readiness.successRate.toFixed(0)}%</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Dominant Failure:</span>
+                                <span className="font-medium text-red-600">{getDominantFailureReason(platform)}</span>
+                              </div>
+                              <div className="mt-2 pt-2 border-t text-muted-foreground">
+                                {readiness.reason}
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -478,9 +596,10 @@ export default function PlatformCoverage() {
                     <TableHead>Domain</TableHead>
                     <TableHead>Tier</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead>Attempts</TableHead>
+                    <TableHead>Successes</TableHead>
                     <TableHead>Tier Reason</TableHead>
                     <TableHead>Extractor</TableHead>
-                    <TableHead>Reliability</TableHead>
                     <TableHead>Last Success</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -497,7 +616,16 @@ export default function PlatformCoverage() {
                       <TableCell>
                         <StatusBadge status={platform.coverage_status} />
                       </TableCell>
-                      <TableCell className="text-sm text-muted-foreground max-w-xs">
+                      <TableCell className="text-sm">
+                        {platform.total_attempts || 0}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        <span className="text-green-600">{platform.total_successes || 0}</span>
+                        {(platform.total_failures || 0) > 0 && (
+                          <span className="text-red-500 ml-1">/ {platform.total_failures}</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
                         {platform.tier_reason || platform.coverage_reason || '-'}
                       </TableCell>
                       <TableCell>
@@ -508,9 +636,6 @@ export default function PlatformCoverage() {
                         ) : (
                           <span className="text-muted-foreground">-</span>
                         )}
-                      </TableCell>
-                      <TableCell>
-                        <ReliabilityBar score={platform.reliability_score || 0} />
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {platform.last_success_at 
