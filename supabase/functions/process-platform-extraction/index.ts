@@ -280,31 +280,142 @@ async function ensureTerminalStatus(
     .eq('id', extractionId);
 }
 
-// Map extraction status to outcome type for Tier B tracking
-function getOutcomeType(status: TerminalStatus): string {
-  switch (status) {
-    case 'success':
-      return 'success';
-    case 'dates_not_applied':
-      return 'dates_not_applied';
-    case 'no_availability_for_dates':
-    case 'listing_unavailable':
-      return 'no_availability';
-    case 'price_not_found_after_dates_applied':
-    case 'total_not_available_pre_checkout':
-      return 'price_not_found';
-    case 'blocked_captcha_or_bot':
-    case 'blocked_rate_limit':
-      return 'blocked';
-    case 'platform_unsupported':
-      return 'platform_unsupported';
-    default:
-      return 'other_failure';
-  }
-}
+// Normalized outcome types for gate_3 evaluation
+const NORMALIZED_OUTCOME_TYPES = [
+  'success',
+  'blocked',
+  'login_required',
+  'reserve_required',
+  'payment_flow_required',
+  'dates_not_applied',
+  'no_availability',
+  'price_not_found',
+  'render_failed',
+  'timeout',
+  'unknown',
+] as const;
 
-// Blocking failure reasons that prevent promotion eligibility
-const BLOCKING_FAILURE_REASONS = ['blocked', 'login_required', 'reserve_required', 'payment_flow_required', 'platform_unsupported'];
+type NormalizedOutcome = typeof NORMALIZED_OUTCOME_TYPES[number];
+
+// Blocking failure reasons that prevent promotion eligibility (gate_3)
+const BLOCKING_FAILURE_REASONS: NormalizedOutcome[] = [
+  'blocked',
+  'login_required',
+  'reserve_required',
+  'payment_flow_required',
+];
+
+// Normalize extraction status to consistent outcome type for gate evaluation
+function normalizeOutcome(status: string, extractionError: string | null = null): NormalizedOutcome {
+  const statusLower = status.toLowerCase();
+  const errorLower = (extractionError || '').toLowerCase();
+  
+  // Success case
+  if (statusLower === 'success') {
+    return 'success';
+  }
+  
+  // Blocked cases
+  if (
+    statusLower.includes('blocked') ||
+    statusLower.includes('captcha') ||
+    statusLower.includes('bot') ||
+    errorLower.includes('captcha') ||
+    errorLower.includes('bot detected') ||
+    errorLower.includes('rate limit')
+  ) {
+    return 'blocked';
+  }
+  
+  // Login required
+  if (
+    statusLower.includes('login') ||
+    errorLower.includes('login') ||
+    errorLower.includes('sign in')
+  ) {
+    return 'login_required';
+  }
+  
+  // Reserve required (inquiry-based pricing)
+  if (
+    statusLower.includes('reserve') ||
+    statusLower.includes('inquiry') ||
+    errorLower.includes('reserve') ||
+    errorLower.includes('inquiry') ||
+    errorLower.includes('request to book')
+  ) {
+    return 'reserve_required';
+  }
+  
+  // Payment flow required (total only visible at checkout)
+  if (
+    statusLower.includes('payment') ||
+    statusLower.includes('checkout') ||
+    statusLower.includes('pre_checkout') ||
+    statusLower.includes('total_not_available') ||
+    errorLower.includes('payment') ||
+    errorLower.includes('checkout')
+  ) {
+    return 'payment_flow_required';
+  }
+  
+  // Dates not applied
+  if (
+    statusLower.includes('dates_not_applied') ||
+    errorLower.includes('could not validate dates') ||
+    errorLower.includes('dates not')
+  ) {
+    return 'dates_not_applied';
+  }
+  
+  // No availability
+  if (
+    statusLower.includes('unavailable') ||
+    statusLower.includes('sold_out') ||
+    statusLower.includes('no_availability') ||
+    errorLower.includes('sold out') ||
+    errorLower.includes('unavailable') ||
+    errorLower.includes('no availability')
+  ) {
+    return 'no_availability';
+  }
+  
+  // Price not found
+  if (
+    statusLower.includes('price_not_found') ||
+    statusLower.includes('not_found') ||
+    errorLower.includes('no price found') ||
+    errorLower.includes('no total prices')
+  ) {
+    return 'price_not_found';
+  }
+  
+  // Render failed
+  if (
+    statusLower.includes('render_failed') ||
+    statusLower.includes('render') ||
+    errorLower.includes('render') ||
+    errorLower.includes('firecrawl error') ||
+    errorLower.includes('zyte error')
+  ) {
+    return 'render_failed';
+  }
+  
+  // Timeout
+  if (
+    statusLower.includes('timeout') ||
+    errorLower.includes('timeout')
+  ) {
+    return 'timeout';
+  }
+  
+  // Platform unsupported maps to blocked for gate purposes
+  if (statusLower.includes('unsupported')) {
+    return 'blocked';
+  }
+  
+  return 'unknown';
+}
 
 // Update platform adapter with evidence tracking (Tier B self-triaging)
 async function updatePlatformEvidence(
@@ -314,7 +425,7 @@ async function updatePlatformEvidence(
   isSuccess: boolean,
   datesValidated: boolean = false
 ): Promise<void> {
-  const outcomeType = getOutcomeType(status);
+  const outcomeType = normalizeOutcome(status, null);
   const now = new Date().toISOString();
   
   try {
