@@ -140,6 +140,26 @@ timeout                         - Operation timed out
 platform_unsupported            - Tier C platform (short-circuited)
 ```
 
+### Normalized Outcome Types (Gate 3 Evaluation)
+
+For consistent gate evaluation, extraction statuses are normalized to:
+
+| Normalized Type | Raw Statuses | Gate 3 Impact |
+|-----------------|--------------|---------------|
+| `success` | success | ✅ Passes |
+| `blocked` | blocked_captcha_or_bot, blocked_rate_limit, bot detected | ❌ Blocks promotion |
+| `login_required` | login errors, sign-in required | ❌ Blocks promotion |
+| `reserve_required` | inquiry-based, request to book | ❌ Blocks promotion |
+| `payment_flow_required` | total_not_available_pre_checkout | ❌ Blocks promotion |
+| `dates_not_applied` | dates_not_applied, could not validate dates | ✅ Passes |
+| `no_availability` | sold_out, listing_unavailable, no_availability_for_dates | ✅ Passes |
+| `price_not_found` | price_not_found_after_dates_applied | ✅ Passes |
+| `render_failed` | render_failed, firecrawl/zyte errors | ✅ Passes |
+| `timeout` | timeout | ✅ Passes |
+| `unknown` | unclassified | ✅ Passes |
+
+**Only blocking outcomes (`blocked`, `login_required`, `reserve_required`, `payment_flow_required`) prevent Gate 3 from passing.**
+
 ---
 
 ## Proven Reference Implementation: Hotels.com
@@ -370,6 +390,31 @@ This contract is enforced by:
 6. **Admin Visibility** - Platform Coverage dashboard exposes tier status
 
 Any violation of this contract should be treated as a system bug, not a platform limitation.
+
+---
+
+## Backfill & Evidence Maintenance
+
+### Historical Data Backfill
+
+The `backfill-platform-evidence` edge function computes gates and scores from existing `price_extractions`:
+
+```bash
+# Run once to populate gates from historical data
+POST /functions/v1/backfill-platform-evidence
+```
+
+**Computes:**
+- `total_attempts`, `total_successes`, `total_failures`
+- `last_success_at`, `last_failure_at`, `last_attempt_at`
+- Gates (G1, G2, G3) from historical outcomes
+- `promotion_score` for eligible Tier B platforms
+- Nominates exactly one promotion candidate
+
+**Use after:**
+- Initial system deployment
+- Database migrations affecting extraction data
+- Manual data corrections
 
 ---
 
