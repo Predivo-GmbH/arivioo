@@ -15,6 +15,9 @@ interface AdminAuthState {
   isAuthenticated: boolean;
 }
 
+// Use sessionStorage instead of localStorage for admin tokens
+// This provides better security: tokens are cleared when browser closes,
+// reducing XSS attack window and shared-computer risk
 const ADMIN_TOKEN_KEY = 'admin_session_token';
 
 export function useAdminAuth() {
@@ -25,7 +28,7 @@ export function useAdminAuth() {
   });
 
   const verifySession = useCallback(async () => {
-    const token = localStorage.getItem(ADMIN_TOKEN_KEY);
+    const token = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (!token) {
       setState({ admin: null, isLoading: false, isAuthenticated: false });
       return;
@@ -38,7 +41,7 @@ export function useAdminAuth() {
       });
 
       if (error || !data?.valid) {
-        localStorage.removeItem(ADMIN_TOKEN_KEY);
+        sessionStorage.removeItem(ADMIN_TOKEN_KEY);
         setState({ admin: null, isLoading: false, isAuthenticated: false });
         return;
       }
@@ -50,7 +53,7 @@ export function useAdminAuth() {
       });
     } catch (err) {
       console.error('Admin session verification failed:', err);
-      localStorage.removeItem(ADMIN_TOKEN_KEY);
+      sessionStorage.removeItem(ADMIN_TOKEN_KEY);
       setState({ admin: null, isLoading: false, isAuthenticated: false });
     }
   }, []);
@@ -74,7 +77,7 @@ export function useAdminAuth() {
         return { success: false, error: data?.error || 'Login failed' };
       }
 
-      localStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+      sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
       setState({
         admin: data.admin,
         isLoading: false,
@@ -88,7 +91,7 @@ export function useAdminAuth() {
   };
 
   const logout = async () => {
-    const token = localStorage.getItem(ADMIN_TOKEN_KEY);
+    const token = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (token) {
       try {
         await supabase.functions.invoke('admin-auth/logout', {
@@ -99,12 +102,12 @@ export function useAdminAuth() {
         console.error('Logout error:', err);
       }
     }
-    localStorage.removeItem(ADMIN_TOKEN_KEY);
+    sessionStorage.removeItem(ADMIN_TOKEN_KEY);
     setState({ admin: null, isLoading: false, isAuthenticated: false });
   };
 
   const changePassword = async (currentPassword: string, newPassword: string): Promise<{ success: boolean; error?: string }> => {
-    const token = localStorage.getItem(ADMIN_TOKEN_KEY);
+    const token = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (!token) {
       return { success: false, error: 'Not authenticated' };
     }
@@ -126,7 +129,7 @@ export function useAdminAuth() {
     }
   };
 
-  const getToken = () => localStorage.getItem(ADMIN_TOKEN_KEY);
+  const getToken = () => sessionStorage.getItem(ADMIN_TOKEN_KEY);
 
   return {
     ...state,
