@@ -405,6 +405,24 @@ Single candidate focus:
 
 ---
 
+## Source of Truth Hierarchy
+
+| Layer | Table | Purpose | Tier Rules |
+|-------|-------|---------|------------|
+| **Primary** | `price_extractions` | Authoritative pricing and extraction outcomes | Tier C = `platform_unsupported` status |
+| **Secondary** | `search_results` | Display-oriented cache with photo match data | Tier C = NULL prices (enforced at write) |
+| **Tertiary** | UI hooks (`useEnrichedSearchResults`) | Merged view for frontend | Tier C = filtered from pricing/ranking |
+
+### Enforcement Points (Defense in Depth)
+
+1. **Backend write guard** (`search-alternatives`): Tier C platforms have prices NULLed before insert
+2. **Frontend read guard** (`useEnrichedSearchResults`): Tier C platforms filtered from price comparisons
+3. **UI display guard** (`SearchResults.tsx`): Tier C platforms excluded from "Best Deal" badges
+
+This ensures that even if one layer fails, Tier C platforms cannot surface prices.
+
+---
+
 ## Implementation Files
 
 | Component | File | Purpose |

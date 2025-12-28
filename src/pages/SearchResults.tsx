@@ -621,8 +621,11 @@ export default function SearchResults() {
             .eq("search_id", searchId)
             .order("savings_percentage", { ascending: false, nullsFirst: false });
 
+          // Use enriched results to properly handle Tier C platforms
+          const enrichedResults = await fetchEnrichedResults(searchId);
+
           setSearch(updatedSearch as SearchData);
-          setResults((resultsData || []) as SearchResult[]);
+          setResults(enrichedResults as unknown as SearchResult[]);
           actualDurationRef.current = Date.now() - (searchStartTimeRef.current || Date.now());
           setSearchPhase("animating");
           return;
