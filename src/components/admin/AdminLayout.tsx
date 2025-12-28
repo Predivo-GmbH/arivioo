@@ -33,6 +33,7 @@ import { NavLink } from '@/components/NavLink';
 
 const navItems = [
   { title: 'Health Overview', url: '/admin', icon: LayoutDashboard },
+  { title: 'Platform Coverage', url: '/admin/coverage', icon: Gauge },
   { title: 'Pipeline Status', url: '/admin/pipeline', icon: Activity },
   { title: 'Extractions', url: '/admin/extractions', icon: Database },
   { title: 'Users & Notify Me', url: '/admin/notify-me', icon: User },

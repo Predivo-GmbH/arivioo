@@ -596,72 +596,96 @@ export type Database = {
       }
       platform_adapters: {
         Row: {
+          coverage_reason: string | null
+          coverage_status: string | null
           created_at: string
           date_application_strategy: string | null
           date_format: string
           date_validation_required: boolean | null
+          dedicated_extractor: string | null
           deep_link_template: string
           extraction_schema_overrides: Json | null
           id: string
           is_active: boolean
           is_ai_generated: boolean
+          last_failure_at: string | null
+          last_success_at: string | null
           last_successful_strategy: string | null
           learned_navigation_steps: Json | null
           navigation_hints: Json | null
+          next_review: string | null
           occupancy_params: Json | null
           platform_domain: string
           platform_name: string
           price_selectors: Json | null
+          proven_deterministic: boolean | null
           reliability_score: number | null
           requires_occupancy: boolean
+          retry_policy: string | null
           strategy_updated_at: string | null
           updated_at: string
           url_parameter_rules: Json | null
           validation_rules: Json | null
         }
         Insert: {
+          coverage_reason?: string | null
+          coverage_status?: string | null
           created_at?: string
           date_application_strategy?: string | null
           date_format?: string
           date_validation_required?: boolean | null
+          dedicated_extractor?: string | null
           deep_link_template: string
           extraction_schema_overrides?: Json | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          last_failure_at?: string | null
+          last_success_at?: string | null
           last_successful_strategy?: string | null
           learned_navigation_steps?: Json | null
           navigation_hints?: Json | null
+          next_review?: string | null
           occupancy_params?: Json | null
           platform_domain: string
           platform_name: string
           price_selectors?: Json | null
+          proven_deterministic?: boolean | null
           reliability_score?: number | null
           requires_occupancy?: boolean
+          retry_policy?: string | null
           strategy_updated_at?: string | null
           updated_at?: string
           url_parameter_rules?: Json | null
           validation_rules?: Json | null
         }
         Update: {
+          coverage_reason?: string | null
+          coverage_status?: string | null
           created_at?: string
           date_application_strategy?: string | null
           date_format?: string
           date_validation_required?: boolean | null
+          dedicated_extractor?: string | null
           deep_link_template?: string
           extraction_schema_overrides?: Json | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          last_failure_at?: string | null
+          last_success_at?: string | null
           last_successful_strategy?: string | null
           learned_navigation_steps?: Json | null
           navigation_hints?: Json | null
+          next_review?: string | null
           occupancy_params?: Json | null
           platform_domain?: string
           platform_name?: string
           price_selectors?: Json | null
+          proven_deterministic?: boolean | null
           reliability_score?: number | null
           requires_occupancy?: boolean
+          retry_policy?: string | null
           strategy_updated_at?: string | null
           updated_at?: string
           url_parameter_rules?: Json | null
