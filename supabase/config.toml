@@ -65,3 +65,6 @@ verify_jwt = false
 
 [functions.extract-expedia]
 verify_jwt = false
+
+[functions.extract-agoda]
+verify_jwt = false

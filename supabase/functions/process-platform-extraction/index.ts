@@ -72,6 +72,7 @@ const DEDICATED_EXTRACTOR_TIMEOUT = 90000; // 90s for dedicated extractors (they
 const GOLDEN_PATH_PLATFORMS: Record<string, string> = {
   'hotels.com': 'extract-hotelscom',
   'expedia.com': 'extract-expedia',
+  'agoda.com': 'extract-agoda',
 };
 
 // Check if platform has a dedicated golden path extractor
