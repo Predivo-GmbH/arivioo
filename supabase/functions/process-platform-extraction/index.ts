@@ -50,11 +50,82 @@ interface WorkerResult {
   };
   finalStatus: TerminalStatus;
   elapsedMs: number;
+  extractorUsed: string;
 }
 
 // Per-phase timeout - increased to allow Firecrawl + Zyte fallback
 const PHASE_A_TIMEOUT = 60000;  // 60s for Phase A (Firecrawl ~25s + Zyte ~25s + buffer)
 const PHASE_B_TIMEOUT = 60000;  // 60s for Phase B
+const DEDICATED_EXTRACTOR_TIMEOUT = 90000; // 90s for dedicated extractors (they handle both phases)
+
+// Golden path platforms with dedicated extractors
+const GOLDEN_PATH_PLATFORMS: Record<string, string> = {
+  'hotels.com': 'extract-hotelscom',
+  'expedia.com': 'extract-expedia',
+};
+
+// Check if platform has a dedicated golden path extractor
+function getDedicatedExtractor(platformName: string): string | null {
+  const platformLower = platformName.toLowerCase();
+  for (const [domain, extractor] of Object.entries(GOLDEN_PATH_PLATFORMS)) {
+    if (platformLower.includes(domain) || platformLower === domain.split('.')[0]) {
+      return extractor;
+    }
+  }
+  return null;
+}
+
+// Call a dedicated production extractor (combines Phase A + B)
+async function runDedicatedExtractor(
+  supabaseUrl: string,
+  supabaseKey: string,
+  extractorName: string,
+  extractionId: string,
+  deepLink: string,
+  requestedCheckIn: string,
+  requestedCheckOut: string,
+  adults: number = 2
+): Promise<{ success: boolean; result: any; error?: string; timedOut?: boolean }> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEDICATED_EXTRACTOR_TIMEOUT);
+    
+    console.log(`[WORKER] Calling dedicated extractor: ${extractorName}`);
+    
+    const response = await fetch(`${supabaseUrl}/functions/v1/${extractorName}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        extractionId,
+        url: deepLink,
+        checkIn: requestedCheckIn,
+        checkOut: requestedCheckOut,
+        adults,
+        requireValidation: true,
+      }),
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { success: false, result: null, error: `HTTP ${response.status}: ${errorText}` };
+    }
+    
+    const result = await response.json();
+    return { success: result.success, result };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    if (errorMsg.includes('aborted') || errorMsg.includes('timeout')) {
+      return { success: false, result: null, error: 'Dedicated extractor timeout', timedOut: true };
+    }
+    return { success: false, result: null, error: errorMsg };
+  }
+}
 
 // Call validate-dates with timeout
 async function runPhaseA(
@@ -203,6 +274,9 @@ Deno.serve(async (req) => {
     const searchId = extraction.search_id;
     const searchResultId = extraction.search_result_id;
     
+    // Check if platform has a dedicated golden path extractor
+    const dedicatedExtractor = getDedicatedExtractor(platform);
+    
     const result: WorkerResult = {
       extractionId,
       platform,
@@ -224,7 +298,106 @@ Deno.serve(async (req) => {
       },
       finalStatus: 'validation_error',
       elapsedMs: 0,
+      extractorUsed: dedicatedExtractor || 'generic',
     };
+    
+    // ============= GOLDEN PATH: Use dedicated extractor if available =============
+    if (dedicatedExtractor) {
+      console.log(`[WORKER] Using GOLDEN PATH extractor: ${dedicatedExtractor} for ${platform}`);
+      
+      result.phaseA.ran = true;
+      result.phaseB.ran = true;
+      
+      const extractorResponse = await runDedicatedExtractor(
+        supabaseUrl,
+        supabaseKey,
+        dedicatedExtractor,
+        extractionId,
+        deepLink,
+        requestedCheckIn,
+        requestedCheckOut,
+        extraction.assumed_adults || 2
+      );
+      
+      if (extractorResponse.timedOut) {
+        result.phaseA.status = 'timeout';
+        result.phaseB.status = 'timeout';
+        result.finalStatus = 'timeout';
+        
+        await ensureTerminalStatus(supabaseClient, extractionId, 'timeout', `${dedicatedExtractor} timeout`);
+        
+        result.elapsedMs = Date.now() - startTime;
+        console.log(`[WORKER] ${dedicatedExtractor} timeout for ${platform}`);
+        return new Response(
+          JSON.stringify({ success: false, result }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      // Parse dedicated extractor response
+      const extractorResult = extractorResponse.result;
+      
+      if (extractorResult) {
+        // Phase A results
+        result.phaseA.datesValidated = extractorResult.phaseA?.datesValidated || extractorResult.dates_validated || false;
+        result.phaseA.detectedCheckIn = extractorResult.phaseA?.detectedCheckIn || extractorResult.detected_checkin || null;
+        result.phaseA.detectedCheckOut = extractorResult.phaseA?.detectedCheckOut || extractorResult.detected_checkout || null;
+        result.phaseA.status = extractorResult.phaseA?.status || (result.phaseA.datesValidated ? 'success' : 'dates_not_applied');
+        
+        // Phase B results
+        result.phaseB.extractedPrice = extractorResult.phaseB?.extractedPrice || extractorResult.extracted_price || null;
+        result.phaseB.currency = extractorResult.phaseB?.currency || extractorResult.currency || null;
+        result.phaseB.includesTaxesFees = extractorResult.phaseB?.includesTaxesFees ?? extractorResult.includes_taxes_fees ?? null;
+        result.phaseB.status = extractorResult.phaseB?.status || extractorResult.status || 'extraction_error';
+        result.phaseB.evidence = extractorResult.phaseB?.evidenceSnippet || extractorResult.evidence_snippet || null;
+        
+        // Map to terminal status
+        if (extractorResult.success && result.phaseB.extractedPrice) {
+          result.finalStatus = 'success';
+        } else if (!result.phaseA.datesValidated) {
+          // Map Phase A failure
+          const phaseAStatus = extractorResult.phaseA?.status || extractorResult.status || '';
+          if (phaseAStatus.includes('sold_out') || phaseAStatus.includes('no_availability')) {
+            result.finalStatus = 'no_availability_for_dates';
+          } else if (phaseAStatus.includes('blocked') || phaseAStatus.includes('captcha')) {
+            result.finalStatus = 'blocked_captcha_or_bot';
+          } else {
+            result.finalStatus = 'dates_not_applied';
+          }
+        } else {
+          // Phase A passed but Phase B failed
+          const phaseBStatus = extractorResult.phaseB?.status || extractorResult.status || '';
+          if (phaseBStatus.includes('price_not_found') || phaseBStatus.includes('no_price')) {
+            result.finalStatus = 'price_not_found_after_dates_applied';
+          } else if (phaseBStatus.includes('blocked')) {
+            result.finalStatus = 'blocked_captcha_or_bot';
+          } else {
+            result.finalStatus = 'extraction_error';
+          }
+        }
+      } else {
+        // Extractor returned no result
+        result.finalStatus = 'extraction_error';
+        result.phaseA.status = 'extraction_error';
+        result.phaseB.status = 'extraction_error';
+        
+        await ensureTerminalStatus(supabaseClient, extractionId, 'extraction_error', extractorResponse.error || 'No result from dedicated extractor');
+      }
+      
+      result.elapsedMs = Date.now() - startTime;
+      console.log(`[WORKER] ${dedicatedExtractor} complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
+      
+      return new Response(
+        JSON.stringify({ 
+          success: result.finalStatus === 'success',
+          result,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    // ============= GENERIC PATH: Phase A then Phase B =============
+    console.log(`[WORKER] Using GENERIC extraction path for ${platform}`);
     
     // ============= PHASE A: Date Validation =============
     console.log(`[WORKER] Phase A: ${platform}`);
@@ -243,7 +416,7 @@ Deno.serve(async (req) => {
     if (phaseAResponse.timedOut) {
       // Timeout - ensure terminal status
       result.phaseA.status = 'timeout';
-      result.phaseA.evidence = 'Phase A exceeded 35 second timeout';
+      result.phaseA.evidence = 'Phase A exceeded 60 second timeout';
       result.finalStatus = 'timeout';
       
       await ensureTerminalStatus(supabaseClient, extractionId, 'timeout', 'Phase A timeout');
@@ -321,7 +494,7 @@ Deno.serve(async (req) => {
     if (phaseBResponse.timedOut) {
       // Timeout - ensure terminal status
       result.phaseB.status = 'timeout';
-      result.phaseB.evidence = 'Phase B exceeded 45 second timeout';
+      result.phaseB.evidence = 'Phase B exceeded 60 second timeout';
       result.finalStatus = 'timeout';
       
       await ensureTerminalStatus(supabaseClient, extractionId, 'timeout', 'Phase B timeout');
