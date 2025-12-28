@@ -609,7 +609,9 @@ export type Database = {
           id: string
           is_active: boolean
           is_ai_generated: boolean
+          last_attempt_at: string | null
           last_failure_at: string | null
+          last_outcome_type: string | null
           last_success_at: string | null
           last_successful_strategy: string | null
           learned_navigation_steps: Json | null
@@ -626,6 +628,9 @@ export type Database = {
           strategy_updated_at: string | null
           tier_reason: string | null
           tier_updated_at: string | null
+          total_attempts: number
+          total_failures: number
+          total_successes: number
           updated_at: string
           url_parameter_rules: Json | null
           validation_rules: Json | null
@@ -644,7 +649,9 @@ export type Database = {
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          last_attempt_at?: string | null
           last_failure_at?: string | null
+          last_outcome_type?: string | null
           last_success_at?: string | null
           last_successful_strategy?: string | null
           learned_navigation_steps?: Json | null
@@ -661,6 +668,9 @@ export type Database = {
           strategy_updated_at?: string | null
           tier_reason?: string | null
           tier_updated_at?: string | null
+          total_attempts?: number
+          total_failures?: number
+          total_successes?: number
           updated_at?: string
           url_parameter_rules?: Json | null
           validation_rules?: Json | null
@@ -679,7 +689,9 @@ export type Database = {
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          last_attempt_at?: string | null
           last_failure_at?: string | null
+          last_outcome_type?: string | null
           last_success_at?: string | null
           last_successful_strategy?: string | null
           learned_navigation_steps?: Json | null
@@ -696,6 +708,9 @@ export type Database = {
           strategy_updated_at?: string | null
           tier_reason?: string | null
           tier_updated_at?: string | null
+          total_attempts?: number
+          total_failures?: number
+          total_successes?: number
           updated_at?: string
           url_parameter_rules?: Json | null
           validation_rules?: Json | null

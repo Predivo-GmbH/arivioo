@@ -280,6 +280,77 @@ async function ensureTerminalStatus(
     .eq('id', extractionId);
 }
 
+// Map extraction status to outcome type for Tier B tracking
+function getOutcomeType(status: TerminalStatus): string {
+  switch (status) {
+    case 'success':
+      return 'success';
+    case 'dates_not_applied':
+      return 'dates_not_applied';
+    case 'no_availability_for_dates':
+    case 'listing_unavailable':
+      return 'no_availability';
+    case 'price_not_found_after_dates_applied':
+    case 'total_not_available_pre_checkout':
+      return 'price_not_found';
+    case 'blocked_captcha_or_bot':
+    case 'blocked_rate_limit':
+      return 'blocked';
+    case 'platform_unsupported':
+      return 'platform_unsupported';
+    default:
+      return 'other_failure';
+  }
+}
+
+// Update platform adapter with evidence tracking (Tier B self-triaging)
+async function updatePlatformEvidence(
+  supabaseClient: any,
+  platformName: string,
+  status: TerminalStatus,
+  isSuccess: boolean
+): Promise<void> {
+  const outcomeType = getOutcomeType(status);
+  const now = new Date().toISOString();
+  
+  try {
+    // Find the platform adapter
+    const { data: adapters } = await supabaseClient
+      .from('platform_adapters')
+      .select('id, total_attempts, total_successes, total_failures')
+      .or(`platform_name.ilike.%${platformName}%,platform_domain.ilike.%${platformName}%`)
+      .limit(1);
+    
+    if (adapters && adapters.length > 0) {
+      const adapter = adapters[0];
+      const updates: Record<string, any> = {
+        last_attempt_at: now,
+        last_outcome_type: outcomeType,
+        total_attempts: (adapter.total_attempts || 0) + 1,
+        updated_at: now,
+      };
+      
+      if (isSuccess) {
+        updates.total_successes = (adapter.total_successes || 0) + 1;
+        updates.last_success_at = now;
+      } else {
+        updates.total_failures = (adapter.total_failures || 0) + 1;
+        updates.last_failure_at = now;
+      }
+      
+      await supabaseClient
+        .from('platform_adapters')
+        .update(updates)
+        .eq('id', adapter.id);
+      
+      console.log(`[WORKER] Updated platform evidence for ${platformName}: ${outcomeType}`);
+    }
+  } catch (err) {
+    console.error(`[WORKER] Failed to update platform evidence: ${err}`);
+    // Non-blocking - don't fail the extraction for evidence tracking
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -470,6 +541,10 @@ Deno.serve(async (req) => {
       }
       
       result.elapsedMs = Date.now() - startTime;
+      
+      // Update platform evidence for Tier A (still track for monitoring)
+      await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success');
+      
       console.log(`[WORKER] ${dedicatedExtractor} complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
       
       return new Response(
@@ -640,6 +715,10 @@ Deno.serve(async (req) => {
     }
     
     result.elapsedMs = Date.now() - startTime;
+    
+    // Update platform evidence for Tier B (critical for self-triaging)
+    await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success');
+    
     console.log(`[WORKER] Complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
     
     return new Response(
