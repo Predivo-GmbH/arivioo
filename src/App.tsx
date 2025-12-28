@@ -22,6 +22,7 @@ import BlockedPlatforms from "./pages/admin/BlockedPlatforms";
 import Quotas from "./pages/admin/Quotas";
 import AuditLogs from "./pages/admin/AuditLogs";
 import NotifyMeUsers from "./pages/admin/NotifyMeUsers";
+import PlatformCoverage from "./pages/admin/PlatformCoverage";
 
 const queryClient = new QueryClient();
 
@@ -43,6 +44,7 @@ const App = () => (
           <Route path="/admin/login" element={<AdminLogin />} />
           <Route path="/admin" element={<AdminLayout />}>
             <Route index element={<HealthOverview />} />
+            <Route path="coverage" element={<PlatformCoverage />} />
             <Route path="pipeline" element={<Pipeline />} />
             <Route path="extractions" element={<Extractions />} />
             <Route path="adapters" element={<Adapters />} />
