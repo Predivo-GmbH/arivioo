@@ -156,10 +156,13 @@ export function useEnrichedSearchResults() {
       // Classify failure
       const { category, reason } = classifyFailure(extractionStatus, extractionError, coverageTier);
 
-      // CRITICAL: Tier C platforms should NOT show prices
-      // Also use extracted_price if available and different from search_results price
+      // FRONTEND GUARD: Additional defense-in-depth
+      // Even if a price somehow exists in data for Tier C, forcefully null it
       let effectivePrice = result.price;
       if (isTierCBlocked) {
+        if (result.price !== null) {
+          console.warn(`FRONTEND GUARD: Nulling leaked price for Tier C platform ${result.platform_name}`);
+        }
         effectivePrice = null; // Never show price for Tier C
       } else if (extraction?.extracted_price && extraction.extracted_price > 0) {
         effectivePrice = extraction.extracted_price;

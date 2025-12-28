@@ -3076,24 +3076,36 @@ async function runSearchWithStreaming(
   // Save ALL results to DB (including those without prices - they're still valuable photo matches)
   console.log(`Attempting to save ${allResultsSorted.length} results to DB (${resultsWithPrices.length} with prices, ${resultsWithoutPrices.length} without) for search ${searchId}`);
   if (allResultsSorted.length > 0) {
-    const insertData = allResultsSorted.map((r) => ({
-      search_id: searchId,
-      platform_name: r.platform_name,
-      listing_url: r.listing_url,
-      listing_title: r.listing_title,
-      price: r.price,
-      original_price: r.original_price,
-      savings_amount: r.savings_amount,
-      savings_percentage: r.savings_percentage,
-      confidence_score: r.confidence_score,
-      image_url: r.image_url,
-      images: r.images,
-      match_type: r.match_type,
-      source_airbnb_image: r.source_airbnb_image || null,
-      price_check_in: r.price_check_in || checkIn,
-      price_check_out: r.price_check_out || checkOut,
-      dates_differ: r.dates_differ || false,
-    }));
+    // BACKEND GUARD: Tier C platforms must NEVER have prices persisted
+    // This is defense-in-depth - even if upstream logic fails, prices cannot leak
+    const insertData = allResultsSorted.map((r) => {
+      const tierCCheck = isTierCPlatform(r.listing_url);
+      const isTierC = tierCCheck.isTierC || (r as any)._tierCSkipped;
+      
+      if (isTierC && r.price) {
+        console.log(`GUARD: Nulling price for Tier C platform ${r.platform_name} (was ${r.price})`);
+      }
+      
+      return {
+        search_id: searchId,
+        platform_name: r.platform_name,
+        listing_url: r.listing_url,
+        listing_title: r.listing_title,
+        // CRITICAL: Null price for Tier C platforms
+        price: isTierC ? null : r.price,
+        original_price: r.original_price,
+        savings_amount: isTierC ? null : r.savings_amount,
+        savings_percentage: isTierC ? null : r.savings_percentage,
+        confidence_score: r.confidence_score,
+        image_url: r.image_url,
+        images: r.images,
+        match_type: r.match_type,
+        source_airbnb_image: r.source_airbnb_image || null,
+        price_check_in: r.price_check_in || checkIn,
+        price_check_out: r.price_check_out || checkOut,
+        dates_differ: r.dates_differ || false,
+      };
+    });
     console.log(
       "Insert data:",
       JSON.stringify(insertData.map((d) => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price, datesDiffer: d.dates_differ })))
