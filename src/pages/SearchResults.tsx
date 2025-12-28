@@ -8,6 +8,13 @@ import { ImageComparison } from "@/components/ImageComparison";
 import { quickCelebration } from "@/lib/confetti";
 import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
 import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS, type EnrichedSearchResult } from "@/hooks/useEnrichedSearchResults";
+import { useStageTimings } from "@/hooks/useStageTimings";
+import { 
+  PIPELINE_STAGES, 
+  getStageIndexFromStatus, 
+  formatTypicalTime,
+  type PipelineStageId 
+} from "@/lib/pipelineStages";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -81,37 +88,15 @@ interface SearchData {
   nights_count?: number | null;
 }
 
-// Step-based loading messages that progress linearly
-const loadingSteps = [
-  {
-    id: "extracting",
-    icon: Camera,
-    title: "Extracting Property Photos",
-    description: "Downloading clean property images from the Airbnb listing...",
-    statuses: ["searching", "pending", "extracting_photos"]
-  },
-  {
-    id: "searching",
-    icon: Globe,
-    title: "Searching Across Platforms",
-    description: "Running reverse image search on Booking.com, Vrbo, Agoda, and 10+ other sites...",
-    statuses: ["searching_platforms"]
-  },
-  {
-    id: "comparing",
-    icon: DollarSign,
-    title: "Comparing Prices",
-    description: "Analyzing prices and calculating potential savings for your dates...",
-    statuses: ["comparing_prices"]
-  },
-  {
-    id: "collecting",
-    icon: DollarSign,
-    title: "Collecting Prices",
-    description: "Fetching real-time prices from each platform for your exact dates...",
-    statuses: ["collecting_prices"]
-  }
-];
+// Icon mapping for pipeline stages
+const stageIcons = {
+  Sparkles,
+  Camera,
+  Globe,
+  Calendar,
+  DollarSign,
+  CheckCircle,
+} as const;
 
 // Helper to convert Json to string array
 const toStringArray = (json: Json | null | undefined): string[] => {
@@ -148,15 +133,7 @@ const calculateNights = (checkIn: string, checkOut: string): number => {
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 };
 
-// Get current step index based on status
-const getCurrentStepIndex = (status: string): number => {
-  for (let i = loadingSteps.length - 1; i >= 0; i--) {
-    if (loadingSteps[i].statuses.includes(status)) {
-      return i;
-    }
-  }
-  return 0;
-};
+// Use getStageIndexFromStatus from pipelineStages lib
 
 // Logo component for consistency
 function AriviooLogo() {
@@ -799,7 +776,7 @@ export default function SearchResults() {
   useEffect(() => {
     if (searchPhase !== 'animating') return;
     
-    const STEP_COUNT = loadingSteps.length;
+    const STEP_COUNT = PIPELINE_STAGES.length;
     // Minimum 1.5s per step, use actual duration evenly split
     const timePerStep = Math.max(actualDurationRef.current / STEP_COUNT, 1500);
     const TOTAL_ANIMATION = timePerStep * STEP_COUNT;
@@ -1086,7 +1063,7 @@ export default function SearchResults() {
 
                 <div className="mt-6 space-y-3">
                   <p className="text-sm text-muted-foreground">
-                    Elapsed: <span className="font-medium text-foreground">{Math.floor(thinkingElapsedMs / 1000)}s</span> · Typical: 30–60s
+                    Elapsed: <span className="font-medium text-foreground">{Math.floor(thinkingElapsedMs / 1000)}s</span>
                   </p>
 
                   {/* Live activity card - always visible with message + detail */}
@@ -1178,8 +1155,8 @@ export default function SearchResults() {
             {/* Step Progress Indicator - Shows after search completes */}
             {searchPhase === 'animating' && (
               <div className="mb-12 animate-fade-in">
-                {loadingSteps.map((step, index) => {
-                  const StepIcon = step.icon;
+                {PIPELINE_STAGES.map((step, index) => {
+                  const StepIcon = stageIcons[step.icon];
                   const isActive = index === currentStep;
                   const isCompleted = index < currentStep;
                   
@@ -1207,7 +1184,7 @@ export default function SearchResults() {
                         </div>
                         
                         {/* Connecting line */}
-                        {index < loadingSteps.length - 1 && (
+                        {index < PIPELINE_STAGES.length - 1 && (
                           <div className={`w-0.5 flex-1 min-h-[2rem] transition-colors duration-300 ${
                             isCompleted ? 'bg-primary' : 'bg-muted'
                           }`} />
@@ -1215,7 +1192,7 @@ export default function SearchResults() {
                       </div>
                       
                       {/* Right column with content */}
-                      <div className={`flex-1 pb-8 ${index === loadingSteps.length - 1 ? 'pb-0' : ''}`}>
+                      <div className={`flex-1 pb-8 ${index === PIPELINE_STAGES.length - 1 ? 'pb-0' : ''}`}>
                         <div className={`p-4 rounded-xl transition-all duration-300 ${
                           isActive ? 'bg-primary/5 border border-primary/20' : ''
                         }`}>
