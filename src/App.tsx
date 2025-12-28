@@ -23,6 +23,7 @@ import Quotas from "./pages/admin/Quotas";
 import AuditLogs from "./pages/admin/AuditLogs";
 import NotifyMeUsers from "./pages/admin/NotifyMeUsers";
 import PlatformCoverage from "./pages/admin/PlatformCoverage";
+import SearchDebug from "./pages/admin/SearchDebug";
 
 const queryClient = new QueryClient();
 
@@ -47,6 +48,7 @@ const App = () => (
             <Route path="coverage" element={<PlatformCoverage />} />
             <Route path="pipeline" element={<Pipeline />} />
             <Route path="extractions" element={<Extractions />} />
+            <Route path="search-debug" element={<SearchDebug />} />
             <Route path="adapters" element={<Adapters />} />
             <Route path="blocked" element={<BlockedPlatforms />} />
             <Route path="quotas" element={<Quotas />} />
