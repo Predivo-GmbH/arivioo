@@ -81,6 +81,8 @@ interface SearchData {
   check_in_date?: string | null;
   check_out_date?: string | null;
   nights_count?: number | null;
+  api_error?: string | null;
+  api_error_code?: string | null;
 }
 
 // Note: stageIcons are now in PipelineProgress component
@@ -415,23 +417,36 @@ export default function SearchResults() {
                .eq("id", searchId)
                .single();
 
-             // If the backend is still running, keep the user in the loading state
-             if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable" && updatedSearch.status !== "dates_required") {
-               setSearch(updatedSearch as SearchData);
-               setSearchPhase("thinking");
-               return;
-             }
-             
-             // Handle dates_required status
-             if (updatedSearch?.status === "dates_required") {
-               toast({
-                 title: "Dates Required",
-                 description: "Please include check-in and check-out dates in your Airbnb URL to compare prices.",
-                 variant: "destructive",
-               });
-               navigate("/dashboard");
-               return;
-             }
+              // Handle terminal failure states (DB constraint only allows 'error', not 'failed')
+              if (updatedSearch?.status === "error") {
+                const errorMessage = updatedSearch.api_error || "Search failed unexpectedly";
+                toast({
+                  title: "Search Failed",
+                  description: errorMessage,
+                  variant: "destructive",
+                });
+                setSearch(updatedSearch as SearchData);
+                setLoading(false);
+                return;
+              }
+              
+              // Handle dates_required status
+              if (updatedSearch?.status === "dates_required") {
+                toast({
+                  title: "Dates Required",
+                  description: "Please include check-in and check-out dates in your Airbnb URL to compare prices.",
+                  variant: "destructive",
+                });
+                navigate("/dashboard");
+                return;
+              }
+
+              // If the backend is still running, keep the user in the loading state
+              if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
+                setSearch(updatedSearch as SearchData);
+                setSearchPhase("thinking");
+                return;
+              }
 
              const enrichedResults = await fetchEnrichedResults(searchId);
 
@@ -570,6 +585,25 @@ export default function SearchResults() {
 
         if (!data) return;
 
+        // Handle terminal failure state (DB constraint only allows 'error', not 'failed')
+        if (data.status === "error") {
+          const { data: updatedSearch } = await supabase
+            .from("searches")
+            .select("*")
+            .eq("id", searchId)
+            .single();
+
+          const errorMessage = updatedSearch?.api_error || "Search failed unexpectedly";
+          toast({
+            title: "Search Failed",
+            description: errorMessage,
+            variant: "destructive",
+          });
+          setSearch(updatedSearch as SearchData);
+          setLoading(false);
+          return;
+        }
+
         // If search is done, update state
         if (["completed", "price_unavailable", "dates_required"].includes(data.status)) {
           // Fetch final results
@@ -578,12 +612,6 @@ export default function SearchResults() {
             .select("*")
             .eq("id", searchId)
             .single();
-
-          const { data: resultsData } = await supabase
-            .from("search_results")
-            .select("*")
-            .eq("search_id", searchId)
-            .order("savings_percentage", { ascending: false, nullsFirst: false });
 
           // Use enriched results to properly handle Tier C platforms
           const enrichedResults = await fetchEnrichedResults(searchId);
@@ -910,8 +938,8 @@ export default function SearchResults() {
           <PipelineProgress
             status={search?.status}
             isComplete={false}
-            isFailed={search?.status === 'error' || search?.status === 'failed'}
-            errorMessage={search?.status === 'error' ? 'Search failed. Please try again.' : undefined}
+            isFailed={search?.status === 'error'}
+            errorMessage={search?.status === 'error' ? (search?.api_error || 'Search failed. Please try again.') : undefined}
             startTime={searchStartTimeRef.current || Date.now()}
             activityFeed={activityFeed}
             priceExtractionPlatforms={priceExtractionPlatforms}
@@ -1004,8 +1032,31 @@ export default function SearchResults() {
                   </div>
                 )}
 
-                {/* Require Airbnb baseline price before showing comparison */}
-                {(search?.status === "price_unavailable") || (search?.status === "completed" && !search?.airbnb_price) ? (
+                {/* Handle failed/error searches */}
+                {search?.status === "error" ? (
+                  <div className="py-12 text-center">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-destructive/10 flex items-center justify-center">
+                      <AlertCircle className="w-8 h-8 text-destructive" />
+                    </div>
+                    <h3 className="text-xl font-semibold text-foreground mb-2">
+                      Search Failed
+                    </h3>
+                    <p className="text-muted-foreground mb-2 max-w-md mx-auto">
+                      {search?.api_error || "We encountered an error while searching for alternatives."}
+                    </p>
+                    {search?.api_error_code && (
+                      <p className="text-xs text-muted-foreground mb-6">
+                        Error code: {search.api_error_code}
+                      </p>
+                    )}
+                    <Button asChild>
+                      <Link to="/dashboard">
+                        <Search className="w-4 h-4 mr-2" />
+                        Try Another Search
+                      </Link>
+                    </Button>
+                  </div>
+                ) : (search?.status === "price_unavailable") || (search?.status === "completed" && !search?.airbnb_price) ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-amber-500" />
