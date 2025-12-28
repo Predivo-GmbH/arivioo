@@ -28,6 +28,19 @@ async function verifyAdminSession(supabase: any, token: string): Promise<{ valid
   return { valid: true, admin: session.admin_users };
 }
 
+// Limit type for normalized quota model
+type LimitType = 'known_limit' | 'unlimited' | 'unknown';
+
+interface NormalizedQuota {
+  limitType: LimitType;
+  limitValue: number | null;
+  usedCount: number;  // From our telemetry
+  remainingCount: number | null;
+  period: 'monthly' | 'daily' | 'unknown';
+  resetAt: string | null;
+  limitSource: 'provider_api' | 'configured' | 'inferred' | 'unknown';
+}
+
 async function fetchSerpApiQuota(): Promise<{ used: number; remaining: number; limit: number; resetAt?: string; error?: string }> {
   try {
     const apiKey = Deno.env.get('SERPAPI_API_KEY');
@@ -41,10 +54,15 @@ async function fetchSerpApiQuota(): Promise<{ used: number; remaining: number; l
     }
 
     const data = await response.json();
+    const limit = data.searches_per_month || 0;
+    const remaining = data.plan_searches_left ?? 0;
+    // Compute used correctly: limit - remaining, or use total_searches if available
+    const used = data.total_searches_this_month ?? (limit - remaining);
+    
     return {
-      used: data.total_searches_this_month || 0,
-      remaining: (data.plan_searches_left ?? data.searches_per_month - data.total_searches_this_month) || 0,
-      limit: data.searches_per_month || 0,
+      used,
+      remaining,
+      limit,
       resetAt: data.plan_billing_date
     };
   } catch (error: any) {
@@ -53,7 +71,7 @@ async function fetchSerpApiQuota(): Promise<{ used: number; remaining: number; l
   }
 }
 
-async function estimateUsageFromLogs(supabase: any, providerName: string, periodDays: number = 30): Promise<{
+async function estimateUsageFromLogs(supabase: any, providerNames: string[], periodDays: number = 30): Promise<{
   used: number;
   costUnits: number;
   requestCount: number;
@@ -67,7 +85,7 @@ async function estimateUsageFromLogs(supabase: any, providerName: string, period
   const { data: logs } = await supabase
     .from('api_request_logs')
     .select('success, duration_ms, cost_units')
-    .eq('provider_name', providerName)
+    .in('provider_name', providerNames)
     .gte('request_timestamp', periodStart.toISOString());
 
   const requestCount = logs?.length || 0;
@@ -78,7 +96,7 @@ async function estimateUsageFromLogs(supabase: any, providerName: string, period
   const avgDurationMs = durations.length > 0 ? Math.round(durations.reduce((a: number, b: number) => a + b, 0) / durations.length) : 0;
 
   return {
-    used: costUnits,
+    used: requestCount,  // Use request count as "used"
     costUnits,
     requestCount,
     successCount,
@@ -87,7 +105,7 @@ async function estimateUsageFromLogs(supabase: any, providerName: string, period
   };
 }
 
-async function getUsageTrend(supabase: any, providerName: string, days: number): Promise<Array<{ date: string; requests: number; successes: number; errors: number }>> {
+async function getUsageTrend(supabase: any, providerNames: string[], days: number): Promise<Array<{ date: string; requests: number; successes: number; errors: number }>> {
   const trend: Array<{ date: string; requests: number; successes: number; errors: number }> = [];
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -101,7 +119,7 @@ async function getUsageTrend(supabase: any, providerName: string, days: number):
     const { data: logs } = await supabase
       .from('api_request_logs')
       .select('success')
-      .eq('provider_name', providerName)
+      .in('provider_name', providerNames)
       .gte('request_timestamp', day.toISOString())
       .lt('request_timestamp', nextDay.toISOString());
 
@@ -143,42 +161,68 @@ Deno.serve(async (req) => {
   try {
     // GET ALL QUOTAS
     if (action === 'all' && req.method === 'GET') {
-      // Get providers from database
+      // Get providers from database - exclude duplicates (firecrawl_1 is duplicate of firecrawl)
       const { data: providers } = await supabase
         .from('api_providers')
         .select('*')
-        .eq('is_active', true);
+        .eq('is_active', true)
+        .not('name', 'eq', 'firecrawl_1'); // Filter out duplicate Firecrawl entry
 
       const quotas = await Promise.all(
         (providers || []).map(async (provider) => {
-          let quotaData: any = {
-            used: 0,
-            remaining: null,
-            limit: provider.plan_limit,
+          // Get usage from our own telemetry (api_request_logs) - this is the single source of truth
+          const thirtyDaysAgo = new Date();
+          thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+          
+          // For firecrawl, aggregate across both possible log names (firecrawl and firecrawl_1)
+          let providerNamesToQuery = [provider.name];
+          if (provider.name === 'firecrawl') {
+            providerNamesToQuery = ['firecrawl', 'firecrawl_1'];
+          }
+          
+          const { data: monthLogs } = await supabase
+            .from('api_request_logs')
+            .select('success, duration_ms, cost_units')
+            .in('provider_name', providerNamesToQuery)
+            .gte('request_timestamp', thirtyDaysAgo.toISOString());
+
+          const telemetryUsed = monthLogs?.length || 0;
+          const telemetryCostUnits = monthLogs?.reduce((sum: number, l: any) => sum + (l.cost_units || 1), 0) || 0;
+          const successCount = monthLogs?.filter((l: any) => l.success).length || 0;
+          
+          // Initialize quota data with telemetry-based usage
+          let quotaData: NormalizedQuota = {
+            limitType: provider.plan_limit ? 'known_limit' : 'unknown',
+            limitValue: provider.plan_limit,
+            usedCount: telemetryUsed,  // Always use our telemetry
+            remainingCount: provider.plan_limit ? provider.plan_limit - telemetryUsed : null,
+            period: (provider.plan_type as 'monthly' | 'daily') || 'monthly',
             resetAt: null,
-            isEstimated: true
+            limitSource: provider.plan_limit ? 'configured' : 'unknown'
           };
 
-          // Try to get real quota data for supported providers
+          // For SerpAPI, get real quota data from their API and reconcile
           if (provider.supports_quota_api && provider.name === 'serpapi') {
             const realQuota = await fetchSerpApiQuota();
             if (!realQuota.error) {
               quotaData = {
-                used: realQuota.used,
-                remaining: realQuota.remaining,
-                limit: realQuota.limit,
-                resetAt: realQuota.resetAt,
-                isEstimated: false
+                limitType: realQuota.limit > 0 ? 'known_limit' : 'unlimited',
+                limitValue: realQuota.limit,
+                usedCount: realQuota.used,  // Use provider's used count for SerpAPI
+                remainingCount: realQuota.remaining,
+                period: 'monthly',
+                resetAt: realQuota.resetAt || null,
+                limitSource: 'provider_api'
               };
             }
           }
 
-          // Get estimated usage from our logs
-          const estimated = await estimateUsageFromLogs(supabase, provider.name, 30);
+          // Get estimated usage from our logs for the stats section
+          const estimated = await estimateUsageFromLogs(supabase, providerNamesToQuery, 30);
 
           // Get 7-day and 30-day trends
-          const trend7Days = await getUsageTrend(supabase, provider.name, 7);
-          const trend30Days = await getUsageTrend(supabase, provider.name, 30);
+          const trend7Days = await getUsageTrend(supabase, providerNamesToQuery, 7);
+          const trend30Days = await getUsageTrend(supabase, providerNamesToQuery, 30);
 
           // Get last 24h stats
           const yesterday = new Date();
@@ -186,7 +230,7 @@ Deno.serve(async (req) => {
           const { data: last24hLogs } = await supabase
             .from('api_request_logs')
             .select('success, duration_ms')
-            .eq('provider_name', provider.name)
+            .in('provider_name', providerNamesToQuery)
             .gte('request_timestamp', yesterday.toISOString());
 
           const last24hRequests = last24hLogs?.length || 0;
@@ -205,17 +249,34 @@ Deno.serve(async (req) => {
             .limit(1)
             .single();
 
+          // Count active keys for aggregated providers (like Firecrawl)
+          let keysActive = 1;
+          if (provider.name === 'firecrawl') {
+            const key1 = Deno.env.get('FIRECRAWL_API_KEY_1');
+            const key2 = Deno.env.get('FIRECRAWL_API_KEY');
+            keysActive = (key1 ? 1 : 0) + (key2 && key2 !== key1 ? 1 : 0);
+          }
+
           return {
             provider: {
               id: provider.id,
               name: provider.name,
               displayName: provider.display_name,
               planType: provider.plan_type,
-              planLimit: provider.plan_limit,
+              planLimit: quotaData.limitValue,
               costPerRequest: provider.cost_per_request,
-              supportsQuotaApi: provider.supports_quota_api
+              supportsQuotaApi: provider.supports_quota_api,
+              keysActive: keysActive > 1 ? keysActive : undefined
             },
-            quota: quotaData,
+            quota: {
+              used: quotaData.usedCount,
+              remaining: quotaData.remainingCount,
+              limit: quotaData.limitValue,
+              limitType: quotaData.limitType,
+              limitSource: quotaData.limitSource,
+              resetAt: quotaData.resetAt,
+              isEstimated: quotaData.limitSource !== 'provider_api'
+            },
             estimated: {
               requestCount: estimated.requestCount,
               costUnits: estimated.costUnits,
