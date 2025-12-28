@@ -55,6 +55,13 @@ interface PlatformAdapter {
   total_attempts: number;
   total_successes: number;
   total_failures: number;
+  gate_1_passed: boolean;
+  gate_2_passed: boolean;
+  gate_3_passed: boolean;
+  promotion_score: number;
+  last_scored_at: string | null;
+  promotion_candidate: boolean;
+  promotion_candidate_reason: string | null;
   proven_deterministic: boolean;
   is_active: boolean;
   created_at: string;
@@ -413,6 +420,7 @@ export default function PlatformCoverage() {
   const tierBCount = platforms.filter(p => p.coverage_tier === 'B').length;
   const tierCCount = platforms.filter(p => p.coverage_tier === 'C').length;
   const tierBPlatforms = platforms.filter(p => p.coverage_tier === 'B');
+  const promotionCandidate = platforms.find(p => p.promotion_candidate === true);
 
   if (isLoading) {
     return (
@@ -529,6 +537,78 @@ export default function PlatformCoverage() {
 
         <TabsContent value="coverage">
           <TierLegend />
+          
+          {/* Recommended Promotion Candidate Section */}
+          {promotionCandidate && (
+            <Card className="mb-4 border-green-300 bg-green-50/50">
+              <CardHeader className="pb-2">
+                <div className="flex items-center gap-2">
+                  <TrendingUp className="h-5 w-5 text-green-600" />
+                  <CardTitle className="text-lg">Recommended Promotion Candidate</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="flex items-center gap-3 mb-2">
+                      <span className="text-xl font-bold">{promotionCandidate.platform_name}</span>
+                      <Badge className="bg-green-500 text-white">Score: {((promotionCandidate.promotion_score || 0) * 100).toFixed(0)}%</Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-3">
+                      {promotionCandidate.promotion_candidate_reason}
+                    </p>
+                    <div className="flex items-center gap-4 text-sm">
+                      <div className="flex items-center gap-1">
+                        {promotionCandidate.gate_1_passed ? (
+                          <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <span>Gate 1: Dates</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {promotionCandidate.gate_2_passed ? (
+                          <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <span>Gate 2: Price</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {promotionCandidate.gate_3_passed ? (
+                          <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <span>Gate 3: Failure Quality</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-right text-sm text-muted-foreground">
+                    <p>Attempts: {promotionCandidate.total_attempts || 0}</p>
+                    <p>Successes: {promotionCandidate.total_successes || 0}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          
+          {!promotionCandidate && tierBPlatforms.length > 0 && (
+            <Card className="mb-4 border-muted">
+              <CardHeader className="pb-2">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Target className="h-5 w-5" />
+                  <CardTitle className="text-lg text-muted-foreground">No Promotion Candidate</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  No Tier B platform currently passes all eligibility gates. Continue collecting extraction evidence.
+                </p>
+              </CardContent>
+            </Card>
+          )}
+          
           <Card>
             <CardHeader>
               <CardTitle>Platform Coverage Overview</CardTitle>
@@ -542,24 +622,63 @@ export default function PlatformCoverage() {
                 <div className="mb-6">
                   <h3 className="text-sm font-semibold text-muted-foreground mb-3 flex items-center gap-2">
                     <Target className="h-4 w-4" />
-                    Tier B Promotion Readiness
+                    Tier B Eligibility & Evidence
                   </h3>
                   <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                     {tierBPlatforms.map((platform) => {
-                      const readiness = getPromotionReadiness(platform);
+                      const allGatesPassed = platform.gate_1_passed && platform.gate_2_passed && platform.gate_3_passed;
+                      const successRate = platform.total_attempts > 0 
+                        ? ((platform.total_successes || 0) / platform.total_attempts) * 100 
+                        : 0;
                       return (
-                        <Card key={platform.id} className={`border ${readiness.isCandidate ? 'border-green-300 bg-green-50/50' : ''}`}>
+                        <Card key={platform.id} className={`border ${platform.promotion_candidate ? 'border-green-300 bg-green-50/50' : allGatesPassed ? 'border-blue-200' : ''}`}>
                           <CardContent className="pt-4 pb-3">
                             <div className="flex items-center justify-between mb-2">
                               <span className="font-medium text-sm">{platform.platform_name}</span>
-                              {readiness.isCandidate ? (
+                              {platform.promotion_candidate ? (
                                 <Badge className="bg-green-500 text-white text-xs gap-1">
                                   <TrendingUp className="h-3 w-3" /> Candidate
                                 </Badge>
+                              ) : allGatesPassed ? (
+                                <Badge variant="outline" className="text-xs text-blue-600 border-blue-300">Eligible</Badge>
                               ) : (
-                                <Badge variant="outline" className="text-xs">Not Ready</Badge>
+                                <Badge variant="outline" className="text-xs">Not Eligible</Badge>
                               )}
                             </div>
+                            
+                            {/* Gates Section */}
+                            <div className="flex items-center gap-2 mb-2 text-xs">
+                              <div className="flex items-center gap-0.5" title="Gate 1: Dates validated at least once">
+                                {platform.gate_1_passed ? (
+                                  <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                                ) : (
+                                  <XCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                                )}
+                                <span className={platform.gate_1_passed ? '' : 'text-muted-foreground'}>G1</span>
+                              </div>
+                              <div className="flex items-center gap-0.5" title="Gate 2: Price extracted at least once">
+                                {platform.gate_2_passed ? (
+                                  <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                                ) : (
+                                  <XCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                                )}
+                                <span className={platform.gate_2_passed ? '' : 'text-muted-foreground'}>G2</span>
+                              </div>
+                              <div className="flex items-center gap-0.5" title="Gate 3: No blocking failures">
+                                {platform.gate_3_passed ? (
+                                  <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+                                ) : (
+                                  <XCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                                )}
+                                <span className={platform.gate_3_passed ? '' : 'text-muted-foreground'}>G3</span>
+                              </div>
+                              {allGatesPassed && (
+                                <Badge variant="secondary" className="text-xs ml-auto">
+                                  Score: {((platform.promotion_score || 0) * 100).toFixed(0)}%
+                                </Badge>
+                              )}
+                            </div>
+                            
                             <div className="space-y-1 text-xs">
                               <div className="flex justify-between">
                                 <span className="text-muted-foreground">Attempts:</span>
@@ -571,14 +690,16 @@ export default function PlatformCoverage() {
                               </div>
                               <div className="flex justify-between">
                                 <span className="text-muted-foreground">Success Rate:</span>
-                                <span className="font-medium">{readiness.successRate.toFixed(0)}%</span>
+                                <span className="font-medium">{successRate.toFixed(0)}%</span>
                               </div>
                               <div className="flex justify-between">
-                                <span className="text-muted-foreground">Dominant Failure:</span>
-                                <span className="font-medium text-red-600">{getDominantFailureReason(platform)}</span>
+                                <span className="text-muted-foreground">Last Outcome:</span>
+                                <span className={`font-medium ${platform.last_outcome_type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                                  {getDominantFailureReason(platform)}
+                                </span>
                               </div>
-                              <div className="mt-2 pt-2 border-t text-muted-foreground">
-                                {readiness.reason}
+                              <div className="mt-2 pt-2 border-t text-muted-foreground text-xs">
+                                {platform.promotion_candidate_reason || 'Collecting evidence...'}
                               </div>
                             </div>
                           </CardContent>

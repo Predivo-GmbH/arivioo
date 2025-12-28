@@ -303,39 +303,101 @@ function getOutcomeType(status: TerminalStatus): string {
   }
 }
 
+// Blocking failure reasons that prevent promotion eligibility
+const BLOCKING_FAILURE_REASONS = ['blocked', 'login_required', 'reserve_required', 'payment_flow_required', 'platform_unsupported'];
+
 // Update platform adapter with evidence tracking (Tier B self-triaging)
 async function updatePlatformEvidence(
   supabaseClient: any,
   platformName: string,
   status: TerminalStatus,
-  isSuccess: boolean
+  isSuccess: boolean,
+  datesValidated: boolean = false
 ): Promise<void> {
   const outcomeType = getOutcomeType(status);
   const now = new Date().toISOString();
   
   try {
-    // Find the platform adapter
+    // Find the platform adapter with full data for gate computation
     const { data: adapters } = await supabaseClient
       .from('platform_adapters')
-      .select('id, total_attempts, total_successes, total_failures')
+      .select('id, coverage_tier, total_attempts, total_successes, total_failures, gate_1_passed, gate_2_passed, gate_3_passed, last_success_at')
       .or(`platform_name.ilike.%${platformName}%,platform_domain.ilike.%${platformName}%`)
       .limit(1);
     
     if (adapters && adapters.length > 0) {
       const adapter = adapters[0];
+      const newTotalAttempts = (adapter.total_attempts || 0) + 1;
+      const newTotalSuccesses = isSuccess ? (adapter.total_successes || 0) + 1 : (adapter.total_successes || 0);
+      const newTotalFailures = isSuccess ? (adapter.total_failures || 0) : (adapter.total_failures || 0) + 1;
+      
       const updates: Record<string, any> = {
         last_attempt_at: now,
         last_outcome_type: outcomeType,
-        total_attempts: (adapter.total_attempts || 0) + 1,
+        total_attempts: newTotalAttempts,
+        total_successes: newTotalSuccesses,
+        total_failures: newTotalFailures,
         updated_at: now,
       };
       
       if (isSuccess) {
-        updates.total_successes = (adapter.total_successes || 0) + 1;
         updates.last_success_at = now;
       } else {
-        updates.total_failures = (adapter.total_failures || 0) + 1;
         updates.last_failure_at = now;
+      }
+      
+      // Only compute gates and scores for Tier B platforms
+      if (adapter.coverage_tier === 'B') {
+        // Gate 1: Date Application Viability - dates_validated=true at least once
+        const gate1Passed = adapter.gate_1_passed || datesValidated;
+        updates.gate_1_passed = gate1Passed;
+        
+        // Gate 2: Price Presence - at least one successful extraction with price
+        const gate2Passed = adapter.gate_2_passed || isSuccess;
+        updates.gate_2_passed = gate2Passed;
+        
+        // Gate 3: Failure Quality - dominant failure reason is not blocking
+        // Pass if last outcome is NOT a blocking reason (or is success)
+        const gate3Passed = !BLOCKING_FAILURE_REASONS.includes(outcomeType);
+        updates.gate_3_passed = gate3Passed;
+        
+        // Compute promotion score if all gates passed
+        if (gate1Passed && gate2Passed && gate3Passed) {
+          // Success rate (0-1) - weight 0.5
+          const successRate = newTotalAttempts > 0 ? newTotalSuccesses / newTotalAttempts : 0;
+          
+          // Recency score (0-1) - weight 0.3
+          // Score based on how recent the last success was (within 7 days = 1.0, 30 days = 0.5, older = 0.1)
+          let recencyScore = 0.1;
+          const lastSuccessAt = isSuccess ? new Date(now) : (adapter.last_success_at ? new Date(adapter.last_success_at) : null);
+          if (lastSuccessAt) {
+            const daysSinceSuccess = (new Date().getTime() - lastSuccessAt.getTime()) / (1000 * 60 * 60 * 24);
+            if (daysSinceSuccess <= 7) recencyScore = 1.0;
+            else if (daysSinceSuccess <= 30) recencyScore = 0.5;
+          }
+          
+          // Stability score (0-1) - weight 0.2
+          // Simple: if success rate >= 50% and gate 3 passed, score 1.0
+          const stabilityScore = (successRate >= 0.5 && gate3Passed) ? 1.0 : 0.5;
+          
+          // Compute weighted score
+          const promotionScore = (successRate * 0.5) + (recencyScore * 0.3) + (stabilityScore * 0.2);
+          updates.promotion_score = Math.round(promotionScore * 1000) / 1000; // 3 decimal places
+          updates.last_scored_at = now;
+          
+          // Generate candidate reason
+          updates.promotion_candidate_reason = `Gates passed. Success rate: ${(successRate * 100).toFixed(0)}% (${newTotalSuccesses}/${newTotalAttempts}). Recent success: ${recencyScore >= 0.5 ? 'Yes' : 'No'}. Stable: ${stabilityScore >= 1.0 ? 'Yes' : 'No'}.`;
+        } else {
+          updates.promotion_score = 0;
+          updates.promotion_candidate = false;
+          
+          // Generate reason for not being eligible
+          const failedGates = [];
+          if (!gate1Passed) failedGates.push('Gate 1 (dates never validated)');
+          if (!gate2Passed) failedGates.push('Gate 2 (no successful price extraction)');
+          if (!gate3Passed) failedGates.push(`Gate 3 (blocking failure: ${outcomeType})`);
+          updates.promotion_candidate_reason = `Not eligible: ${failedGates.join(', ')}`;
+        }
       }
       
       await supabaseClient
@@ -343,11 +405,56 @@ async function updatePlatformEvidence(
         .update(updates)
         .eq('id', adapter.id);
       
-      console.log(`[WORKER] Updated platform evidence for ${platformName}: ${outcomeType}`);
+      console.log(`[WORKER] Updated platform evidence for ${platformName}: ${outcomeType}, gates: [${updates.gate_1_passed || false}, ${updates.gate_2_passed || false}, ${updates.gate_3_passed || false}]`);
+      
+      // Trigger promotion candidate nomination if this is a Tier B platform
+      if (adapter.coverage_tier === 'B') {
+        await nominateSinglePromotionCandidate(supabaseClient);
+      }
     }
   } catch (err) {
     console.error(`[WORKER] Failed to update platform evidence: ${err}`);
     // Non-blocking - don't fail the extraction for evidence tracking
+  }
+}
+
+// Nominate exactly one promotion candidate from all eligible Tier B platforms
+async function nominateSinglePromotionCandidate(supabaseClient: any): Promise<void> {
+  try {
+    // Clear all existing promotion candidates first
+    await supabaseClient
+      .from('platform_adapters')
+      .update({ promotion_candidate: false })
+      .eq('promotion_candidate', true);
+    
+    // Find the highest-scoring eligible Tier B platform
+    const { data: eligiblePlatforms } = await supabaseClient
+      .from('platform_adapters')
+      .select('id, platform_name, promotion_score, promotion_candidate_reason')
+      .eq('coverage_tier', 'B')
+      .eq('gate_1_passed', true)
+      .eq('gate_2_passed', true)
+      .eq('gate_3_passed', true)
+      .gt('promotion_score', 0)
+      .order('promotion_score', { ascending: false })
+      .limit(1);
+    
+    if (eligiblePlatforms && eligiblePlatforms.length > 0) {
+      const candidate = eligiblePlatforms[0];
+      await supabaseClient
+        .from('platform_adapters')
+        .update({
+          promotion_candidate: true,
+          promotion_candidate_reason: `Highest-scoring eligible platform (score: ${candidate.promotion_score}). ${candidate.promotion_candidate_reason || ''}`,
+        })
+        .eq('id', candidate.id);
+      
+      console.log(`[WORKER] Nominated promotion candidate: ${candidate.platform_name} (score: ${candidate.promotion_score})`);
+    } else {
+      console.log(`[WORKER] No eligible promotion candidates found`);
+    }
+  } catch (err) {
+    console.error(`[WORKER] Failed to nominate promotion candidate: ${err}`);
   }
 }
 
@@ -543,7 +650,7 @@ Deno.serve(async (req) => {
       result.elapsedMs = Date.now() - startTime;
       
       // Update platform evidence for Tier A (still track for monitoring)
-      await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success');
+      await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success', result.phaseA.datesValidated);
       
       console.log(`[WORKER] ${dedicatedExtractor} complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
       
@@ -717,7 +824,7 @@ Deno.serve(async (req) => {
     result.elapsedMs = Date.now() - startTime;
     
     // Update platform evidence for Tier B (critical for self-triaging)
-    await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success');
+    await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success', result.phaseA.datesValidated);
     
     console.log(`[WORKER] Complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
     
