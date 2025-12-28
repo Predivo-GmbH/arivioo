@@ -329,6 +329,63 @@ Automatic promotion would:
 
 **Promotion requires manual implementation of a production extractor**, which must be tested for repeatability before Tier A classification.
 
+---
+
+## Promotion Execution Workflow
+
+### Promotion Lifecycle States
+
+| State | Meaning |
+|-------|---------|
+| `none` | Default, no promotion activity |
+| `nominated` | Platform is the current promotion candidate |
+| `in_progress` | Promotion work started, scoring locked |
+| `promoted` | Successfully promoted to Tier A |
+| `rejected` | Promotion rejected, remains Tier B |
+
+### Starting Promotion Work
+
+When an admin clicks **"Start Promotion Work"** on a nominated candidate:
+
+1. `promotion_in_progress = true`
+2. `promotion_status = 'in_progress'`
+3. `promotion_started_at = now()`
+4. `promotion_started_by = admin_id`
+5. `promotion_source_score` = current score (locked)
+6. `promotion_snapshot` = JSON snapshot of gates and evidence
+
+**Scoring is locked**: No gate or score updates while in progress. This preserves the decision context.
+
+### During Promotion Work
+
+The engineering team must:
+1. Build a dedicated extractor (mirror `extract-hotelscom`)
+2. Run 3-run repeatability test
+3. Verify hallucination guard passes
+4. Document results in promotion notes
+
+### Completing Promotion
+
+#### Mark as Promoted
+- `promotion_status = 'promoted'`
+- `coverage_tier = 'A'`
+- `tier_reason = 'Promoted from Tier B. <notes>'`
+- `promotion_in_progress = false`
+
+#### Mark as Rejected
+- `promotion_status = 'rejected'`
+- `promotion_notes = '<rejection reason>'`
+- `promotion_in_progress = false`
+- Remains Tier B, may be re-nominated later if evidence improves
+
+### Traceability
+
+All promotion decisions are auditable:
+- `promotion_decision_at` - timestamp
+- `promotion_decision_by` - who made the decision
+- `promotion_notes` - human-written notes
+- `promotion_snapshot` - evidence at decision time
+
 ### Why Only One Candidate Exists
 
 Single candidate focus:

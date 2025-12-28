@@ -432,7 +432,7 @@ async function updatePlatformEvidence(
     // Find the platform adapter with full data for gate computation
     const { data: adapters } = await supabaseClient
       .from('platform_adapters')
-      .select('id, coverage_tier, total_attempts, total_successes, total_failures, gate_1_passed, gate_2_passed, gate_3_passed, last_success_at')
+      .select('id, coverage_tier, total_attempts, total_successes, total_failures, gate_1_passed, gate_2_passed, gate_3_passed, last_success_at, promotion_in_progress')
       .or(`platform_name.ilike.%${platformName}%,platform_domain.ilike.%${platformName}%`)
       .limit(1);
     
@@ -457,8 +457,9 @@ async function updatePlatformEvidence(
         updates.last_failure_at = now;
       }
       
-      // Only compute gates and scores for Tier B platforms
-      if (adapter.coverage_tier === 'B') {
+      // Only compute gates and scores for Tier B platforms that are NOT in promotion workflow
+      // If promotion_in_progress is true, we lock the scoring to preserve the decision context
+      if (adapter.coverage_tier === 'B' && !adapter.promotion_in_progress) {
         // Gate 1: Date Application Viability - dates_validated=true at least once
         const gate1Passed = adapter.gate_1_passed || datesValidated;
         updates.gate_1_passed = gate1Passed;
@@ -516,10 +517,10 @@ async function updatePlatformEvidence(
         .update(updates)
         .eq('id', adapter.id);
       
-      console.log(`[WORKER] Updated platform evidence for ${platformName}: ${outcomeType}, gates: [${updates.gate_1_passed || false}, ${updates.gate_2_passed || false}, ${updates.gate_3_passed || false}]`);
+      console.log(`[WORKER] Updated platform evidence for ${platformName}: ${outcomeType}, gates: [${updates.gate_1_passed || false}, ${updates.gate_2_passed || false}, ${updates.gate_3_passed || false}]${adapter.promotion_in_progress ? ' (scoring locked - promotion in progress)' : ''}`);
       
-      // Trigger promotion candidate nomination if this is a Tier B platform
-      if (adapter.coverage_tier === 'B') {
+      // Trigger promotion candidate nomination if this is a Tier B platform NOT in promotion workflow
+      if (adapter.coverage_tier === 'B' && !adapter.promotion_in_progress) {
         await nominateSinglePromotionCandidate(supabaseClient);
       }
     }
@@ -532,13 +533,14 @@ async function updatePlatformEvidence(
 // Nominate exactly one promotion candidate from all eligible Tier B platforms
 async function nominateSinglePromotionCandidate(supabaseClient: any): Promise<void> {
   try {
-    // Clear all existing promotion candidates first
+    // Clear all existing promotion candidates that are NOT in promotion workflow
     await supabaseClient
       .from('platform_adapters')
-      .update({ promotion_candidate: false })
-      .eq('promotion_candidate', true);
+      .update({ promotion_candidate: false, promotion_status: 'none' })
+      .eq('promotion_candidate', true)
+      .eq('promotion_in_progress', false);
     
-    // Find the highest-scoring eligible Tier B platform
+    // Find the highest-scoring eligible Tier B platform that is NOT in promotion workflow
     const { data: eligiblePlatforms } = await supabaseClient
       .from('platform_adapters')
       .select('id, platform_name, promotion_score, promotion_candidate_reason')
@@ -546,6 +548,7 @@ async function nominateSinglePromotionCandidate(supabaseClient: any): Promise<vo
       .eq('gate_1_passed', true)
       .eq('gate_2_passed', true)
       .eq('gate_3_passed', true)
+      .eq('promotion_in_progress', false)
       .gt('promotion_score', 0)
       .order('promotion_score', { ascending: false })
       .limit(1);
@@ -556,6 +559,7 @@ async function nominateSinglePromotionCandidate(supabaseClient: any): Promise<vo
         .from('platform_adapters')
         .update({
           promotion_candidate: true,
+          promotion_status: 'nominated',
           promotion_candidate_reason: `Highest-scoring eligible platform (score: ${candidate.promotion_score}). ${candidate.promotion_candidate_reason || ''}`,
         })
         .eq('id', candidate.id);
