@@ -1276,6 +1276,43 @@ Deno.serve(async (req) => {
       );
     }
 
+    // RECENT SEARCHES (for admin debug)
+    if (action === 'recent-searches' && req.method === 'GET') {
+      const { data: recentSearches } = await supabase
+        .from('searches')
+        .select('id, airbnb_url, airbnb_title, check_in_date, check_out_date, status, created_at')
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      // Get platform counts for each search
+      const searchIds = recentSearches?.map(s => s.id) || [];
+      const { data: extractionCounts } = await supabase
+        .from('price_extractions')
+        .select('search_id')
+        .in('search_id', searchIds);
+
+      const countMap = new Map<string, number>();
+      extractionCounts?.forEach(e => {
+        countMap.set(e.search_id, (countMap.get(e.search_id) || 0) + 1);
+      });
+
+      const enrichedSearches = recentSearches?.map(s => ({
+        id: s.id,
+        airbnbUrl: s.airbnb_url,
+        airbnbTitle: s.airbnb_title,
+        checkInDate: s.check_in_date,
+        checkOutDate: s.check_out_date,
+        status: s.status,
+        createdAt: s.created_at,
+        platformCount: countMap.get(s.id) || 0
+      })) || [];
+
+      return new Response(
+        JSON.stringify({ success: true, searches: enrichedSearches }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     // SEARCH DEBUG VIEW
     if (action === 'search-debug' && req.method === 'POST') {
       const { searchId, airbnbUrl } = await req.json();
@@ -1287,7 +1324,7 @@ Deno.serve(async (req) => {
         );
       }
 
-      // Find the search
+      // Find the search - prioritize most recent
       let searchQuery = supabase.from('searches').select('*');
       if (searchId) {
         searchQuery = searchQuery.eq('id', searchId);
@@ -1302,7 +1339,11 @@ Deno.serve(async (req) => {
 
       if (searchError || !searches || searches.length === 0) {
         return new Response(
-          JSON.stringify({ success: false, error: 'Search not found' }),
+          JSON.stringify({ 
+            success: false, 
+            error: 'No search found for this Airbnb URL. Run search-alternatives first to create a search.',
+            notFound: true
+          }),
           { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
@@ -1321,9 +1362,69 @@ Deno.serve(async (req) => {
         .from('platform_adapters')
         .select('platform_name, platform_domain, coverage_tier, coverage_status, dedicated_extractor');
 
-      const adapterMap = new Map(adapters?.map(a => [a.platform_domain, a]) || []);
+      // Helper to classify failure
+      const classifyFailure = (extraction: any): { category: string; humanReason: string } => {
+        const error = extraction.extraction_error || '';
+        const metadata = extraction.extraction_metadata || {};
+        const status = extraction.extraction_status;
 
-      // Map extractions with tier info
+        // Provider errors
+        if (error.includes('Zyte error: 400') || error.includes('Zyte 400')) {
+          return { category: 'provider_error', humanReason: 'Provider rejected request (Zyte 400)' };
+        }
+        if (error.includes('Zyte timeout') || error.includes('Zyte error: 5')) {
+          return { category: 'provider_error', humanReason: 'Provider timeout or server error' };
+        }
+        if (error.includes('Firecrawl error: 403') || error.includes('Firecrawl: 403')) {
+          return { category: 'blocked', humanReason: 'Blocked by platform (403 Forbidden)' };
+        }
+        if (error.includes('Firecrawl error: 5') || error.includes('Firecrawl timeout')) {
+          return { category: 'provider_error', humanReason: 'Firecrawl server error or timeout' };
+        }
+
+        // Bot/CAPTCHA
+        if (status === 'blocked_captcha_or_bot' || error.toLowerCase().includes('captcha') || error.toLowerCase().includes('bot')) {
+          return { category: 'blocked', humanReason: 'Blocked by CAPTCHA or bot detection' };
+        }
+
+        // Dates not applied
+        if (status === 'dates_not_applied') {
+          return { category: 'dates_not_applied', humanReason: 'Could not apply requested dates to URL' };
+        }
+
+        // Sold out / unavailable
+        if (status === 'sold_out' || status === 'no_availability_for_dates' || error.toLowerCase().includes('sold out') || error.toLowerCase().includes('unavailable')) {
+          return { category: 'sold_out', humanReason: 'Property unavailable for these dates' };
+        }
+
+        // Tier C / unsupported
+        if (status === 'platform_unsupported' || metadata.short_circuited || metadata.tier === 'C') {
+          return { category: 'unsupported', humanReason: metadata.tier_reason || 'Platform not supported (Tier C)' };
+        }
+
+        // Render failed
+        if (status === 'render_failed') {
+          return { category: 'render_failed', humanReason: 'Page failed to render properly' };
+        }
+
+        // Generic price not found
+        if (status === 'price_not_found' || status === 'price_not_found_after_dates_applied') {
+          // Check if Phase A ran
+          if (metadata.phaseA && metadata.phaseA.ran === false) {
+            return { category: 'fetch_failed', humanReason: 'Could not fetch page content' };
+          }
+          return { category: 'price_not_visible', humanReason: 'Price not visible on page (may require interaction)' };
+        }
+
+        // Default
+        if (status === 'failed') {
+          return { category: 'unknown', humanReason: error || 'Extraction failed (unknown reason)' };
+        }
+
+        return { category: 'unknown', humanReason: error || 'Unknown status' };
+      };
+
+      // Map extractions with tier info and failure classification
       const enrichedExtractions = extractions?.map(e => {
         // Try to find adapter by matching domain
         const platformDomain = e.platform_name.toLowerCase().replace(/\s+/g, '');
@@ -1333,10 +1434,14 @@ Deno.serve(async (req) => {
           e.platform_name.toLowerCase().includes(a.platform_domain.split('.')[0])
         );
 
+        const failureInfo = e.extraction_status !== 'success' ? classifyFailure(e) : null;
+
         return {
           id: e.id,
           platformName: e.platform_name,
           coverageTier: adapter?.coverage_tier || 'B',
+          coverageStatus: adapter?.coverage_status || 'unknown',
+          dedicatedExtractor: adapter?.dedicated_extractor || null,
           deepLink: e.deep_link,
           checkIn: e.detected_checkin,
           checkOut: e.detected_checkout,
@@ -1346,11 +1451,14 @@ Deno.serve(async (req) => {
           currency: e.currency || 'USD',
           includesTaxesFees: e.includes_taxes_fees,
           extractionError: e.extraction_error,
+          failureCategory: failureInfo?.category || null,
+          failureReason: failureInfo?.humanReason || null,
           evidenceSnippets: e.evidence_snippets,
           providerUsed: e.provider_used,
           lastAttemptAt: e.updated_at,
           priceType: e.price_type,
-          pageContentHash: e.page_content_hash
+          pageContentHash: e.page_content_hash,
+          extractionMetadata: e.extraction_metadata
         };
       }) || [];
 

@@ -2933,6 +2933,39 @@ async function runSearchWithStreaming(
     return score(b) - score(a);
   });
 
+  // Fetch platform adapters to check coverage tier
+  interface PlatformAdapterInfo {
+    platform_domain: string;
+    coverage_tier: string | null;
+    coverage_status: string | null;
+    coverage_reason: string | null;
+  }
+  const { data: platformAdapters } = await supabase
+    .from("platform_adapters")
+    .select("platform_domain, coverage_tier, coverage_status, coverage_reason") as { data: PlatformAdapterInfo[] | null };
+  
+  const tierCDomains = new Set<string>();
+  platformAdapters?.forEach((adapter: PlatformAdapterInfo) => {
+    if (adapter.coverage_tier === 'C' || adapter.coverage_status === 'blocked') {
+      tierCDomains.add(adapter.platform_domain.toLowerCase());
+    }
+  });
+
+  // Helper to check if a URL belongs to a Tier C platform
+  const isTierCPlatform = (url: string): { isTierC: boolean; reason?: string } => {
+    const urlLower = url.toLowerCase();
+    for (const domain of tierCDomains) {
+      if (urlLower.includes(domain)) {
+        const adapter = platformAdapters?.find((a: PlatformAdapterInfo) => a.platform_domain.toLowerCase() === domain);
+        return { 
+          isTierC: true, 
+          reason: adapter?.coverage_reason || 'Platform not supported (Tier C)' 
+        };
+      }
+    }
+    return { isTierC: false };
+  };
+
   const toScrape = prioritizedForPricing.slice(0, 20);
   for (let i = 0; i < toScrape.length; i++) {
     // Check for skip request before each price scrape
@@ -2944,6 +2977,22 @@ async function runSearchWithStreaming(
     await heartbeat();
 
     const alt = toScrape[i];
+    
+    // SHORT-CIRCUIT: Check if platform is Tier C (blocked/unsupported) BEFORE any extraction attempt
+    const tierCCheck = isTierCPlatform(alt.listing_url);
+    if (tierCCheck.isTierC) {
+      console.log(`Skipping extraction for ${alt.platform_name}: Tier C - ${tierCCheck.reason}`);
+      sendProgress(
+        controller,
+        `Skipped ${alt.platform_name}`,
+        `Platform unsupported (Tier C): ${tierCCheck.reason}`,
+        { platform: alt.platform_name, skipped: true, tier: 'C', reason: tierCCheck.reason }
+      );
+      // Mark in alternatives so it's saved with explicit unsupported status
+      (alt as any)._tierCSkipped = true;
+      (alt as any)._tierCReason = tierCCheck.reason;
+      continue;
+    }
     
     // Validate URL is an actual bookable property page before scraping
     const urlValidation = isValidBookablePropertyUrl(alt.listing_url);

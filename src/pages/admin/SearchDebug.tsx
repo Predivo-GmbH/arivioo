@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import { 
   Search as SearchIcon, 
@@ -12,7 +12,13 @@ import {
   DollarSign,
   Link as LinkIcon,
   FileText,
-  Server
+  Server,
+  Play,
+  History,
+  ShieldAlert,
+  Ban,
+  CloudOff,
+  Eye
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -38,6 +44,8 @@ interface PlatformExtraction {
   id: string;
   platformName: string;
   coverageTier: string;
+  coverageStatus: string;
+  dedicatedExtractor: string | null;
   deepLink: string;
   checkIn: string | null;
   checkOut: string | null;
@@ -47,11 +55,25 @@ interface PlatformExtraction {
   currency: string;
   includesTaxesFees: boolean | null;
   extractionError: string | null;
+  failureCategory: string | null;
+  failureReason: string | null;
   evidenceSnippets: any;
   providerUsed: string | null;
   lastAttemptAt: string | null;
   priceType: string;
   pageContentHash: string | null;
+  extractionMetadata: any;
+}
+
+interface RecentSearch {
+  id: string;
+  airbnbUrl: string;
+  airbnbTitle: string | null;
+  checkInDate: string | null;
+  checkOutDate: string | null;
+  status: string;
+  createdAt: string;
+  platformCount: number;
 }
 
 const TIER_COLORS: Record<string, string> = {
@@ -60,28 +82,62 @@ const TIER_COLORS: Record<string, string> = {
   'C': 'bg-red-500 text-white',
 };
 
+const FAILURE_CATEGORY_CONFIG: Record<string, { color: string; icon: typeof XCircle; label: string }> = {
+  'provider_error': { color: 'text-orange-500', icon: CloudOff, label: 'Provider Error' },
+  'blocked': { color: 'text-red-500', icon: Ban, label: 'Blocked' },
+  'dates_not_applied': { color: 'text-orange-500', icon: Calendar, label: 'Dates Not Applied' },
+  'sold_out': { color: 'text-yellow-500', icon: AlertTriangle, label: 'Sold Out' },
+  'unsupported': { color: 'text-muted-foreground', icon: ShieldAlert, label: 'Unsupported' },
+  'render_failed': { color: 'text-orange-500', icon: Eye, label: 'Render Failed' },
+  'fetch_failed': { color: 'text-orange-500', icon: CloudOff, label: 'Fetch Failed' },
+  'price_not_visible': { color: 'text-yellow-500', icon: DollarSign, label: 'Price Not Visible' },
+  'unknown': { color: 'text-muted-foreground', icon: AlertTriangle, label: 'Unknown' },
+};
+
 const STATUS_CONFIG: Record<string, { color: string; icon: typeof CheckCircle2 }> = {
   'success': { color: 'text-green-500', icon: CheckCircle2 },
   'pending': { color: 'text-muted-foreground', icon: Clock },
   'running': { color: 'text-blue-500', icon: RefreshCw },
-  'dates_not_applied': { color: 'text-orange-500', icon: AlertTriangle },
-  'blocked_captcha_or_bot': { color: 'text-red-500', icon: XCircle },
-  'price_not_found': { color: 'text-red-500', icon: XCircle },
-  'no_availability_for_dates': { color: 'text-yellow-500', icon: AlertTriangle },
-  'sold_out': { color: 'text-yellow-500', icon: AlertTriangle },
-  'failed': { color: 'text-red-500', icon: XCircle },
 };
 
 export default function SearchDebug() {
   const { getToken } = useAdminAuth();
   const [searchInput, setSearchInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingRecent, setIsLoadingRecent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchInfo, setSearchInfo] = useState<SearchInfo | null>(null);
   const [extractions, setExtractions] = useState<PlatformExtraction[]>([]);
+  const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
 
-  const fetchSearchData = async () => {
-    if (!searchInput.trim()) return;
+  // Fetch recent searches on mount
+  useEffect(() => {
+    fetchRecentSearches();
+  }, []);
+
+  const fetchRecentSearches = async () => {
+    setIsLoadingRecent(true);
+    try {
+      const token = getToken();
+      const { data, error: fnError } = await supabase.functions.invoke('admin-dashboard/recent-searches', {
+        headers: { Authorization: `Bearer ${token}` },
+        method: 'GET',
+      });
+
+      if (fnError) throw fnError;
+      if (data?.success) {
+        setRecentSearches(data.searches || []);
+      }
+    } catch (err: any) {
+      console.error('Failed to load recent searches:', err);
+    } finally {
+      setIsLoadingRecent(false);
+    }
+  };
+
+  const fetchSearchData = async (inputOverride?: string) => {
+    const input = inputOverride || searchInput;
+    if (!input.trim()) return;
     
     setIsLoading(true);
     setError(null);
@@ -92,21 +148,26 @@ export default function SearchDebug() {
       const token = getToken();
       
       // Determine if input is UUID or URL
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(searchInput.trim());
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.trim());
       
       const { data, error: fnError } = await supabase.functions.invoke('admin-dashboard/search-debug', {
         headers: { Authorization: `Bearer ${token}` },
         method: 'POST',
         body: { 
-          searchId: isUuid ? searchInput.trim() : undefined,
-          airbnbUrl: !isUuid ? searchInput.trim() : undefined
+          searchId: isUuid ? input.trim() : undefined,
+          airbnbUrl: !isUuid ? input.trim() : undefined
         },
       });
 
       if (fnError) throw fnError;
       
       if (!data.success) {
-        throw new Error(data.error || 'Failed to load search data');
+        if (data.notFound) {
+          setError('No search found for this Airbnb URL. Run search-alternatives first to create a search.');
+        } else {
+          throw new Error(data.error || 'Failed to load search data');
+        }
+        return;
       }
 
       setSearchInfo(data.search);
@@ -118,13 +179,28 @@ export default function SearchDebug() {
     }
   };
 
-  const getStatusDisplay = (status: string) => {
-    const config = STATUS_CONFIG[status] || { color: 'text-muted-foreground', icon: AlertTriangle };
+  const getStatusDisplay = (extraction: PlatformExtraction) => {
+    if (extraction.extractionStatus === 'success') {
+      return (
+        <div className="flex items-center gap-2 text-green-500">
+          <CheckCircle2 className="h-4 w-4" />
+          <span className="font-medium">Success</span>
+        </div>
+      );
+    }
+
+    // Use failure category for better display
+    const categoryConfig = extraction.failureCategory 
+      ? FAILURE_CATEGORY_CONFIG[extraction.failureCategory] 
+      : FAILURE_CATEGORY_CONFIG['unknown'];
+    
+    const config = categoryConfig || FAILURE_CATEGORY_CONFIG['unknown'];
     const Icon = config.icon;
+    
     return (
       <div className={`flex items-center gap-2 ${config.color}`}>
         <Icon className="h-4 w-4" />
-        <span className="font-medium">{status.replace(/_/g, ' ')}</span>
+        <span className="font-medium">{config.label}</span>
       </div>
     );
   };
@@ -134,12 +210,16 @@ export default function SearchDebug() {
   const failedCount = extractions.filter(e => e.extractionStatus !== 'success' && e.extractionStatus !== 'pending').length;
   const pendingCount = extractions.filter(e => e.extractionStatus === 'pending').length;
 
+  // Count by tier
+  const tierACounts = extractions.filter(e => e.coverageTier === 'A');
+  const tierASuccessCount = tierACounts.filter(e => e.extractionStatus === 'success').length;
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Search Debug View</h1>
         <p className="text-muted-foreground">
-          Inspect per-platform extraction results for any Airbnb search
+          Inspect per-platform extraction results for truth verification
         </p>
       </div>
 
@@ -163,7 +243,7 @@ export default function SearchDebug() {
               onKeyDown={(e) => e.key === 'Enter' && fetchSearchData()}
               className="flex-1"
             />
-            <Button onClick={fetchSearchData} disabled={isLoading || !searchInput.trim()}>
+            <Button onClick={() => fetchSearchData()} disabled={isLoading || !searchInput.trim()}>
               {isLoading ? (
                 <RefreshCw className="h-4 w-4 animate-spin" />
               ) : (
@@ -172,6 +252,73 @@ export default function SearchDebug() {
                   Inspect
                 </>
               )}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Recent Searches */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <History className="h-5 w-5" />
+            Recent Searches
+          </CardTitle>
+          <CardDescription>
+            Quick access to the most recent pipeline runs
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isLoadingRecent ? (
+            <div className="flex items-center justify-center py-4">
+              <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : recentSearches.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">No recent searches found</p>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {recentSearches.map((search) => (
+                <div 
+                  key={search.id}
+                  className="flex items-center justify-between p-3 border rounded-lg hover:bg-muted/50 cursor-pointer transition-colors"
+                  onClick={() => {
+                    setSearchInput(search.id);
+                    fetchSearchData(search.id);
+                  }}
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">
+                      {search.airbnbTitle || 'Untitled Listing'}
+                    </p>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
+                      {search.checkInDate && search.checkOutDate && (
+                        <span className="flex items-center gap-1">
+                          <Calendar className="h-3 w-3" />
+                          {search.checkInDate} → {search.checkOutDate}
+                        </span>
+                      )}
+                      <span>{format(new Date(search.createdAt), 'MMM d, HH:mm')}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-xs">
+                      {search.platformCount} platforms
+                    </Badge>
+                    <Badge 
+                      variant={search.status === 'completed' ? 'default' : 'secondary'}
+                      className="text-xs"
+                    >
+                      {search.status}
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-3">
+            <Button variant="outline" size="sm" onClick={fetchRecentSearches} disabled={isLoadingRecent}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${isLoadingRecent ? 'animate-spin' : ''}`} />
+              Refresh
             </Button>
           </div>
         </CardContent>
@@ -246,7 +393,7 @@ export default function SearchDebug() {
 
       {/* Summary */}
       {extractions.length > 0 && (
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-5">
           <Card>
             <CardContent className="pt-6">
               <div className="text-center">
@@ -279,6 +426,14 @@ export default function SearchDebug() {
               </div>
             </CardContent>
           </Card>
+          <Card className="border-green-200 bg-green-50/50 dark:border-green-900 dark:bg-green-950/20">
+            <CardContent className="pt-6">
+              <div className="text-center">
+                <p className="text-3xl font-bold text-green-600">{tierASuccessCount}/{tierACounts.length}</p>
+                <p className="text-sm text-muted-foreground">Tier A Success</p>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
 
@@ -305,8 +460,13 @@ export default function SearchDebug() {
                         Tier {extraction.coverageTier}
                       </Badge>
                       <span className="font-semibold text-lg">{extraction.platformName}</span>
+                      {extraction.dedicatedExtractor && (
+                        <Badge variant="outline" className="text-xs">
+                          {extraction.dedicatedExtractor}
+                        </Badge>
+                      )}
                     </div>
-                    {getStatusDisplay(extraction.extractionStatus)}
+                    {getStatusDisplay(extraction)}
                   </div>
 
                   {/* Details Grid */}
@@ -369,14 +529,23 @@ export default function SearchDebug() {
                     </div>
                   </div>
 
-                  {/* Error/Failure Reason */}
-                  {extraction.extractionError && (
+                  {/* Failure Reason (enhanced) */}
+                  {extraction.failureReason && (
                     <div className="mt-3 p-2 bg-destructive/10 rounded text-sm">
                       <div className="flex items-start gap-2">
                         <AlertTriangle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
                         <div>
-                          <p className="font-medium text-destructive">Failure Reason</p>
-                          <p className="text-destructive/80">{extraction.extractionError}</p>
+                          <p className="font-medium text-destructive">
+                            {extraction.failureCategory && (
+                              <Badge variant="outline" className="mr-2 text-xs">
+                                {extraction.failureCategory}
+                              </Badge>
+                            )}
+                            {extraction.failureReason}
+                          </p>
+                          {extraction.extractionError && extraction.extractionError !== extraction.failureReason && (
+                            <p className="text-destructive/70 text-xs mt-1">{extraction.extractionError}</p>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -433,6 +602,9 @@ export default function SearchDebug() {
               <p className="text-lg font-medium">Enter a search ID or Airbnb URL to inspect</p>
               <p className="text-sm mt-1">
                 This view shows all platform extractions for truth verification
+              </p>
+              <p className="text-sm mt-3">
+                Or click on a recent search above to load it
               </p>
             </div>
           </CardContent>
