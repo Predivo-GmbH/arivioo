@@ -7,19 +7,14 @@ import { useToast } from "@/hooks/use-toast";
 import { ImageComparison } from "@/components/ImageComparison";
 import { quickCelebration } from "@/lib/confetti";
 import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
-import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS, type EnrichedSearchResult } from "@/hooks/useEnrichedSearchResults";
-import { useStageTimings } from "@/hooks/useStageTimings";
-import { 
-  PIPELINE_STAGES, 
-  getStageIndexFromStatus, 
-  formatTypicalTime,
-  type PipelineStageId 
-} from "@/lib/pipelineStages";
+import { PipelineProgress, type ActivityItem } from "@/components/PipelineProgress";
+import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS } from "@/hooks/useEnrichedSearchResults";
+import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/lib/pipelineStages";
 import { 
   ArrowLeft, 
   ExternalLink, 
   Search, 
-  Sparkles, 
+  Sparkles,
   AlertCircle,
   TrendingDown,
   TrendingUp,
@@ -88,15 +83,7 @@ interface SearchData {
   nights_count?: number | null;
 }
 
-// Icon mapping for pipeline stages
-const stageIcons = {
-  Sparkles,
-  Camera,
-  Globe,
-  Calendar,
-  DollarSign,
-  CheckCircle,
-} as const;
+// Note: stageIcons are now in PipelineProgress component
 
 // Helper to convert Json to string array
 const toStringArray = (json: Json | null | undefined): string[] => {
@@ -666,91 +653,43 @@ export default function SearchResults() {
     setSearchPhase("thinking");
   };
 
-  const getLiveActivity = (status?: string | null): { message: string; detail?: string } => {
-    if (!status) return { message: "Starting search…" };
-
-    // Extracting phase
+  // Helper to get activity message for the feed (used by SSE handler)
+  const getActivityMessage = (status: string): { message: string; detail?: string } => {
     if (status === "extracting_photos") {
-      return { message: "Extracting property photos", detail: "Downloading clean property images from the Airbnb listing" };
+      return { message: "Extracting property photos", detail: "Downloading clean property images" };
     }
     if (status === "scraping_airbnb_page") {
-      return { message: "Loading Airbnb listing", detail: "Capturing page content including dynamic price data" };
+      return { message: "Loading Airbnb listing", detail: "Capturing page content" };
     }
-    if (status === "extracting_price_with_ai") {
-      return { message: "Extracting Airbnb price", detail: "Using AI to find the exact price for your dates" };
-    }
-
-    // Reverse image search phase
     if (status.startsWith("searching_platforms_lens_")) {
       const m = status.match(/searching_platforms_lens_(\d+)_of_(\d+)/);
       if (m) {
-        return { 
-          message: `Searching for matches (image ${m[1]} of ${m[2]})`, 
-          detail: "Running AI reverse image search across Booking.com, Vrbo, TripAdvisor, and more" 
-        };
+        return { message: `Searching for matches (image ${m[1]} of ${m[2]})` };
       }
-      return { message: "Searching for matches", detail: "Running AI reverse image search" };
+      return { message: "Searching for matches" };
     }
-    if (status === "searching_platforms") {
-      return { message: "Searching for matches", detail: "Running AI reverse image search across booking sites" };
-    }
-
-    // AI verification
     if (status.startsWith("ai_verifying_")) {
       const platform = status.replace("ai_verifying_", "").replace(/_/g, " ");
-      const formattedPlatform = platform.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-      return { message: `Verifying match on ${formattedPlatform}`, detail: "AI is comparing property photos to confirm it's the same place" };
-    }
-
-    // Reverse image backup
-    if (status === "reverse_image_search_backup") {
-      return { message: "Running backup search", detail: "Trying alternative image search methods" };
-    }
-
-    // Price comparison - now includes index
-    if (status === "comparing_prices") {
-      return { message: "Collecting prices", detail: "Preparing to scrape prices from matched platforms" };
+      return { message: `Verifying match on ${platform.charAt(0).toUpperCase() + platform.slice(1)}` };
     }
     if (status.startsWith("scraping_price_")) {
       const parts = status.replace("scraping_price_", "");
       const indexMatch = parts.match(/_(\d+)_of_(\d+)$/);
       let platform = parts.replace(/_\d+_of_\d+$/, "").replace(/_/g, " ");
-      const formattedPlatform = platform.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-      
       if (indexMatch) {
-        return { 
-          message: `Getting price from ${formattedPlatform} (${indexMatch[1]}/${indexMatch[2]})`, 
-          detail: "Scraping the listing page to find the exact price for your dates" 
-        };
+        return { message: `Getting price from ${platform} (${indexMatch[1]}/${indexMatch[2]})` };
       }
-      return { message: `Getting price from ${formattedPlatform}`, detail: "Scraping the listing page to find the exact price" };
+      return { message: `Getting price from ${platform}` };
     }
-
-    // Text search fallback
-    if (status.startsWith("text_search_")) {
-      return { message: "Running text search", detail: "Searching by property name as a fallback" };
-    }
-
-    // Completed states
-    if (status === "completed") return { message: "Search complete" };
-    if (status === "price_unavailable") {
-      return { message: "Price unavailable", detail: "Could not extract the Airbnb price for your dates" };
-    }
-
-    // Generic fallback
-    if (status === "searching" || status === "pending") return { message: "Starting search…" };
-
     return { message: status.replace(/_/g, " ") };
   };
 
-  // Ticker-style live activity feed: append a line whenever backend status meaningfully changes
+  // Activity feed from backend status changes
   useEffect(() => {
-    if (!loading) return;
-    if (searchPhase !== "thinking") return;
+    if (!loading || !search?.status) return;
 
-    const activity = getLiveActivity(search?.status);
+    const activity = getActivityMessage(search.status);
     const key = `${activity.message}__${activity.detail ?? ""}`;
-    if (!activity.message) return;
     if (seenActivityKeysRef.current.has(key)) return;
 
     seenActivityKeysRef.current.add(key);
@@ -762,78 +701,7 @@ export default function SearchResults() {
       id: `activity-${activityIdCounterRef.current}`
     };
     setActivityFeed((prev) => [...prev, newItem].slice(-8));
-  }, [loading, searchPhase, search?.status]);
-
-  // Auto-scroll ticker feed when new items are added
-  useEffect(() => {
-    if (tickerScrollRef.current && activityFeed.length > 0) {
-      // Scroll to top smoothly since we reverse the list (newest at top)
-      tickerScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  }, [activityFeed]);
-
-  // Animate through all steps evenly when search completes
-  useEffect(() => {
-    if (searchPhase !== 'animating') return;
-    
-    const STEP_COUNT = PIPELINE_STAGES.length;
-    // Minimum 1.5s per step, use actual duration evenly split
-    const timePerStep = Math.max(actualDurationRef.current / STEP_COUNT, 1500);
-    const TOTAL_ANIMATION = timePerStep * STEP_COUNT;
-    
-    const startTime = Date.now();
-    
-    // Use a ref to track animation state without causing re-renders
-    let currentAnimStep = 0;
-    let currentAnimProgress = 0;
-    
-    const animate = () => {
-      const elapsed = Date.now() - startTime;
-      const totalProgress = Math.min(elapsed / TOTAL_ANIMATION, 1);
-      
-      // Calculate overall progress as a continuous value from 0 to 300 (for 3 steps)
-      const continuousProgress = totalProgress * STEP_COUNT * 100;
-      
-      // Determine which step we're on
-      const stepIndex = Math.min(Math.floor(continuousProgress / 100), STEP_COUNT - 1);
-      
-      // Calculate progress within current step (0-100)
-      const progressInStep = continuousProgress - (stepIndex * 100);
-      
-      // Only update state if values changed
-      if (stepIndex !== currentAnimStep) {
-        currentAnimStep = stepIndex;
-        setCurrentStep(stepIndex);
-      }
-      
-      // Update progress continuously for smooth animation
-      currentAnimProgress = Math.min(progressInStep, 100);
-      setStepProgress(currentAnimProgress);
-      
-      if (totalProgress < 1) {
-        animationFrameRef.current = requestAnimationFrame(animate);
-      } else {
-        // Complete
-        setCurrentStep(STEP_COUNT - 1);
-        setStepProgress(100);
-        setSearchPhase('done');
-        setTimeout(() => {
-          setLoading(false);
-        }, 400);
-      }
-    };
-    
-    // Start animation
-    setCurrentStep(0);
-    setStepProgress(0);
-    animationFrameRef.current = requestAnimationFrame(animate);
-    
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, [searchPhase]);
+  }, [loading, search?.status]);
 
   // Celebrate when results are shown
   useEffect(() => {
@@ -1039,246 +907,22 @@ export default function SearchResults() {
 
       <main className="container px-4 py-8 md:py-12">
         {loading ? (
-          <div className="max-w-xl mx-auto py-12">
-            {/* Thinking Phase - Shows while search is running */}
-            {searchPhase === 'thinking' && (
-              <div className="text-center py-8 animate-fade-in">
-                <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-primary/10 flex items-center justify-center">
-                  <Sparkles className="w-10 h-10 text-primary animate-pulse" />
-                </div>
-                <h2 className="text-2xl font-bold text-foreground mb-2">
-                  Analyzing Your Listing
-                </h2>
-
-                <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                  Searching across platforms and visually verifying matches with your photos.
-                </p>
-
-                {/* Pulsing progress indicator */}
-                <div className="max-w-xs mx-auto">
-                  <div className="h-2 bg-muted rounded-full overflow-hidden">
-                    <div className="h-full bg-primary/60 rounded-full animate-pulse" style={{ width: '100%' }} />
-                  </div>
-                </div>
-
-                <div className="mt-6 space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    Elapsed: <span className="font-medium text-foreground">{Math.floor(thinkingElapsedMs / 1000)}s</span>
-                  </p>
-
-                  {/* Live activity card - always visible with message + detail */}
-                  {(() => {
-                    const activity = getLiveActivity(search?.status);
-                    return (
-                      <div className="mx-auto max-w-md rounded-xl border-2 border-primary/30 bg-primary/5 p-4 text-left shadow-sm">
-                        <div className="flex items-center gap-2 mb-2">
-                          <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                          <p className="text-xs font-medium text-primary uppercase tracking-wide">Live Activity</p>
-                        </div>
-                        <p className="text-base font-semibold text-foreground leading-relaxed">{activity.message}</p>
-                        {activity.detail && (
-                          <p className="text-sm text-muted-foreground mt-1">{activity.detail}</p>
-                        )}
-
-                        {/* Ticker feed */}
-                        {activityFeed.length > 0 && (
-                          <div className="mt-4 rounded-lg border border-border bg-card/60">
-                            <ScrollArea className="h-32">
-                              <div ref={tickerScrollRef} className="p-3 space-y-2">
-                                {activityFeed
-                                  .slice()
-                                  .reverse()
-                                  .map((item, idx) => (
-                                    <div 
-                                      key={item.id} 
-                                      className="text-sm animate-in fade-in slide-in-from-top-2 duration-300"
-                                    >
-                                      <p className="text-foreground/90">{item.message}</p>
-                                      {item.detail && (
-                                        <p className="text-xs text-muted-foreground mt-0.5">{item.detail}</p>
-                                      )}
-                                    </div>
-                                  ))}
-                              </div>
-                            </ScrollArea>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {thinkingElapsedMs >= 12000 && (
-                    <div className="mx-auto max-w-md rounded-xl border border-border bg-card p-4 text-left">
-                      <p className="text-sm font-medium text-foreground mb-2">What we’re doing right now</p>
-                      <ul className="text-sm text-muted-foreground space-y-1 list-disc pl-5">
-                        <li>Extracting clean property photos</li>
-                        <li>Running reverse image searches across multiple sites</li>
-                        <li>Verifying matches (≥ 90% confidence)</li>
-                      </ul>
-                      {thinkingElapsedMs >= 45000 && (
-                        <p className="text-sm text-muted-foreground mt-3">
-                          If this feels stuck, you can cancel and try again.
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-center gap-3">
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        abortReasonRef.current = "cancel";
-                        abortControllerRef.current?.abort();
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        toast({ title: "Still working", description: "We’ll keep searching — this can take up to a minute." });
-                      }}
-                    >
-                      Why is this taking time?
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      onClick={() => requestSkipCurrentStep("manual")}
-                    >
-                      Skip this step
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            )}
-            
-            {/* Step Progress Indicator - Shows after search completes */}
-            {searchPhase === 'animating' && (
-              <div className="mb-12 animate-fade-in">
-                {PIPELINE_STAGES.map((step, index) => {
-                  const StepIcon = stageIcons[step.icon];
-                  const isActive = index === currentStep;
-                  const isCompleted = index < currentStep;
-                  
-                  return (
-                    <div key={step.id} className="relative flex">
-                      {/* Left column with circle and line */}
-                      <div className="flex flex-col items-center mr-4">
-                        {/* Circle */}
-                        <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 transition-all duration-300 ${
-                          isCompleted 
-                            ? 'bg-primary text-primary-foreground' 
-                            : isActive 
-                            ? 'bg-primary/10 text-primary border-2 border-primary' 
-                            : 'bg-muted text-muted-foreground'
-                        }`}>
-                          {isCompleted ? (
-                            <Check className="w-5 h-5" />
-                          ) : isActive ? (
-                            <div className="relative">
-                              <StepIcon className="w-5 h-5" />
-                            </div>
-                          ) : (
-                            <StepIcon className="w-5 h-5" />
-                          )}
-                        </div>
-                        
-                        {/* Connecting line */}
-                        {index < PIPELINE_STAGES.length - 1 && (
-                          <div className={`w-0.5 flex-1 min-h-[2rem] transition-colors duration-300 ${
-                            isCompleted ? 'bg-primary' : 'bg-muted'
-                          }`} />
-                        )}
-                      </div>
-                      
-                      {/* Right column with content */}
-                      <div className={`flex-1 pb-8 ${index === PIPELINE_STAGES.length - 1 ? 'pb-0' : ''}`}>
-                        <div className={`p-4 rounded-xl transition-all duration-300 ${
-                          isActive ? 'bg-primary/5 border border-primary/20' : ''
-                        }`}>
-                          <h3 className={`font-semibold mb-1 transition-colors ${
-                            isActive ? 'text-foreground' : isCompleted ? 'text-foreground' : 'text-muted-foreground'
-                          }`}>
-                            {step.title}
-                            {isCompleted && <span className="text-primary ml-2 text-sm">✓</span>}
-                          </h3>
-                          <p className={`text-sm transition-colors mb-3 ${
-                            isActive ? 'text-muted-foreground' : 'text-muted-foreground/60'
-                          }`}>
-                            {step.description}
-                          </p>
-                          
-                          {/* Progress bar for active step */}
-                          {isActive && (
-                            <>
-                              {/* Show PriceExtractionProgress for the "collect_prices" step */}
-                              {step.id === 'collect_prices' && priceExtractionPlatforms.length > 0 ? (
-                                <div className="mt-4">
-                                  <PriceExtractionProgress
-                                    platforms={priceExtractionPlatforms}
-                                    totalPlatforms={priceExtractionTotal}
-                                    completedCount={priceExtractionCompleted}
-                                  />
-                                </div>
-                              ) : (
-                                <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
-                                  <div 
-                                    className="h-full bg-primary rounded-full"
-                                    style={{ width: `${stepProgress}%`, transition: 'width 50ms linear' }}
-                                  />
-                                  <div
-                                    className="absolute inset-0 pointer-events-none"
-                                    aria-hidden="true"
-                                  >
-                                    <div
-                                      className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.25s_ease-in-out_infinite]"
-                                      style={{
-                                        backgroundImage:
-                                          'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
-                                      }}
-                                    />
-                                  </div>
-                                </div>
-                              )}
-                            </>
-                          )}
-                          
-                          {/* Completed progress bar */}
-                          {isCompleted && (
-                            <div className="h-1.5 bg-primary/20 rounded-full overflow-hidden">
-                              <div className="h-full bg-primary rounded-full w-full" />
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-                
-                <div className="text-center mt-8">
-                  <p className="text-sm text-muted-foreground">
-                    Preparing your results...
-                  </p>
-                  <div className="mt-3 mx-auto max-w-xs">
-                    <div className="relative h-2.5 bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="absolute inset-0 pointer-events-none"
-                        aria-hidden="true"
-                      >
-                        <div
-                          className="h-full w-1/3 opacity-60 animate-[loading-sweep_1.1s_ease-in-out_infinite]"
-                          style={{
-                            backgroundImage:
-                              'linear-gradient(90deg, transparent, hsl(var(--primary) / 0.35), transparent)',
-                          }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
+          <PipelineProgress
+            status={search?.status}
+            isComplete={false}
+            isFailed={search?.status === 'error' || search?.status === 'failed'}
+            errorMessage={search?.status === 'error' ? 'Search failed. Please try again.' : undefined}
+            startTime={searchStartTimeRef.current || Date.now()}
+            activityFeed={activityFeed}
+            priceExtractionPlatforms={priceExtractionPlatforms}
+            priceExtractionTotal={priceExtractionTotal}
+            priceExtractionCompleted={priceExtractionCompleted}
+            onCancel={() => {
+              abortReasonRef.current = "cancel";
+              abortControllerRef.current?.abort();
+            }}
+            onSkip={() => requestSkipCurrentStep("manual")}
+          />
         ) : (
           <div className="max-w-5xl mx-auto">
             {/* Clean Results Container */}

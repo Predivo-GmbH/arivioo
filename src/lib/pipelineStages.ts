@@ -45,51 +45,69 @@ export interface PipelineStage {
  * 5. Collect prices - Phase B: Extract actual prices from each platform
  * 6. Finalize results - Compute best deal, sort, prepare for display
  */
+/**
+ * Canonical pipeline stages in execution order.
+ * 
+ * These map to real backend work and are the SINGLE SOURCE OF TRUTH for:
+ * - Backend telemetry (search_stage_runs table)
+ * - Frontend progress UI
+ * - Timing estimates
+ * 
+ * Order rationale:
+ * 1. Analyze listing - Parse Airbnb URL, extract metadata, determine dates
+ * 2. Collect photos - Download property images from Airbnb
+ * 3. Find matches - Visual search + text search to find property on other platforms
+ * 4. Verify matches - AI verification of visual matches (≥90% confidence)
+ * 5. Collect prices - Extract actual prices from each platform
+ * 6. Finalize results - Compute best deal, sort, prepare for display
+ */
 export const PIPELINE_STAGES: readonly PipelineStage[] = [
   {
     id: 'analyze_listing',
     title: 'Analyzing Listing',
-    description: 'Parsing Airbnb URL, extracting metadata and dates...',
+    description: 'Parsing Airbnb URL and extracting property details...',
     icon: 'Sparkles',
-    fallbackTypicalSeconds: [8, 15],
-    backendStatuses: ['pending', 'searching', 'extracting_price', 'scraping_airbnb_page'],
+    fallbackTypicalSeconds: [5, 12],
+    backendStatuses: ['pending', 'searching', 'extracting_price', 'scraping_airbnb_page', 'extracting_price_with_ai'],
   },
   {
     id: 'collect_photos',
-    title: 'Collecting Property Photos',
-    description: 'Downloading images from the Airbnb listing...',
+    title: 'Collecting Photos',
+    description: 'Downloading property images for visual matching...',
     icon: 'Camera',
-    fallbackTypicalSeconds: [5, 12],
+    fallbackTypicalSeconds: [3, 8],
     backendStatuses: ['extracting_photos'],
   },
   {
     id: 'find_matches',
-    title: 'Finding Matches on Other Platforms',
-    description: 'Running visual search on Booking.com, Agoda, Expedia...',
+    title: 'Finding Comparable Listings',
+    description: 'Searching Booking.com, Vrbo, TripAdvisor, and more...',
     icon: 'Globe',
-    fallbackTypicalSeconds: [20, 45],
-    backendStatuses: ['searching_platforms'],
-    statusPattern: '^searching_platforms_lens_',
+    fallbackTypicalSeconds: [15, 35],
+    backendStatuses: ['searching_platforms', 'reverse_image_search_backup'],
+    statusPattern: '^searching_platforms_lens_|^text_search_',
   },
   {
     id: 'validate_dates',
-    title: 'Applying Your Dates',
-    description: 'Setting check-in/check-out dates on each platform...',
+    title: 'Verifying Matches',
+    description: 'AI is confirming these are the same property...',
     icon: 'Calendar',
-    fallbackTypicalSeconds: [10, 25],
+    fallbackTypicalSeconds: [8, 20],
     backendStatuses: ['validating_dates', 'phase_a'],
+    statusPattern: '^ai_verifying_',
   },
   {
     id: 'collect_prices',
     title: 'Collecting Prices',
-    description: 'Extracting real-time prices from each platform...',
+    description: 'Getting real-time prices for your exact dates...',
     icon: 'DollarSign',
-    fallbackTypicalSeconds: [15, 40],
-    backendStatuses: ['collecting_prices', 'phase_b', 'extracting_prices'],
+    fallbackTypicalSeconds: [12, 30],
+    backendStatuses: ['collecting_prices', 'comparing_prices', 'phase_b', 'extracting_prices'],
+    statusPattern: '^scraping_price_',
   },
   {
     id: 'finalize_results',
-    title: 'Finalizing Results',
+    title: 'Comparing & Finalizing',
     description: 'Computing savings and preparing your results...',
     icon: 'CheckCircle',
     fallbackTypicalSeconds: [2, 5],
