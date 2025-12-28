@@ -2315,6 +2315,7 @@ function isLikelyPropertyImage(url: string): boolean {
 // This scrapes the page to pull a higher-quality image for AI verification.
 async function scrapeBestImageFromListing(url: string, firecrawlApiKey: string): Promise<string | null> {
   try {
+    // NOTE: Firecrawl requires waitFor <= timeout/2. Use timeout=15000, waitFor=2500.
     const response = await fetch("https://api.firecrawl.dev/v1/scrape", {
       method: "POST",
       headers: {
@@ -2326,6 +2327,7 @@ async function scrapeBestImageFromListing(url: string, firecrawlApiKey: string):
         formats: ["html"],
         onlyMainContent: false,
         waitFor: 2500,
+        timeout: 15000, // Required: waitFor must be <= timeout/2
       }),
     });
 
@@ -3574,6 +3576,7 @@ serve(async (req) => {
       console.log("Using Firecrawl to scrape Airbnb (with JS rendering)...");
       try {
         console.log("Firecrawl scraping Airbnb with extended wait time...");
+        // NOTE: Firecrawl requires waitFor <= timeout/2. Use timeout=60000, waitFor=25000.
         const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
           method: 'POST',
           headers: {
@@ -3584,7 +3587,7 @@ serve(async (req) => {
             url: search.airbnb_url,
             formats: ['markdown', 'html', 'rawHtml'],
             onlyMainContent: false,
-            waitFor: 15000, // Increased wait time for Airbnb's heavy JS
+            waitFor: 25000, // Must be <= timeout/2. Airbnb needs time for JS.
             timeout: 60000, // Overall timeout
           }),
         });
@@ -3882,6 +3885,7 @@ serve(async (req) => {
         contentForAI = directHtml;
       } else if (firecrawlApiKey) {
         try {
+          // NOTE: Firecrawl requires waitFor <= timeout/2. Use timeout=30000, waitFor=5000.
           const aiScrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
             method: 'POST',
             headers: {
@@ -3893,6 +3897,7 @@ serve(async (req) => {
               formats: ['markdown'],
               onlyMainContent: true,
               waitFor: 5000,
+              timeout: 30000, // Required: waitFor must be <= timeout/2
             }),
           });
           
@@ -3920,6 +3925,18 @@ serve(async (req) => {
       const airbnbImages = imageUrls.slice(0, 5);
       const nights = calculateNights(checkIn, checkOut);
 
+      // Determine specific failure reason
+      let errorCode = "airbnb_price_element_missing";
+      let errorMessage = "Could not find price information on the Airbnb page";
+      
+      if (!firecrawlMarkdown && !firecrawlHtml && !directHtml) {
+        errorCode = "airbnb_scrape_failed";
+        errorMessage = "Failed to load Airbnb page content";
+      } else if (firecrawlMarkdown.length < 500 && firecrawlHtml.length < 500) {
+        errorCode = "airbnb_blocked";
+        errorMessage = "Airbnb may have blocked or limited the request";
+      }
+
       await supabase.from("searches").update({
         status: "price_unavailable",
         airbnb_title: airbnbTitle,
@@ -3929,13 +3946,16 @@ serve(async (req) => {
         check_in_date: checkIn,
         check_out_date: checkOut,
         nights_count: nights,
+        api_error: errorMessage,
+        api_error_code: errorCode,
       }).eq("id", searchId);
 
       return new Response(
         JSON.stringify({
           success: false,
           error: "AIRBNB_PRICE_UNAVAILABLE",
-          message: "We couldn't extract the Airbnb total price for the selected dates. Please try again, or pick different dates and retry.",
+          message: errorMessage,
+          code: errorCode,
         }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );

@@ -536,6 +536,36 @@ export default function SearchResults() {
     return () => window.clearInterval(id);
   }, [loading, searchPhase]);
 
+  const requestCancelSearch = async () => {
+    if (!searchId) return;
+
+    try {
+      // Call backend to set cancelled status
+      const { data, error } = await supabase.functions.invoke("cancel-search", {
+        body: { searchId },
+      });
+
+      if (error) {
+        console.error("Cancel error:", error);
+      }
+
+      // Abort the SSE stream
+      abortReasonRef.current = "cancel";
+      abortControllerRef.current?.abort();
+
+      toast({ 
+        title: "Search cancelled", 
+        description: "No worries — you can try again anytime." 
+      });
+      navigate("/dashboard");
+    } catch (e: any) {
+      // Even if backend call fails, still abort and navigate
+      abortReasonRef.current = "cancel";
+      abortControllerRef.current?.abort();
+      navigate("/dashboard");
+    }
+  };
+
   const requestSkipCurrentStep = async (mode: "manual" | "auto") => {
     if (!searchId || skipInFlightRef.current) return;
     skipInFlightRef.current = true;
@@ -592,7 +622,7 @@ export default function SearchResults() {
         // Keep local UI in sync with backend status so the stepper advances even if SSE is silent
         setSearch((prev) => (prev ? ({ ...prev, ...data } as SearchData) : (data as SearchData)));
 
-        // Handle terminal failure state (DB constraint only allows 'error', not 'failed')
+        // Handle terminal failure states
         if (data.status === "error") {
           const errorMessage = data.api_error || "Search failed unexpectedly";
           toast({
@@ -602,6 +632,16 @@ export default function SearchResults() {
           });
           setSearchPhase("done");
           setLoading(false);
+          return;
+        }
+
+        // Handle cancelled status
+        if (data.status === "cancelled") {
+          toast({
+            title: "Search Cancelled",
+            description: "This search was cancelled.",
+          });
+          navigate("/dashboard");
           return;
         }
 
@@ -939,10 +979,7 @@ export default function SearchResults() {
             priceExtractionPlatforms={priceExtractionPlatforms}
             priceExtractionTotal={priceExtractionTotal}
             priceExtractionCompleted={priceExtractionCompleted}
-            onCancel={() => {
-              abortReasonRef.current = "cancel";
-              abortControllerRef.current?.abort();
-            }}
+            onCancel={requestCancelSearch}
             onSkip={() => requestSkipCurrentStep("manual")}
           />
         ) : (
@@ -1058,11 +1095,22 @@ export default function SearchResults() {
                     <h3 className="text-xl font-semibold text-foreground mb-2">
                       Price Comparison Unavailable
                     </h3>
-                    <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-                      We couldn't fetch the Airbnb price for your dates, so we can't calculate savings or compare alternatives fairly.
+                    <p className="text-muted-foreground mb-4 max-w-md mx-auto">
+                      {search?.api_error || "We couldn't read the total price Airbnb shows for those dates."}
                     </p>
+                    {search?.api_error_code && (
+                      <p className="text-xs text-muted-foreground/70 mb-4">
+                        Reason: {search.api_error_code === 'airbnb_blocked' ? 'Airbnb blocked the request' :
+                                 search.api_error_code === 'airbnb_timeout' ? 'Request timed out' :
+                                 search.api_error_code === 'airbnb_price_element_missing' ? 'Price element not found on page' :
+                                 search.api_error_code === 'provider_error' ? 'Scraping service error' :
+                                 search.api_error_code}
+                      </p>
+                    )}
                     <p className="text-sm text-muted-foreground mb-6">
-                      Please try again in a moment or search with different dates or another listing.
+                      {search?.api_error_code === 'airbnb_timeout' || search?.api_error_code === 'provider_error' 
+                        ? "This is usually temporary. Please try again in a moment."
+                        : "Try different dates or another listing."}
                     </p>
                     <Button asChild>
                       <Link to="/dashboard">
