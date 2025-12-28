@@ -3430,7 +3430,23 @@ serve(async (req) => {
             });
           } catch (error) {
             console.error("Streaming search error:", error);
-            sendSSE(controller, "error", { message: (error as Error).message || "Search failed" });
+            const errorMessage = (error as Error).message || "Search failed";
+            
+            // CRITICAL: Always update DB to terminal state on error
+            // This prevents searches from being stuck indefinitely
+            try {
+              await supabase.from("searches").update({ 
+                status: "error",
+                api_error: errorMessage,
+                api_error_code: "pipeline_error",
+              }).eq("id", searchId);
+              console.log(`Search ${searchId} marked as error in DB`);
+            } catch (dbError) {
+              console.error("Failed to update search status to error:", dbError);
+            }
+            
+            sendSSE(controller, "error", { message: errorMessage });
+            sendSSE(controller, "complete", { success: false, error: errorMessage });
           } finally {
             markControllerInvalid(controller);
             try { controller.close(); } catch { /* already closed */ }
