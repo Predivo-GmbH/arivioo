@@ -598,6 +598,7 @@ export type Database = {
         Row: {
           coverage_reason: string | null
           coverage_status: string | null
+          coverage_tier: string | null
           created_at: string
           date_application_strategy: string | null
           date_format: string
@@ -623,6 +624,8 @@ export type Database = {
           requires_occupancy: boolean
           retry_policy: string | null
           strategy_updated_at: string | null
+          tier_reason: string | null
+          tier_updated_at: string | null
           updated_at: string
           url_parameter_rules: Json | null
           validation_rules: Json | null
@@ -630,6 +633,7 @@ export type Database = {
         Insert: {
           coverage_reason?: string | null
           coverage_status?: string | null
+          coverage_tier?: string | null
           created_at?: string
           date_application_strategy?: string | null
           date_format?: string
@@ -655,6 +659,8 @@ export type Database = {
           requires_occupancy?: boolean
           retry_policy?: string | null
           strategy_updated_at?: string | null
+          tier_reason?: string | null
+          tier_updated_at?: string | null
           updated_at?: string
           url_parameter_rules?: Json | null
           validation_rules?: Json | null
@@ -662,6 +668,7 @@ export type Database = {
         Update: {
           coverage_reason?: string | null
           coverage_status?: string | null
+          coverage_tier?: string | null
           created_at?: string
           date_application_strategy?: string | null
           date_format?: string
@@ -687,6 +694,8 @@ export type Database = {
           requires_occupancy?: boolean
           retry_policy?: string | null
           strategy_updated_at?: string | null
+          tier_reason?: string | null
+          tier_updated_at?: string | null
           updated_at?: string
           url_parameter_rules?: Json | null
           validation_rules?: Json | null

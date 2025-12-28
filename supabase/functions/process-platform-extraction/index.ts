@@ -19,9 +19,19 @@ const TERMINAL_STATUSES = [
   'validation_error',
   'extraction_error',
   'timeout',
+  'platform_unsupported',  // Tier C platforms
 ] as const;
 
 type TerminalStatus = typeof TERMINAL_STATUSES[number];
+
+// Coverage tier definitions
+type CoverageTier = 'A' | 'B' | 'C';
+
+interface TierConfig {
+  useDedicatedExtractor: boolean;
+  attemptExtraction: boolean;
+  failureReason?: string;
+}
 
 interface WorkerRequest {
   extractionId: string;
@@ -73,6 +83,38 @@ function getDedicatedExtractor(platformName: string): string | null {
     }
   }
   return null;
+}
+
+// Lookup platform adapter to get coverage tier
+async function getPlatformTier(
+  supabaseClient: any,
+  platformName: string
+): Promise<{ tier: CoverageTier; reason: string | null; dedicatedExtractor: string | null }> {
+  try {
+    const platformLower = platformName.toLowerCase();
+    
+    // Query platform_adapters for coverage_tier
+    const { data: adapters } = await supabaseClient
+      .from('platform_adapters')
+      .select('coverage_tier, tier_reason, dedicated_extractor, platform_domain')
+      .or(`platform_name.ilike.%${platformLower}%,platform_domain.ilike.%${platformLower}%`)
+      .limit(1);
+    
+    if (adapters && adapters.length > 0) {
+      const adapter = adapters[0];
+      return {
+        tier: (adapter.coverage_tier || 'B') as CoverageTier,
+        reason: adapter.tier_reason,
+        dedicatedExtractor: adapter.dedicated_extractor,
+      };
+    }
+    
+    // Default to Tier B (best effort) for unknown platforms
+    return { tier: 'B', reason: 'Platform not in adapter registry', dedicatedExtractor: null };
+  } catch (error) {
+    console.error(`[WORKER] Error looking up platform tier: ${error}`);
+    return { tier: 'B', reason: 'Tier lookup failed', dedicatedExtractor: null };
+  }
 }
 
 // Call a dedicated production extractor (combines Phase A + B)
@@ -274,8 +316,13 @@ Deno.serve(async (req) => {
     const searchId = extraction.search_id;
     const searchResultId = extraction.search_result_id;
     
-    // Check if platform has a dedicated golden path extractor
-    const dedicatedExtractor = getDedicatedExtractor(platform);
+    // ============= COVERAGE TIER ENFORCEMENT =============
+    // Lookup platform's coverage tier from platform_adapters
+    const tierInfo = await getPlatformTier(supabaseClient, platform);
+    console.log(`[WORKER] Platform ${platform} is Tier ${tierInfo.tier}: ${tierInfo.reason || 'no reason'}`);
+    
+    // Get dedicated extractor (prefer DB value, fallback to hardcoded)
+    const dedicatedExtractor = tierInfo.dedicatedExtractor || getDedicatedExtractor(platform);
     
     const result: WorkerResult = {
       extractionId,
@@ -301,8 +348,46 @@ Deno.serve(async (req) => {
       extractorUsed: dedicatedExtractor || 'generic',
     };
     
-    // ============= GOLDEN PATH: Use dedicated extractor if available =============
-    if (dedicatedExtractor) {
+    // ============= TIER C: SHORT-CIRCUIT UNSUPPORTED PLATFORMS =============
+    if (tierInfo.tier === 'C') {
+      console.log(`[WORKER] Tier C platform ${platform} - short-circuiting with unsupported status`);
+      
+      const unsupportedReason = tierInfo.reason || 'Platform classified as unsupported (Tier C)';
+      result.phaseA.status = 'platform_unsupported';
+      result.phaseA.evidence = unsupportedReason;
+      result.finalStatus = 'platform_unsupported';
+      
+      // Update extraction with explicit unsupported status
+      await supabaseClient
+        .from('price_extractions')
+        .update({
+          extraction_status: 'platform_unsupported',
+          extraction_error: unsupportedReason,
+          extraction_metadata: {
+            tier: 'C',
+            tier_reason: unsupportedReason,
+            short_circuited: true,
+            short_circuited_at: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', extractionId);
+      
+      result.elapsedMs = Date.now() - startTime;
+      
+      return new Response(
+        JSON.stringify({ 
+          success: false, 
+          result,
+          tier: 'C',
+          tierReason: unsupportedReason,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    // ============= TIER A: GOLDEN PATH with dedicated extractor =============
+    if (tierInfo.tier === 'A' && dedicatedExtractor) {
       console.log(`[WORKER] Using GOLDEN PATH extractor: ${dedicatedExtractor} for ${platform}`);
       
       result.phaseA.ran = true;
@@ -396,8 +481,9 @@ Deno.serve(async (req) => {
       );
     }
     
-    // ============= GENERIC PATH: Phase A then Phase B =============
-    console.log(`[WORKER] Using GENERIC extraction path for ${platform}`);
+    // ============= TIER B: BEST EFFORT (Generic Path) =============
+    // Tier B platforms use generic Phase A → Phase B flow
+    console.log(`[WORKER] Tier B: Using GENERIC extraction path for ${platform}`);
     
     // ============= PHASE A: Date Validation =============
     console.log(`[WORKER] Phase A: ${platform}`);

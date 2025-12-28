@@ -1,16 +1,111 @@
 # Golden Path Contract
 
-**Version**: 1.0  
-**Last Updated**: 2025-12-27  
-**Status**: PROVEN
+**Version**: 2.0  
+**Last Updated**: 2025-12-28  
+**Status**: ENFORCED
 
 ## Core Requirement
 
 > Given an Airbnb stay with dates, reliably apply those exact dates on matching listings across other platforms and extract real, comparable total stay prices, or explicitly explain why that is not possible, fully automatically.
 
-## Proven Reference Implementation: Hotels.com
+---
 
-Hotels.com has been validated as the **reference golden path** with the following proven properties:
+## Platform Coverage Tiers (SLA)
+
+All platforms are classified into exactly ONE coverage tier. Tier classification is **authoritative** and enforced in the pipeline.
+
+### Tier A – Supported (Production SLA)
+
+**Criteria (ALL must be true):**
+- ✅ Dates apply deterministically (URL params or minimal navigation)
+- ✅ Total stay price visible pre-payment
+- ✅ Production extractor exists
+- ✅ Hallucination guard passes
+- ✅ Repeatability proven (≥3 runs consistent)
+- ✅ `reliability_score >= 0.9`
+
+**Behavior:**
+- Always attempted first
+- Uses dedicated production extractor
+- `requireValidation=true` enforced
+- Covered by reliability monitoring
+
+**Current Tier A Platforms:**
+| Platform | Extractor | Repeatability | Notes |
+|----------|-----------|---------------|-------|
+| Hotels.com | `extract-hotelscom` | 3/3 ($175, hash `601625a2`) | Reference golden path |
+| Expedia | `extract-expedia` | 3/3 ($630, hash `631f3b1a`) | Proven production |
+
+---
+
+### Tier B – Attempted (Best Effort)
+
+**Criteria:**
+- Platform matched by search
+- No proven extractor yet, OR unstable behavior
+- Not classified as blocked or non-compliant
+
+**Behavior:**
+- Attempt Phase A + Phase B automatically
+- Uses generic extraction flow
+- Explicit failure outcomes expected and acceptable
+- **No SLA on price availability**
+
+**Default for new platforms.**
+
+---
+
+### Tier C – Unsupported (Short-Circuited)
+
+**Criteria (ANY of the following):**
+- ❌ Network blocked (403, bot detection)
+- ❌ Requires payment/login to see totals
+- ❌ Inquiry-based pricing only
+- ❌ Compliance constraints
+
+**Behavior:**
+- **Immediately short-circuited** – no extraction attempted
+- Returns explicit `platform_unsupported` status with reason
+- No retries, no escalations
+- `retry_policy = disabled`
+
+**Current Tier C Platforms:**
+| Platform | Reason | Classification Date |
+|----------|--------|---------------------|
+| Vrbo | Network blocked (403 Firecrawl + Zyte) | 2025-12-28 |
+
+---
+
+## System-Wide Success Semantics
+
+> **A pipeline run is successful if every matched platform produces either:**
+> 1. A grounded total stay price, OR
+> 2. An explicit, classified terminal failure
+
+Absence of a price is **not a failure** if it is explained with evidence.
+
+### Terminal Statuses (Exhaustive)
+
+```
+success                          - Price extracted and verified
+dates_not_applied               - Could not apply requested dates
+no_availability_for_dates       - Property unavailable for dates
+sold_out                        - Property sold out
+blocked_captcha_or_bot          - Bot/CAPTCHA detection
+blocked_rate_limit              - Rate limited
+render_failed                   - Page did not render
+listing_unavailable             - Listing no longer exists
+price_not_found_after_dates_applied - Dates applied but no price visible
+total_not_available_pre_checkout - Only nightly price visible
+validation_error                - Phase A validation failed
+extraction_error                - Phase B extraction failed
+timeout                         - Operation timed out
+platform_unsupported            - Tier C platform (short-circuited)
+```
+
+---
+
+## Proven Reference Implementation: Hotels.com
 
 | Property | Status | Evidence |
 |----------|--------|----------|
@@ -24,30 +119,24 @@ Hotels.com has been validated as the **reference golden path** with the followin
 
 ---
 
-## Required Platform Properties
-
-A platform can only be considered **supported** if ALL of the following are true:
+## Required Platform Properties (for Tier A)
 
 ### 1. Dates Can Be Applied Deterministically
-
 - URL parameters OR minimal navigation applies dates
 - Page leaves "enter dates" state reliably
 - Detected check-in/check-out match requested dates
 
 ### 2. Total Stay Prices Are Visible Pre-Payment
-
 - Total price (not just nightly) is displayed
 - No "reserve" or "book" flow required to see price
 - No room selection required to see price
 
 ### 3. Prices Appear Verbatim in Captured Content
-
 - Extracted price matches exact string in markdown/HTML
 - No AI inference or estimation
 - Evidence snippet contains the extracted value
 
 ### 4. Pricing Is Stable Enough to Pass Repeatability Tests
-
 - 3 consecutive runs produce consistent results
 - If prices differ, content hashes must also differ (real dynamic pricing)
 - No unexplained extraction failures
@@ -57,93 +146,80 @@ A platform can only be considered **supported** if ALL of the following are true
 ## Required Pipeline Guarantees
 
 ### No Price Without Date Validation
-
 ```
 Phase A MUST pass before Phase B runs.
 If dates are not validated, return explicit failure status.
 ```
 
 ### No Price Without Content Verification
-
 ```
 Extracted price MUST appear verbatim in captured content.
 If price cannot be verified, return price_not_found.
 ```
 
 ### No Silent Failure
-
 ```
-Every extraction attempt MUST end in a terminal status:
-- success
-- dates_not_applied
-- no_availability_for_dates
-- sold_out
-- blocked_captcha_or_bot
-- price_not_found
-- render_failed
-- validation_error
-```
-
-### Explicit Terminal Status for Every Attempt
-
-```
-Status must be written to database.
+Every extraction attempt MUST end in a terminal status.
 No extraction may remain in "pending" state.
 Error field must explain the failure.
 ```
 
----
-
-## Platform Classification System
-
-When testing a new platform, classify it into exactly ONE category:
-
-| Classification | Description | Support Status |
-|----------------|-------------|----------------|
-| **A** | Prices visible and extractable pre-payment | ✅ Supported |
-| **B** | Prices only visible after reserve/room selection | ❌ Not Supported |
-| **C** | Dates cannot be applied reliably | ❌ Not Supported |
-| **D** | Bot/anti-automation blocking | ❌ Not Supported |
-
-### Classification Evidence Requirements
-
-Each classification must include:
-- Verbatim evidence snippets
-- Content hash before/after navigation
-- Date application state confirmation
-- Strategy used (URL_PARAMS, FIRECRAWL_ACTIONS, ZYTE_BROWSER)
+### Tier-Based Routing
+```
+Tier A → Dedicated production extractor
+Tier B → Generic Phase A + Phase B flow
+Tier C → Immediate short-circuit with platform_unsupported
+```
 
 ---
 
-## Expansion Protocol
+## Adapter Onboarding Workflow
 
-When adding a new platform:
+### New Platform Appears
 
-1. **Run Diagnostic** - Use existing diagnostic framework (see `hotelscom-diagnostic`)
-2. **Classify A/B/C/D** - With evidence
-3. **Repeatability Test** - 3 consecutive runs if Classification A
-4. **Lock Adapter** - Update `platform_adapters` with proven settings
-5. **Create Production Extractor** - Only if Classification A and repeatability passes
+1. **Default Classification**: Tier B (Best Effort)
+2. **Evidence Collection**: Automatic via generic extraction attempts
+3. **Metrics Tracked**:
+   - Success rate
+   - Date validation rate
+   - Content hash stability
 
-### Expansion Blockers
+### Promotion to Tier A (Supported)
 
-Do NOT expand to a new platform if:
-- Reference implementation (Hotels.com) is unstable
-- No clear Classification A evidence
-- Hallucination guard cannot be satisfied
-- Payment/reserve flow required for prices
+**Requirements:**
+- [ ] Golden Path Contract satisfied (all 4 properties)
+- [ ] Repeatability test passed (3/3 runs consistent)
+- [ ] Production extractor implemented
+- [ ] `reliability_score >= 0.9` achieved
+- [ ] Hallucination guard verified
 
----
+**Process:**
+1. Run diagnostic sequence
+2. Create production extractor (mirror `extract-hotelscom`)
+3. Run 3-run repeatability test
+4. Update `platform_adapters`:
+   - `coverage_tier = 'A'`
+   - `dedicated_extractor = 'extract-{platform}'`
+   - `reliability_score = 1.0`
+   - `tier_reason = 'Production-proven...'`
 
-## Current Platform Status
+### Demotion to Tier C (Unsupported)
 
-| Platform | Classification | Status | Notes |
-|----------|---------------|--------|-------|
-| **Hotels.com** | A | ✅ **REFERENCE** | Golden path proven, 3/3 runs |
-| **Expedia** | A | ✅ **PROVEN** | 3/3 runs ($630, hash `631f3b1a`) |
-| Booking.com | B | ❌ Unsupported | Prices require reserve flow |
-| Agoda | C | ❌ Unsupported | Prices not exposed pre-interaction |
-| Vrbo | D | ❌ NO-GO | 403 blocked by Firecrawl+Zyte, first fail: render_failed |
+**Triggers:**
+- Consistent blocking (403, CAPTCHA) across Firecrawl + Zyte
+- Prices only visible after payment/login
+- Inquiry-based pricing confirmed
+- Compliance constraints identified
+
+**Process:**
+1. Run single diagnostic (no tuning)
+2. Document first failing criterion
+3. Update `platform_adapters`:
+   - `coverage_tier = 'C'`
+   - `coverage_status = 'blocked' | 'unsupported'`
+   - `retry_policy = 'disabled'`
+   - `is_active = false`
+   - `tier_reason = 'Explicit reason...'`
 
 ---
 
@@ -151,28 +227,29 @@ Do NOT expand to a new platform if:
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Reference Extractor | `supabase/functions/extract-hotelscom/index.ts` | Production Hotels.com extraction |
-| Diagnostic | `supabase/functions/hotelscom-diagnostic/index.ts` | Testing & repeatability |
-| Adapter Config | `platform_adapters` table | Platform-specific settings |
-| Pipeline Worker | `supabase/functions/process-platform-extraction/index.ts` | Multi-platform orchestration |
+| Hotels.com Extractor | `supabase/functions/extract-hotelscom/index.ts` | Tier A production |
+| Expedia Extractor | `supabase/functions/extract-expedia/index.ts` | Tier A production |
+| Pipeline Worker | `supabase/functions/process-platform-extraction/index.ts` | Tier routing & enforcement |
+| Adapter Config | `platform_adapters` table | Tier & coverage metadata |
+| Admin Dashboard | `src/pages/admin/PlatformCoverage.tsx` | Visibility & governance |
 
 ---
 
 ## Failure Mode Documentation
 
 ### Acceptable Failures (Explicit & Evidence-Backed)
-
 - `sold_out` - Property not available for dates (evidence: "Sold out" in content)
-- `no_availability_for_dates` - Platform shows unavailable (evidence: explicit unavailability message)
+- `no_availability_for_dates` - Platform shows unavailable (evidence: explicit message)
 - `blocked_captcha_or_bot` - Anti-automation (evidence: CAPTCHA/block message)
 - `dates_not_applied` - URL params didn't work (evidence: "enter dates" still present)
+- `platform_unsupported` - Tier C platform (evidence: classification reason)
 
 ### Unacceptable Failures (Must Be Eliminated)
-
 - Silent pending status
 - Price without content verification
 - AI-inferred prices without verbatim match
 - Extraction without Phase A validation
+- Tier C platform attempted instead of short-circuited
 
 ---
 
@@ -180,9 +257,23 @@ Do NOT expand to a new platform if:
 
 This contract is enforced by:
 
-1. **Hallucination Guard** - Prices must be verified against captured content
-2. **Phase Sequencing** - Phase B only runs after Phase A success
-3. **Terminal Status Requirement** - All paths lead to explicit status
-4. **Evidence Storage** - All extractions store evidence snippets and content hashes
+1. **Tier-Based Routing** - Pipeline checks `coverage_tier` before extraction
+2. **Hallucination Guard** - Prices must be verified against captured content
+3. **Phase Sequencing** - Phase B only runs after Phase A success
+4. **Terminal Status Requirement** - All paths lead to explicit status
+5. **Evidence Storage** - All extractions store evidence snippets and content hashes
+6. **Admin Visibility** - Platform Coverage dashboard exposes tier status
 
 Any violation of this contract should be treated as a system bug, not a platform limitation.
+
+---
+
+## TODO: Future Coverage Program Hooks
+
+These are planned but not yet implemented:
+
+- [ ] Automatic adapter candidate backlog creation when new platforms appear
+- [ ] Platform classification persistence (audit trail)
+- [ ] `reliability_score` decay over time without successful extractions
+- [ ] Scheduled revalidation for Tier B platforms
+- [ ] Automatic promotion alerts when Tier B reaches Tier A criteria
