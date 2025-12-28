@@ -79,6 +79,126 @@ function markControllerInvalid(controller: SSEController) {
   controllerValid.delete(controller);
 }
 
+// ============================================================================
+// Stage Telemetry - Records timing for each pipeline stage
+// ============================================================================
+
+type PipelineStageId = 
+  | 'analyze_listing'
+  | 'collect_photos'
+  | 'find_matches'
+  | 'validate_dates'
+  | 'collect_prices'
+  | 'finalize_results';
+
+type StageOutcome = 'running' | 'success' | 'partial' | 'failed' | 'skipped' | 'cancelled';
+
+interface StageRun {
+  id: string;
+  stageId: PipelineStageId;
+  startedAt: number; // timestamp ms
+}
+
+// Track active stage runs per search
+const activeStageRuns = new Map<string, StageRun>();
+
+async function startStageRun(
+  supabase: any,
+  searchId: string,
+  stageId: PipelineStageId,
+  metadata?: Record<string, any>
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('search_stage_runs')
+      .insert({
+        search_id: searchId,
+        stage_name: stageId,
+        started_at: new Date().toISOString(),
+        outcome_status: 'running',
+        metadata: metadata || {},
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      console.error(`Failed to start stage ${stageId}:`, error.message);
+      return null;
+    }
+
+    const runId = data.id;
+    activeStageRuns.set(`${searchId}:${stageId}`, {
+      id: runId,
+      stageId,
+      startedAt: Date.now(),
+    });
+
+    console.log(`STAGE START: ${stageId} for search ${searchId.slice(0, 8)}...`);
+    return runId;
+  } catch (e) {
+    console.error(`Failed to start stage ${stageId}:`, e);
+    return null;
+  }
+}
+
+async function finishStageRun(
+  supabase: any,
+  searchId: string,
+  stageId: PipelineStageId,
+  outcome: StageOutcome,
+  errorMessage?: string
+): Promise<void> {
+  try {
+    const key = `${searchId}:${stageId}`;
+    const activeRun = activeStageRuns.get(key);
+    
+    if (!activeRun) {
+      console.warn(`No active stage run found for ${stageId}`);
+      return;
+    }
+
+    const durationMs = Date.now() - activeRun.startedAt;
+    
+    await supabase
+      .from('search_stage_runs')
+      .update({
+        finished_at: new Date().toISOString(),
+        outcome_status: outcome,
+        error_message: errorMessage || null,
+      })
+      .eq('id', activeRun.id);
+
+    activeStageRuns.delete(key);
+    console.log(`STAGE END: ${stageId} (${outcome}) - ${durationMs}ms`);
+  } catch (e) {
+    console.error(`Failed to finish stage ${stageId}:`, e);
+  }
+}
+
+// Convenience wrapper for running a stage with automatic timing
+async function withStageTelemetry<T>(
+  supabase: any,
+  searchId: string,
+  stageId: PipelineStageId,
+  operation: () => Promise<T>,
+  options?: { metadata?: Record<string, any> }
+): Promise<{ result: T | null; outcome: StageOutcome; error?: string }> {
+  await startStageRun(supabase, searchId, stageId, options?.metadata);
+  
+  try {
+    const result = await operation();
+    await finishStageRun(supabase, searchId, stageId, 'success');
+    return { result, outcome: 'success' };
+  } catch (e) {
+    const errorMsg = e instanceof Error ? e.message : 'Unknown error';
+    await finishStageRun(supabase, searchId, stageId, 'failed', errorMsg);
+    return { result: null, outcome: 'failed', error: errorMsg };
+  }
+}
+
+// ============================================================================
+
+
 // SerpAPI error types for proper error handling
 type SerpApiErrorType = 
   | 'invalid_key'      // 401 - Invalid API key

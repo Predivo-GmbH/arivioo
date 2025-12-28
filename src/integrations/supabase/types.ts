@@ -981,6 +981,98 @@ export type Database = {
           },
         ]
       }
+      search_stage_runs: {
+        Row: {
+          created_at: string
+          duration_ms: number | null
+          error_message: string | null
+          finished_at: string | null
+          id: string
+          metadata: Json | null
+          outcome_status: string
+          search_id: string
+          stage_name: string
+          started_at: string
+        }
+        Insert: {
+          created_at?: string
+          duration_ms?: number | null
+          error_message?: string | null
+          finished_at?: string | null
+          id?: string
+          metadata?: Json | null
+          outcome_status?: string
+          search_id: string
+          stage_name: string
+          started_at?: string
+        }
+        Update: {
+          created_at?: string
+          duration_ms?: number | null
+          error_message?: string | null
+          finished_at?: string | null
+          id?: string
+          metadata?: Json | null
+          outcome_status?: string
+          search_id?: string
+          stage_name?: string
+          started_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "search_stage_runs_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      search_stage_stats: {
+        Row: {
+          avg_duration_ms: number | null
+          computed_date: string
+          created_at: string
+          id: string
+          max_duration_ms: number | null
+          min_duration_ms: number | null
+          p50_duration_ms: number | null
+          p80_duration_ms: number | null
+          sample_count: number
+          stage_name: string
+          success_rate: number | null
+          updated_at: string
+        }
+        Insert: {
+          avg_duration_ms?: number | null
+          computed_date?: string
+          created_at?: string
+          id?: string
+          max_duration_ms?: number | null
+          min_duration_ms?: number | null
+          p50_duration_ms?: number | null
+          p80_duration_ms?: number | null
+          sample_count?: number
+          stage_name: string
+          success_rate?: number | null
+          updated_at?: string
+        }
+        Update: {
+          avg_duration_ms?: number | null
+          computed_date?: string
+          created_at?: string
+          id?: string
+          max_duration_ms?: number | null
+          min_duration_ms?: number | null
+          p50_duration_ms?: number | null
+          p80_duration_ms?: number | null
+          sample_count?: number
+          stage_name?: string
+          success_rate?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       searches: {
         Row: {
           airbnb_image_url: string | null

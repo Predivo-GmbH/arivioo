@@ -68,3 +68,6 @@ verify_jwt = false
 
 [functions.extract-agoda]
 verify_jwt = false
+
+[functions.get-stage-timings]
+verify_jwt = false
