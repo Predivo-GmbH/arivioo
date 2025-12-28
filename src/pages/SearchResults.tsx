@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { ImageComparison } from "@/components/ImageComparison";
 import { quickCelebration } from "@/lib/confetti";
 import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
+import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS, type EnrichedSearchResult } from "@/hooks/useEnrichedSearchResults";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -26,7 +27,9 @@ import {
   CheckCircle,
   ArrowLeftRight,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Ban,
+  AlertTriangle
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
@@ -44,10 +47,15 @@ interface SearchResult {
   image_url: string | null;
   images: Json;
   match_type?: string;
-  source_airbnb_image?: string | null; // The Airbnb image that matched this result
-  price_check_in?: string | null; // Actual dates used for this result's price
+  source_airbnb_image?: string | null;
+  price_check_in?: string | null;
   price_check_out?: string | null;
-  dates_differ?: boolean; // True if different dates were used due to unavailability
+  dates_differ?: boolean;
+  // Tier enrichment
+  coverage_tier?: 'A' | 'B' | 'C' | null;
+  is_tier_c_blocked?: boolean;
+  failure_category?: string | null;
+  failure_reason?: string | null;
 }
 
 interface PriceExtraction {
@@ -171,6 +179,7 @@ export default function SearchResults() {
   const { searchId } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { fetchEnrichedResults } = useEnrichedSearchResults();
   
   const [user, setUser] = useState<User | null>(null);
   const [search, setSearch] = useState<SearchData | null>(null);
@@ -255,15 +264,10 @@ export default function SearchResults() {
         return;
       }
 
-      // If search is already completed, fetch results
+      // If search is already completed, fetch enriched results
       if (searchData.status === "completed") {
-        const { data: resultsData } = await supabase
-          .from("search_results")
-          .select("*")
-          .eq("search_id", searchId)
-          .order("savings_percentage", { ascending: false, nullsFirst: false });
-
-        setResults((resultsData || []) as SearchResult[]);
+        const enrichedResults = await fetchEnrichedResults(searchId);
+        setResults(enrichedResults as unknown as SearchResult[]);
         setLoading(false);
         return;
       }
@@ -420,14 +424,10 @@ export default function SearchResults() {
                         .eq("id", searchId)
                         .single();
 
-                      const { data: resultsData } = await supabase
-                        .from("search_results")
-                        .select("*")
-                        .eq("search_id", searchId)
-                        .order("savings_percentage", { ascending: false, nullsFirst: false });
+                      const enrichedResults = await fetchEnrichedResults(searchId);
 
                       setSearch(updatedSearch as SearchData);
-                      setResults((resultsData || []) as SearchResult[]);
+                      setResults(enrichedResults as unknown as SearchResult[]);
                       setSearchPhase("animating");
                     } else if (eventType === "error") {
                       throw new Error(data.message || "Search failed");
@@ -469,14 +469,10 @@ export default function SearchResults() {
                return;
              }
 
-             const { data: resultsData } = await supabase
-               .from("search_results")
-               .select("*")
-               .eq("search_id", searchId)
-               .order("savings_percentage", { ascending: false, nullsFirst: false });
+             const enrichedResults = await fetchEnrichedResults(searchId);
 
              setSearch(updatedSearch as SearchData);
-             setResults((resultsData || []) as SearchResult[]);
+             setResults(enrichedResults as unknown as SearchResult[]);
              actualDurationRef.current = Date.now() - startedAt;
              setSearchPhase("animating");
            }
@@ -931,9 +927,14 @@ export default function SearchResults() {
   const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
-  // Separate results with and without valid prices
-  const resultsWithPrices = results.filter((r) => !!r.price && r.price >= 10);
-  const resultsWithoutPrices = results.filter((r) => !r.price || r.price < 10);
+  // CRITICAL: Filter out Tier C (blocked) platforms from price comparisons
+  // They should NEVER show prices or be marked as "Best Deal"
+  const supportedResults = results.filter((r) => !r.is_tier_c_blocked);
+  const tierCResults = results.filter((r) => r.is_tier_c_blocked);
+
+  // Separate results with and without valid prices (only from supported platforms)
+  const resultsWithPrices = supportedResults.filter((r) => !!r.price && r.price >= 10);
+  const resultsWithoutPrices = supportedResults.filter((r) => !r.price || r.price < 10);
 
   // Sort by price descending (for results with prices)
   const sortedByPrice = [...resultsWithPrices].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
@@ -953,7 +954,7 @@ export default function SearchResults() {
     return alternativeTotal >= airbnbGrandTotal;
   });
 
-  // For backward compatibility, validResults = results with prices
+  // For backward compatibility, validResults = results with prices (excluding Tier C)
   const validResults = resultsWithPrices;
 
   // Show up to 10 cheaper alternatives, while ensuring the cheapest is included
@@ -1018,6 +1019,26 @@ export default function SearchResults() {
     }
     
     return differences.length > 0 ? differences : ["Verify booking terms on site"];
+  };
+
+  // Get human-readable failure reason for display
+  const getFailureDisplay = (result: SearchResult): { text: string; isTierC: boolean; isTierA: boolean } => {
+    const isTierC = result.is_tier_c_blocked === true;
+    const isTierA = result.coverage_tier === 'A';
+    
+    if (isTierC) {
+      return { text: 'Platform not supported', isTierC: true, isTierA: false };
+    }
+    
+    if (result.failure_reason) {
+      return { 
+        text: FAILURE_CATEGORY_LABELS[result.failure_category || ''] || result.failure_reason, 
+        isTierC: false, 
+        isTierA 
+      };
+    }
+    
+    return { text: 'Price unavailable', isTierC: false, isTierA };
   };
 
   return (
@@ -1604,13 +1625,26 @@ export default function SearchResults() {
                                   const resultImages = toStringArray(result.images);
                                   const isExpanded = expandedComparison === result.id;
                                   
+                                  const failureDisplay = getFailureDisplay(result);
+                                  
                                   return (
                                     <React.Fragment key={result.id}>
                                       <tr className="border-b border-border/50 hover:bg-muted/30">
                                         <td className="py-4 px-4">
                                           <div className="flex items-center gap-2">
-                                            <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                            <span className={`w-2 h-2 rounded-full ${failureDisplay.isTierC ? 'bg-red-400' : failureDisplay.isTierA ? 'bg-amber-500' : 'bg-muted-foreground'}`} />
                                             <span className="font-medium text-foreground">{result.platform_name}</span>
+                                            {failureDisplay.isTierA && (
+                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 text-[10px] font-medium">
+                                                Tier A
+                                              </span>
+                                            )}
+                                            {failureDisplay.isTierC && (
+                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
+                                                <Ban className="w-2.5 h-2.5" />
+                                                Blocked
+                                              </span>
+                                            )}
                                           </div>
                                         </td>
                                         <td className="py-4 px-4 text-center">
@@ -1627,7 +1661,17 @@ export default function SearchResults() {
                                           )}
                                         </td>
                                         <td className="py-4 px-4 text-right text-muted-foreground">
-                                          <span className="text-sm">Price unavailable</span>
+                                          <div className="flex flex-col items-end gap-0.5">
+                                            <span className={`text-sm ${failureDisplay.isTierC ? 'text-red-500' : failureDisplay.isTierA ? 'text-amber-600' : ''}`}>
+                                              {failureDisplay.text}
+                                            </span>
+                                            {failureDisplay.isTierA && result.failure_category && (
+                                              <span className="inline-flex items-center gap-1 text-[10px] text-amber-500">
+                                                <AlertTriangle className="w-2.5 h-2.5" />
+                                                {result.failure_category}
+                                              </span>
+                                            )}
+                                          </div>
                                         </td>
                                         <td className="py-4 px-4 text-center">
                                           <div className="flex flex-col gap-1.5 items-center">
@@ -1995,13 +2039,26 @@ export default function SearchResults() {
                                   const resultImages = toStringArray(result.images);
                                   const isExpanded = expandedComparison === result.id;
                                   
+                                  const failureDisplay = getFailureDisplay(result);
+                                  
                                   return (
                                     <React.Fragment key={result.id}>
                                       <tr className="border-b border-border/50 hover:bg-muted/30">
                                         <td className="py-4 px-4">
                                           <div className="flex items-center gap-2">
-                                            <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                            <span className={`w-2 h-2 rounded-full ${failureDisplay.isTierC ? 'bg-red-400' : failureDisplay.isTierA ? 'bg-amber-500' : 'bg-muted-foreground'}`} />
                                             <span className="font-medium text-foreground">{result.platform_name}</span>
+                                            {failureDisplay.isTierA && (
+                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 text-[10px] font-medium">
+                                                Tier A
+                                              </span>
+                                            )}
+                                            {failureDisplay.isTierC && (
+                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
+                                                <Ban className="w-2.5 h-2.5" />
+                                                Blocked
+                                              </span>
+                                            )}
                                           </div>
                                         </td>
                                         <td className="py-4 px-4 text-center">
@@ -2018,7 +2075,17 @@ export default function SearchResults() {
                                           )}
                                         </td>
                                         <td className="py-4 px-4 text-right text-muted-foreground">
-                                          <span className="text-sm">Price unavailable</span>
+                                          <div className="flex flex-col items-end gap-0.5">
+                                            <span className={`text-sm ${failureDisplay.isTierC ? 'text-red-500' : failureDisplay.isTierA ? 'text-amber-600' : ''}`}>
+                                              {failureDisplay.text}
+                                            </span>
+                                            {failureDisplay.isTierA && result.failure_category && (
+                                              <span className="inline-flex items-center gap-1 text-[10px] text-amber-500">
+                                                <AlertTriangle className="w-2.5 h-2.5" />
+                                                {result.failure_category}
+                                              </span>
+                                            )}
+                                          </div>
                                         </td>
                                         <td className="py-4 px-4 text-center">
                                           <div className="flex flex-col gap-1.5 items-center">
