@@ -15,6 +15,9 @@ verify_jwt = false
 [functions.request-skip-step]
 verify_jwt = true
 
+[functions.cancel-search]
+verify_jwt = true
+
 [functions.generate-deep-links]
 verify_jwt = true
 
