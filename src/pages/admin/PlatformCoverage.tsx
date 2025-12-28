@@ -14,6 +14,9 @@ import {
   Shield,
   TrendingUp,
   Target,
+  PlayCircle,
+  History,
+  Loader2,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -62,6 +65,15 @@ interface PlatformAdapter {
   last_scored_at: string | null;
   promotion_candidate: boolean;
   promotion_candidate_reason: string | null;
+  promotion_status: string;
+  promotion_in_progress: boolean;
+  promotion_started_at: string | null;
+  promotion_started_by: string | null;
+  promotion_source_score: number | null;
+  promotion_snapshot: any;
+  promotion_notes: string | null;
+  promotion_decision_at: string | null;
+  promotion_decision_by: string | null;
   proven_deterministic: boolean;
   is_active: boolean;
   created_at: string;
@@ -330,6 +342,7 @@ export default function PlatformCoverage() {
   const [platforms, setPlatforms] = useState<PlatformAdapter[]>([]);
   const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isStartingPromotion, setIsStartingPromotion] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchData = async () => {
@@ -416,11 +429,90 @@ export default function PlatformCoverage() {
     fetchData();
   }, []);
 
+  // Start Promotion Work - mark platform as in_progress
+  const startPromotionWork = async (platform: PlatformAdapter) => {
+    if (!window.confirm(`Start promotion work for ${platform.platform_name}?\n\nThis will lock scoring for this platform and begin the promotion workflow.`)) {
+      return;
+    }
+    
+    setIsStartingPromotion(true);
+    try {
+      const snapshot = {
+        gates: {
+          gate_1_passed: platform.gate_1_passed,
+          gate_2_passed: platform.gate_2_passed,
+          gate_3_passed: platform.gate_3_passed,
+        },
+        evidence: {
+          total_attempts: platform.total_attempts,
+          total_successes: platform.total_successes,
+          total_failures: platform.total_failures,
+          last_success_at: platform.last_success_at,
+          last_outcome_type: platform.last_outcome_type,
+        },
+        score: platform.promotion_score,
+        captured_at: new Date().toISOString(),
+      };
+      
+      const { error: updateError } = await supabase
+        .from('platform_adapters')
+        .update({
+          promotion_in_progress: true,
+          promotion_status: 'in_progress',
+          promotion_started_at: new Date().toISOString(),
+          promotion_started_by: 'admin', // Could get from auth context
+          promotion_source_score: platform.promotion_score,
+          promotion_snapshot: snapshot,
+        })
+        .eq('id', platform.id);
+      
+      if (updateError) throw updateError;
+      
+      await fetchData();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to start promotion work');
+    } finally {
+      setIsStartingPromotion(false);
+    }
+  };
+
+  // Complete promotion - promote to Tier A or reject
+  const completePromotion = async (platform: PlatformAdapter, decision: 'promoted' | 'rejected', notes: string) => {
+    try {
+      const updates: Record<string, any> = {
+        promotion_in_progress: false,
+        promotion_status: decision,
+        promotion_decision_at: new Date().toISOString(),
+        promotion_decision_by: 'admin',
+        promotion_notes: notes,
+      };
+      
+      if (decision === 'promoted') {
+        updates.coverage_tier = 'A';
+        updates.tier_reason = `Promoted from Tier B. ${notes}`;
+        updates.tier_updated_at = new Date().toISOString();
+      }
+      
+      const { error: updateError } = await supabase
+        .from('platform_adapters')
+        .update(updates)
+        .eq('id', platform.id);
+      
+      if (updateError) throw updateError;
+      
+      await fetchData();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to complete promotion');
+    }
+  };
+
   const tierACount = platforms.filter(p => p.coverage_tier === 'A').length;
   const tierBCount = platforms.filter(p => p.coverage_tier === 'B').length;
   const tierCCount = platforms.filter(p => p.coverage_tier === 'C').length;
   const tierBPlatforms = platforms.filter(p => p.coverage_tier === 'B');
-  const promotionCandidate = platforms.find(p => p.promotion_candidate === true);
+  const promotionCandidate = platforms.find(p => p.promotion_candidate === true && p.coverage_tier === 'B');
+  const promotionInProgress = platforms.find(p => p.promotion_in_progress === true);
+  const promotionHistory = platforms.filter(p => p.promotion_status === 'promoted' || p.promotion_status === 'rejected');
 
   if (isLoading) {
     return (
@@ -538,8 +630,92 @@ export default function PlatformCoverage() {
         <TabsContent value="coverage">
           <TierLegend />
           
+          {/* Promotion In Progress Section */}
+          {promotionInProgress && (
+            <Card className="mb-4 border-blue-300 bg-blue-50/50">
+              <CardHeader className="pb-2">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="h-5 w-5 text-blue-600 animate-spin" />
+                  <CardTitle className="text-lg">Promotion Work In Progress</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="flex items-center gap-3 mb-2">
+                      <span className="text-xl font-bold">{promotionInProgress.platform_name}</span>
+                      <Badge className="bg-blue-500 text-white">In Progress</Badge>
+                      <Badge variant="outline">Locked Score: {((promotionInProgress.promotion_source_score || 0) * 100).toFixed(0)}%</Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Started: {promotionInProgress.promotion_started_at ? new Date(promotionInProgress.promotion_started_at).toLocaleString() : '-'}
+                      {promotionInProgress.promotion_started_by && ` by ${promotionInProgress.promotion_started_by}`}
+                    </p>
+                    <p className="text-sm text-muted-foreground mb-3">
+                      Scoring is locked. Build a dedicated extractor, run repeatability tests, then mark as promoted or rejected.
+                    </p>
+                    <div className="flex items-center gap-4 text-sm mb-4">
+                      <div className="flex items-center gap-1">
+                        {promotionInProgress.gate_1_passed ? (
+                          <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <span>Gate 1: Dates</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {promotionInProgress.gate_2_passed ? (
+                          <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <span>Gate 2: Price</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {promotionInProgress.gate_3_passed ? (
+                          <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-500" />
+                        )}
+                        <span>Gate 3: Failure Quality</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button 
+                        size="sm"
+                        className="bg-green-600 hover:bg-green-700"
+                        onClick={() => {
+                          const notes = window.prompt('Enter promotion notes (extractor name, repeatability results, etc.):');
+                          if (notes) completePromotion(promotionInProgress, 'promoted', notes);
+                        }}
+                      >
+                        <CheckCircle2 className="h-4 w-4 mr-1" />
+                        Mark as Promoted
+                      </Button>
+                      <Button 
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => {
+                          const notes = window.prompt('Enter rejection reason:');
+                          if (notes) completePromotion(promotionInProgress, 'rejected', notes);
+                        }}
+                      >
+                        <XCircle className="h-4 w-4 mr-1" />
+                        Mark as Rejected
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="text-right text-sm text-muted-foreground">
+                    <p>Attempts: {promotionInProgress.total_attempts || 0}</p>
+                    <p>Successes: {promotionInProgress.total_successes || 0}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          
           {/* Recommended Promotion Candidate Section */}
-          {promotionCandidate && (
+          {promotionCandidate && !promotionInProgress && (
             <Card className="mb-4 border-green-300 bg-green-50/50">
               <CardHeader className="pb-2">
                 <div className="flex items-center gap-2">
@@ -557,7 +733,7 @@ export default function PlatformCoverage() {
                     <p className="text-sm text-muted-foreground mb-3">
                       {promotionCandidate.promotion_candidate_reason}
                     </p>
-                    <div className="flex items-center gap-4 text-sm">
+                    <div className="flex items-center gap-4 text-sm mb-4">
                       <div className="flex items-center gap-1">
                         {promotionCandidate.gate_1_passed ? (
                           <CheckCircle2 className="h-4 w-4 text-green-500" />
@@ -583,6 +759,18 @@ export default function PlatformCoverage() {
                         <span>Gate 3: Failure Quality</span>
                       </div>
                     </div>
+                    <Button 
+                      onClick={() => startPromotionWork(promotionCandidate)}
+                      disabled={isStartingPromotion}
+                      className="bg-green-600 hover:bg-green-700"
+                    >
+                      {isStartingPromotion ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <PlayCircle className="h-4 w-4 mr-2" />
+                      )}
+                      Start Promotion Work
+                    </Button>
                   </div>
                   <div className="text-right text-sm text-muted-foreground">
                     <p>Attempts: {promotionCandidate.total_attempts || 0}</p>
@@ -593,7 +781,7 @@ export default function PlatformCoverage() {
             </Card>
           )}
           
-          {!promotionCandidate && tierBPlatforms.length > 0 && (
+          {!promotionCandidate && !promotionInProgress && tierBPlatforms.length > 0 && (
             <Card className="mb-4 border-muted">
               <CardHeader className="pb-2">
                 <div className="flex items-center gap-2 text-muted-foreground">
@@ -605,6 +793,56 @@ export default function PlatformCoverage() {
                 <p className="text-sm text-muted-foreground">
                   No Tier B platform currently passes all eligibility gates. Continue collecting extraction evidence.
                 </p>
+              </CardContent>
+            </Card>
+          )}
+          
+          {/* Promotion History Section */}
+          {promotionHistory.length > 0 && (
+            <Card className="mb-4">
+              <CardHeader className="pb-2">
+                <div className="flex items-center gap-2">
+                  <History className="h-5 w-5 text-muted-foreground" />
+                  <CardTitle className="text-lg">Promotion History</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Platform</TableHead>
+                      <TableHead>Decision</TableHead>
+                      <TableHead>Notes</TableHead>
+                      <TableHead>By</TableHead>
+                      <TableHead>Date</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {promotionHistory.map((platform) => (
+                      <TableRow key={platform.id}>
+                        <TableCell className="font-medium">{platform.platform_name}</TableCell>
+                        <TableCell>
+                          <Badge 
+                            className={platform.promotion_status === 'promoted' ? 'bg-green-500' : 'bg-red-500'}
+                          >
+                            {platform.promotion_status === 'promoted' ? 'Promoted' : 'Rejected'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
+                          {platform.promotion_notes || '-'}
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {platform.promotion_decision_by || '-'}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {platform.promotion_decision_at 
+                            ? new Date(platform.promotion_decision_at).toLocaleDateString()
+                            : '-'}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </CardContent>
             </Card>
           )}

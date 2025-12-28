@@ -627,7 +627,16 @@ export type Database = {
           price_selectors: Json | null
           promotion_candidate: boolean | null
           promotion_candidate_reason: string | null
+          promotion_decision_at: string | null
+          promotion_decision_by: string | null
+          promotion_in_progress: boolean | null
+          promotion_notes: string | null
           promotion_score: number | null
+          promotion_snapshot: Json | null
+          promotion_source_score: number | null
+          promotion_started_at: string | null
+          promotion_started_by: string | null
+          promotion_status: string | null
           proven_deterministic: boolean | null
           reliability_score: number | null
           requires_occupancy: boolean
@@ -674,7 +683,16 @@ export type Database = {
           price_selectors?: Json | null
           promotion_candidate?: boolean | null
           promotion_candidate_reason?: string | null
+          promotion_decision_at?: string | null
+          promotion_decision_by?: string | null
+          promotion_in_progress?: boolean | null
+          promotion_notes?: string | null
           promotion_score?: number | null
+          promotion_snapshot?: Json | null
+          promotion_source_score?: number | null
+          promotion_started_at?: string | null
+          promotion_started_by?: string | null
+          promotion_status?: string | null
           proven_deterministic?: boolean | null
           reliability_score?: number | null
           requires_occupancy?: boolean
@@ -721,7 +739,16 @@ export type Database = {
           price_selectors?: Json | null
           promotion_candidate?: boolean | null
           promotion_candidate_reason?: string | null
+          promotion_decision_at?: string | null
+          promotion_decision_by?: string | null
+          promotion_in_progress?: boolean | null
+          promotion_notes?: string | null
           promotion_score?: number | null
+          promotion_snapshot?: Json | null
+          promotion_source_score?: number | null
+          promotion_started_at?: string | null
+          promotion_started_by?: string | null
+          promotion_status?: string | null
           proven_deterministic?: boolean | null
           reliability_score?: number | null
           requires_occupancy?: boolean
