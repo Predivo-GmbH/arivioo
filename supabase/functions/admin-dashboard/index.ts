@@ -1276,6 +1276,109 @@ Deno.serve(async (req) => {
       );
     }
 
+    // SEARCH DEBUG VIEW
+    if (action === 'search-debug' && req.method === 'POST') {
+      const { searchId, airbnbUrl } = await req.json();
+
+      if (!searchId && !airbnbUrl) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'Either searchId or airbnbUrl is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Find the search
+      let searchQuery = supabase.from('searches').select('*');
+      if (searchId) {
+        searchQuery = searchQuery.eq('id', searchId);
+      } else {
+        // Match by URL (partial match for flexibility)
+        searchQuery = searchQuery.ilike('airbnb_url', `%${airbnbUrl}%`);
+      }
+      
+      const { data: searches, error: searchError } = await searchQuery
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (searchError || !searches || searches.length === 0) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'Search not found' }),
+          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const search = searches[0];
+
+      // Get all price_extractions for this search
+      const { data: extractions } = await supabase
+        .from('price_extractions')
+        .select('*')
+        .eq('search_id', search.id)
+        .order('platform_name');
+
+      // Get platform_adapters for coverage tier info
+      const { data: adapters } = await supabase
+        .from('platform_adapters')
+        .select('platform_name, platform_domain, coverage_tier, coverage_status, dedicated_extractor');
+
+      const adapterMap = new Map(adapters?.map(a => [a.platform_domain, a]) || []);
+
+      // Map extractions with tier info
+      const enrichedExtractions = extractions?.map(e => {
+        // Try to find adapter by matching domain
+        const platformDomain = e.platform_name.toLowerCase().replace(/\s+/g, '');
+        const adapter = adapters?.find(a => 
+          a.platform_domain.includes(platformDomain) || 
+          a.platform_name.toLowerCase().replace(/\s+/g, '') === platformDomain ||
+          e.platform_name.toLowerCase().includes(a.platform_domain.split('.')[0])
+        );
+
+        return {
+          id: e.id,
+          platformName: e.platform_name,
+          coverageTier: adapter?.coverage_tier || 'B',
+          deepLink: e.deep_link,
+          checkIn: e.detected_checkin,
+          checkOut: e.detected_checkout,
+          datesValidated: e.dates_validated || false,
+          extractionStatus: e.extraction_status,
+          extractedPrice: e.extracted_price,
+          currency: e.currency || 'USD',
+          includesTaxesFees: e.includes_taxes_fees,
+          extractionError: e.extraction_error,
+          evidenceSnippets: e.evidence_snippets,
+          providerUsed: e.provider_used,
+          lastAttemptAt: e.updated_at,
+          priceType: e.price_type,
+          pageContentHash: e.page_content_hash
+        };
+      }) || [];
+
+      console.log('[Admin Dashboard] Search debug:', { 
+        searchId: search.id, 
+        extractionsCount: enrichedExtractions.length 
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          search: {
+            id: search.id,
+            airbnbUrl: search.airbnb_url,
+            airbnbTitle: search.airbnb_title,
+            airbnbPrice: search.airbnb_price,
+            checkInDate: search.check_in_date,
+            checkOutDate: search.check_out_date,
+            nightsCount: search.nights_count,
+            status: search.status,
+            createdAt: search.created_at
+          },
+          extractions: enrichedExtractions
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

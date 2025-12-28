@@ -36,6 +36,7 @@ const navItems = [
   { title: 'Platform Coverage', url: '/admin/coverage', icon: Gauge },
   { title: 'Pipeline Status', url: '/admin/pipeline', icon: Activity },
   { title: 'Extractions', url: '/admin/extractions', icon: Database },
+  { title: 'Search Debug', url: '/admin/search-debug', icon: Activity },
   { title: 'Users & Notify Me', url: '/admin/notify-me', icon: User },
   { title: 'Platform Adapters', url: '/admin/adapters', icon: Settings },
   { title: 'Blocked Platforms', url: '/admin/blocked', icon: ShieldOff },
