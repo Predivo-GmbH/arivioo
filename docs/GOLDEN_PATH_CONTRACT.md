@@ -260,6 +260,74 @@ Tier C → Immediate short-circuit with platform_unsupported
 
 ---
 
+## Automated Promotion Candidate Nomination
+
+### How Promotion Candidates Are Nominated
+
+The system automatically nominates **exactly one** promotion candidate from Tier B platforms. Nomination is based on evidence, not assumptions.
+
+#### Eligibility Gates (All Must Pass)
+
+| Gate | Name | Requirement |
+|------|------|-------------|
+| G1 | Date Application Viability | `dates_validated = true` at least once |
+| G2 | Price Presence | At least one grounded price extraction (verbatim, hallucination guard passed) |
+| G3 | Failure Quality | Dominant failure reason is NOT: `blocked`, `login_required`, `reserve_required`, `payment_flow_required` |
+
+Platforms failing any gate are **not eligible** for promotion.
+
+#### Promotion Score (Eligible Platforms Only)
+
+For platforms passing all gates, a transparent score is computed:
+
+```
+promotion_score = (success_rate × 0.5) + (recency_score × 0.3) + (stability_score × 0.2)
+```
+
+| Component | Weight | Meaning |
+|-----------|--------|---------|
+| success_rate | 0.5 | total_successes / total_attempts |
+| recency_score | 0.3 | 1.0 if success ≤7 days, 0.5 if ≤30 days, 0.1 otherwise |
+| stability_score | 0.2 | 1.0 if success_rate ≥ 50% and G3 passed |
+
+**No ML. No tuning magic. Deterministic and explainable only.**
+
+#### Single Candidate Rule
+
+- At most **one** platform can be `promotion_candidate = true` at any time
+- The highest-scoring eligible platform is nominated
+- If no platform passes all gates, no candidate exists
+- Candidate status is **recalculated** after every extraction
+
+### Why Promotion Is Never Automatic
+
+Automatic promotion would:
+- Risk production instability from unvalidated extractors
+- Skip repeatability testing (3-run consistency)
+- Bypass hallucination guard verification
+- Create extractors without human review
+
+**Promotion requires manual implementation of a production extractor**, which must be tested for repeatability before Tier A classification.
+
+### Why Only One Candidate Exists
+
+Single candidate focus:
+- Prevents scattered engineering effort
+- Forces investment where evidence is strongest
+- Makes "next platform" decision clear
+- Avoids ad-hoc platform chasing
+
+### How This Prevents Ad-Hoc Platform Chasing
+
+| Before | After |
+|--------|-------|
+| "Let's try Booking.com" | "Booking.com is Tier B, no successful extractions yet" |
+| "Can we support Agoda?" | "Agoda is eligible but not the top candidate" |
+| Manual investigation | Dashboard shows gates, scores, reasons |
+| Guessing which platform next | Top candidate is clearly nominated |
+
+---
+
 ## Implementation Files
 
 | Component | File | Purpose |

@@ -606,12 +606,16 @@ export type Database = {
           dedicated_extractor: string | null
           deep_link_template: string
           extraction_schema_overrides: Json | null
+          gate_1_passed: boolean | null
+          gate_2_passed: boolean | null
+          gate_3_passed: boolean | null
           id: string
           is_active: boolean
           is_ai_generated: boolean
           last_attempt_at: string | null
           last_failure_at: string | null
           last_outcome_type: string | null
+          last_scored_at: string | null
           last_success_at: string | null
           last_successful_strategy: string | null
           learned_navigation_steps: Json | null
@@ -621,6 +625,9 @@ export type Database = {
           platform_domain: string
           platform_name: string
           price_selectors: Json | null
+          promotion_candidate: boolean | null
+          promotion_candidate_reason: string | null
+          promotion_score: number | null
           proven_deterministic: boolean | null
           reliability_score: number | null
           requires_occupancy: boolean
@@ -646,12 +653,16 @@ export type Database = {
           dedicated_extractor?: string | null
           deep_link_template: string
           extraction_schema_overrides?: Json | null
+          gate_1_passed?: boolean | null
+          gate_2_passed?: boolean | null
+          gate_3_passed?: boolean | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
           last_attempt_at?: string | null
           last_failure_at?: string | null
           last_outcome_type?: string | null
+          last_scored_at?: string | null
           last_success_at?: string | null
           last_successful_strategy?: string | null
           learned_navigation_steps?: Json | null
@@ -661,6 +672,9 @@ export type Database = {
           platform_domain: string
           platform_name: string
           price_selectors?: Json | null
+          promotion_candidate?: boolean | null
+          promotion_candidate_reason?: string | null
+          promotion_score?: number | null
           proven_deterministic?: boolean | null
           reliability_score?: number | null
           requires_occupancy?: boolean
@@ -686,12 +700,16 @@ export type Database = {
           dedicated_extractor?: string | null
           deep_link_template?: string
           extraction_schema_overrides?: Json | null
+          gate_1_passed?: boolean | null
+          gate_2_passed?: boolean | null
+          gate_3_passed?: boolean | null
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
           last_attempt_at?: string | null
           last_failure_at?: string | null
           last_outcome_type?: string | null
+          last_scored_at?: string | null
           last_success_at?: string | null
           last_successful_strategy?: string | null
           learned_navigation_steps?: Json | null
@@ -701,6 +719,9 @@ export type Database = {
           platform_domain?: string
           platform_name?: string
           price_selectors?: Json | null
+          promotion_candidate?: boolean | null
+          promotion_candidate_reason?: string | null
+          promotion_score?: number | null
           proven_deterministic?: boolean | null
           reliability_score?: number | null
           requires_occupancy?: boolean
