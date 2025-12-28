@@ -94,19 +94,35 @@ function simpleHash(str: string): string {
 }
 
 /**
+ * Calculate nights between two dates
+ */
+function calculateNights(checkIn: string, checkOut: string): number {
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
+  const diffTime = end.getTime() - start.getTime();
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
+
+/**
  * Build Agoda URL with date parameters
- * Agoda uses: checkIn=YYYY-MM-DD, checkOut=YYYY-MM-DD, adults=N
+ * CRITICAL: Agoda requires `los` (length of stay) parameter for dates to apply!
+ * Without `los`, dates are ignored and page shows "Enter dates to see prices"
+ * Format: checkIn=YYYY-MM-DD, checkOut=YYYY-MM-DD, los=N (nights), adults=N, rooms=N, cid=-1
  */
 function buildAgodaUrl(baseUrl: string, checkIn: string, checkOut: string, adults: number = 2): string {
   const url = new URL(baseUrl);
   
-  // Agoda uses los (length of stay) and some use check-in/check-out directly
-  // Primary format: checkIn and checkOut params
+  // Calculate length of stay
+  const los = calculateNights(checkIn, checkOut);
+  
+  // Agoda REQUIRES these params together for dates to be applied
   url.searchParams.set('checkIn', checkIn);
   url.searchParams.set('checkOut', checkOut);
+  url.searchParams.set('los', String(los));  // CRITICAL: Required for dates to apply
   url.searchParams.set('adults', String(adults));
   url.searchParams.set('children', '0');
   url.searchParams.set('rooms', '1');
+  url.searchParams.set('cid', '-1');  // Helps bypass tracking issues
   
   return url.toString();
 }
@@ -176,96 +192,95 @@ function validatePhaseA(markdown: string): {
 }
 
 // Phase B: Extract total price with verification (GROUNDED EXTRACTION ONLY)
-function extractPrice(markdown: string): {
+// Agoda shows nightly rates primarily - we extract nightly and compute total
+function extractPrice(markdown: string, nights: number): {
   extractedPrice: number | null;
+  nightlyPrice: number | null;
   currency: string | null;
   includesTaxesFees: boolean | null;
   priceVerified: boolean;
   evidenceSnippet: string | null;
+  priceType: 'total' | 'nightly_computed';
 } {
-  // Pattern 1: "Total: $XXX" or "Grand Total: $XXX"
-  const totalLabelPattern = /(?:total|grand total|final price)[:\s]*\$?([\d,]+(?:\.\d{2})?)/i;
-  const totalLabelMatch = markdown.match(totalLabelPattern);
+  const lowerMarkdown = markdown.toLowerCase();
   
-  // Pattern 2: "$XXX total" or "$XXX for X nights"
-  const suffixPattern = /\$([\d,]+(?:\.\d{2})?)\s*(?:total|for\s+\d+\s*nights?)/gi;
-  const suffixMatches = [...markdown.matchAll(suffixPattern)];
+  // Check for taxes/fees status early - Agoda often states this clearly
+  let includesTaxesFees: boolean | null = null;
+  if (lowerMarkdown.includes('prices do not include taxes') || 
+      lowerMarkdown.includes('before taxes') ||
+      lowerMarkdown.includes('excluding taxes')) {
+    includesTaxesFees = false;
+  } else if (lowerMarkdown.includes('including taxes') || 
+             lowerMarkdown.includes('taxes included') ||
+             lowerMarkdown.includes('incl. taxes')) {
+    includesTaxesFees = true;
+  }
   
-  // Pattern 3: "Price: $XXX" or explicit price declarations
-  const pricePattern = /price[:\s]*\$?([\d,]+(?:\.\d{2})?)/gi;
-  const priceMatches = [...markdown.matchAll(pricePattern)];
-  
+  let nightlyPrice: number | null = null;
   let extractedPrice: number | null = null;
   let evidenceSnippet: string | null = null;
-  let includesTaxesFees: boolean | null = null;
+  let priceType: 'total' | 'nightly_computed' = 'nightly_computed';
   
-  // Priority 1: Explicit "Total: $XXX" pattern
-  if (totalLabelMatch) {
-    const priceStr = totalLabelMatch[1].replace(/,/g, '');
+  // Pattern 1: Agoda nightly rate - "USD798\n\nPer night" or "$798 per night"
+  const nightlyPattern = /(?:USD|US\$|\$)\s*([\d,]+(?:\.\d{2})?)\s*(?:\n\n?)?(?:per night|\/night)/gi;
+  const nightlyMatches = [...markdown.matchAll(nightlyPattern)];
+  
+  // Pattern 2: Explicit total if shown
+  const totalPattern = /(?:total|grand total)[:\s]*(?:USD|US\$|\$)\s*([\d,]+(?:\.\d{2})?)/gi;
+  const totalMatches = [...markdown.matchAll(totalPattern)];
+  
+  // Pattern 3: Just USD + number before "Per night"
+  const simpleNightlyPattern = /USD([\d,]+)\s*\n\s*Per night/gi;
+  const simpleMatches = [...markdown.matchAll(simpleNightlyPattern)];
+  
+  // Priority 1: Use explicit total if found
+  if (totalMatches.length > 0) {
+    const match = totalMatches[0];
+    const priceStr = match[1].replace(/,/g, '');
     extractedPrice = parseFloat(priceStr);
+    priceType = 'total';
     
-    // Get surrounding context for evidence
-    const matchIndex = markdown.indexOf(totalLabelMatch[0]);
+    const matchIndex = markdown.indexOf(match[0]);
     const start = Math.max(0, matchIndex - 40);
-    const end = Math.min(markdown.length, matchIndex + totalLabelMatch[0].length + 60);
+    const end = Math.min(markdown.length, matchIndex + match[0].length + 60);
     evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
-    
-    // Check for taxes/fees mention
-    const context = markdown.slice(matchIndex, matchIndex + 150).toLowerCase();
-    if (context.includes('taxes') && context.includes('fees')) {
-      includesTaxesFees = true;
-    } else if (context.includes('incl') || context.includes('including')) {
-      includesTaxesFees = true;
-    }
   }
-  // Priority 2: "$XXX total" suffix pattern
-  else if (suffixMatches.length > 0) {
-    const firstMatch = suffixMatches[0];
-    const priceStr = firstMatch[1].replace(/,/g, '');
-    extractedPrice = parseFloat(priceStr);
+  // Priority 2: Nightly rate with calculation
+  else if (nightlyMatches.length > 0 || simpleMatches.length > 0) {
+    const match = nightlyMatches.length > 0 ? nightlyMatches[0] : simpleMatches[0];
+    const priceStr = match[1].replace(/,/g, '');
+    nightlyPrice = parseFloat(priceStr);
+    extractedPrice = nightlyPrice * nights;  // Calculate total from nightly
+    priceType = 'nightly_computed';
     
-    const matchIndex = markdown.indexOf(firstMatch[0]);
+    const matchIndex = markdown.indexOf(match[0]);
     const start = Math.max(0, matchIndex - 40);
-    const end = Math.min(markdown.length, matchIndex + firstMatch[0].length + 60);
+    const end = Math.min(markdown.length, matchIndex + match[0].length + 60);
     evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
-    
-    const context = markdown.slice(matchIndex, matchIndex + 150).toLowerCase();
-    if (context.includes('taxes') && context.includes('fees')) {
-      includesTaxesFees = true;
-    }
-  }
-  // Priority 3: General price pattern (least reliable, only if explicit total context)
-  else if (priceMatches.length > 0) {
-    // Only use if "total" appears nearby
-    for (const match of priceMatches) {
-      const matchIndex = markdown.indexOf(match[0]);
-      const context = markdown.slice(Math.max(0, matchIndex - 50), matchIndex + 100).toLowerCase();
-      
-      if (context.includes('total')) {
-        const priceStr = match[1].replace(/,/g, '');
-        extractedPrice = parseFloat(priceStr);
-        
-        const start = Math.max(0, matchIndex - 40);
-        const end = Math.min(markdown.length, matchIndex + match[0].length + 60);
-        evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
-        break;
-      }
-    }
   }
   
-  // HALLUCINATION GUARD: Price MUST appear verbatim in evidence
-  const priceVerified = extractedPrice !== null && 
+  // HALLUCINATION GUARD: Nightly price MUST appear verbatim in content
+  const priceToVerify = nightlyPrice || extractedPrice;
+  const priceVerified = priceToVerify !== null && 
     evidenceSnippet !== null && 
-    (evidenceSnippet.includes(String(Math.round(extractedPrice))) || 
-     evidenceSnippet.includes(extractedPrice.toLocaleString()) ||
-     evidenceSnippet.includes(String(extractedPrice)));
+    (evidenceSnippet.includes(String(Math.round(priceToVerify))) || 
+     evidenceSnippet.includes(priceToVerify.toLocaleString()) ||
+     evidenceSnippet.includes(String(priceToVerify)));
+  
+  // Detect currency from content
+  let currency = 'USD';
+  if (markdown.includes('EUR') || markdown.includes('€')) currency = 'EUR';
+  else if (markdown.includes('GBP') || markdown.includes('£')) currency = 'GBP';
+  else if (markdown.includes('SGD')) currency = 'SGD';
   
   return {
     extractedPrice,
-    currency: extractedPrice ? 'USD' : null, // Agoda may use various currencies, default USD
+    nightlyPrice,
+    currency,
     includesTaxesFees,
     priceVerified,
     evidenceSnippet,
+    priceType,
   };
 }
 
@@ -415,6 +430,7 @@ async function extractFromAgoda(
 ): Promise<ExtractionResult> {
   const startTime = Date.now();
   const attempts: AttemptResult[] = [];
+  const nights = calculateNights(checkIn, checkOut);
   
   const result: ExtractionResult = {
     success: false,
@@ -590,7 +606,7 @@ async function extractFromAgoda(
     // ============= PHASE B: Extract price (only if Phase A passed) =============
     result.phaseB.ran = true;
     
-    const phaseBResult = extractPrice(markdown);
+    const phaseBResult = extractPrice(markdown, nights);
     result.phaseB.extractedPrice = phaseBResult.extractedPrice;
     result.phaseB.currency = phaseBResult.currency;
     result.phaseB.includesTaxesFees = phaseBResult.includesTaxesFees;
