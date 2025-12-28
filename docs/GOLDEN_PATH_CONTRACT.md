@@ -143,7 +143,7 @@ Do NOT expand to a new platform if:
 | **Expedia** | A | ✅ **PROVEN** | 3/3 runs ($630, hash `631f3b1a`) |
 | Booking.com | B | ❌ Unsupported | Prices require reserve flow |
 | Agoda | C | ❌ Unsupported | Prices not exposed pre-interaction |
-| Vrbo | TBD | ⏳ Pending | Next in queue for go/no-go check |
+| Vrbo | D | ❌ NO-GO | 403 blocked by Firecrawl+Zyte, first fail: render_failed |
 
 ---
 
