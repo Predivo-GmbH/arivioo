@@ -2063,6 +2063,8 @@ async function scrapePriceFromListing(
 
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      // NOTE: Firecrawl requires waitFor <= timeout/2. Calculate timeout as 2.5x waitFor.
+      const timeout = Math.max(30000, Math.ceil(opts.waitFor * 2.5));
       const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
         method: "POST",
         headers: {
@@ -2074,6 +2076,7 @@ async function scrapePriceFromListing(
           formats: opts.formats,
           onlyMainContent: opts.onlyMainContent,
           waitFor: opts.waitFor,
+          timeout, // Required: waitFor must be <= timeout/2
         }),
       });
 
@@ -2625,8 +2628,8 @@ async function runSearchWithStreaming(
                 formats,
                 onlyMainContent: false,
                 waitFor: waitForMs,
-                // Strict provider-side timeout (required to prevent stuck stage 1)
-                timeout: 25_000,
+                // NOTE: Firecrawl requires waitFor <= timeout/2. Use 2.5x waitFor.
+                timeout: Math.max(30000, Math.ceil(waitForMs * 2.5)),
               }),
             },
             // Strict client-side timeout (required to prevent stuck stage 1)
@@ -2652,8 +2655,8 @@ async function runSearchWithStreaming(
       };
 
       try {
-        // Attempt 1: full content + screenshot
-        let attempt = await scrapeWithFirecrawl(["markdown", "html", "rawHtml", "screenshot"], 16000);
+        // Attempt 1: full content + screenshot (waitFor=10s, timeout=30s to satisfy waitFor <= timeout/2)
+        let attempt = await scrapeWithFirecrawl(["markdown", "html", "rawHtml", "screenshot"], 10000);
 
         if (attempt.status === 499) {
           console.log("SKIP requested during Airbnb scrape");
@@ -2667,7 +2670,8 @@ async function runSearchWithStreaming(
         if (!attempt.ok) {
           checkStage1Timeout();
           sendProgress(controller, "Loading Airbnb listing", "Retrying with longer wait");
-          attempt = await scrapeWithFirecrawl(["screenshot", "html", "rawHtml"], 25000);
+          // Retry with waitFor=15s (timeout will be 37.5s)
+          attempt = await scrapeWithFirecrawl(["screenshot", "html", "rawHtml"], 15000);
         }
 
         if (attempt.status === 499) {
