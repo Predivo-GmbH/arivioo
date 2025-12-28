@@ -540,6 +540,109 @@ Firecrawl usage is aggregated across all active keys:
 
 ---
 
+## Pipeline Stage Timing System
+
+### Overview
+
+The pipeline timing system provides data-driven "typical time" estimates for each stage of the search pipeline. This replaces static hardcoded estimates with real measurements from telemetry.
+
+### Canonical Pipeline Stages
+
+The pipeline has 6 canonical stages defined in `src/lib/pipelineStages.ts`:
+
+| Stage ID | Title | Description |
+|----------|-------|-------------|
+| `analyze_listing` | Analyzing Listing | Parse Airbnb URL, extract metadata, dates |
+| `collect_photos` | Collecting Property Photos | Download images from Airbnb listing |
+| `find_matches` | Finding Matches on Other Platforms | Visual search + text search across platforms |
+| `validate_dates` | Applying Your Dates | Set check-in/check-out dates on each platform (Phase A) |
+| `collect_prices` | Collecting Prices | Extract real-time prices from each platform (Phase B) |
+| `finalize_results` | Finalizing Results | Compute savings and prepare results |
+
+### Telemetry Storage
+
+Stage timings are stored in `search_stage_runs` table:
+
+```sql
+CREATE TABLE search_stage_runs (
+  id UUID PRIMARY KEY,
+  search_id UUID REFERENCES searches(id),
+  stage_name TEXT NOT NULL,
+  started_at TIMESTAMPTZ NOT NULL,
+  finished_at TIMESTAMPTZ,
+  duration_ms INTEGER,
+  outcome_status TEXT DEFAULT 'running',  -- running, success, partial, failed, skipped, cancelled
+  error_message TEXT,
+  metadata JSONB
+);
+```
+
+Aggregated statistics are cached in `search_stage_stats` for fast UI retrieval.
+
+### "Typical Time" Calculation
+
+The `get-stage-timings` edge function computes robust typical times using the following algorithm:
+
+1. **Sample Selection**: Use the most recent 200 successful/partial runs per stage
+2. **Outlier Removal**: Apply IQR-based filtering:
+   - Compute Q1, Q3, and IQR = Q3 - Q1
+   - Exclude durations outside [Q1 - 1.5×IQR, Q3 + 1.5×IQR]
+3. **Percentile Calculation**:
+   - If ≥10 samples remain after filtering: compute p50 and p80
+   - If <10 samples: fall back to unfiltered p50 and p80
+4. **Display Format**: Show range as "p50–p80" (e.g., "8s–15s")
+5. **Caching**: Results are cached daily in `search_stage_stats`
+
+### Fallback Values
+
+Each stage has hardcoded fallback typical times used when insufficient telemetry exists:
+
+| Stage | Fallback p50 | Fallback p80 |
+|-------|--------------|--------------|
+| analyze_listing | 8s | 15s |
+| collect_photos | 5s | 12s |
+| find_matches | 20s | 45s |
+| validate_dates | 10s | 25s |
+| collect_prices | 15s | 40s |
+| finalize_results | 2s | 5s |
+
+### Backend Instrumentation
+
+Stage timings are recorded using helper functions in the orchestration code:
+
+```typescript
+import { startStageRun, finishStageRun } from './telemetry';
+
+const stageRun = await startStageRun(supabase, searchId, 'collect_photos');
+try {
+  // ... stage work ...
+  await finishStageRun(supabase, stageRun.id, 'success');
+} catch (error) {
+  await finishStageRun(supabase, stageRun.id, 'failed', error.message);
+}
+```
+
+### Frontend Integration
+
+The `useStageTimings` hook fetches timing data for display:
+
+```typescript
+const { stageTimings, isLoading } = useStageTimings();
+
+// Get timing for a specific stage
+const timing = stageTimings.find(t => t.stageId === 'collect_prices');
+const display = formatTypicalTime(timing?.p50Seconds, timing?.p80Seconds);
+// Returns: "15s–40s"
+```
+
+### Handling "Unknown" States
+
+- **Unknown limit**: When we cannot determine the API provider's limit
+- **Unknown timing**: Falls back to hardcoded values with "Calculating..." display
+- **Skipped stages**: Marked with `outcome_status = 'skipped'` and explicit reason in metadata
+
+---
+
 ## TODO: Future Coverage Program Hooks
 
 These are planned but not yet implemented:
