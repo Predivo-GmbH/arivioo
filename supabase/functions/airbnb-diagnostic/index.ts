@@ -15,6 +15,9 @@ interface ProviderAttempt {
   evidenceSnippet: string | null;
   priceFound: boolean;
   priceValue: number | null;
+  priceType: 'total' | 'nightly' | null;
+  priceEvidence: string | null;
+  nightsDetected: number | null;
   durationMs: number;
   error: string | null;
   finalUrl: string | null;
@@ -32,28 +35,55 @@ interface DiagnosticResult {
 }
 
 // Detect bot/captcha indicators in content
+// IMPORTANT: Only detect real bot walls, not CSS class names or script content
 function detectBotIndicators(content: string): string[] {
   const indicators: string[] = [];
-  const lowerContent = content.toLowerCase();
   
+  // Strip out CSS, scripts, and style blocks to avoid false positives from class names
+  const visibleContent = content
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/\{[^}]*\}/g, ' ') // Remove CSS rule blocks
+    .replace(/class\s*=\s*["'][^"']*["']/gi, ' ') // Remove class attributes
+    .replace(/id\s*=\s*["'][^"']*["']/gi, ' '); // Remove id attributes
+  
+  // These patterns must appear in visible text context, not CSS/class names
   const patterns = [
-    { pattern: /captcha/i, label: "captcha" },
-    { pattern: /robot|bot\s+check/i, label: "robot_check" },
-    { pattern: /verify you['']?re human/i, label: "human_verification" },
-    { pattern: /cloudflare/i, label: "cloudflare" },
-    { pattern: /please\s+wait\s+while\s+we\s+verify/i, label: "verification_wait" },
-    { pattern: /access\s+denied/i, label: "access_denied" },
-    { pattern: /blocked/i, label: "blocked" },
-    { pattern: /unusual\s+traffic/i, label: "unusual_traffic" },
-    { pattern: /rate\s+limit/i, label: "rate_limited" },
-    { pattern: /too\s+many\s+requests/i, label: "too_many_requests" },
-    { pattern: /just\s+a\s+moment/i, label: "cloudflare_wait" },
+    // Specific phrases that indicate a real bot wall
+    { pattern: /please\s+complete\s+the\s+captcha/i, label: "captcha" },
+    { pattern: /solve\s+the\s+captcha/i, label: "captcha" },
+    { pattern: /verify\s+you['']?re\s+human/i, label: "human_verification" },
+    { pattern: /verify\s+you\s+are\s+human/i, label: "human_verification" },
+    { pattern: /i['']?m\s+not\s+a\s+robot/i, label: "captcha" },
     { pattern: /checking\s+your\s+browser/i, label: "browser_check" },
+    { pattern: /just\s+a\s+moment[\.\!\s]/i, label: "cloudflare_wait" },
+    { pattern: /please\s+wait\s+while\s+we\s+verify/i, label: "verification_wait" },
+    { pattern: /unusual\s+traffic\s+from\s+your/i, label: "unusual_traffic" },
+    { pattern: /too\s+many\s+requests/i, label: "too_many_requests" },
+    { pattern: /access\s+to\s+this\s+page\s+has\s+been\s+denied/i, label: "access_denied" },
+    { pattern: /this\s+page\s+is\s+not\s+available/i, label: "page_unavailable" },
+    // Cloudflare specific
+    { pattern: /ray\s+id[:\s]+[a-f0-9]+/i, label: "cloudflare" },
+    { pattern: /performance\s+&\s+security\s+by\s+cloudflare/i, label: "cloudflare" },
   ];
   
   for (const { pattern, label } of patterns) {
-    if (pattern.test(content)) {
+    if (pattern.test(visibleContent)) {
       indicators.push(label);
+    }
+  }
+  
+  // Additional heuristic: if content is very small (under 50KB) and lacks key Airbnb elements,
+  // it might be a block page
+  if (content.length < 50000) {
+    const hasAirbnbPricing = /price|night|total|reserve|book/i.test(content);
+    const hasAirbnbListing = /listing|property|host|amenities/i.test(content);
+    
+    if (!hasAirbnbPricing && !hasAirbnbListing) {
+      // Could be a block page, but only flag if we found other indicators
+      if (indicators.length > 0) {
+        indicators.push("minimal_content");
+      }
     }
   }
   
@@ -62,22 +92,33 @@ function detectBotIndicators(content: string): string[] {
 
 // Extract evidence snippet around bot indicator or price
 function extractEvidenceSnippet(content: string, maxLength: number = 500): string {
-  // Try to find context around prices or bot messages
-  const botMatch = content.match(/(captcha|robot|verify|blocked|access denied).{0,200}/i);
-  if (botMatch) {
-    const start = Math.max(0, botMatch.index! - 100);
-    return content.slice(start, start + maxLength);
-  }
+  // Strip CSS/style content for cleaner evidence
+  const cleanContent = content
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/\{[^}]*\}/g, ' ');
   
-  // Try to find context around price
-  const priceMatch = content.match(/\$\s*\d{1,5}[,\d]*(\.\d{2})?/);
+  // Try to find context around price (more useful evidence)
+  const priceMatch = cleanContent.match(/(\$\s*\d{1,5}[,\d]*(?:\.\d{2})?).{0,150}/i);
   if (priceMatch) {
-    const start = Math.max(0, priceMatch.index! - 100);
-    return content.slice(start, start + maxLength);
+    const start = Math.max(0, priceMatch.index! - 50);
+    return cleanContent.slice(start, start + maxLength);
   }
   
-  // Return first chunk
-  return content.slice(0, maxLength);
+  // Try to find night rate context
+  const nightMatch = cleanContent.match(/.{0,50}(?:per\s+night|\/night|night).{0,100}/i);
+  if (nightMatch) {
+    return nightMatch[0];
+  }
+  
+  // Look for total context
+  const totalMatch = cleanContent.match(/.{0,50}total.{0,150}/i);
+  if (totalMatch) {
+    return totalMatch[0];
+  }
+  
+  // Return first meaningful chunk (skip leading whitespace)
+  const trimmed = cleanContent.trim();
+  return trimmed.slice(0, maxLength);
 }
 
 // Simple hash for content comparison
@@ -92,40 +133,76 @@ function simpleHash(str: string): string {
 }
 
 // Extract Airbnb price from content using regex patterns
-function extractAirbnbPrice(content: string): number | null {
-  // Try JSON-LD first
+function extractAirbnbPrice(content: string): { price: number | null; type: 'total' | 'nightly' | null; evidence: string | null; nights: number | null } {
+  const result = { price: null as number | null, type: null as 'total' | 'nightly' | null, evidence: null as string | null, nights: null as number | null };
+  
+  // Priority 1: Look for "X for Y nights" pattern in aria-label or visible text
+  // This is the TOTAL stay price Airbnb shows
+  const totalNightsMatch = content.match(/aria-label=["']?\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/i);
+  if (totalNightsMatch) {
+    const price = parseFloat(totalNightsMatch[1].replace(/,/g, ''));
+    const nights = parseInt(totalNightsMatch[2], 10);
+    if (price >= 20 && price <= 50000 && nights > 0) {
+      return { 
+        price, 
+        type: 'total', 
+        evidence: totalNightsMatch[0].slice(0, 100),
+        nights 
+      };
+    }
+  }
+  
+  // Priority 2: Look for total price indicators
+  const totalPatterns = [
+    /["']?total[:\s]*\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    /\$\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
+    /"priceForDisplay"[:\s]*["\$]*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
+  ];
+  
+  for (const pattern of totalPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      const priceStr = (match[1] || "").replace(/,/g, '');
+      const price = parseFloat(priceStr);
+      if (price >= 20 && price <= 50000) {
+        return { price, type: 'total', evidence: match[0].slice(0, 100), nights: null };
+      }
+    }
+  }
+  
+  // Priority 3: Look for nightly rate
+  const nightlyPatterns = [
+    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per\s+)?night/gi,
+    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*\/\s*night/gi,
+    /"(?:price|pricePerNight|nightlyPrice|amount)"[:\s]*["\$]*(\d{1,4}(?:\.\d{2})?)/gi,
+  ];
+  
+  for (const pattern of nightlyPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      const priceStr = (match[1] || match[2] || "").replace(/,/g, '');
+      const price = parseFloat(priceStr);
+      if (price >= 15 && price <= 5000) {
+        return { price, type: 'nightly', evidence: match[0].slice(0, 100), nights: null };
+      }
+    }
+  }
+  
+  // Priority 4: Try JSON-LD
   const jsonLdMatch = content.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
   if (jsonLdMatch) {
     for (const match of jsonLdMatch) {
       try {
         const json = JSON.parse(match.replace(/<\/?script[^>]*>/gi, ''));
         if (json.offers?.price) {
-          return parseFloat(json.offers.price);
+          const price = parseFloat(json.offers.price);
+          return { price, type: 'nightly', evidence: 'JSON-LD offers.price', nights: null };
         }
       } catch {}
     }
   }
   
-  // Try common Airbnb price patterns
-  const patterns = [
-    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:night|\/night|per night)/gi,
-    /"(?:price|priceString|priceForDisplay)"[:\s]*"\$?(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)"/gi,
-    /"(?:amount|pricePerNight|nightlyPrice)"[:\s]*(\d{1,4}(?:\.\d{2})?)/gi,
-    /total[:\s]*\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
-  ];
-  
-  for (const pattern of patterns) {
-    const matches = [...content.matchAll(pattern)];
-    for (const match of matches) {
-      const priceStr = (match[1] || match[2] || "").replace(/,/g, '');
-      const price = parseFloat(priceStr);
-      if (price >= 15 && price <= 10000) {
-        return price;
-      }
-    }
-  }
-  
-  return null;
+  return result;
 }
 
 // Test Firecrawl provider
@@ -141,6 +218,9 @@ async function testFirecrawl(url: string, apiKey: string): Promise<ProviderAttem
     evidenceSnippet: null,
     priceFound: false,
     priceValue: null,
+    priceType: null,
+    priceEvidence: null,
+    nightsDetected: null,
     durationMs: 0,
     error: null,
     finalUrl: null,
@@ -184,10 +264,13 @@ async function testFirecrawl(url: string, apiKey: string): Promise<ProviderAttem
     attempt.evidenceSnippet = extractEvidenceSnippet(content);
     attempt.finalUrl = data.data?.metadata?.sourceURL || url;
     
-    const price = extractAirbnbPrice(content);
-    if (price) {
+    const priceResult = extractAirbnbPrice(content);
+    if (priceResult.price) {
       attempt.priceFound = true;
-      attempt.priceValue = price;
+      attempt.priceValue = priceResult.price;
+      attempt.priceType = priceResult.type;
+      attempt.priceEvidence = priceResult.evidence;
+      attempt.nightsDetected = priceResult.nights;
     }
     
   } catch (e) {
@@ -211,6 +294,9 @@ async function testZyte(url: string, apiKey: string): Promise<ProviderAttempt> {
     evidenceSnippet: null,
     priceFound: false,
     priceValue: null,
+    priceType: null,
+    priceEvidence: null,
+    nightsDetected: null,
     durationMs: 0,
     error: null,
     finalUrl: null,
@@ -232,7 +318,7 @@ async function testZyte(url: string, apiKey: string): Promise<ProviderAttempt> {
         screenshot: true,
         screenshotOptions: { fullPage: false },
         actions: [
-          { action: "waitForTimeout", timeout: 8000 },
+          { action: "waitForTimeout", timeout: 8 },  // Zyte timeout is in SECONDS, max 15
         ],
       }),
     });
@@ -256,10 +342,13 @@ async function testZyte(url: string, apiKey: string): Promise<ProviderAttempt> {
     attempt.evidenceSnippet = extractEvidenceSnippet(html);
     attempt.finalUrl = data.url || url;
     
-    const price = extractAirbnbPrice(html);
-    if (price) {
+    const priceResult = extractAirbnbPrice(html);
+    if (priceResult.price) {
       attempt.priceFound = true;
-      attempt.priceValue = price;
+      attempt.priceValue = priceResult.price;
+      attempt.priceType = priceResult.type;
+      attempt.priceEvidence = priceResult.evidence;
+      attempt.nightsDetected = priceResult.nights;
     }
     
   } catch (e) {
@@ -283,6 +372,9 @@ async function testDirectFetch(url: string): Promise<ProviderAttempt> {
     evidenceSnippet: null,
     priceFound: false,
     priceValue: null,
+    priceType: null,
+    priceEvidence: null,
+    nightsDetected: null,
     durationMs: 0,
     error: null,
     finalUrl: null,
@@ -314,10 +406,13 @@ async function testDirectFetch(url: string): Promise<ProviderAttempt> {
     attempt.botIndicators = detectBotIndicators(html);
     attempt.evidenceSnippet = extractEvidenceSnippet(html);
     
-    const price = extractAirbnbPrice(html);
-    if (price) {
+    const priceResult = extractAirbnbPrice(html);
+    if (priceResult.price) {
       attempt.priceFound = true;
-      attempt.priceValue = price;
+      attempt.priceValue = priceResult.price;
+      attempt.priceType = priceResult.type;
+      attempt.priceEvidence = priceResult.evidence;
+      attempt.nightsDetected = priceResult.nights;
     }
     
   } catch (e) {
