@@ -74,6 +74,7 @@ interface SearchData {
   airbnb_url: string;
   airbnb_title: string | null;
   airbnb_price: number | null;
+  airbnb_currency?: string | null;
   airbnb_image_url: string | null;
   airbnb_images: Json;
   status: string;
@@ -84,6 +85,19 @@ interface SearchData {
   api_error?: string | null;
   api_error_code?: string | null;
 }
+
+// Helper to get currency symbol
+const getCurrencySymbol = (currency: string | null | undefined): string => {
+  switch (currency) {
+    case 'EUR': return '€';
+    case 'GBP': return '£';
+    case 'CHF': return 'CHF ';
+    case 'AUD': return 'A$';
+    case 'CAD': return 'C$';
+    case 'USD':
+    default: return '$';
+  }
+};
 
 // Note: stageIcons are now in PipelineProgress component
 
@@ -844,6 +858,7 @@ export default function SearchResults() {
   // airbnb_price is TOTAL price for the entire stay (not per-night)
   // result.price from alternatives is also TOTAL price
   const airbnbTotal = search?.airbnb_price || (results.length > 0 ? results[0].original_price : null);
+  const currencySymbol = getCurrencySymbol(search?.airbnb_currency);
 
   // CRITICAL: Filter out Tier C (blocked) platforms from price comparisons
   // They should NEVER show prices or be marked as "Best Deal"
@@ -1164,7 +1179,7 @@ export default function SearchResults() {
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-foreground text-lg">
-                              €{airbnbTotal ? Math.round(airbnbTotal) : "—"}
+                              {currencySymbol}{airbnbTotal ? Math.round(airbnbTotal) : "—"}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
                               <span className="text-xs">AirCover protection, service fee, cleaning fee may apply</span>
@@ -1237,7 +1252,7 @@ export default function SearchResults() {
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-success text-lg">
-                              €{airbnbTotal ? Math.round(airbnbTotal) : "—"}
+                              {currencySymbol}{airbnbTotal ? Math.round(airbnbTotal) : "—"}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
                               <span className="text-xs">Baseline price from Airbnb for these dates</span>
@@ -1294,8 +1309,8 @@ export default function SearchResults() {
                                         )}
                                       </td>
                                       <td className="py-4 px-4 text-right">
-                                        <span className="font-semibold text-foreground">€{Math.round(alternativeTotal)}</span>
-                                        <span className="text-amber-600 text-xs ml-2">(+€{priceDiff})</span>
+                                        <span className="font-semibold text-foreground">{currencySymbol}{Math.round(alternativeTotal)}</span>
+                                        <span className="text-amber-600 text-xs ml-2">(+{currencySymbol}{priceDiff})</span>
                                       </td>
                                       <td className="py-4 px-4 hidden lg:table-cell">
                                         <span className="text-xs text-muted-foreground">May have different terms</span>
@@ -1475,7 +1490,7 @@ export default function SearchResults() {
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-foreground">
                               {airbnbTotal ? (
-                                `€${Math.round(airbnbTotal)}`
+                                `${currencySymbol}${Math.round(airbnbTotal)}`
                               ) : (
                                 <div className="flex justify-end">
                                   <div className="h-5 w-16 bg-muted animate-pulse rounded" />
@@ -1540,7 +1555,7 @@ export default function SearchResults() {
                                   )}
                                 </td>
                                 <td className={`py-4 px-4 text-right font-semibold ${isCheapest ? 'text-success text-lg' : 'text-foreground'}`}>
-                                  {result.price && result.price >= 10 ? `€${Math.round(result.price)}` : '—'}
+                                  {result.price && result.price >= 10 ? `${currencySymbol}${Math.round(result.price)}` : '—'}
                                 </td>
                                 <td className="py-4 px-4 hidden lg:table-cell">
                                     <div className="flex flex-col gap-1">
@@ -1674,14 +1689,14 @@ export default function SearchResults() {
                             </div>
                           ) : potentialSavings && potentialSavings > 0 ? (
                             <>
-                              <p className="text-5xl font-bold text-success">€{Math.round(potentialSavings)}</p>
+                              <p className="text-5xl font-bold text-success">{currencySymbol}{Math.round(potentialSavings)}</p>
                               <span className="text-success text-xl font-semibold">
                                 ({airbnbTotal ? Math.round((potentialSavings / airbnbTotal) * 100) : '~'}% off)
                               </span>
                             </>
                           ) : (
                             <p className="text-3xl font-bold text-success">
-                              Best price: €{cheapestResult.price}/total
+                              Best price: {currencySymbol}{cheapestResult.price}/total
                             </p>
                           )}
                         </div>
@@ -1693,7 +1708,7 @@ export default function SearchResults() {
                         </p>
                         {search?.airbnb_price && potentialSavings && potentialSavings > 0 && (
                           <p className="text-sm text-muted-foreground">
-                            <strong>Unlock fee:</strong> €{(potentialSavings * 0.1).toFixed(2)} (10% of your savings) — Only pay when you save
+                            <strong>Unlock fee:</strong> {currencySymbol}{(potentialSavings * 0.1).toFixed(2)} (10% of your savings) — Only pay when you save
                           </p>
                         )}
                       </div>
