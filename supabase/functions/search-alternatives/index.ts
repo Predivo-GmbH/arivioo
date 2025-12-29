@@ -52,18 +52,77 @@ async function withTimeout<T>(
 }
 
 // ============================================================================
-// Zyte Scraper for Airbnb - Fallback when Firecrawl blocks Airbnb
+// Airbnb Fallback Chain Types and Helpers
 // ============================================================================
 
-interface ZyteAirbnbResult {
+// Provider identifiers for the 5-tier fallback chain
+type AirbnbProvider = 'firecrawl' | 'zyte' | 'browserless' | 'scrapingbee';
+
+interface AirbnbScrapeResult {
   ok: boolean;
   markdown: string;
   html: string;
   screenshot: string | null;
-  providerUsed: 'zyte';
+  providerUsed: AirbnbProvider;
   botIndicators: string[];
   error: string | null;
+  statusCode?: number;
+  evidenceSnippet?: string;
 }
+
+// Consolidated trace record for a single Airbnb extraction run
+interface AirbnbExtractionTrace {
+  attemptOrder: AirbnbProvider[];
+  outcomes: Record<AirbnbProvider, {
+    attempted: boolean;
+    success: boolean;
+    error?: string;
+    botIndicators?: string[];
+    contentLength?: number;
+    contentHash?: string;
+    evidenceSnippet?: string;
+    durationMs?: number;
+  }>;
+  finalProvider?: AirbnbProvider;
+  finalPrice?: number;
+  finalOutcome: 'success' | 'bot_wall' | 'price_not_found' | 'all_failed';
+  totalDurationMs: number;
+}
+
+// Create a simple content hash for deduplication/logging
+function hashContent(content: string): string {
+  let hash = 0;
+  for (let i = 0; i < Math.min(content.length, 1000); i++) {
+    const char = content.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(16).padStart(8, '0');
+}
+
+// Extract evidence snippet around a price match
+function extractEvidenceSnippet(content: string, priceValue?: number): string {
+  if (!content) return '';
+  
+  // If we have a price, try to find it in content
+  if (priceValue) {
+    const priceStr = priceValue.toString();
+    const idx = content.indexOf(priceStr);
+    if (idx !== -1) {
+      const start = Math.max(0, idx - 100);
+      const end = Math.min(content.length, idx + priceStr.length + 100);
+      return content.slice(start, end).replace(/\s+/g, ' ').trim();
+    }
+  }
+  
+  // Otherwise return first 200 chars of meaningful content
+  const cleaned = content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned.slice(0, 200);
+}
+
+// ============================================================================
+// Bot/Captcha Detection - Shared across all providers
+// ============================================================================
 
 // Detect bot/captcha indicators in content
 // IMPORTANT: Only detect real bot walls, not CSS class names or script content
@@ -104,9 +163,14 @@ function detectBotIndicators(content: string): string[] {
   return indicators;
 }
 
+// ============================================================================
+// Tier 2: Zyte Scraper for Airbnb
+// ============================================================================
+
 // Scrape Airbnb using Zyte API with browser rendering
-async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<ZyteAirbnbResult> {
-  const result: ZyteAirbnbResult = {
+async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<AirbnbScrapeResult> {
+  const startTime = Date.now();
+  const result: AirbnbScrapeResult = {
     ok: false,
     markdown: '',
     html: '',
@@ -150,6 +214,8 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Zy
       60_000 // 60 second timeout for Zyte
     );
     
+    result.statusCode = response.status;
+    
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
       result.error = `Zyte HTTP ${response.status}: ${errText.slice(0, 200)}`;
@@ -173,6 +239,7 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Zy
       console.log("Zyte: Bot indicators detected:", result.botIndicators.join(', '));
       result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
       result.html = html;
+      result.evidenceSnippet = extractEvidenceSnippet(html);
       return result;
     }
     
@@ -188,12 +255,191 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Zy
       .replace(/\s+/g, " ")
       .trim();
     
-    console.log("Zyte scrape successful. HTML length:", html.length, "Has screenshot:", !!screenshot);
+    console.log("Zyte scrape successful. HTML length:", html.length, "Has screenshot:", !!screenshot, "Duration:", Date.now() - startTime, "ms");
     
     return result;
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
     console.error("Zyte scrape error:", result.error);
+    return result;
+  }
+}
+
+// ============================================================================
+// Tier 3: Browserless Scraper for Airbnb
+// ============================================================================
+
+async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: string): Promise<AirbnbScrapeResult> {
+  const startTime = Date.now();
+  const result: AirbnbScrapeResult = {
+    ok: false,
+    markdown: '',
+    html: '',
+    screenshot: null,
+    providerUsed: 'browserless',
+    botIndicators: [],
+    error: null,
+  };
+  
+  try {
+    console.log("Scraping Airbnb with Browserless:", url.slice(0, 100));
+    
+    // Use Browserless /content endpoint for HTML extraction with JS rendering
+    const browserlessUrl = `https://chrome.browserless.io/content?token=${browserlessApiKey}`;
+    
+    const response = await fetchWithTimeout(
+      browserlessUrl,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url,
+          gotoOptions: {
+            waitUntil: "networkidle2",
+            timeout: 45000,
+          },
+          waitForSelector: {
+            selector: "[data-testid='book-it-default-book-it-button'], [aria-label*='nights'], .price",
+            timeout: 20000,
+          },
+          // Add extra wait for dynamic content
+          addScriptTag: [{
+            content: `await new Promise(r => setTimeout(r, 3000));`
+          }],
+        }),
+      },
+      55_000
+    );
+    
+    result.statusCode = response.status;
+    
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      result.error = `Browserless HTTP ${response.status}: ${errText.slice(0, 200)}`;
+      console.error("Browserless scrape failed:", result.error);
+      return result;
+    }
+    
+    const html = await response.text();
+    
+    if (!html || html.length < 500) {
+      result.error = "Browserless returned insufficient content";
+      return result;
+    }
+    
+    // Check for bot indicators
+    result.botIndicators = detectBotIndicators(html);
+    
+    if (result.botIndicators.length > 0) {
+      console.log("Browserless: Bot indicators detected:", result.botIndicators.join(', '));
+      result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
+      result.html = html;
+      result.evidenceSnippet = extractEvidenceSnippet(html);
+      return result;
+    }
+    
+    result.ok = true;
+    result.html = html;
+    
+    // Generate markdown from HTML
+    result.markdown = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    
+    console.log("Browserless scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms");
+    
+    return result;
+  } catch (e) {
+    result.error = e instanceof Error ? e.message : String(e);
+    console.error("Browserless scrape error:", result.error);
+    return result;
+  }
+}
+
+// ============================================================================
+// Tier 5: ScrapingBee Scraper for Airbnb (Break Glass - Last Resort)
+// ============================================================================
+
+async function scrapeAirbnbWithScrapingBee(url: string, scrapingBeeApiKey: string): Promise<AirbnbScrapeResult> {
+  const startTime = Date.now();
+  const result: AirbnbScrapeResult = {
+    ok: false,
+    markdown: '',
+    html: '',
+    screenshot: null,
+    providerUsed: 'scrapingbee',
+    botIndicators: [],
+    error: null,
+  };
+  
+  try {
+    console.log("Scraping Airbnb with ScrapingBee (break glass):", url.slice(0, 100));
+    
+    // ScrapingBee API with JS rendering
+    const params = new URLSearchParams({
+      api_key: scrapingBeeApiKey,
+      url: url,
+      render_js: 'true',
+      premium_proxy: 'true', // Use premium proxies for better success
+      wait: '5000', // Wait 5 seconds for dynamic content
+      wait_for: '[aria-label*="nights"], .price, [data-testid="book-it-default-book-it-button"]',
+    });
+    
+    const response = await fetchWithTimeout(
+      `https://app.scrapingbee.com/api/v1?${params.toString()}`,
+      { method: "GET" },
+      60_000
+    );
+    
+    result.statusCode = response.status;
+    
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      result.error = `ScrapingBee HTTP ${response.status}: ${errText.slice(0, 200)}`;
+      console.error("ScrapingBee scrape failed:", result.error);
+      return result;
+    }
+    
+    const html = await response.text();
+    
+    if (!html || html.length < 500) {
+      result.error = "ScrapingBee returned insufficient content";
+      return result;
+    }
+    
+    // Check for bot indicators
+    result.botIndicators = detectBotIndicators(html);
+    
+    if (result.botIndicators.length > 0) {
+      console.log("ScrapingBee: Bot indicators detected:", result.botIndicators.join(', '));
+      result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
+      result.html = html;
+      result.evidenceSnippet = extractEvidenceSnippet(html);
+      return result;
+    }
+    
+    result.ok = true;
+    result.html = html;
+    
+    // Generate markdown from HTML
+    result.markdown = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    
+    console.log("ScrapingBee scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms");
+    
+    return result;
+  } catch (e) {
+    result.error = e instanceof Error ? e.message : String(e);
+    console.error("ScrapingBee scrape error:", result.error);
     return result;
   }
 }
@@ -3017,7 +3263,180 @@ async function runSearchWithStreaming(
               // Track the Zyte failure for diagnosis
               (lastScrapedContent as any).zyteError = zyteResult.error;
               (lastScrapedContent as any).zyteBotIndicators = zyteResult.botIndicators;
-              sendProgress(controller, "Fallback extraction", "Both scrapers failed, trying direct page fetch");
+              
+              // Check if Zyte hit a bot wall - if so, stop the chain
+              const zyteBotWall = zyteResult.botIndicators && zyteResult.botIndicators.length > 0;
+              
+              if (!zyteBotWall && !airbnbPrice) {
+                // Tier 3: Try Browserless
+                const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
+                if (browserlessApiKey) {
+                  console.log("Zyte failed without bot wall, trying Browserless fallback...");
+                  sendProgress(controller, "Switching providers", "Trying Browserless (Tier 3)");
+                  
+                  const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
+                  
+                  if (browserlessResult.ok) {
+                    console.log("Browserless Airbnb scrape succeeded. HTML:", browserlessResult.html.length);
+                    
+                    lastScrapedContent = { 
+                      markdown: browserlessResult.markdown, 
+                      html: browserlessResult.html, 
+                      hasScreenshot: false,
+                      providerUsed: 'browserless',
+                    } as any;
+
+                    // Extract title
+                    const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
+                    if (titleMatch) {
+                      airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+                    }
+
+                    // Extract images
+                    const imagePatterns = [
+                      /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                      /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                    ];
+                    const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+                    let allImages: string[] = [];
+                    for (const pattern of imagePatterns) {
+                      allImages.push(...(browserlessResult.html.match(pattern) || []));
+                    }
+                    const unique = [...new Set(allImages.map(canonicalize))];
+                    if (imageUrls.length === 0) {
+                      imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+                    }
+
+                    // Extract price
+                    checkStage1Timeout();
+                    sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless");
+                    
+                    airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                    if (!airbnbPrice && browserlessResult.markdown.length > 100) {
+                      airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                    }
+                    if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
+                      airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                        [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+                        nights
+                      );
+                    }
+
+                    if (airbnbPrice) {
+                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
+                      await supabase
+                        .from("searches")
+                        .update({
+                          status: "searching_platforms",
+                          last_progress_at: new Date().toISOString(),
+                          airbnb_title: airbnbTitle,
+                          airbnb_price: airbnbPrice,
+                          airbnb_image_url: imageUrls[0] || null,
+                          airbnb_images: imageUrls.slice(0, 5),
+                          check_in_date: checkIn,
+                          check_out_date: checkOut,
+                          nights_count: nights,
+                        })
+                        .eq("id", searchId);
+                    }
+                  } else {
+                    console.log("Browserless scrape failed:", browserlessResult.error);
+                    (lastScrapedContent as any).browserlessError = browserlessResult.error;
+                    (lastScrapedContent as any).browserlessBotIndicators = browserlessResult.botIndicators;
+                    
+                    // Check if Browserless hit a bot wall
+                    const browserlessBotWall = browserlessResult.botIndicators && browserlessResult.botIndicators.length > 0;
+                    
+                    // Tier 5: Try ScrapingBee (break glass - last resort)
+                    if (!browserlessBotWall && !airbnbPrice) {
+                      const scrapingBeeApiKey = Deno.env.get("SCRAPINGBEE_API_KEY");
+                      const scrapingBeeEnabled = Deno.env.get("SCRAPINGBEE_ENABLED") !== "false";
+                      
+                      if (scrapingBeeApiKey && scrapingBeeEnabled) {
+                        console.log("Browserless failed without bot wall, trying ScrapingBee (break glass)...");
+                        sendProgress(controller, "Switching providers", "Trying ScrapingBee (last resort)");
+                        
+                        const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKey);
+                        
+                        if (scrapingBeeResult.ok) {
+                          console.log("ScrapingBee Airbnb scrape succeeded. HTML:", scrapingBeeResult.html.length);
+                          
+                          lastScrapedContent = { 
+                            markdown: scrapingBeeResult.markdown, 
+                            html: scrapingBeeResult.html, 
+                            hasScreenshot: false,
+                            providerUsed: 'scrapingbee',
+                          } as any;
+
+                          // Extract title
+                          const titleMatch = scrapingBeeResult.html.match(/<title>([^<]+)<\/title>/i);
+                          if (titleMatch) {
+                            airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+                          }
+
+                          // Extract images
+                          const imagePatterns = [
+                            /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                            /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                          ];
+                          const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+                          let allImages: string[] = [];
+                          for (const pattern of imagePatterns) {
+                            allImages.push(...(scrapingBeeResult.html.match(pattern) || []));
+                          }
+                          const unique = [...new Set(allImages.map(canonicalize))];
+                          if (imageUrls.length === 0) {
+                            imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+                          }
+
+                          // Extract price
+                          checkStage1Timeout();
+                          sendProgress(controller, "Extracting Airbnb price", "Reading price from ScrapingBee");
+                          
+                          airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
+                          if (!airbnbPrice && scrapingBeeResult.markdown.length > 100) {
+                            airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.markdown, nights);
+                          }
+                          if (!airbnbPrice && (scrapingBeeResult.markdown.length > 100 || scrapingBeeResult.html.length > 100)) {
+                            airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                              [scrapingBeeResult.markdown, scrapingBeeResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+                              nights
+                            );
+                          }
+
+                          if (airbnbPrice) {
+                            sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
+                            await supabase
+                              .from("searches")
+                              .update({
+                                status: "searching_platforms",
+                                last_progress_at: new Date().toISOString(),
+                                airbnb_title: airbnbTitle,
+                                airbnb_price: airbnbPrice,
+                                airbnb_image_url: imageUrls[0] || null,
+                                airbnb_images: imageUrls.slice(0, 5),
+                                check_in_date: checkIn,
+                                check_out_date: checkOut,
+                                nights_count: nights,
+                              })
+                              .eq("id", searchId);
+                          }
+                        } else {
+                          console.log("ScrapingBee scrape failed:", scrapingBeeResult.error);
+                          (lastScrapedContent as any).scrapingBeeError = scrapingBeeResult.error;
+                        }
+                      }
+                    }
+                  }
+                }
+              } else if (zyteBotWall) {
+                console.log("Zyte detected bot wall, stopping fallback chain");
+                sendProgress(controller, "Bot detection", "Airbnb blocked the request (bot wall detected)");
+              }
+              
+              if (!airbnbPrice) {
+                sendProgress(controller, "Fallback extraction", "All scrapers failed, trying direct page fetch");
+              }
             }
           } else {
             sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
@@ -3094,9 +3513,208 @@ async function runSearchWithStreaming(
                     })
                     .eq("id", searchId);
                 }
+              } else {
+                // Zyte failed - try Browserless and ScrapingBee if no bot wall
+                const zyteBotIndicators = (zyteResult as any).botIndicators || [];
+                const zyteBotWall = zyteBotIndicators.length > 0;
+                
+                if (!zyteBotWall && !airbnbPrice) {
+                  // Tier 3: Try Browserless
+                  const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
+                  if (browserlessApiKey) {
+                    console.log("Zyte failed in catch block, trying Browserless...");
+                    sendProgress(controller, "Switching providers", "Trying Browserless (Tier 3)");
+                    
+                    try {
+                      const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
+                      
+                      if (browserlessResult.ok) {
+                        lastScrapedContent = { 
+                          markdown: browserlessResult.markdown, 
+                          html: browserlessResult.html, 
+                          hasScreenshot: false,
+                          providerUsed: 'browserless',
+                        } as any;
+
+                        const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
+                        if (titleMatch) {
+                          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+                        }
+
+                        const imagePatterns = [
+                          /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                          /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                        ];
+                        const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+                        let allImages: string[] = [];
+                        for (const pattern of imagePatterns) {
+                          allImages.push(...(browserlessResult.html.match(pattern) || []));
+                        }
+                        const unique = [...new Set(allImages.map(canonicalize))];
+                        if (imageUrls.length === 0) {
+                          imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+                        }
+
+                        airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                        if (!airbnbPrice && browserlessResult.markdown.length > 100) {
+                          airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                        }
+                        if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
+                          airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                            [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+                            nights
+                          );
+                        }
+
+                        if (airbnbPrice) {
+                          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
+                          await supabase.from("searches").update({
+                            status: "searching_platforms",
+                            last_progress_at: new Date().toISOString(),
+                            airbnb_title: airbnbTitle,
+                            airbnb_price: airbnbPrice,
+                            airbnb_image_url: imageUrls[0] || null,
+                            airbnb_images: imageUrls.slice(0, 5),
+                            check_in_date: checkIn,
+                            check_out_date: checkOut,
+                            nights_count: nights,
+                          }).eq("id", searchId);
+                        }
+                      } else {
+                        // Browserless failed - try ScrapingBee if no bot wall
+                        const browserlessBotWall = browserlessResult.botIndicators && browserlessResult.botIndicators.length > 0;
+                        
+                        if (!browserlessBotWall && !airbnbPrice) {
+                          const scrapingBeeApiKey = Deno.env.get("SCRAPINGBEE_API_KEY");
+                          const scrapingBeeEnabled = Deno.env.get("SCRAPINGBEE_ENABLED") !== "false";
+                          
+                          if (scrapingBeeApiKey && scrapingBeeEnabled) {
+                            console.log("Browserless failed in catch block, trying ScrapingBee...");
+                            sendProgress(controller, "Switching providers", "Trying ScrapingBee (last resort)");
+                            
+                            const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKey);
+                            
+                            if (scrapingBeeResult.ok) {
+                              lastScrapedContent = { 
+                                markdown: scrapingBeeResult.markdown, 
+                                html: scrapingBeeResult.html, 
+                                hasScreenshot: false,
+                                providerUsed: 'scrapingbee',
+                              } as any;
+
+                              const titleMatch = scrapingBeeResult.html.match(/<title>([^<]+)<\/title>/i);
+                              if (titleMatch) {
+                                airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+                              }
+
+                              const imagePatterns = [
+                                /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                                /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                              ];
+                              const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+                              let allImages: string[] = [];
+                              for (const pattern of imagePatterns) {
+                                allImages.push(...(scrapingBeeResult.html.match(pattern) || []));
+                              }
+                              const unique = [...new Set(allImages.map(canonicalize))];
+                              if (imageUrls.length === 0) {
+                                imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+                              }
+
+                              airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
+                              if (!airbnbPrice && scrapingBeeResult.markdown.length > 100) {
+                                airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.markdown, nights);
+                              }
+                              if (!airbnbPrice && (scrapingBeeResult.markdown.length > 100 || scrapingBeeResult.html.length > 100)) {
+                                airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                                  [scrapingBeeResult.markdown, scrapingBeeResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+                                  nights
+                                );
+                              }
+
+                              if (airbnbPrice) {
+                                sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
+                                await supabase.from("searches").update({
+                                  status: "searching_platforms",
+                                  last_progress_at: new Date().toISOString(),
+                                  airbnb_title: airbnbTitle,
+                                  airbnb_price: airbnbPrice,
+                                  airbnb_image_url: imageUrls[0] || null,
+                                  airbnb_images: imageUrls.slice(0, 5),
+                                  check_in_date: checkIn,
+                                  check_out_date: checkOut,
+                                  nights_count: nights,
+                                }).eq("id", searchId);
+                              }
+                            }
+                          }
+                        }
+                      }
+                    } catch (browserlessError) {
+                      console.error("Browserless fallback failed:", browserlessError);
+                    }
+                  }
+                }
               }
             } catch (zyteError) {
               console.error("Zyte fallback also failed:", zyteError);
+              
+              // Even if Zyte threw, try Browserless and ScrapingBee
+              const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
+              if (browserlessApiKey && !airbnbPrice) {
+                console.log("Zyte threw exception, trying Browserless...");
+                try {
+                  const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
+                  if (browserlessResult.ok) {
+                    lastScrapedContent = { 
+                      markdown: browserlessResult.markdown, 
+                      html: browserlessResult.html, 
+                      hasScreenshot: false,
+                      providerUsed: 'browserless',
+                    } as any;
+                    
+                    airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                    if (!airbnbPrice && browserlessResult.markdown.length > 100) {
+                      airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                    }
+                    if (!airbnbPrice) {
+                      airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                        [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+                        nights
+                      );
+                    }
+                    
+                    if (airbnbPrice) {
+                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
+                      await supabase.from("searches").update({
+                        status: "searching_platforms",
+                        airbnb_price: airbnbPrice,
+                      }).eq("id", searchId);
+                    }
+                  } else if (!browserlessResult.botIndicators?.length) {
+                    // Try ScrapingBee
+                    const scrapingBeeApiKey = Deno.env.get("SCRAPINGBEE_API_KEY");
+                    if (scrapingBeeApiKey && Deno.env.get("SCRAPINGBEE_ENABLED") !== "false") {
+                      const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKey);
+                      if (scrapingBeeResult.ok) {
+                        airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
+                        if (!airbnbPrice) {
+                          airbnbPrice = await extractAirbnbTotalPriceWithAI(scrapingBeeResult.html.slice(0, 12000), nights);
+                        }
+                        if (airbnbPrice) {
+                          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
+                          await supabase.from("searches").update({
+                            status: "searching_platforms",
+                            airbnb_price: airbnbPrice,
+                          }).eq("id", searchId);
+                        }
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.error("Browserless also failed after Zyte exception:", e);
+                }
+              }
             }
           }
           sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
