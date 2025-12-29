@@ -2958,8 +2958,17 @@ async function runSearchWithStreaming(
       sendProgress(controller, "Loading Airbnb listing", "Using ScrapingBee (test mode - no fallback)");
       await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
       
+      // Build URL with dates to ensure price is shown
+      const airbnbUrlWithDates = (() => {
+        const urlObj = new URL(search.airbnb_url);
+        if (checkIn) urlObj.searchParams.set('check_in', checkIn);
+        if (checkOut) urlObj.searchParams.set('check_out', checkOut);
+        return urlObj.toString();
+      })();
+      
       console.log("TESTING: Using ScrapingBee ONLY (no fallback) for Airbnb extraction");
-      const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKeyTest);
+      console.log("Scraping URL with dates:", airbnbUrlWithDates);
+      const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(airbnbUrlWithDates, scrapingBeeApiKeyTest);
       
       if (scrapingBeeResult.ok) {
         console.log("ScrapingBee scrape succeeded. HTML:", scrapingBeeResult.html.length);
