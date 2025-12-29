@@ -989,26 +989,10 @@ function extractTotalPriceWithRegex(content: string, nights: number): number | n
     if (subtotalForNights) break;
   }
   
-  // If we found multiple totals, prefer the highest one (likely includes taxes)
-  // but only if it's within 30% higher than the subtotal (reasonable tax range)
+  // ALWAYS use the highest price found - this is the latest/most complete total (with taxes and fees)
   if (potentialTotals.length > 0) {
     const maxTotal = Math.max(...potentialTotals);
-    const minTotal = Math.min(...potentialTotals);
-    
-    // If we have a subtotal and a higher total (within 30%), use the higher one
-    if (subtotalForNights && maxTotal > subtotalForNights && maxTotal <= subtotalForNights * 1.3) {
-      console.log("Using final total with taxes:", maxTotal, "(subtotal was", subtotalForNights, ")");
-      return maxTotal;
-    }
-    
-    // Otherwise use the subtotal if available
-    if (subtotalForNights) {
-      console.log("Using subtotal (no valid tax-inclusive total found):", subtotalForNights);
-      return subtotalForNights;
-    }
-    
-    // Fallback to highest found
-    console.log("Using highest potential total:", maxTotal);
+    console.log("Using highest found price (latest total):", maxTotal, "from", potentialTotals.length, "candidates:", potentialTotals.join(', '));
     return maxTotal;
   }
   
@@ -2965,30 +2949,30 @@ async function runSearchWithStreaming(
     sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
     await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
-    // TESTING MODE: Try Browserless first (temporary - for one-time test)
-    const BROWSERLESS_FIRST_TEST = true; // TODO: Remove after testing
-    const browserlessApiKeyFirst = Deno.env.get("BROWSERLESS_API_KEY");
+    // TESTING MODE: ScrapingBee only (no fallback) - temporary for one-time test
+    const SCRAPINGBEE_ONLY_TEST = true; // TODO: Remove after testing
+    const scrapingBeeApiKeyTest = Deno.env.get("SCRAPINGBEE_API_KEY");
     
-    if (BROWSERLESS_FIRST_TEST && browserlessApiKeyFirst) {
+    if (SCRAPINGBEE_ONLY_TEST && scrapingBeeApiKeyTest) {
       checkStage1Timeout();
-      sendProgress(controller, "Loading Airbnb listing", "Testing Browserless as primary provider");
+      sendProgress(controller, "Loading Airbnb listing", "Using ScrapingBee (test mode - no fallback)");
       await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
       
-      console.log("TESTING: Trying Browserless FIRST for Airbnb extraction");
-      const browserlessTestResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKeyFirst);
+      console.log("TESTING: Using ScrapingBee ONLY (no fallback) for Airbnb extraction");
+      const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKeyTest);
       
-      if (browserlessTestResult.ok) {
-        console.log("Browserless (test first) scrape succeeded. HTML:", browserlessTestResult.html.length);
+      if (scrapingBeeResult.ok) {
+        console.log("ScrapingBee scrape succeeded. HTML:", scrapingBeeResult.html.length);
         
         lastScrapedContent = { 
-          markdown: browserlessTestResult.markdown, 
-          html: browserlessTestResult.html, 
+          markdown: scrapingBeeResult.markdown, 
+          html: scrapingBeeResult.html, 
           hasScreenshot: false,
-          providerUsed: 'browserless',
+          providerUsed: 'scrapingbee',
         } as any;
 
         // Extract title
-        const titleMatch = browserlessTestResult.html.match(/<title>([^<]+)<\/title>/i);
+        const titleMatch = scrapingBeeResult.html.match(/<title>([^<]+)<\/title>/i);
         if (titleMatch) {
           airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
@@ -3001,33 +2985,34 @@ async function runSearchWithStreaming(
         const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
         let allImages: string[] = [];
         for (const pattern of imagePatterns) {
-          allImages.push(...(browserlessTestResult.html.match(pattern) || []));
+          allImages.push(...(scrapingBeeResult.html.match(pattern) || []));
         }
         const unique = [...new Set(allImages.map(canonicalize))];
         imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
 
-        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via Browserless (test)`, {
+        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via ScrapingBee`, {
           imageCount: imageUrls.length,
-          provider: 'browserless',
+          provider: 'scrapingbee',
         });
 
-        // Extract price
+        // Extract price - use the highest found price (latest total with taxes)
         checkStage1Timeout();
-        sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless (test first)");
+        sendProgress(controller, "Extracting Airbnb price", "Reading price from ScrapingBee (no fallback mode)");
         
-        airbnbPrice = extractTotalPriceWithRegex(browserlessTestResult.html, nights);
-        if (!airbnbPrice && browserlessTestResult.markdown.length > 100) {
-          airbnbPrice = extractTotalPriceWithRegex(browserlessTestResult.markdown, nights);
+        airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
+        if (!airbnbPrice && scrapingBeeResult.markdown.length > 100) {
+          airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.markdown, nights);
         }
-        if (!airbnbPrice && (browserlessTestResult.markdown.length > 100 || browserlessTestResult.html.length > 100)) {
+        if (!airbnbPrice && (scrapingBeeResult.markdown.length > 100 || scrapingBeeResult.html.length > 100)) {
           airbnbPrice = await extractAirbnbTotalPriceWithAI(
-            [browserlessTestResult.markdown, browserlessTestResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+            [scrapingBeeResult.markdown, scrapingBeeResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
             nights
           );
         }
 
         if (airbnbPrice) {
-          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless test)`, { airbnbPrice, provider: 'browserless' });
+          console.log("ScrapingBee extracted Airbnb price:", airbnbPrice);
+          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
           await supabase
             .from("searches")
             .update({
@@ -3042,15 +3027,25 @@ async function runSearchWithStreaming(
               nights_count: nights,
             })
             .eq("id", searchId);
+          
+          // Mark that we have everything we need - skip remaining fallback chain
+          console.log("ScrapingBee extraction complete with price. Skipping fallback chain.");
+        } else {
+          console.log("ScrapingBee price extraction failed - no fallback will be attempted");
+          sendProgress(controller, "Price not found", "ScrapingBee could not extract price (no fallback mode)", { provider: 'scrapingbee' });
         }
       } else {
-        console.log("Browserless (test first) failed:", browserlessTestResult.error);
-        (lastScrapedContent as any).browserlessTestError = browserlessTestResult.error;
+        console.log("ScrapingBee scrape failed:", scrapingBeeResult.error);
+        sendProgress(controller, "ScrapingBee failed", scrapingBeeResult.error || "Unknown error", { provider: 'scrapingbee' });
+        (lastScrapedContent as any).scrapingBeeError = scrapingBeeResult.error;
       }
+      
+      // In test mode, we DON'T fall back to other providers - this is intentional
+      // Skip the rest of the fallback chain entirely
     }
 
-    // Continue with normal fallback chain if ScrapingBee test didn't get a price
-    if (firecrawlApiKey && !airbnbPrice) {
+    // Continue with normal fallback chain ONLY if NOT in ScrapingBee-only test mode
+    if (firecrawlApiKey && !airbnbPrice && !SCRAPINGBEE_ONLY_TEST) {
       checkStage1Timeout();
       sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
       await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
