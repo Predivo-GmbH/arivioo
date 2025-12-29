@@ -51,6 +51,131 @@ async function withTimeout<T>(
   });
 }
 
+// ============================================================================
+// Zyte Scraper for Airbnb - Fallback when Firecrawl blocks Airbnb
+// ============================================================================
+
+interface ZyteAirbnbResult {
+  ok: boolean;
+  markdown: string;
+  html: string;
+  screenshot: string | null;
+  providerUsed: 'zyte';
+  botIndicators: string[];
+  error: string | null;
+}
+
+// Detect bot/captcha indicators in content
+function detectBotIndicators(content: string): string[] {
+  const indicators: string[] = [];
+  const patterns = [
+    { pattern: /captcha/i, label: "captcha" },
+    { pattern: /robot|bot\s+check/i, label: "robot_check" },
+    { pattern: /verify you['']?re human/i, label: "human_verification" },
+    { pattern: /cloudflare/i, label: "cloudflare" },
+    { pattern: /please\s+wait\s+while\s+we\s+verify/i, label: "verification_wait" },
+    { pattern: /access\s+denied/i, label: "access_denied" },
+    { pattern: /just\s+a\s+moment/i, label: "cloudflare_wait" },
+    { pattern: /checking\s+your\s+browser/i, label: "browser_check" },
+  ];
+  
+  for (const { pattern, label } of patterns) {
+    if (pattern.test(content)) {
+      indicators.push(label);
+    }
+  }
+  
+  return indicators;
+}
+
+// Scrape Airbnb using Zyte API with browser rendering
+async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<ZyteAirbnbResult> {
+  const result: ZyteAirbnbResult = {
+    ok: false,
+    markdown: '',
+    html: '',
+    screenshot: null,
+    providerUsed: 'zyte',
+    botIndicators: [],
+    error: null,
+  };
+  
+  try {
+    const zyteAuth = btoa(zyteApiKey + ":");
+    
+    console.log("Scraping Airbnb with Zyte:", url.slice(0, 100));
+    
+    const response = await fetchWithTimeout(
+      "https://api.zyte.com/v1/extract",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Basic ${zyteAuth}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url,
+          browserHtml: true,
+          javascript: true,
+          screenshot: true,
+          screenshotOptions: { fullPage: false },
+          // Wait for pricing to render
+          actions: [
+            { action: "waitForTimeout", timeout: 10000 },
+          ],
+        }),
+      },
+      60_000 // 60 second timeout for Zyte
+    );
+    
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      result.error = `Zyte HTTP ${response.status}: ${errText.slice(0, 200)}`;
+      console.error("Zyte scrape failed:", result.error);
+      return result;
+    }
+    
+    const data = await response.json();
+    const html = data.browserHtml || "";
+    const screenshot = data.screenshot || null;
+    
+    if (!html || html.length < 500) {
+      result.error = "Zyte returned insufficient content";
+      return result;
+    }
+    
+    // Check for bot indicators
+    result.botIndicators = detectBotIndicators(html);
+    
+    if (result.botIndicators.length > 0) {
+      console.log("Zyte: Bot indicators detected:", result.botIndicators.join(', '));
+      result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
+      result.html = html;
+      return result;
+    }
+    
+    result.ok = true;
+    result.html = html;
+    result.screenshot = screenshot;
+    
+    // Generate simple markdown from HTML (strip tags)
+    result.markdown = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    
+    console.log("Zyte scrape successful. HTML length:", html.length, "Has screenshot:", !!screenshot);
+    
+    return result;
+  } catch (e) {
+    result.error = e instanceof Error ? e.message : String(e);
+    console.error("Zyte scrape error:", result.error);
+    return result;
+  }
+}
+
 // Track if controller is still valid
 const controllerValid = new WeakSet<SSEController>();
 
@@ -2792,14 +2917,194 @@ async function runSearchWithStreaming(
             }
           }
         } else {
-          // Firecrawl failed twice; we'll fall back to direct fetch.
-          sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
+          // Firecrawl failed (likely 403 blocking Airbnb) - try Zyte as fallback
+          console.log("Firecrawl failed for Airbnb, attempting Zyte fallback...");
+          sendProgress(controller, "Switching providers", "Primary scraper blocked, using fallback provider");
+          
+          const zyteApiKey = Deno.env.get("ZYTE_API_KEY");
+          if (zyteApiKey && !skipAirbnbPrice) {
+            const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
+            
+            if (zyteResult.ok) {
+              console.log("Zyte Airbnb scrape succeeded. HTML:", zyteResult.html.length, "Screenshot:", !!zyteResult.screenshot);
+              
+              // Track content for failure diagnosis
+              lastScrapedContent = { 
+                markdown: zyteResult.markdown, 
+                html: zyteResult.html, 
+                hasScreenshot: !!zyteResult.screenshot,
+                providerUsed: 'zyte',
+              } as any;
+
+              // Extract title
+              const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
+              if (titleMatch) {
+                airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+              }
+
+              // Extract images
+              const imagePatterns = [
+                /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+              ];
+              const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+              let allImages: string[] = [];
+              for (const pattern of imagePatterns) {
+                allImages.push(...(zyteResult.html.match(pattern) || []));
+              }
+              const unique = [...new Set(allImages.map(canonicalize))];
+              imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+
+              sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via fallback`, {
+                imageCount: imageUrls.length,
+                provider: 'zyte',
+              });
+
+              // Extract price from Zyte content
+              checkStage1Timeout();
+              sendProgress(controller, "Extracting Airbnb price", "Reading price from fallback provider");
+              await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
+
+              // 1) HTML extraction
+              airbnbPrice = extractPriceWithRegex(zyteResult.html, nights);
+
+              // 2) Markdown
+              if (!airbnbPrice && zyteResult.markdown.length > 100) {
+                airbnbPrice = extractPriceWithRegex(zyteResult.markdown, nights);
+              }
+
+              // 3) Screenshot
+              if (!airbnbPrice && zyteResult.screenshot) {
+                checkStage1Timeout();
+                sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading from screenshot");
+                const total = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
+                if (total) {
+                  const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
+                  airbnbPrice = perNight;
+                  console.log("Zyte screenshot extracted total:", total, "-> per night:", perNight);
+                }
+              }
+
+              // 4) AI fallback
+              if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
+                checkStage1Timeout();
+                sendProgress(controller, "Using AI for price extraction", "Analyzing page content from fallback");
+                airbnbPrice = await extractAirbnbPriceWithAI(
+                  [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+                  nights
+                );
+              }
+
+              if (airbnbPrice) {
+                sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night (via fallback)`, { airbnbPrice, provider: 'zyte' });
+
+                await supabase
+                  .from("searches")
+                  .update({
+                    status: "searching_platforms",
+                    last_progress_at: new Date().toISOString(),
+                    airbnb_title: airbnbTitle,
+                    airbnb_price: airbnbPrice,
+                    airbnb_image_url: imageUrls[0] || null,
+                    airbnb_images: imageUrls.slice(0, 5),
+                    check_in_date: checkIn,
+                    check_out_date: checkOut,
+                    nights_count: nights,
+                  })
+                  .eq("id", searchId);
+              } else {
+                console.log("Zyte price extraction failed for URL:", search.airbnb_url);
+              }
+            } else {
+              console.log("Zyte Airbnb scrape failed:", zyteResult.error);
+              // Track the Zyte failure for diagnosis
+              (lastScrapedContent as any).zyteError = zyteResult.error;
+              (lastScrapedContent as any).zyteBotIndicators = zyteResult.botIndicators;
+              sendProgress(controller, "Fallback extraction", "Both scrapers failed, trying direct page fetch");
+            }
+          } else {
+            sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
+          }
         }
       } catch (e) {
         if ((e as Error)?.message === "__SKIP_AIRBNB_PRICE__") {
           // intentional; continue
         } else {
           console.error("Firecrawl error:", e);
+          // Try Zyte as fallback on Firecrawl exception
+          const zyteApiKey = Deno.env.get("ZYTE_API_KEY");
+          if (zyteApiKey && !skipAirbnbPrice) {
+            console.log("Firecrawl threw exception, trying Zyte fallback...");
+            sendProgress(controller, "Switching providers", "Primary scraper failed, using fallback provider");
+            
+            try {
+              const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
+              
+              if (zyteResult.ok) {
+                // Same extraction logic as above
+                lastScrapedContent = { 
+                  markdown: zyteResult.markdown, 
+                  html: zyteResult.html, 
+                  hasScreenshot: !!zyteResult.screenshot,
+                  providerUsed: 'zyte',
+                } as any;
+
+                const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
+                if (titleMatch) {
+                  airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+                }
+
+                const imagePatterns = [
+                  /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                  /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                ];
+                const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+                let allImages: string[] = [];
+                for (const pattern of imagePatterns) {
+                  allImages.push(...(zyteResult.html.match(pattern) || []));
+                }
+                const unique = [...new Set(allImages.map(canonicalize))];
+                imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+
+                airbnbPrice = extractPriceWithRegex(zyteResult.html, nights);
+                if (!airbnbPrice && zyteResult.markdown.length > 100) {
+                  airbnbPrice = extractPriceWithRegex(zyteResult.markdown, nights);
+                }
+                if (!airbnbPrice && zyteResult.screenshot) {
+                  const total = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
+                  if (total) {
+                    airbnbPrice = Math.round((total / Math.max(1, nights)) * 100) / 100;
+                  }
+                }
+                if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
+                  airbnbPrice = await extractAirbnbPriceWithAI(
+                    [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+                    nights
+                  );
+                }
+
+                if (airbnbPrice) {
+                  sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night (via fallback)`, { airbnbPrice, provider: 'zyte' });
+                  await supabase
+                    .from("searches")
+                    .update({
+                      status: "searching_platforms",
+                      last_progress_at: new Date().toISOString(),
+                      airbnb_title: airbnbTitle,
+                      airbnb_price: airbnbPrice,
+                      airbnb_image_url: imageUrls[0] || null,
+                      airbnb_images: imageUrls.slice(0, 5),
+                      check_in_date: checkIn,
+                      check_out_date: checkOut,
+                      nights_count: nights,
+                    })
+                    .eq("id", searchId);
+                }
+              }
+            } catch (zyteError) {
+              console.error("Zyte fallback also failed:", zyteError);
+            }
+          }
           sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
         }
       }
