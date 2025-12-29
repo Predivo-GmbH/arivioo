@@ -430,6 +430,7 @@ export default function PlatformCoverage() {
   }, []);
 
   // Start Promotion Work - mark platform as in_progress
+  // Uses the admin-dashboard edge function to ensure proper authorization and audit logging
   const startPromotionWork = async (platform: PlatformAdapter) => {
     if (!window.confirm(`Start promotion work for ${platform.platform_name}?\n\nThis will lock scoring for this platform and begin the promotion workflow.`)) {
       return;
@@ -437,6 +438,11 @@ export default function PlatformCoverage() {
     
     setIsStartingPromotion(true);
     try {
+      const token = getToken();
+      if (!token) {
+        throw new Error('Not authenticated. Please log in again.');
+      }
+
       const snapshot = {
         gates: {
           gate_1_passed: platform.gate_1_passed,
@@ -454,19 +460,23 @@ export default function PlatformCoverage() {
         captured_at: new Date().toISOString(),
       };
       
-      const { error: updateError } = await supabase
-        .from('platform_adapters')
-        .update({
+      // Use admin-dashboard edge function for secure server-side update with audit logging
+      const { data, error } = await supabase.functions.invoke('admin-dashboard/adapters', {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+        body: {
+          id: platform.id,
           promotion_in_progress: true,
           promotion_status: 'in_progress',
           promotion_started_at: new Date().toISOString(),
-          promotion_started_by: 'admin', // Could get from auth context
+          promotion_started_by: 'admin',
           promotion_source_score: platform.promotion_score,
           promotion_snapshot: snapshot,
-        })
-        .eq('id', platform.id);
+        },
+      });
       
-      if (updateError) throw updateError;
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
       
       await fetchData();
     } catch (err: any) {
@@ -477,9 +487,16 @@ export default function PlatformCoverage() {
   };
 
   // Complete promotion - promote to Tier A or reject
+  // Uses the admin-dashboard edge function to ensure proper authorization and audit logging
   const completePromotion = async (platform: PlatformAdapter, decision: 'promoted' | 'rejected', notes: string) => {
     try {
+      const token = getToken();
+      if (!token) {
+        throw new Error('Not authenticated. Please log in again.');
+      }
+
       const updates: Record<string, any> = {
+        id: platform.id,
         promotion_in_progress: false,
         promotion_status: decision,
         promotion_decision_at: new Date().toISOString(),
@@ -493,12 +510,15 @@ export default function PlatformCoverage() {
         updates.tier_updated_at = new Date().toISOString();
       }
       
-      const { error: updateError } = await supabase
-        .from('platform_adapters')
-        .update(updates)
-        .eq('id', platform.id);
+      // Use admin-dashboard edge function for secure server-side update with audit logging
+      const { data, error } = await supabase.functions.invoke('admin-dashboard/adapters', {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+        body: updates,
+      });
       
-      if (updateError) throw updateError;
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
       
       await fetchData();
     } catch (err: any) {
