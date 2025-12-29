@@ -74,3 +74,6 @@ verify_jwt = false
 
 [functions.get-stage-timings]
 verify_jwt = false
+
+[functions.submit-launch-signup]
+verify_jwt = false

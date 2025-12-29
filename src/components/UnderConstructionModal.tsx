@@ -51,7 +51,16 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
   const handleEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!email || !email.includes("@")) {
+    // Client-side validation
+    const trimmedEmail = email.toLowerCase().trim();
+    if (!trimmedEmail || !trimmedEmail.includes("@") || trimmedEmail.length > 255) {
+      toast.error("Please enter a valid email address");
+      return;
+    }
+
+    // Basic email format check
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmedEmail)) {
       toast.error("Please enter a valid email address");
       return;
     }
@@ -59,33 +68,47 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
     setIsSubmitting(true);
     
     try {
-      const { error } = await supabase
-        .from("launch_signups")
-        .insert({ email: email.toLowerCase().trim() });
+      // Use edge function instead of direct insert for rate limiting & server-side validation
+      const { data, error } = await supabase.functions.invoke('submit-launch-signup', {
+        body: { email: trimmedEmail }
+      });
 
       if (error) {
-        if (error.code === "23505") {
-          toast.info("You're already on the list! We'll notify you when we launch.");
+        throw error;
+      }
+
+      if (!data?.success) {
+        if (data?.error) {
+          toast.error(data.error);
         } else {
-          throw error;
+          toast.error("Something went wrong. Please try again.");
         }
+        return;
+      }
+
+      if (data.message === 'already_registered') {
+        toast.info("You're already on the list! We'll notify you when we launch.");
       } else {
-        // Send email notification
+        // Send email notification (optional, don't fail if it errors)
         try {
           await supabase.functions.invoke('send-notify-me-email', {
-            body: { email: email.toLowerCase().trim() }
+            body: { email: trimmedEmail }
           });
         } catch (emailError) {
           console.error("Error sending notification email:", emailError);
-          // Don't fail the signup if email fails
         }
         
-        setIsEmailSubmitted(true);
         toast.success("You're on the list! We'll notify you when we launch.");
       }
+      
+      setIsEmailSubmitted(true);
     } catch (error: any) {
       console.error("Error saving email:", error);
-      toast.error("Something went wrong. Please try again.");
+      if (error?.message?.includes('429') || error?.context?.status === 429) {
+        toast.error("Too many attempts. Please try again later.");
+      } else {
+        toast.error("Something went wrong. Please try again.");
+      }
     } finally {
       setIsSubmitting(false);
     }
