@@ -211,38 +211,8 @@ function extractAirbnbPrice(content: string): { price: number | null; type: 'tot
   
   // Priority 2: Look for total price indicators
   
-  // Priority 3: Look for nightly rate
-  const nightlyPatterns = [
-    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per\s+)?night/gi,
-    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*\/\s*night/gi,
-    /"(?:price|pricePerNight|nightlyPrice|amount)"[:\s]*["\$]*(\d{1,4}(?:\.\d{2})?)/gi,
-  ];
-  
-  for (const pattern of nightlyPatterns) {
-    const matches = [...content.matchAll(pattern)];
-    for (const match of matches) {
-      const priceStr = (match[1] || match[2] || "").replace(/,/g, '');
-      const price = parseFloat(priceStr);
-      if (price >= 15 && price <= 5000) {
-        return { price, type: 'nightly', evidence: match[0].slice(0, 100), nights: null };
-      }
-    }
-  }
-  
-  // Priority 4: Try JSON-LD
-  const jsonLdMatch = content.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
-  if (jsonLdMatch) {
-    for (const match of jsonLdMatch) {
-      try {
-        const json = JSON.parse(match.replace(/<\/?script[^>]*>/gi, ''));
-        if (json.offers?.price) {
-          const price = parseFloat(json.offers.price);
-          return { price, type: 'nightly', evidence: 'JSON-LD offers.price', nights: null };
-        }
-      } catch {}
-    }
-  }
-  
+  // Priority 3: Do NOT derive totals from nightly rates.
+  // We must report the total Airbnb actually shows; if only a nightly rate is present, treat as not found.
   return result;
 }
 

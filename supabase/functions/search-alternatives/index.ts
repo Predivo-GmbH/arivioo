@@ -767,38 +767,9 @@ function extractTotalPriceWithRegex(content: string, nights: number): number | n
   
   // Priority 2: Look for explicit "total" price indicators
   
-  // Priority 3: If we find per-night price, calculate total (fallback)
-  if (nights > 0) {
-    const perNightPatterns = [
-      // $123 night, $123/night, $123 per night
-      /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per\s+)?(?:night|\/night)/gi,
-      // €123 night, £123 night
-      /[€£]\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per\s+)?(?:night|\/night)/gi,
-      // JSON patterns for per-night
-      /"(?:price|pricePerNight|nightlyPrice|amount)"[:\s]*["\$]*(\d{1,4}(?:\.\d{2})?)/gi,
-    ];
-    
-    for (const pattern of perNightPatterns) {
-      const matches = [...content.matchAll(pattern)];
-      for (const match of matches) {
-        const perNight = parseFloat((match[1] || "").replace(/,/g, ''));
-        if (perNight >= 15 && perNight <= 5000) {
-          const total = Math.round(perNight * nights);
-          console.log("Regex extracted per-night:", perNight, "x", nights, "nights = TOTAL:", total);
-          return total;
-        }
-      }
-    }
-  }
-  
-  // Priority 4: Try JSON-LD structured data
-  const jsonLdPrice = extractPriceFromJsonLD(content);
-  if (jsonLdPrice && nights > 0) {
-    const total = Math.round(jsonLdPrice * nights);
-    console.log("JSON-LD per-night:", jsonLdPrice, "x", nights, "nights = TOTAL:", total);
-    return total;
-  }
-  
+  // Priority 3: If we only find a per-night price, DO NOT compute totals.
+  // We must show the total Airbnb shows; if it's not visible as a total, treat as unavailable.
+  // (Prevents incorrect values like "$X/night" being multiplied into a fake "total".)
   return null;
 }
 
@@ -819,17 +790,16 @@ async function extractAirbnbTotalPriceWithAI(content: string, nights: number): P
   }
 
   try {
-    const prompt = `You are analyzing text scraped from an Airbnb listing page.
+  const prompt = `You are analyzing text scraped from an Airbnb listing page.
 The stay is for exactly ${nights} night(s).
 
-Goal: Extract the TOTAL price for the ENTIRE stay as shown by Airbnb (including cleaning fee, service fee, taxes if included in the displayed total).
+Goal: Extract the TOTAL price for the ENTIRE stay as shown by Airbnb (including mandatory fees/taxes if included in the displayed total).
 
 Rules:
 - Return the TOTAL price for the whole stay, NOT per-night.
-- Look for patterns like "$X for Y nights", "Total: $X", "Total before taxes: $X".
-- If only a per-night price is shown, compute total = perNight * ${nights}.
+- Look for patterns like "$X for Y nights", "Total: $X", "Trip total: $X", "Total before taxes: $X".
+- IMPORTANT: If the page only shows a per-night rate and no total, return "null" (do NOT multiply).
 - If you find "Total before taxes", return that number.
-- IMPORTANT: Do NOT divide by nights. Return the TOTAL.
 
 Content:
 ${content.slice(0, 12000)}
