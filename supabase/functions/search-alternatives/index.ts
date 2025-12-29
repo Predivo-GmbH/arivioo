@@ -893,26 +893,37 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
   // Priority 1: Look for explicit total markers in price breakdown
   // These appear in the expanded price details
   const totalMarkerPatterns: { pattern: RegExp; currency: string }[] = [
-    // "Total $2,214" or "Total: $2,214"
+    // "Total before taxes $2,214" (Airbnb commonly uses this label)
+    { pattern: /total\s+before\s+taxes[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /total\s+before\s+taxes[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    { pattern: /total\s+before\s+taxes[:\s]*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
+    { pattern: /total\s+before\s+taxes[:\s]*CHF\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'CHF' },
+
+    // "Trip total $2,214" / "Total $2,214" or "Total: $2,214"
+    { pattern: /trip\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     { pattern: /total[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    // "Total (USD) $2,214"
-    { pattern: /total\s*\(USD\)[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    // "Total €2,214"
+    // "Total (USD) $2,214" or "Total (USD): $2,214"
+    { pattern: /total\s*\(USD\)[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+
+    { pattern: /trip\s+total[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
     { pattern: /total[:\s]+€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    // "Total (EUR) €2,214"
-    { pattern: /total\s*\(EUR\)[:\s]*€?\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    // "Total £2,214"
+    { pattern: /total\s*\(EUR\)[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+
+    { pattern: /trip\s+total[:\s]*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
     { pattern: /total[:\s]+£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-    // "Grand total $2,214"
+
+    // "Grand total $2,214" / "You pay $2,214"
     { pattern: /grand\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     { pattern: /grand\s+total[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
     { pattern: /grand\s+total[:\s]*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-    // "You pay $2,214"
     { pattern: /you\s+(?:will\s+)?pay[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     { pattern: /you\s+(?:will\s+)?pay[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    // JSON patterns: "totalPrice": 2214 - assume USD if no currency context
-    { pattern: /"totalPrice"[:\s]*"?\$?([\d,]+(?:\.\d{2})?)?"?/gi, currency: 'USD' },
-    { pattern: /"total"[:\s]*"?\$?([\d,]+(?:\.\d{2})?)?"?/gi, currency: 'USD' },
+
+    // "US$2,214" (Airbnb sometimes renders with country prefix)
+    { pattern: /US\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+
+    // JSON-ish patterns (last resort)
+    { pattern: /"totalPrice"[:\s]*"?\$?\s*([\d,]+(?:\.\d{2})?)"?/gi, currency: 'USD' },
   ];
   
   for (const { pattern, currency } of totalMarkerPatterns) {
@@ -965,9 +976,10 @@ Goal: Extract the TOTAL price for the ENTIRE stay as shown by Airbnb (including 
 
 Rules:
 - Return the TOTAL price for the whole stay, NOT per-night.
-- Look for patterns like "$X for Y nights", "Total: $X", "Trip total: $X", "Total before taxes: $X".
+- Prioritize the booking-widget headline like "$X for Y nights" (aria-label often contains it).
+- If a price breakdown is present, prioritize "Total before taxes" or "Trip total".
+- Do NOT return "Subtotal" / "x nights" line items if a higher total exists.
 - IMPORTANT: If the page only shows a per-night rate and no total, return "null" (do NOT multiply).
-- If you find "Total before taxes", return that number.
 - Also identify the currency symbol used: $=USD, €=EUR, £=GBP, CHF=CHF, A$=AUD, C$=CAD
 
 Content:
