@@ -314,17 +314,17 @@ export function PipelineProgress({
                 <span>Elapsed: <span className="font-medium text-foreground">{formatElapsed(elapsedMs)}</span></span>
               </div>
               
-              {estimatedRemaining && totalEstimatedTime.hasData && (
+              {totalEstimatedTime.hasData && (
                 <div className="flex items-center gap-1.5">
-                  <span>Remaining: <span className="font-medium text-foreground">
-                    {formatTypicalTime(estimatedRemaining.p50, estimatedRemaining.p80)}
+                  <span>Usually takes <span className="font-medium text-foreground">
+                    {formatTypicalTime(totalEstimatedTime.p50, totalEstimatedTime.p80)}
                   </span></span>
                 </div>
               )}
               
               {!totalEstimatedTime.hasData && (
                 <div className="text-muted-foreground/70">
-                  <span>Estimating time…</span>
+                  <span>Usually takes 30s–2m</span>
                 </div>
               )}
             </div>
