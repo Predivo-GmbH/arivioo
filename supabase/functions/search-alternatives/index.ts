@@ -283,55 +283,88 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
   
   try {
     console.log("Scraping Airbnb with Browserless:", url.slice(0, 100));
-    
-    // Use Browserless /content endpoint for HTML extraction with JS rendering
-    const browserlessUrl = `https://chrome.browserless.io/content?token=${browserlessApiKey}`;
-    
+
+    // Use Browserless /function endpoint so we can interact with the page (expand price breakdown)
+    // This is necessary because the headline "$X for Y nights" can sometimes reflect a partial amount.
+    const browserlessFnUrl = `https://chrome.browserless.io/function?token=${browserlessApiKey}`;
+
+    const functionPayload = {
+      code: `module.exports = async ({ page, context }) => {
+        const url = context.url;
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+        // Let dynamic pricing hydrate
+        await page.waitForTimeout(9000);
+
+        // Attempt to expand the price breakdown (Airbnb often hides "Total before taxes" behind this)
+        const clickSelectors = [
+          "button[data-testid='price-breakdown-trigger']",
+          "button[aria-label*='Show price breakdown']",
+          "button[aria-label*='Price breakdown']",
+          "button:has-text('Show price breakdown')",
+          "button:has-text('Price breakdown')",
+          "a:has-text('Show price breakdown')",
+        ];
+
+        for (const sel of clickSelectors) {
+          try {
+            const el = await page.$(sel);
+            if (el) {
+              await el.click({ delay: 30 });
+              await page.waitForTimeout(1500);
+              break;
+            }
+          } catch (_) {}
+        }
+
+        // Extra wait after click attempt
+        await page.waitForTimeout(2500);
+
+        // Return full HTML content
+        const html = await page.content();
+
+        // Also return a small text snapshot for debugging
+        const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 5000) || "");
+
+        return { html, bodyTextLength: bodyText.length, bodyTextPreview: bodyText.slice(0, 600) };
+      };`,
+      context: { url },
+    };
+
     const response = await fetchWithTimeout(
-      browserlessUrl,
+      browserlessFnUrl,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url,
-          gotoOptions: {
-            waitUntil: "networkidle2",
-            timeout: 45000,
-          },
-          waitForSelector: {
-            selector: "[data-testid='book-it-default-book-it-button'], [aria-label*='nights'], .price",
-            timeout: 20000,
-          },
-          // Add extra wait for dynamic content
-          addScriptTag: [{
-            content: `await new Promise(r => setTimeout(r, 3000));`
-          }],
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(functionPayload),
       },
-      55_000
+      60_000
     );
-    
+
     result.statusCode = response.status;
-    
+
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
       result.error = `Browserless HTTP ${response.status}: ${errText.slice(0, 200)}`;
-      console.error("Browserless scrape failed:", result.error);
+      console.error("Browserless function scrape failed:", result.error);
       return result;
     }
-    
-    const html = await response.text();
-    
+
+    const fnJson = await response.json().catch(() => null);
+    const html = fnJson?.html || "";
+
     if (!html || html.length < 500) {
       result.error = "Browserless returned insufficient content";
       return result;
     }
-    
+
+    // Debug preview: confirm we actually got text hydrated
+    if (fnJson?.bodyTextPreview) {
+      console.log("Browserless bodyText preview:", String(fnJson.bodyTextPreview).replace(/\s+/g, ' ').slice(0, 200));
+    }
+
     // Check for bot indicators
     result.botIndicators = detectBotIndicators(html);
-    
+
     if (result.botIndicators.length > 0) {
       console.log("Browserless: Bot indicators detected:", result.botIndicators.join(', '));
       result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
@@ -339,10 +372,10 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       result.evidenceSnippet = extractEvidenceSnippet(html);
       return result;
     }
-    
+
     result.ok = true;
     result.html = html;
-    
+
     // Generate markdown from HTML
     result.markdown = html
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -350,9 +383,9 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-    
-    console.log("Browserless scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms");
-    
+
+    console.log("Browserless function scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms");
+
     return result;
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
