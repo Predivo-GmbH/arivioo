@@ -28,6 +28,49 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
+// Validate password complexity for admin accounts
+// Requires: 12+ chars, uppercase, lowercase, number, special character
+function validatePasswordComplexity(password: string): { valid: boolean; error?: string } {
+  if (password.length < 12) {
+    return { valid: false, error: 'Password must be at least 12 characters' };
+  }
+  
+  if (password.length > 128) {
+    return { valid: false, error: 'Password must be at most 128 characters' };
+  }
+  
+  if (!/[a-z]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one lowercase letter' };
+  }
+  
+  if (!/[A-Z]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one uppercase letter' };
+  }
+  
+  if (!/[0-9]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one number' };
+  }
+  
+  if (!/[^a-zA-Z0-9]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one special character (!@#$%^&*...)' };
+  }
+  
+  // Check for common weak patterns
+  const weakPatterns = [
+    /^(.)\1+$/, // All same character (aaaaaaaaaa)
+    /^(012|123|234|345|456|567|678|789|890)+/, // Sequential numbers
+    /^(abc|bcd|cde|def|efg|fgh|ghi|hij|ijk|jkl|klm|lmn|mno|nop|opq|pqr|qrs|rst|stu|tuv|uvw|vwx|wxy|xyz)+/i, // Sequential letters
+  ];
+  
+  for (const pattern of weakPatterns) {
+    if (pattern.test(password)) {
+      return { valid: false, error: 'Password contains weak patterns. Please use a more complex password.' };
+    }
+  }
+  
+  return { valid: true };
+}
+
 // Simple bcrypt verification using Web Crypto (simplified for edge function)
 // In production, you'd want to use a proper bcrypt library
 async function verifyPassword(password: string, hash: string): Promise<boolean> {
@@ -425,9 +468,11 @@ Deno.serve(async (req) => {
         );
       }
 
-      if (newPassword.length < 12) {
+      // Validate password complexity for admin accounts
+      const passwordValidation = validatePasswordComplexity(newPassword);
+      if (!passwordValidation.valid) {
         return new Response(
-          JSON.stringify({ error: 'New password must be at least 12 characters' }),
+          JSON.stringify({ error: passwordValidation.error }),
           { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
