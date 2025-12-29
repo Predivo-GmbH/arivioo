@@ -831,9 +831,9 @@ export default function SearchResults() {
   const hasValidDates = checkIn && checkOut;
   const nights = dbNights || (hasValidDates ? calculateNights(checkIn!, checkOut!) : null);
 
-  // Calculate totals - use original_price from results if airbnb_price not available
-  const referencePrice = search?.airbnb_price || (results.length > 0 ? results[0].original_price : null);
-  const airbnbTotal = referencePrice && nights ? referencePrice * nights : null;
+  // airbnb_price is now TOTAL price for the entire stay (not per-night)
+  // result.price from alternatives is also TOTAL price
+  const airbnbTotal = search?.airbnb_price || (results.length > 0 ? results[0].original_price : null);
   const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
   const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
@@ -850,18 +850,16 @@ export default function SearchResults() {
   const sortedByPrice = [...resultsWithPrices].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
 
   // Separate results into cheaper (savings) and more expensive (no savings)
-  // IMPORTANT: result.price is PER-NIGHT rate, must multiply by nights to get total
+  // result.price is now TOTAL price - compare directly
   const cheaperResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal || !nights) return true;
-    const alternativeTotal = r.price! * nights;
-    return alternativeTotal < airbnbGrandTotal;
+    if (!airbnbGrandTotal) return true;
+    return r.price! < airbnbGrandTotal;
   });
 
   // More expensive alternatives for collapsed section
   const moreExpensiveResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal || !nights) return false;
-    const alternativeTotal = r.price! * nights;
-    return alternativeTotal >= airbnbGrandTotal;
+    if (!airbnbGrandTotal) return false;
+    return r.price! >= airbnbGrandTotal;
   });
 
   // For backward compatibility, validResults = results with prices (excluding Tier C)
@@ -897,9 +895,8 @@ export default function SearchResults() {
       )
     : null;
 
-  // Calculate potential savings
-  // NOTE: cheapestResult.price is PER-NIGHT rate, multiply by nights for total
-  const cheapestTotal = cheapestResult?.price && nights ? cheapestResult.price * nights : null;
+  // Calculate potential savings - prices are now TOTAL
+  const cheapestTotal = cheapestResult?.price || null;
   const potentialSavings = airbnbGrandTotal && cheapestTotal ? airbnbGrandTotal - cheapestTotal : null;
 
 
@@ -1136,7 +1133,6 @@ export default function SearchResults() {
                             <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
                             <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
                             <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights || 1} nights)</th>
-                            <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
                             <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Key Differences</th>
                             <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
                           </tr>
@@ -1161,9 +1157,6 @@ export default function SearchResults() {
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-foreground text-lg">
                               €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
-                            </td>
-                            <td className="py-4 px-4 text-right text-foreground font-medium">
-                              €{referencePrice ? Math.round(referencePrice) : "—"}/night
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
                               <span className="text-xs">AirCover protection, service fee, cleaning fee may apply</span>
@@ -1212,7 +1205,6 @@ export default function SearchResults() {
                             <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
                             <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
                             <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights || 1} nights)</th>
-                            <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
                             <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Key Differences</th>
                             <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
                           </tr>
@@ -1238,9 +1230,6 @@ export default function SearchResults() {
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-success text-lg">
                               €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
-                            </td>
-                            <td className="py-4 px-4 text-right text-success font-medium">
-                              €{referencePrice ? Math.round(referencePrice) : "—"}/night
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
                               <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
@@ -1459,13 +1448,12 @@ export default function SearchResults() {
                             <th className="text-left py-3 px-4 font-semibold text-foreground">Platform</th>
                             <th className="text-center py-3 px-4 font-semibold text-foreground">Trust Score</th>
                             <th className="text-right py-3 px-4 font-semibold text-foreground">Total ({nights || 1} nights)</th>
-                            <th className="text-right py-3 px-4 font-semibold text-foreground">Per Night</th>
                             <th className="text-left py-3 px-4 font-semibold text-foreground hidden lg:table-cell">Key Differences</th>
                             <th className="text-center py-3 px-4 font-semibold text-foreground">Action</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {/* Airbnb Original Row - Show estimated price when actual not available */}
+                          {/* Airbnb Original Row - airbnb_price is now TOTAL */}
                           <tr className="border-b border-border bg-[#FF5A5F]/5">
                             <td className="py-4 px-4">
                               <div className="flex items-center gap-2">
@@ -1481,20 +1469,11 @@ export default function SearchResults() {
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-foreground">
-                              {search?.airbnb_price ? (
-                                `€${Math.round(search.airbnb_price * (nights || 1) * 1.14)}`
+                              {airbnbGrandTotal ? (
+                                `€${Math.round(airbnbGrandTotal)}`
                               ) : (
                                 <div className="flex justify-end">
                                   <div className="h-5 w-16 bg-muted animate-pulse rounded" />
-                                </div>
-                              )}
-                            </td>
-                            <td className="py-4 px-4 text-right text-muted-foreground">
-                              {search?.airbnb_price ? (
-                                `€${search.airbnb_price}/night`
-                              ) : (
-                                <div className="flex justify-end">
-                                  <div className="h-4 w-14 bg-muted animate-pulse rounded" />
                                 </div>
                               )}
                             </td>
@@ -1553,24 +1532,13 @@ export default function SearchResults() {
                                       <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
                                         <Info className="w-3 h-3" />
                                         Text
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className={`py-4 px-4 text-right font-semibold ${isCheapest ? 'text-success text-lg' : 'text-foreground'}`}>
-                                    {result.price && result.price >= 10 && totalPrice ? `€${totalPrice}` : '—'}
-                                  </td>
-                                  <td className={`py-4 px-4 text-right ${isCheapest ? 'text-success font-medium' : 'text-muted-foreground'}`}>
-                                    <div className="flex flex-col items-end gap-0.5">
-                                      <span>{result.price && result.price >= 10 ? `€${result.price}/night` : '—'}</span>
-                                      {result.dates_differ && result.price_check_in && result.price_check_out && (
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[10px] font-medium">
-                                          <Calendar className="w-2.5 h-2.5" />
-                                          {new Date(result.price_check_in).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – {new Date(result.price_check_out).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="py-4 px-4 hidden lg:table-cell">
+                                    </span>
+                                  )}
+                                </td>
+                                <td className={`py-4 px-4 text-right font-semibold ${isCheapest ? 'text-success text-lg' : 'text-foreground'}`}>
+                                  {result.price && result.price >= 10 ? `€${Math.round(result.price)}` : '—'}
+                                </td>
+                                <td className="py-4 px-4 hidden lg:table-cell">
                                     <div className="flex flex-col gap-1">
                                       <span className={`text-xs ${isCheapest ? 'text-success flex items-center gap-1' : 'text-muted-foreground'}`}>
                                         {isCheapest && <Check className="w-3 h-3" />}

@@ -119,7 +119,7 @@ export function PriceExtractionProgress({
               <div className="font-medium truncate">{platform.platformName}</div>
               <div className="text-xs text-muted-foreground">
                 {platform.status === 'success' && platform.price 
-                  ? `${platform.currency || '$'}${platform.price.toLocaleString()}/night`
+                  ? `${platform.currency || '$'}${platform.price.toLocaleString()} total`
                   : getStatusLabel(platform.status)
                 }
               </div>
