@@ -4819,7 +4819,7 @@ serve(async (req) => {
         const nights = calculateNights(checkIn, checkOut);
         const aiResult = await extractAirbnbTotalPriceWithAI(contentForAI, nights);
         airbnbPrice = aiResult.price;
-        if (aiResult.price) airbnbCurrency = aiResult.currency;
+        // Note: currency not tracked in this fallback path
       }
     }
 
