@@ -199,15 +199,9 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Ai
           javascript: true,
           screenshot: true,
           screenshotOptions: { fullPage: false },
-          // Click "Show price breakdown" to reveal total with taxes, then wait
+          // Wait for page to fully load and prices to hydrate
           actions: [
-            { action: "waitForTimeout", timeout: 5 }, // Wait for initial render
-            { 
-              action: "click", 
-              selector: { type: "css", value: "button[aria-label*='for'][aria-label*='nights']" },
-              onError: "ignore" // Continue if button not found
-            },
-            { action: "waitForTimeout", timeout: 3 }, // Wait for modal to open
+            { action: "waitForTimeout", timeout: 8 }, // Wait for initial render and dynamic pricing
           ],
         }),
       },
@@ -289,44 +283,43 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${browserlessApiKey}`;
 
     const functionPayload = {
-      code: `module.exports = async ({ page, context }) => {
-        const url = context.url;
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-        // Let dynamic pricing hydrate
-        await page.waitForTimeout(9000);
+      code: `
+        export default async function({ page, context }) {
+          const url = context.url;
+          await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+          // Let dynamic pricing hydrate
+          await page.waitForTimeout(9000);
 
-        // Attempt to expand the price breakdown (Airbnb often hides "Total before taxes" behind this)
-        const clickSelectors = [
-          "button[data-testid='price-breakdown-trigger']",
-          "button[aria-label*='Show price breakdown']",
-          "button[aria-label*='Price breakdown']",
-          "button:has-text('Show price breakdown')",
-          "button:has-text('Price breakdown')",
-          "a:has-text('Show price breakdown')",
-        ];
+          // Attempt to expand the price breakdown (Airbnb often hides "Total before taxes" behind this)
+          const clickSelectors = [
+            "button[data-testid='price-breakdown-trigger']",
+            "button[aria-label*='Show price breakdown']",
+            "button[aria-label*='Price breakdown']",
+          ];
 
-        for (const sel of clickSelectors) {
-          try {
-            const el = await page.$(sel);
-            if (el) {
-              await el.click({ delay: 30 });
-              await page.waitForTimeout(1500);
-              break;
-            }
-          } catch (_) {}
+          for (const sel of clickSelectors) {
+            try {
+              const el = await page.$(sel);
+              if (el) {
+                await el.click({ delay: 30 });
+                await page.waitForTimeout(1500);
+                break;
+              }
+            } catch (e) {}
+          }
+
+          // Extra wait after click attempt
+          await page.waitForTimeout(2500);
+
+          // Return full HTML content
+          const html = await page.content();
+
+          // Also return a small text snapshot for debugging
+          const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 5000) || "");
+
+          return { html, bodyTextLength: bodyText.length, bodyTextPreview: bodyText.slice(0, 600) };
         }
-
-        // Extra wait after click attempt
-        await page.waitForTimeout(2500);
-
-        // Return full HTML content
-        const html = await page.content();
-
-        // Also return a small text snapshot for debugging
-        const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 5000) || "");
-
-        return { html, bodyTextLength: bodyText.length, bodyTextPreview: bodyText.slice(0, 600) };
-      };`,
+      `,
       context: { url },
     };
 
