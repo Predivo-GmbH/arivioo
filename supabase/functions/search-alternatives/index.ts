@@ -849,101 +849,116 @@ function extractPriceFromJsonLD(content: string): number | null {
 }
 
 // Try to extract TOTAL STAY PRICE with regex patterns first (faster, more reliable for common formats)
-// Returns TOTAL price for the entire stay, NOT per-night
-function extractTotalPriceWithRegex(content: string, nights: number): number | null {
+// Returns TOTAL price for the entire stay and detected currency, NOT per-night
+function extractTotalPriceWithRegex(content: string, nights: number): { price: number | null; currency: string } {
   console.log("Attempting regex TOTAL price extraction, content length:", content.length, "nights:", nights);
   
-  // Collect all potential totals
-  let potentialTotals: number[] = [];
+  // Collect all potential totals with their currencies
+  let potentialTotals: { price: number; currency: string }[] = [];
   
   // Priority 0: Look for "$X,XXX for Y nights" - this is Airbnb's PRIMARY total price display
   // This appears prominently on the booking widget (e.g., "$2,214 for 4 nights")
-  const forNightsPatterns = [
-    // "$2,214 for 4 nights" - main visible format with comma-separated thousands
-    /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi,
-    // "€2,214 for 4 nights"
-    /€\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi,
-    // "£2,214 for 4 nights"
-    /£\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi,
-    // aria-label="$2,214 for 4 nights" - Airbnb's accessibility format
-    /aria-label=["']?\$?\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi,
-    // "2,214 for 4 nights" without currency (in case currency is separate)
-    /\b([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?\b/gi,
+  const forNightsPatterns: { pattern: RegExp; currency: string }[] = [
+    // "$2,214 for 4 nights" - USD
+    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'USD' },
+    // "€2,214 for 4 nights" - EUR
+    { pattern: /€\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'EUR' },
+    // "£2,214 for 4 nights" - GBP
+    { pattern: /£\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'GBP' },
+    // "CHF 2,214 for 4 nights" - CHF
+    { pattern: /CHF\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'CHF' },
+    // "2,214 AUD for 4 nights" - AUD
+    { pattern: /A\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'AUD' },
+    // "2,214 CAD for 4 nights" - CAD
+    { pattern: /C\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'CAD' },
+    // aria-label="$2,214 for 4 nights" - Airbnb's accessibility format (USD)
+    { pattern: /aria-label=["']?\$\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'USD' },
+    { pattern: /aria-label=["']?€\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'EUR' },
+    { pattern: /aria-label=["']?£\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'GBP' },
   ];
   
-  for (const pattern of forNightsPatterns) {
+  for (const { pattern, currency } of forNightsPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
       const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
       const detectedNights = parseInt(match[2], 10);
       // Only accept if nights match what we expect (within +/- 1 for edge cases)
       if (totalPrice >= 30 && totalPrice <= 500000 && detectedNights > 0 && Math.abs(detectedNights - nights) <= 1) {
-        console.log(`Found TOTAL from 'for X nights' pattern: $${totalPrice} for ${detectedNights} nights`);
-        potentialTotals.push(totalPrice);
+        console.log(`Found TOTAL from 'for X nights' pattern: ${currency} ${totalPrice} for ${detectedNights} nights`);
+        potentialTotals.push({ price: totalPrice, currency });
       }
     }
   }
   
   // Priority 1: Look for explicit total markers in price breakdown
   // These appear in the expanded price details
-  const totalMarkerPatterns = [
+  const totalMarkerPatterns: { pattern: RegExp; currency: string }[] = [
     // "Total $2,214" or "Total: $2,214"
-    /total[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    { pattern: /total[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     // "Total (USD) $2,214"
-    /total\s*\([A-Z]{3}\)[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/gi,
+    { pattern: /total\s*\(USD\)[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     // "Total €2,214"
-    /total[:\s]+€\s*([\d,]+(?:\.\d{2})?)/gi,
+    { pattern: /total[:\s]+€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    // "Total (EUR) €2,214"
+    { pattern: /total\s*\(EUR\)[:\s]*€?\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    // "Total £2,214"
+    { pattern: /total[:\s]+£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
     // "Grand total $2,214"
-    /grand\s+total[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/gi,
+    { pattern: /grand\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /grand\s+total[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    { pattern: /grand\s+total[:\s]*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
     // "You pay $2,214"
-    /you\s+(?:will\s+)?pay[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/gi,
-    // JSON patterns: "totalPrice": 2214 or "total": 2214
-    /"totalPrice"[:\s]*"?\$?([\d,]+(?:\.\d{2})?)?"?/gi,
-    /"total"[:\s]*"?\$?([\d,]+(?:\.\d{2})?)?"?/gi,
+    { pattern: /you\s+(?:will\s+)?pay[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /you\s+(?:will\s+)?pay[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    // JSON patterns: "totalPrice": 2214 - assume USD if no currency context
+    { pattern: /"totalPrice"[:\s]*"?\$?([\d,]+(?:\.\d{2})?)?"?/gi, currency: 'USD' },
+    { pattern: /"total"[:\s]*"?\$?([\d,]+(?:\.\d{2})?)?"?/gi, currency: 'USD' },
   ];
   
-  for (const pattern of totalMarkerPatterns) {
+  for (const { pattern, currency } of totalMarkerPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
       const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
       if (totalPrice >= 30 && totalPrice <= 500000) {
-        console.log(`Found TOTAL from explicit marker: $${totalPrice} from "${match[0].slice(0, 60)}"`);
-        potentialTotals.push(totalPrice);
+        console.log(`Found TOTAL from explicit marker: ${currency} ${totalPrice} from "${match[0].slice(0, 60)}"`);
+        potentialTotals.push({ price: totalPrice, currency });
       }
     }
   }
   
   // Use the highest found price - taxes/fees make final total highest
   if (potentialTotals.length > 0) {
-    const maxTotal = Math.max(...potentialTotals);
-    console.log(`Regex extraction: Using highest total $${maxTotal} from ${potentialTotals.length} candidates: [${potentialTotals.join(', ')}]`);
-    return maxTotal;
+    // Sort by price descending and take the highest
+    potentialTotals.sort((a, b) => b.price - a.price);
+    const best = potentialTotals[0];
+    console.log(`Regex extraction: Using highest total ${best.currency} ${best.price} from ${potentialTotals.length} candidates: [${potentialTotals.map(t => `${t.currency}${t.price}`).join(', ')}]`);
+    return { price: best.price, currency: best.currency };
   }
   
   // DO NOT derive totals from nightly rates
   // We must show the total Airbnb actually displays
   console.log("Regex extraction: No total price pattern found");
-  return null;
+  return { price: null, currency: 'USD' };
 }
 
 // Use Lovable AI to extract Airbnb TOTAL STAY PRICE (including mandatory fees) from scraped content.
-// Returns the TOTAL price for the entire stay, NOT per-night.
-async function extractAirbnbTotalPriceWithAI(content: string, nights: number): Promise<number | null> {
+// Returns the TOTAL price for the entire stay and currency, NOT per-night.
+async function extractAirbnbTotalPriceWithAI(content: string, nights: number): Promise<{ price: number | null; currency: string }> {
   // Try regex extraction first (fast path)
-  const regexTotal = extractTotalPriceWithRegex(content, nights);
-  if (regexTotal) {
-    console.log("Using regex-extracted TOTAL price:", regexTotal);
-    return regexTotal;
+  const regexResult = extractTotalPriceWithRegex(content, nights);
+  if (regexResult.price) {
+    console.log("Using regex-extracted TOTAL price:", regexResult.price, regexResult.currency);
+    return regexResult;
   }
 
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
   if (!lovableApiKey) {
     console.log("LOVABLE_API_KEY not available for AI price extraction");
-    return null;
+    return { price: null, currency: 'USD' };
   }
 
   try {
-  const prompt = `You are analyzing text scraped from an Airbnb listing page.
+    const prompt = `You are analyzing text scraped from an Airbnb listing page.
 The stay is for exactly ${nights} night(s).
 
 Goal: Extract the TOTAL price for the ENTIRE stay as shown by Airbnb (including mandatory fees/taxes if included in the displayed total).
@@ -953,12 +968,13 @@ Rules:
 - Look for patterns like "$X for Y nights", "Total: $X", "Trip total: $X", "Total before taxes: $X".
 - IMPORTANT: If the page only shows a per-night rate and no total, return "null" (do NOT multiply).
 - If you find "Total before taxes", return that number.
+- Also identify the currency symbol used: $=USD, €=EUR, £=GBP, CHF=CHF, A$=AUD, C$=CAD
 
 Content:
 ${content.slice(0, 12000)}
 
-Return ONLY a single number representing the TOTAL price for the entire stay (no currency symbol).
-If you cannot find a reliable total, return "null".`;
+Return ONLY JSON: {"price": <number|null>, "currency": "<USD|EUR|GBP|CHF|AUD|CAD>"}
+If you cannot find a reliable total, return {"price": null, "currency": "USD"}.`;
 
     const response = await fetchWithTimeout(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
@@ -971,7 +987,7 @@ If you cannot find a reliable total, return "null".`;
         body: JSON.stringify({
           model: "google/gemini-2.5-flash",
           messages: [{ role: "user", content: prompt }],
-          max_tokens: 50,
+          max_tokens: 80,
         }),
       },
       15_000
@@ -979,32 +995,62 @@ If you cannot find a reliable total, return "null".`;
 
     if (!response.ok) {
       console.error("Lovable AI request failed:", response.status);
-      return null;
+      return { price: null, currency: 'USD' };
     }
 
     const data = await response.json();
-    const totalText = data.choices?.[0]?.message?.content?.trim();
+    const responseText = data.choices?.[0]?.message?.content?.trim();
 
-    if (!totalText || totalText.toLowerCase() === "null") {
-      console.log("AI could not extract total price from content");
-      return null;
+    if (!responseText) {
+      console.log("AI returned empty response");
+      return { price: null, currency: 'USD' };
     }
 
-    const total = parseFloat(totalText.replace(/[^0-9.]/g, ""));
-    if (isNaN(total) || total < 20 || total > 500000) {
-      console.log("AI returned invalid total:", totalText);
-      return null;
+    // Try to parse as JSON
+    try {
+      // Clean up markdown code blocks if present
+      const cleanJson = responseText.replace(/```json\n?/gi, '').replace(/```\n?/gi, '').trim();
+      const parsed = JSON.parse(cleanJson);
+      const price = typeof parsed.price === 'number' && parsed.price >= 20 && parsed.price <= 500000 ? parsed.price : null;
+      const currency = ['USD', 'EUR', 'GBP', 'CHF', 'AUD', 'CAD'].includes(parsed.currency) ? parsed.currency : 'USD';
+      console.log("AI extracted TOTAL price:", price, currency, "for", nights, "nights");
+      return { price, currency };
+    } catch {
+      // Fallback: try to extract just a number (legacy behavior)
+      const total = parseFloat(responseText.replace(/[^0-9.]/g, ""));
+      if (!isNaN(total) && total >= 20 && total <= 500000) {
+        console.log("AI extracted TOTAL price (legacy):", total, "for", nights, "nights");
+        return { price: total, currency: 'USD' };
+      }
+      console.log("AI returned invalid response:", responseText);
+      return { price: null, currency: 'USD' };
     }
-
-    console.log("AI extracted TOTAL price:", total, "for", nights, "nights");
-    return total;
   } catch (error) {
     console.error("AI price extraction error:", error);
-    return null;
+    return { price: null, currency: 'USD' };
   }
 }
 
-// Use AI to extract price from alternative booking platforms (Booking.com, TripAdvisor, etc.)
+// Helper type for price extraction result
+type PriceExtractionResult = { price: number | null; currency: string };
+
+// Helper function to update price and currency from extraction result
+function updatePriceFromResult(
+  result: PriceExtractionResult,
+  currentPrice: number | null,
+  currentCurrency: string
+): { price: number | null; currency: string } {
+  if (result.price !== null) {
+    return { price: result.price, currency: result.currency };
+  }
+  return { price: currentPrice, currency: currentCurrency };
+}
+
+// Wrapper to extract price from regex and return just the price (for backward compat during migration)
+function extractPriceOnly(content: string, nights: number): number | null {
+  return extractTotalPriceWithRegex(content, nights).price;
+}
+
 async function extractAlternativePlatformPriceWithAI(
   content: string,
   platformName: string,
@@ -2806,6 +2852,7 @@ async function runSearchWithStreaming(
   const foundUrls = new Set<string>();
   let airbnbTitle = "Vacation Rental";
   let airbnbPrice: number | null = null;
+  let airbnbCurrency: string = 'USD'; // Track currency from extraction
   let imageUrls: string[] = [];
   let skipAirbnbPrice = false;
   // Track scraped content for failure diagnosis
@@ -2930,20 +2977,26 @@ async function runSearchWithStreaming(
         checkStage1Timeout();
         sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless (no fallback mode)");
         
-        airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
-        if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-          airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+        // Extract price and currency
+        let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
+        if (!priceResult.price && browserlessResult.markdown.length > 100) {
+          priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
         }
-        if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
-          airbnbPrice = await extractAirbnbTotalPriceWithAI(
+        if (!priceResult.price && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
+          priceResult = await extractAirbnbTotalPriceWithAI(
             [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
             nights
           );
         }
+        
+        // Update the tracking variables
+        airbnbPrice = priceResult.price;
+        airbnbCurrency = priceResult.currency;
 
         if (airbnbPrice) {
-          console.log("Browserless extracted Airbnb price:", airbnbPrice);
-          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
+          const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+          console.log("Browserless extracted Airbnb price:", airbnbCurrency, airbnbPrice);
+          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
           await supabase
             .from("searches")
             .update({
@@ -2951,6 +3004,7 @@ async function runSearchWithStreaming(
               last_progress_at: new Date().toISOString(),
               airbnb_title: airbnbTitle,
               airbnb_price: airbnbPrice,
+              airbnb_currency: airbnbCurrency,
               airbnb_image_url: imageUrls[0] || null,
               airbnb_images: imageUrls.slice(0, 5),
               check_in_date: checkIn,
@@ -3123,11 +3177,11 @@ async function runSearchWithStreaming(
             await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
             // 1) HTML/Raw HTML (JSON-LD / embedded data) - Extract TOTAL price
-            airbnbPrice = extractTotalPriceWithRegex(rawHtml || html, nights);
+            airbnbPrice = extractPriceOnly(rawHtml || html, nights);
 
             // 2) Markdown
             if (!airbnbPrice && markdown.length > 100) {
-              airbnbPrice = extractTotalPriceWithRegex(markdown, nights);
+              airbnbPrice = extractPriceOnly(markdown, nights);
             }
 
             // 3) Screenshot (dynamic totals)
@@ -3144,10 +3198,12 @@ async function runSearchWithStreaming(
             if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
               checkStage1Timeout();
               sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
-              airbnbPrice = await extractAirbnbTotalPriceWithAI(
+              const aiResult = await extractAirbnbTotalPriceWithAI(
                 [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
                 nights
               );
+              airbnbPrice = aiResult.price;
+              if (aiResult.price) airbnbCurrency = aiResult.currency;
             }
 
             if (airbnbPrice) {
@@ -3223,11 +3279,11 @@ async function runSearchWithStreaming(
               await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
               // 1) HTML extraction - TOTAL price
-              airbnbPrice = extractTotalPriceWithRegex(zyteResult.html, nights);
+              airbnbPrice = extractPriceOnly(zyteResult.html, nights);
 
               // 2) Markdown
               if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                airbnbPrice = extractTotalPriceWithRegex(zyteResult.markdown, nights);
+                airbnbPrice = extractPriceOnly(zyteResult.markdown, nights);
               }
 
               // 3) Screenshot
@@ -3244,10 +3300,12 @@ async function runSearchWithStreaming(
               if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
                 checkStage1Timeout();
                 sendProgress(controller, "Using AI for price extraction", "Analyzing page content from fallback");
-                airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                const aiResult = await extractAirbnbTotalPriceWithAI(
                   [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
                   nights
                 );
+                airbnbPrice = aiResult.price;
+                if (aiResult.price) airbnbCurrency = aiResult.currency;
               }
 
               if (airbnbPrice) {
@@ -3323,15 +3381,17 @@ async function runSearchWithStreaming(
                     checkStage1Timeout();
                     sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless");
                     
-                    airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                    airbnbPrice = extractPriceOnly(browserlessResult.html, nights);
                     if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                      airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                      airbnbPrice = extractPriceOnly(browserlessResult.markdown, nights);
                     }
                     if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
-                      airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                      const aiResult = await extractAirbnbTotalPriceWithAI(
                         [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
                         nights
                       );
+                      airbnbPrice = aiResult.price;
+                      if (aiResult.price) airbnbCurrency = aiResult.currency;
                     }
 
                     if (airbnbPrice) {
@@ -3418,18 +3478,20 @@ async function runSearchWithStreaming(
                 const unique = [...new Set(allImages.map(canonicalize))];
                 imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
 
-                airbnbPrice = extractTotalPriceWithRegex(zyteResult.html, nights);
+                airbnbPrice = extractPriceOnly(zyteResult.html, nights);
                 if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                  airbnbPrice = extractTotalPriceWithRegex(zyteResult.markdown, nights);
+                  airbnbPrice = extractPriceOnly(zyteResult.markdown, nights);
                 }
                 if (!airbnbPrice && zyteResult.screenshot) {
                   airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
                 }
                 if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
-                  airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                  const aiResult = await extractAirbnbTotalPriceWithAI(
                     [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
                     nights
                   );
+                  airbnbPrice = aiResult.price;
+                  if (aiResult.price) airbnbCurrency = aiResult.currency;
                 }
 
                 if (airbnbPrice) {
@@ -3491,15 +3553,17 @@ async function runSearchWithStreaming(
                           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
                         }
 
-                        airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                        airbnbPrice = extractPriceOnly(browserlessResult.html, nights);
                         if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                          airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                          airbnbPrice = extractPriceOnly(browserlessResult.markdown, nights);
                         }
                         if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
-                          airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                          const aiResult = await extractAirbnbTotalPriceWithAI(
                             [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
                             nights
                           );
+                          airbnbPrice = aiResult.price;
+                          if (aiResult.price) airbnbCurrency = aiResult.currency;
                         }
 
                         if (airbnbPrice) {
@@ -3545,15 +3609,17 @@ async function runSearchWithStreaming(
                       providerUsed: 'browserless',
                     } as any;
                     
-                    airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                    airbnbPrice = extractPriceOnly(browserlessResult.html, nights);
                     if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                      airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                      airbnbPrice = extractPriceOnly(browserlessResult.markdown, nights);
                     }
                     if (!airbnbPrice) {
-                      airbnbPrice = await extractAirbnbTotalPriceWithAI(
+                      const aiResult = await extractAirbnbTotalPriceWithAI(
                         [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
                         nights
                       );
+                      airbnbPrice = aiResult.price;
+                      if (aiResult.price) airbnbCurrency = aiResult.currency;
                     }
                     
                     if (airbnbPrice) {
@@ -3611,8 +3677,13 @@ async function runSearchWithStreaming(
           if (!airbnbPrice) {
             checkStage1Timeout();
             sendProgress(controller, "Extracting Airbnb price", "Using AI to find the exact price");
-            airbnbPrice = await extractAirbnbTotalPriceWithAI(html.slice(0, 15000), nights);
-            if (airbnbPrice) sendProgress(controller, "Price extracted", `Found TOTAL: €${airbnbPrice}`);
+            const aiResult = await extractAirbnbTotalPriceWithAI(html.slice(0, 15000), nights);
+            airbnbPrice = aiResult.price;
+            if (aiResult.price) {
+              airbnbCurrency = aiResult.currency;
+              const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : '$';
+              sendProgress(controller, "Price extracted", `Found TOTAL: ${currencySymbol}${airbnbPrice}`);
+            }
           }
         }
       } catch (e) {
@@ -4746,7 +4817,9 @@ serve(async (req) => {
       if (contentForAI) {
         await supabase.from("searches").update({ status: "extracting_price_with_ai" }).eq("id", searchId);
         const nights = calculateNights(checkIn, checkOut);
-        airbnbPrice = await extractAirbnbTotalPriceWithAI(contentForAI, nights);
+        const aiResult = await extractAirbnbTotalPriceWithAI(contentForAI, nights);
+        airbnbPrice = aiResult.price;
+        if (aiResult.price) airbnbCurrency = aiResult.currency;
       }
     }
 

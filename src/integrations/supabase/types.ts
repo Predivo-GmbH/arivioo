@@ -1075,6 +1075,7 @@ export type Database = {
       }
       searches: {
         Row: {
+          airbnb_currency: string | null
           airbnb_image_url: string | null
           airbnb_images: Json | null
           airbnb_price: number | null
@@ -1095,6 +1096,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          airbnb_currency?: string | null
           airbnb_image_url?: string | null
           airbnb_images?: Json | null
           airbnb_price?: number | null
@@ -1115,6 +1117,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          airbnb_currency?: string | null
           airbnb_image_url?: string | null
           airbnb_images?: Json | null
           airbnb_price?: number | null
