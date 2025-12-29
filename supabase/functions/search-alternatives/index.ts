@@ -286,9 +286,11 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       code: `
         export default async function({ page, context }) {
           const url = context.url;
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
           await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
           // Let dynamic pricing hydrate
-          await page.waitForTimeout(9000);
+          await sleep(9000);
 
           // Attempt to expand the price breakdown (Airbnb often hides "Total before taxes" behind this)
           const clickSelectors = [
@@ -302,14 +304,14 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
               const el = await page.$(sel);
               if (el) {
                 await el.click({ delay: 30 });
-                await page.waitForTimeout(1500);
+                await sleep(1500);
                 break;
               }
             } catch (e) {}
           }
 
           // Extra wait after click attempt
-          await page.waitForTimeout(2500);
+          await sleep(2500);
 
           // Return full HTML content
           const html = await page.content();
