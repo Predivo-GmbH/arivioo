@@ -2529,6 +2529,10 @@ async function runSearchWithStreaming(
   let airbnbPrice: number | null = null;
   let imageUrls: string[] = [];
   let skipAirbnbPrice = false;
+  // Track scraped content for failure diagnosis
+  let lastScrapedContent: { markdown: string; html: string; hasScreenshot: boolean } = { 
+    markdown: '', html: '', hasScreenshot: false 
+  };
 
   // IMPORTANT: Save dates immediately after extraction so they're available even if search stalls
   console.log(`Extracted dates from URL: checkIn=${checkIn}, checkOut=${checkOut}, nights=${nights}`);
@@ -2696,6 +2700,13 @@ async function runSearchWithStreaming(
             "screenshot:",
             !!screenshotBase64
           );
+          
+          // Track content for failure diagnosis
+          lastScrapedContent = { 
+            markdown, 
+            html: rawHtml || html, 
+            hasScreenshot: !!screenshotBase64 
+          };
 
           // Extract title
           const metaTitle = firecrawlData?.data?.metadata?.title;
@@ -2858,14 +2869,61 @@ async function runSearchWithStreaming(
           .eq("id", searchId);
         // Continue the pipeline.
       } else {
+        // Determine specific failure reason based on what we observed
+        let failureCode = 'airbnb_price_element_missing';
+        let failureMessage = "We couldn't find the total price on the Airbnb listing.";
+        let userMessage = "Airbnb didn't show a total price for your selected dates. This can happen when dates are unavailable or the listing requires interaction to show pricing.";
+        
+        // Check what content we got to determine failure reason
+        const hasContent = lastScrapedContent.markdown.length > 100 || lastScrapedContent.html.length > 100;
+        const hasScreenshot = lastScrapedContent.hasScreenshot;
+        
+        if (!hasContent && !hasScreenshot) {
+          failureCode = 'airbnb_blocked_or_captcha';
+          failureMessage = "Airbnb blocked the page request (captcha or bot detection).";
+          userMessage = "Airbnb is blocking automated requests. Please try again in a few minutes.";
+        } else if (hasContent) {
+          // Content available - analyze for specific issues
+          const content = lastScrapedContent.markdown || lastScrapedContent.html;
+          if (content.toLowerCase().includes('captcha') || content.toLowerCase().includes('robot') || content.toLowerCase().includes('verify you')) {
+            failureCode = 'airbnb_blocked_or_captcha';
+            failureMessage = "Airbnb requested human verification.";
+            userMessage = "Airbnb is requiring verification. Please try again in a few minutes.";
+          } else if (content.includes('Enter dates') || content.includes('Add dates') || content.includes('Check availability')) {
+            failureCode = 'airbnb_dates_not_applied';
+            failureMessage = "The dates from your URL weren't applied to the listing.";
+            userMessage = "The dates in your Airbnb link weren't applied. Make sure check_in and check_out parameters are in the URL.";
+          } else if ((content.includes('night') || content.includes('/night')) && !content.toLowerCase().includes('total')) {
+            failureCode = 'airbnb_total_not_visible';
+            failureMessage = "Airbnb shows per-night pricing but no total for your dates.";
+            userMessage = "Airbnb isn't showing the total price for your dates. The property may require interaction to reveal pricing.";
+          }
+        }
+        
         stage1Outcome = 'failed';
-        stage1Error = 'AIRBNB_PRICE_UNAVAILABLE';
-        sendProgress(controller, "Price unavailable", "We couldn't read the total price Airbnb shows for those dates. Try different dates or try again in a minute.");
-        await supabase.from("searches").update({ status: "price_unavailable" }).eq("id", searchId);
+        stage1Error = failureCode.toUpperCase();
+        
+        // Update search with explicit failure info
+        await supabase.from("searches").update({ 
+          status: "error",
+          api_error: failureMessage,
+          api_error_code: failureCode,
+          airbnb_title: airbnbTitle || null,
+          airbnb_image_url: imageUrls[0] || null,
+          airbnb_images: imageUrls.slice(0, 5),
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          nights_count: nights,
+          last_progress_at: new Date().toISOString(),
+        }).eq("id", searchId);
+        
+        sendProgress(controller, "Price unavailable", failureMessage);
         sendSSE(controller, "error", {
-          message: "We couldn't extract the Airbnb total for your selected dates. This can happen when Airbnb loads prices dynamically or blocks automated requests. Please try again, or change your dates and retry.",
+          message: userMessage,
+          code: failureCode,
+          canRetry: failureCode === 'airbnb_blocked_or_captcha' || failureCode === 'airbnb_timeout',
         });
-        sendSSE(controller, "complete", { success: false, error: "AIRBNB_PRICE_UNAVAILABLE" });
+        sendSSE(controller, "complete", { success: false, error: failureCode });
         return;
       }
     }
