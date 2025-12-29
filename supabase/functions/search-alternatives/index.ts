@@ -135,9 +135,15 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Zy
           javascript: true,
           screenshot: true,
           screenshotOptions: { fullPage: false },
-          // Wait for pricing to render - Zyte timeout is in SECONDS, max 15
+          // Click "Show price breakdown" to reveal total with taxes, then wait
           actions: [
-            { action: "waitForTimeout", timeout: 10 },
+            { action: "waitForTimeout", timeout: 5 }, // Wait for initial render
+            { 
+              action: "click", 
+              selector: { type: "css", value: "button[aria-label*='for'][aria-label*='nights']" },
+              onError: "ignore" // Continue if button not found
+            },
+            { action: "waitForTimeout", timeout: 3 }, // Wait for modal to open
           ],
         }),
       },
@@ -682,7 +688,34 @@ function extractPriceFromJsonLD(content: string): number | null {
 function extractTotalPriceWithRegex(content: string, nights: number): number | null {
   console.log("Attempting regex TOTAL price extraction, content length:", content.length, "nights:", nights);
   
-  // Priority 1: Look for "X for Y nights" pattern - this is the TOTAL stay price
+  // Priority 0: Look for FINAL TOTAL with taxes (most accurate)
+  // Airbnb often shows "Total (USD)" or similar in the price breakdown
+  const finalTotalPatterns = [
+    // "Total (USD)" or "Total" followed by price - this is the FINAL amount
+    /(?:total\s*(?:\([A-Z]{3}\))?|grand\s+total)[:\s]*\$?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    // Price breakdown JSON patterns - look for final totals
+    /"totalPrice"[:\s]*["\$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    /"total"[:\s]*["\$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    // "You pay $X" or similar final confirmation
+    /you\s+(?:will\s+)?pay[:\s]*\$?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+  ];
+  
+  // Collect all potential final totals and pick the highest reasonable one
+  // (taxes will make the final total higher than the subtotal)
+  let potentialTotals: number[] = [];
+  
+  for (const pattern of finalTotalPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
+      if (totalPrice >= 30 && totalPrice <= 200000) {
+        potentialTotals.push(totalPrice);
+        console.log("Found potential final total:", totalPrice, "from pattern:", match[0].slice(0, 50));
+      }
+    }
+  }
+  
+  // Priority 1: Look for "X for Y nights" pattern - this is the subtotal (before taxes)
   const totalNightsPatterns = [
     // aria-label="$137 for 2 nights" - Airbnb's common format
     /aria-label=["']?\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi,
@@ -692,40 +725,47 @@ function extractTotalPriceWithRegex(content: string, nights: number): number | n
     /[€£]\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi,
   ];
   
+  let subtotalForNights: number | null = null;
+  
   for (const pattern of totalNightsPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
       const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
       const detectedNights = parseInt(match[2], 10);
       if (totalPrice >= 20 && totalPrice <= 100000 && detectedNights > 0) {
-        console.log("Regex extracted TOTAL price:", totalPrice, "for", detectedNights, "nights");
-        return totalPrice;
+        console.log("Found subtotal for nights:", totalPrice, "for", detectedNights, "nights");
+        subtotalForNights = totalPrice;
+        potentialTotals.push(totalPrice);
+        break;
       }
     }
+    if (subtotalForNights) break;
+  }
+  
+  // If we found multiple totals, prefer the highest one (likely includes taxes)
+  // but only if it's within 30% higher than the subtotal (reasonable tax range)
+  if (potentialTotals.length > 0) {
+    const maxTotal = Math.max(...potentialTotals);
+    const minTotal = Math.min(...potentialTotals);
+    
+    // If we have a subtotal and a higher total (within 30%), use the higher one
+    if (subtotalForNights && maxTotal > subtotalForNights && maxTotal <= subtotalForNights * 1.3) {
+      console.log("Using final total with taxes:", maxTotal, "(subtotal was", subtotalForNights, ")");
+      return maxTotal;
+    }
+    
+    // Otherwise use the subtotal if available
+    if (subtotalForNights) {
+      console.log("Using subtotal (no valid tax-inclusive total found):", subtotalForNights);
+      return subtotalForNights;
+    }
+    
+    // Fallback to highest found
+    console.log("Using highest potential total:", maxTotal);
+    return maxTotal;
   }
   
   // Priority 2: Look for explicit "total" price indicators
-  const totalPatterns = [
-    // Total: $500, Total before taxes: $500
-    /total(?:\s+(?:before\s+)?(?:taxes|fees))?[:\s]*\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
-    // $500 total
-    /\$\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
-    // €500 total, £500 total
-    /[€£]\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
-    // "priceForDisplay":"$500" (Airbnb JSON)
-    /"priceForDisplay"[:\s]*["$]*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
-  ];
-  
-  for (const pattern of totalPatterns) {
-    const matches = [...content.matchAll(pattern)];
-    for (const match of matches) {
-      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
-      if (totalPrice >= 30 && totalPrice <= 100000) {
-        console.log("Regex extracted explicit TOTAL price:", totalPrice);
-        return totalPrice;
-      }
-    }
-  }
   
   // Priority 3: If we find per-night price, calculate total (fallback)
   if (nights > 0) {
