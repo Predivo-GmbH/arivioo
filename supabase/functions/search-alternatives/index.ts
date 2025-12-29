@@ -66,21 +66,37 @@ interface ZyteAirbnbResult {
 }
 
 // Detect bot/captcha indicators in content
+// IMPORTANT: Only detect real bot walls, not CSS class names or script content
 function detectBotIndicators(content: string): string[] {
   const indicators: string[] = [];
+  
+  // Strip out CSS, scripts, and style blocks to avoid false positives from class names
+  const visibleContent = content
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/\{[^}]*\}/g, ' ') // Remove CSS rule blocks
+    .replace(/class\s*=\s*["'][^"']*["']/gi, ' ') // Remove class attributes
+    .replace(/id\s*=\s*["'][^"']*["']/gi, ' '); // Remove id attributes
+  
+  // These patterns must appear in visible text context, not CSS/class names
   const patterns = [
-    { pattern: /captcha/i, label: "captcha" },
-    { pattern: /robot|bot\s+check/i, label: "robot_check" },
-    { pattern: /verify you['']?re human/i, label: "human_verification" },
-    { pattern: /cloudflare/i, label: "cloudflare" },
-    { pattern: /please\s+wait\s+while\s+we\s+verify/i, label: "verification_wait" },
-    { pattern: /access\s+denied/i, label: "access_denied" },
-    { pattern: /just\s+a\s+moment/i, label: "cloudflare_wait" },
+    { pattern: /please\s+complete\s+the\s+captcha/i, label: "captcha" },
+    { pattern: /solve\s+the\s+captcha/i, label: "captcha" },
+    { pattern: /verify\s+you['']?re\s+human/i, label: "human_verification" },
+    { pattern: /verify\s+you\s+are\s+human/i, label: "human_verification" },
+    { pattern: /i['']?m\s+not\s+a\s+robot/i, label: "captcha" },
     { pattern: /checking\s+your\s+browser/i, label: "browser_check" },
+    { pattern: /just\s+a\s+moment[\.\!\s]/i, label: "cloudflare_wait" },
+    { pattern: /please\s+wait\s+while\s+we\s+verify/i, label: "verification_wait" },
+    { pattern: /unusual\s+traffic\s+from\s+your/i, label: "unusual_traffic" },
+    { pattern: /too\s+many\s+requests/i, label: "too_many_requests" },
+    { pattern: /access\s+to\s+this\s+page\s+has\s+been\s+denied/i, label: "access_denied" },
+    { pattern: /ray\s+id[:\s]+[a-f0-9]+/i, label: "cloudflare" },
+    { pattern: /performance\s+&\s+security\s+by\s+cloudflare/i, label: "cloudflare" },
   ];
   
   for (const { pattern, label } of patterns) {
-    if (pattern.test(content)) {
+    if (pattern.test(visibleContent)) {
       indicators.push(label);
     }
   }
@@ -119,9 +135,9 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Zy
           javascript: true,
           screenshot: true,
           screenshotOptions: { fullPage: false },
-          // Wait for pricing to render
+          // Wait for pricing to render - Zyte timeout is in SECONDS, max 15
           actions: [
-            { action: "waitForTimeout", timeout: 10000 },
+            { action: "waitForTimeout", timeout: 10 },
           ],
         }),
       },
