@@ -938,13 +938,13 @@ function extractTotalPriceWithRegex(content: string, nights: number): number | n
   // Priority 0: Look for FINAL TOTAL with taxes (most accurate)
   // Airbnb often shows "Total (USD)" or similar in the price breakdown
   const finalTotalPatterns = [
-    // "Total (USD)" or "Total" followed by price - this is the FINAL amount
-    /(?:total\s*(?:\([A-Z]{3}\))?|grand\s+total)[:\s]*\$?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    // "Total (USD)" / "Total (EUR)" / "Total" followed by price - this is the FINAL amount
+    /(?:total\s*(?:\([A-Z]{3}\))?|grand\s+total)[:\s]*[€£$]?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
     // Price breakdown JSON patterns - look for final totals
-    /"totalPrice"[:\s]*["\$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
-    /"total"[:\s]*["\$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
-    // "You pay $X" or similar final confirmation
-    /you\s+(?:will\s+)?pay[:\s]*\$?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    /"totalPrice"[:\s]*["€£$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    /"total"[:\s]*["€£$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    // "You pay €X" or similar final confirmation
+    /you\s+(?:will\s+)?pay[:\s]*[€£$]?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
   ];
   
   // Collect all potential final totals and pick the highest reasonable one
