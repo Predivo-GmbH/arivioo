@@ -381,19 +381,20 @@ async function scrapeAirbnbWithScrapingBee(url: string, scrapingBeeApiKey: strin
     console.log("Scraping Airbnb with ScrapingBee (break glass):", url.slice(0, 100));
     
     // ScrapingBee API with JS rendering
+    // Use longer timeout (90s) as ScrapingBee with JS rendering can be slow
     const params = new URLSearchParams({
       api_key: scrapingBeeApiKey,
       url: url,
       render_js: 'true',
       premium_proxy: 'true', // Use premium proxies for better success
-      wait: '5000', // Wait 5 seconds for dynamic content
-      wait_for: '[aria-label*="nights"], .price, [data-testid="book-it-default-book-it-button"]',
+      wait: '8000', // Wait 8 seconds for dynamic content to load (price elements)
+      timeout: '60000', // ScrapingBee-side timeout of 60s
     });
     
     const response = await fetchWithTimeout(
       `https://app.scrapingbee.com/api/v1?${params.toString()}`,
       { method: "GET" },
-      60_000
+      90_000 // Client-side timeout of 90s to account for network latency
     );
     
     result.statusCode = response.status;
