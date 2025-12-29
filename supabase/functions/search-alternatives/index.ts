@@ -677,62 +677,34 @@ function extractPriceFromJsonLD(content: string): number | null {
   return null;
 }
 
-// Try to extract price with regex patterns first (faster, more reliable for common formats)
-function extractPriceWithRegex(content: string, nights: number): number | null {
-  console.log("Attempting regex price extraction, content length:", content.length);
+// Try to extract TOTAL STAY PRICE with regex patterns first (faster, more reliable for common formats)
+// Returns TOTAL price for the entire stay, NOT per-night
+function extractTotalPriceWithRegex(content: string, nights: number): number | null {
+  console.log("Attempting regex TOTAL price extraction, content length:", content.length, "nights:", nights);
   
-  // First try JSON-LD structured data
-  const jsonLdPrice = extractPriceFromJsonLD(content);
-  if (jsonLdPrice) return jsonLdPrice;
-  
-  // Airbnb-specific patterns - they often show "$XXX night" or "$XXX per night"
-  const airbnbPatterns = [
-    // $123 night (Airbnb's common format)
-    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:night|\/night|per night)/gi,
-    // $123 x 2 nights = $246 (calculate per night from this)
-    /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*x\s*\d+\s*night/gi,
-    // €123 night, £123 night
-    /[€£]\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:night|\/night|per night)/gi,
+  // Priority 1: Look for "X for Y nights" pattern - this is the TOTAL stay price
+  const totalNightsPatterns = [
+    // aria-label="$137 for 2 nights" - Airbnb's common format
+    /aria-label=["']?\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi,
+    // "$137 for 2 nights" in visible text
+    /\$\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi,
+    // "€137 for 2 nights"
+    /[€£]\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi,
   ];
   
-  for (const pattern of airbnbPatterns) {
+  for (const pattern of totalNightsPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
-      let priceStr = match[1].replace(/,/g, '');
-      const price = parseFloat(priceStr);
-      if (price >= 15 && price <= 5000) {
-        console.log("Airbnb pattern extracted per-night price:", price);
-        return price;
+      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
+      const detectedNights = parseInt(match[2], 10);
+      if (totalPrice >= 20 && totalPrice <= 100000 && detectedNights > 0) {
+        console.log("Regex extracted TOTAL price:", totalPrice, "for", detectedNights, "nights");
+        return totalPrice;
       }
     }
   }
   
-  // Common Airbnb price patterns - look for per-night prices
-  const perNightPatterns = [
-    // "priceString":"$399" or similar JSON patterns
-    /"(?:price|priceString|priceForDisplay|displayPrice)"[:\s]*"\$?(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)"/gi,
-    // "amount":399 or "price":399 in JSON
-    /"(?:amount|price|pricePerNight|nightlyPrice|basePrice)"[:\s]*(\d{1,4}(?:\.\d{2})?)/gi,
-    // €123 per night, $123/night, CHF 123 per night
-    /([€$£]|CHF|USD|EUR)\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per|\/)\s*night/gi,
-    // 123 € per night, 123 CHF/night
-    /(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*([€$£]|CHF|USD|EUR)\s*(?:per|\/)\s*night/gi,
-  ];
-  
-  for (const pattern of perNightPatterns) {
-    const matches = [...content.matchAll(pattern)];
-    for (const match of matches) {
-      let priceStr = match[2] || match[1];
-      priceStr = priceStr.replace(/[^\d.,]/g, '').replace(',', '');
-      const price = parseFloat(priceStr);
-      if (price >= 15 && price <= 5000) {
-        console.log("Regex extracted per-night price:", price);
-        return price;
-      }
-    }
-  }
-  
-  // Look for total price patterns and divide by nights
+  // Priority 2: Look for explicit "total" price indicators
   const totalPatterns = [
     // Total: $500, Total before taxes: $500
     /total(?:\s+(?:before\s+)?(?:taxes|fees))?[:\s]*\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
@@ -740,60 +712,64 @@ function extractPriceWithRegex(content: string, nights: number): number | null {
     /\$\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
     // €500 total, £500 total
     /[€£]\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
+    // "priceForDisplay":"$500" (Airbnb JSON)
+    /"priceForDisplay"[:\s]*["$]*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
   ];
   
   for (const pattern of totalPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
-      let priceStr = match[1].replace(/,/g, '');
-      const totalPrice = parseFloat(priceStr);
-      if (totalPrice >= 30 && totalPrice <= 50000 && nights > 0) {
-        const perNight = Math.round(totalPrice / nights);
+      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
+      if (totalPrice >= 30 && totalPrice <= 100000) {
+        console.log("Regex extracted explicit TOTAL price:", totalPrice);
+        return totalPrice;
+      }
+    }
+  }
+  
+  // Priority 3: If we find per-night price, calculate total (fallback)
+  if (nights > 0) {
+    const perNightPatterns = [
+      // $123 night, $123/night, $123 per night
+      /\$\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per\s+)?(?:night|\/night)/gi,
+      // €123 night, £123 night
+      /[€£]\s*(\d{1,4}(?:,\d{3})?(?:\.\d{2})?)\s*(?:per\s+)?(?:night|\/night)/gi,
+      // JSON patterns for per-night
+      /"(?:price|pricePerNight|nightlyPrice|amount)"[:\s]*["\$]*(\d{1,4}(?:\.\d{2})?)/gi,
+    ];
+    
+    for (const pattern of perNightPatterns) {
+      const matches = [...content.matchAll(pattern)];
+      for (const match of matches) {
+        const perNight = parseFloat((match[1] || "").replace(/,/g, ''));
         if (perNight >= 15 && perNight <= 5000) {
-          console.log("Regex extracted total price:", totalPrice, "-> per night:", perNight);
-          return perNight;
+          const total = Math.round(perNight * nights);
+          console.log("Regex extracted per-night:", perNight, "x", nights, "nights = TOTAL:", total);
+          return total;
         }
       }
     }
   }
   
-  // Last resort: find any dollar amount that looks like a nightly rate
-  const anyPricePattern = /\$\s*(\d{2,4})(?:\.\d{2})?/g;
-  const allPrices: number[] = [];
-  let priceMatch;
-  while ((priceMatch = anyPricePattern.exec(content)) !== null) {
-    const price = parseFloat(priceMatch[1]);
-    if (price >= 30 && price <= 2000) {
-      allPrices.push(price);
-    }
-  }
-  
-  // If we found prices, return the most common one in a reasonable range
-  if (allPrices.length > 0) {
-    // Find mode (most frequent price)
-    const priceCount: Record<number, number> = {};
-    for (const p of allPrices) {
-      priceCount[p] = (priceCount[p] || 0) + 1;
-    }
-    const sortedPrices = Object.entries(priceCount).sort((a, b) => b[1] - a[1]);
-    if (sortedPrices.length > 0) {
-      const mostCommonPrice = parseFloat(sortedPrices[0][0]);
-      console.log("Found most common price from content:", mostCommonPrice);
-      return mostCommonPrice;
-    }
+  // Priority 4: Try JSON-LD structured data
+  const jsonLdPrice = extractPriceFromJsonLD(content);
+  if (jsonLdPrice && nights > 0) {
+    const total = Math.round(jsonLdPrice * nights);
+    console.log("JSON-LD per-night:", jsonLdPrice, "x", nights, "nights = TOTAL:", total);
+    return total;
   }
   
   return null;
 }
 
-// Use Lovable AI to extract Airbnb TOTAL price (including mandatory fees) from scraped content.
-// Returns PER-NIGHT derived from total/nights when possible.
-async function extractAirbnbPriceWithAI(content: string, nights: number): Promise<number | null> {
+// Use Lovable AI to extract Airbnb TOTAL STAY PRICE (including mandatory fees) from scraped content.
+// Returns the TOTAL price for the entire stay, NOT per-night.
+async function extractAirbnbTotalPriceWithAI(content: string, nights: number): Promise<number | null> {
   // Try regex extraction first (fast path)
-  const regexPrice = extractPriceWithRegex(content, nights);
-  if (regexPrice) {
-    console.log("Using regex-extracted price:", regexPrice);
-    return regexPrice;
+  const regexTotal = extractTotalPriceWithRegex(content, nights);
+  if (regexTotal) {
+    console.log("Using regex-extracted TOTAL price:", regexTotal);
+    return regexTotal;
   }
 
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
@@ -806,18 +782,19 @@ async function extractAirbnbPriceWithAI(content: string, nights: number): Promis
     const prompt = `You are analyzing text scraped from an Airbnb listing page.
 The stay is for exactly ${nights} night(s).
 
-Goal: Extract the TOTAL price for the selected dates as shown by Airbnb (including cleaning fee, service fee, taxes if included in the displayed total).
+Goal: Extract the TOTAL price for the ENTIRE stay as shown by Airbnb (including cleaning fee, service fee, taxes if included in the displayed total).
 
 Rules:
-- Prefer the final TOTAL shown (e.g. "Total", "Total before taxes", or the checkout total).
-- If multiple totals appear, choose the total that represents what the guest will pay for the stay.
+- Return the TOTAL price for the whole stay, NOT per-night.
+- Look for patterns like "$X for Y nights", "Total: $X", "Total before taxes: $X".
 - If only a per-night price is shown, compute total = perNight * ${nights}.
-- If you can only find "Total before taxes", return that (better than nothing).
+- If you find "Total before taxes", return that number.
+- IMPORTANT: Do NOT divide by nights. Return the TOTAL.
 
 Content:
 ${content.slice(0, 12000)}
 
-Return ONLY a single number representing the TOTAL price for the stay (no currency symbol).
+Return ONLY a single number representing the TOTAL price for the entire stay (no currency symbol).
 If you cannot find a reliable total, return "null".`;
 
     const response = await fetchWithTimeout(
@@ -851,15 +828,13 @@ If you cannot find a reliable total, return "null".`;
     }
 
     const total = parseFloat(totalText.replace(/[^0-9.]/g, ""));
-    if (isNaN(total) || total < 20 || total > 200000) {
+    if (isNaN(total) || total < 20 || total > 500000) {
       console.log("AI returned invalid total:", totalText);
       return null;
     }
 
-    const perNight = nights > 0 ? total / nights : total;
-    const rounded = Math.round(perNight * 100) / 100;
-    console.log("AI extracted total:", total, "-> per night:", rounded);
-    return rounded;
+    console.log("AI extracted TOTAL price:", total, "for", nights, "nights");
+    return total;
   } catch (error) {
     console.error("AI price extraction error:", error);
     return null;
@@ -2879,23 +2854,21 @@ async function runSearchWithStreaming(
             sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
             await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
-            // 1) HTML/Raw HTML (JSON-LD / embedded data)
-            airbnbPrice = extractPriceWithRegex(rawHtml || html, nights);
+            // 1) HTML/Raw HTML (JSON-LD / embedded data) - Extract TOTAL price
+            airbnbPrice = extractTotalPriceWithRegex(rawHtml || html, nights);
 
             // 2) Markdown
             if (!airbnbPrice && markdown.length > 100) {
-              airbnbPrice = extractPriceWithRegex(markdown, nights);
+              airbnbPrice = extractTotalPriceWithRegex(markdown, nights);
             }
 
             // 3) Screenshot (dynamic totals)
             if (!airbnbPrice && screenshotBase64) {
               checkStage1Timeout();
               sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading it from the rendered page");
-              const total = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
-              if (total) {
-                const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
-                airbnbPrice = perNight;
-                console.log("Derived per-night from screenshot total:", total, "->", perNight);
+              airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
+              if (airbnbPrice) {
+                console.log("Screenshot extracted TOTAL price:", airbnbPrice);
               }
             }
 
@@ -2903,14 +2876,14 @@ async function runSearchWithStreaming(
             if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
               checkStage1Timeout();
               sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
-              airbnbPrice = await extractAirbnbPriceWithAI(
+              airbnbPrice = await extractAirbnbTotalPriceWithAI(
                 [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
                 nights
               );
             }
 
             if (airbnbPrice) {
-              sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night`, { airbnbPrice });
+              sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice}`, { airbnbPrice });
 
               await supabase
                 .from("searches")
@@ -2981,23 +2954,21 @@ async function runSearchWithStreaming(
               sendProgress(controller, "Extracting Airbnb price", "Reading price from fallback provider");
               await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
-              // 1) HTML extraction
-              airbnbPrice = extractPriceWithRegex(zyteResult.html, nights);
+              // 1) HTML extraction - TOTAL price
+              airbnbPrice = extractTotalPriceWithRegex(zyteResult.html, nights);
 
               // 2) Markdown
               if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                airbnbPrice = extractPriceWithRegex(zyteResult.markdown, nights);
+                airbnbPrice = extractTotalPriceWithRegex(zyteResult.markdown, nights);
               }
 
               // 3) Screenshot
               if (!airbnbPrice && zyteResult.screenshot) {
                 checkStage1Timeout();
                 sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading from screenshot");
-                const total = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
-                if (total) {
-                  const perNight = Math.round((total / Math.max(1, nights)) * 100) / 100;
-                  airbnbPrice = perNight;
-                  console.log("Zyte screenshot extracted total:", total, "-> per night:", perNight);
+                airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
+                if (airbnbPrice) {
+                  console.log("Zyte screenshot extracted TOTAL:", airbnbPrice);
                 }
               }
 
@@ -3005,14 +2976,14 @@ async function runSearchWithStreaming(
               if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
                 checkStage1Timeout();
                 sendProgress(controller, "Using AI for price extraction", "Analyzing page content from fallback");
-                airbnbPrice = await extractAirbnbPriceWithAI(
+                airbnbPrice = await extractAirbnbTotalPriceWithAI(
                   [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
                   nights
                 );
               }
 
               if (airbnbPrice) {
-                sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night (via fallback)`, { airbnbPrice, provider: 'zyte' });
+                sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via fallback)`, { airbnbPrice, provider: 'zyte' });
 
                 await supabase
                   .from("searches")
@@ -3082,25 +3053,22 @@ async function runSearchWithStreaming(
                 const unique = [...new Set(allImages.map(canonicalize))];
                 imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
 
-                airbnbPrice = extractPriceWithRegex(zyteResult.html, nights);
+                airbnbPrice = extractTotalPriceWithRegex(zyteResult.html, nights);
                 if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                  airbnbPrice = extractPriceWithRegex(zyteResult.markdown, nights);
+                  airbnbPrice = extractTotalPriceWithRegex(zyteResult.markdown, nights);
                 }
                 if (!airbnbPrice && zyteResult.screenshot) {
-                  const total = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
-                  if (total) {
-                    airbnbPrice = Math.round((total / Math.max(1, nights)) * 100) / 100;
-                  }
+                  airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
                 }
                 if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
-                  airbnbPrice = await extractAirbnbPriceWithAI(
+                  airbnbPrice = await extractAirbnbTotalPriceWithAI(
                     [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
                     nights
                   );
                 }
 
                 if (airbnbPrice) {
-                  sendProgress(controller, "Price extracted", `Found Airbnb price: $${airbnbPrice}/night (via fallback)`, { airbnbPrice, provider: 'zyte' });
+                  sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via fallback)`, { airbnbPrice, provider: 'zyte' });
                   await supabase
                     .from("searches")
                     .update({
@@ -3161,8 +3129,8 @@ async function runSearchWithStreaming(
           if (!airbnbPrice) {
             checkStage1Timeout();
             sendProgress(controller, "Extracting Airbnb price", "Using AI to find the exact price");
-            airbnbPrice = await extractAirbnbPriceWithAI(html.slice(0, 15000), nights);
-            if (airbnbPrice) sendProgress(controller, "Price extracted", `Found: €${airbnbPrice}/night`);
+            airbnbPrice = await extractAirbnbTotalPriceWithAI(html.slice(0, 15000), nights);
+            if (airbnbPrice) sendProgress(controller, "Price extracted", `Found TOTAL: €${airbnbPrice}`);
           }
         }
       } catch (e) {
@@ -4296,7 +4264,7 @@ serve(async (req) => {
       if (contentForAI) {
         await supabase.from("searches").update({ status: "extracting_price_with_ai" }).eq("id", searchId);
         const nights = calculateNights(checkIn, checkOut);
-        airbnbPrice = await extractAirbnbPriceWithAI(contentForAI, nights);
+        airbnbPrice = await extractAirbnbTotalPriceWithAI(contentForAI, nights);
       }
     }
 
