@@ -56,7 +56,7 @@ async function withTimeout<T>(
 // ============================================================================
 
 // Provider identifiers for the 5-tier fallback chain
-type AirbnbProvider = 'firecrawl' | 'zyte' | 'browserless' | 'scrapingbee';
+type AirbnbProvider = 'firecrawl' | 'zyte' | 'browserless';
 
 interface AirbnbScrapeResult {
   ok: boolean;
@@ -361,89 +361,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
   }
 }
 
-// ============================================================================
-// Tier 5: ScrapingBee Scraper for Airbnb (Break Glass - Last Resort)
-// ============================================================================
-
-async function scrapeAirbnbWithScrapingBee(url: string, scrapingBeeApiKey: string): Promise<AirbnbScrapeResult> {
-  const startTime = Date.now();
-  const result: AirbnbScrapeResult = {
-    ok: false,
-    markdown: '',
-    html: '',
-    screenshot: null,
-    providerUsed: 'scrapingbee',
-    botIndicators: [],
-    error: null,
-  };
-  
-  try {
-    console.log("Scraping Airbnb with ScrapingBee (break glass):", url.slice(0, 100));
-    
-    // ScrapingBee API with JS rendering
-    // Use longer timeout (90s) as ScrapingBee with JS rendering can be slow
-    const params = new URLSearchParams({
-      api_key: scrapingBeeApiKey,
-      url: url,
-      render_js: 'true',
-      premium_proxy: 'true', // Use premium proxies for better success
-      wait: '8000', // Wait 8 seconds for dynamic content to load (price elements)
-      timeout: '60000', // ScrapingBee-side timeout of 60s
-    });
-    
-    const response = await fetchWithTimeout(
-      `https://app.scrapingbee.com/api/v1?${params.toString()}`,
-      { method: "GET" },
-      90_000 // Client-side timeout of 90s to account for network latency
-    );
-    
-    result.statusCode = response.status;
-    
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      result.error = `ScrapingBee HTTP ${response.status}: ${errText.slice(0, 200)}`;
-      console.error("ScrapingBee scrape failed:", result.error);
-      return result;
-    }
-    
-    const html = await response.text();
-    
-    if (!html || html.length < 500) {
-      result.error = "ScrapingBee returned insufficient content";
-      return result;
-    }
-    
-    // Check for bot indicators
-    result.botIndicators = detectBotIndicators(html);
-    
-    if (result.botIndicators.length > 0) {
-      console.log("ScrapingBee: Bot indicators detected:", result.botIndicators.join(', '));
-      result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
-      result.html = html;
-      result.evidenceSnippet = extractEvidenceSnippet(html);
-      return result;
-    }
-    
-    result.ok = true;
-    result.html = html;
-    
-    // Generate markdown from HTML
-    result.markdown = html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    
-    console.log("ScrapingBee scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms");
-    
-    return result;
-  } catch (e) {
-    result.error = e instanceof Error ? e.message : String(e);
-    console.error("ScrapingBee scrape error:", result.error);
-    return result;
-  }
-}
+// ScrapingBee removed - using Browserless only
 
 // Track if controller is still valid
 const controllerValid = new WeakSet<SSEController>();
@@ -2949,13 +2867,13 @@ async function runSearchWithStreaming(
     sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
     await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
-    // TESTING MODE: ScrapingBee only (no fallback) - temporary for one-time test
-    const SCRAPINGBEE_ONLY_TEST = true; // TODO: Remove after testing
-    const scrapingBeeApiKeyTest = Deno.env.get("SCRAPINGBEE_API_KEY");
+    // TESTING MODE: Browserless only (no fallback) - temporary for testing
+    const BROWSERLESS_ONLY_TEST = true; // TODO: Remove after testing
+    const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
     
-    if (SCRAPINGBEE_ONLY_TEST && scrapingBeeApiKeyTest) {
+    if (BROWSERLESS_ONLY_TEST && browserlessApiKey) {
       checkStage1Timeout();
-      sendProgress(controller, "Loading Airbnb listing", "Using ScrapingBee (test mode - no fallback)");
+      sendProgress(controller, "Loading Airbnb listing", "Using Browserless (test mode - no fallback)");
       await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
       
       // Build URL with dates to ensure price is shown
@@ -2966,22 +2884,22 @@ async function runSearchWithStreaming(
         return urlObj.toString();
       })();
       
-      console.log("TESTING: Using ScrapingBee ONLY (no fallback) for Airbnb extraction");
+      console.log("TESTING: Using Browserless ONLY (no fallback) for Airbnb extraction");
       console.log("Scraping URL with dates:", airbnbUrlWithDates);
-      const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(airbnbUrlWithDates, scrapingBeeApiKeyTest);
+      const browserlessResult = await scrapeAirbnbWithBrowserless(airbnbUrlWithDates, browserlessApiKey);
       
-      if (scrapingBeeResult.ok) {
-        console.log("ScrapingBee scrape succeeded. HTML:", scrapingBeeResult.html.length);
+      if (browserlessResult.ok) {
+        console.log("Browserless scrape succeeded. HTML:", browserlessResult.html.length);
         
         lastScrapedContent = { 
-          markdown: scrapingBeeResult.markdown, 
-          html: scrapingBeeResult.html, 
+          markdown: browserlessResult.markdown, 
+          html: browserlessResult.html, 
           hasScreenshot: false,
-          providerUsed: 'scrapingbee',
+          providerUsed: 'browserless',
         } as any;
 
         // Extract title
-        const titleMatch = scrapingBeeResult.html.match(/<title>([^<]+)<\/title>/i);
+        const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
         if (titleMatch) {
           airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
@@ -2994,34 +2912,34 @@ async function runSearchWithStreaming(
         const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
         let allImages: string[] = [];
         for (const pattern of imagePatterns) {
-          allImages.push(...(scrapingBeeResult.html.match(pattern) || []));
+          allImages.push(...(browserlessResult.html.match(pattern) || []));
         }
         const unique = [...new Set(allImages.map(canonicalize))];
         imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
 
-        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via ScrapingBee`, {
+        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via Browserless`, {
           imageCount: imageUrls.length,
-          provider: 'scrapingbee',
+          provider: 'browserless',
         });
 
         // Extract price - use the highest found price (latest total with taxes)
         checkStage1Timeout();
-        sendProgress(controller, "Extracting Airbnb price", "Reading price from ScrapingBee (no fallback mode)");
+        sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless (no fallback mode)");
         
-        airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
-        if (!airbnbPrice && scrapingBeeResult.markdown.length > 100) {
-          airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.markdown, nights);
+        airbnbPrice = extractTotalPriceWithRegex(browserlessResult.html, nights);
+        if (!airbnbPrice && browserlessResult.markdown.length > 100) {
+          airbnbPrice = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
         }
-        if (!airbnbPrice && (scrapingBeeResult.markdown.length > 100 || scrapingBeeResult.html.length > 100)) {
+        if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
           airbnbPrice = await extractAirbnbTotalPriceWithAI(
-            [scrapingBeeResult.markdown, scrapingBeeResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+            [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
             nights
           );
         }
 
         if (airbnbPrice) {
-          console.log("ScrapingBee extracted Airbnb price:", airbnbPrice);
-          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
+          console.log("Browserless extracted Airbnb price:", airbnbPrice);
+          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
           await supabase
             .from("searches")
             .update({
@@ -3038,23 +2956,23 @@ async function runSearchWithStreaming(
             .eq("id", searchId);
           
           // Mark that we have everything we need - skip remaining fallback chain
-          console.log("ScrapingBee extraction complete with price. Skipping fallback chain.");
+          console.log("Browserless extraction complete with price. Skipping fallback chain.");
         } else {
-          console.log("ScrapingBee price extraction failed - no fallback will be attempted");
-          sendProgress(controller, "Price not found", "ScrapingBee could not extract price (no fallback mode)", { provider: 'scrapingbee' });
+          console.log("Browserless price extraction failed - no fallback will be attempted");
+          sendProgress(controller, "Price not found", "Browserless could not extract price (no fallback mode)", { provider: 'browserless' });
         }
       } else {
-        console.log("ScrapingBee scrape failed:", scrapingBeeResult.error);
-        sendProgress(controller, "ScrapingBee failed", scrapingBeeResult.error || "Unknown error", { provider: 'scrapingbee' });
-        (lastScrapedContent as any).scrapingBeeError = scrapingBeeResult.error;
+        console.log("Browserless scrape failed:", browserlessResult.error);
+        sendProgress(controller, "Browserless failed", browserlessResult.error || "Unknown error", { provider: 'browserless' });
+        (lastScrapedContent as any).browserlessError = browserlessResult.error;
       }
       
       // In test mode, we DON'T fall back to other providers - this is intentional
       // Skip the rest of the fallback chain entirely
     }
 
-    // Continue with normal fallback chain ONLY if NOT in ScrapingBee-only test mode
-    if (firecrawlApiKey && !airbnbPrice && !SCRAPINGBEE_ONLY_TEST) {
+    // Continue with normal fallback chain ONLY if NOT in Browserless-only test mode
+    if (firecrawlApiKey && !airbnbPrice && !BROWSERLESS_ONLY_TEST) {
       checkStage1Timeout();
       sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
       await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
@@ -3439,83 +3357,7 @@ async function runSearchWithStreaming(
                     
                     // Tier 5: Try ScrapingBee (break glass - last resort)
                     if (!browserlessBotWall && !airbnbPrice) {
-                      const scrapingBeeApiKey = Deno.env.get("SCRAPINGBEE_API_KEY");
-                      const scrapingBeeEnabled = Deno.env.get("SCRAPINGBEE_ENABLED") !== "false";
-                      
-                      if (scrapingBeeApiKey && scrapingBeeEnabled) {
-                        console.log("Browserless failed without bot wall, trying ScrapingBee (break glass)...");
-                        sendProgress(controller, "Switching providers", "Trying ScrapingBee (last resort)");
-                        
-                        const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKey);
-                        
-                        if (scrapingBeeResult.ok) {
-                          console.log("ScrapingBee Airbnb scrape succeeded. HTML:", scrapingBeeResult.html.length);
-                          
-                          lastScrapedContent = { 
-                            markdown: scrapingBeeResult.markdown, 
-                            html: scrapingBeeResult.html, 
-                            hasScreenshot: false,
-                            providerUsed: 'scrapingbee',
-                          } as any;
-
-                          // Extract title
-                          const titleMatch = scrapingBeeResult.html.match(/<title>([^<]+)<\/title>/i);
-                          if (titleMatch) {
-                            airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-                          }
-
-                          // Extract images
-                          const imagePatterns = [
-                            /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                            /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                          ];
-                          const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-                          let allImages: string[] = [];
-                          for (const pattern of imagePatterns) {
-                            allImages.push(...(scrapingBeeResult.html.match(pattern) || []));
-                          }
-                          const unique = [...new Set(allImages.map(canonicalize))];
-                          if (imageUrls.length === 0) {
-                            imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-                          }
-
-                          // Extract price
-                          checkStage1Timeout();
-                          sendProgress(controller, "Extracting Airbnb price", "Reading price from ScrapingBee");
-                          
-                          airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
-                          if (!airbnbPrice && scrapingBeeResult.markdown.length > 100) {
-                            airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.markdown, nights);
-                          }
-                          if (!airbnbPrice && (scrapingBeeResult.markdown.length > 100 || scrapingBeeResult.html.length > 100)) {
-                            airbnbPrice = await extractAirbnbTotalPriceWithAI(
-                              [scrapingBeeResult.markdown, scrapingBeeResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-                              nights
-                            );
-                          }
-
-                          if (airbnbPrice) {
-                            sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
-                            await supabase
-                              .from("searches")
-                              .update({
-                                status: "searching_platforms",
-                                last_progress_at: new Date().toISOString(),
-                                airbnb_title: airbnbTitle,
-                                airbnb_price: airbnbPrice,
-                                airbnb_image_url: imageUrls[0] || null,
-                                airbnb_images: imageUrls.slice(0, 5),
-                                check_in_date: checkIn,
-                                check_out_date: checkOut,
-                                nights_count: nights,
-                              })
-                              .eq("id", searchId);
-                          }
-                        } else {
-                          console.log("ScrapingBee scrape failed:", scrapingBeeResult.error);
-                          (lastScrapedContent as any).scrapingBeeError = scrapingBeeResult.error;
-                        }
-                      }
+                      // ScrapingBee removed - Browserless is the final fallback
                     }
                   }
                 }
@@ -3674,71 +3516,7 @@ async function runSearchWithStreaming(
                         // Browserless failed - try ScrapingBee if no bot wall
                         const browserlessBotWall = browserlessResult.botIndicators && browserlessResult.botIndicators.length > 0;
                         
-                        if (!browserlessBotWall && !airbnbPrice) {
-                          const scrapingBeeApiKey = Deno.env.get("SCRAPINGBEE_API_KEY");
-                          const scrapingBeeEnabled = Deno.env.get("SCRAPINGBEE_ENABLED") !== "false";
-                          
-                          if (scrapingBeeApiKey && scrapingBeeEnabled) {
-                            console.log("Browserless failed in catch block, trying ScrapingBee...");
-                            sendProgress(controller, "Switching providers", "Trying ScrapingBee (last resort)");
-                            
-                            const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKey);
-                            
-                            if (scrapingBeeResult.ok) {
-                              lastScrapedContent = { 
-                                markdown: scrapingBeeResult.markdown, 
-                                html: scrapingBeeResult.html, 
-                                hasScreenshot: false,
-                                providerUsed: 'scrapingbee',
-                              } as any;
-
-                              const titleMatch = scrapingBeeResult.html.match(/<title>([^<]+)<\/title>/i);
-                              if (titleMatch) {
-                                airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-                              }
-
-                              const imagePatterns = [
-                                /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                                /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                              ];
-                              const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-                              let allImages: string[] = [];
-                              for (const pattern of imagePatterns) {
-                                allImages.push(...(scrapingBeeResult.html.match(pattern) || []));
-                              }
-                              const unique = [...new Set(allImages.map(canonicalize))];
-                              if (imageUrls.length === 0) {
-                                imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-                              }
-
-                              airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
-                              if (!airbnbPrice && scrapingBeeResult.markdown.length > 100) {
-                                airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.markdown, nights);
-                              }
-                              if (!airbnbPrice && (scrapingBeeResult.markdown.length > 100 || scrapingBeeResult.html.length > 100)) {
-                                airbnbPrice = await extractAirbnbTotalPriceWithAI(
-                                  [scrapingBeeResult.markdown, scrapingBeeResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-                                  nights
-                                );
-                              }
-
-                              if (airbnbPrice) {
-                                sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
-                                await supabase.from("searches").update({
-                                  status: "searching_platforms",
-                                  last_progress_at: new Date().toISOString(),
-                                  airbnb_title: airbnbTitle,
-                                  airbnb_price: airbnbPrice,
-                                  airbnb_image_url: imageUrls[0] || null,
-                                  airbnb_images: imageUrls.slice(0, 5),
-                                  check_in_date: checkIn,
-                                  check_out_date: checkOut,
-                                  nights_count: nights,
-                                }).eq("id", searchId);
-                              }
-                            }
-                          }
-                        }
+                        // ScrapingBee removed - Browserless is the final fallback
                       }
                     } catch (browserlessError) {
                       console.error("Browserless fallback failed:", browserlessError);
@@ -3781,26 +3559,8 @@ async function runSearchWithStreaming(
                         airbnb_price: airbnbPrice,
                       }).eq("id", searchId);
                     }
-                  } else if (!browserlessResult.botIndicators?.length) {
-                    // Try ScrapingBee
-                    const scrapingBeeApiKey = Deno.env.get("SCRAPINGBEE_API_KEY");
-                    if (scrapingBeeApiKey && Deno.env.get("SCRAPINGBEE_ENABLED") !== "false") {
-                      const scrapingBeeResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKey);
-                      if (scrapingBeeResult.ok) {
-                        airbnbPrice = extractTotalPriceWithRegex(scrapingBeeResult.html, nights);
-                        if (!airbnbPrice) {
-                          airbnbPrice = await extractAirbnbTotalPriceWithAI(scrapingBeeResult.html.slice(0, 12000), nights);
-                        }
-                        if (airbnbPrice) {
-                          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee)`, { airbnbPrice, provider: 'scrapingbee' });
-                          await supabase.from("searches").update({
-                            status: "searching_platforms",
-                            airbnb_price: airbnbPrice,
-                          }).eq("id", searchId);
-                        }
-                      }
-                    }
                   }
+                  // ScrapingBee removed - Browserless is the final fallback
                 } catch (e) {
                   console.error("Browserless also failed after Zyte exception:", e);
                 }
