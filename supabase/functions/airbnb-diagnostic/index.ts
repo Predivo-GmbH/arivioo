@@ -136,39 +136,80 @@ function simpleHash(str: string): string {
 function extractAirbnbPrice(content: string): { price: number | null; type: 'total' | 'nightly' | null; evidence: string | null; nights: number | null } {
   const result = { price: null as number | null, type: null as 'total' | 'nightly' | null, evidence: null as string | null, nights: null as number | null };
   
-  // Priority 1: Look for "X for Y nights" pattern in aria-label or visible text
-  // This is the TOTAL stay price Airbnb shows
-  const totalNightsMatch = content.match(/aria-label=["']?\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/i);
-  if (totalNightsMatch) {
-    const price = parseFloat(totalNightsMatch[1].replace(/,/g, ''));
-    const nights = parseInt(totalNightsMatch[2], 10);
-    if (price >= 20 && price <= 50000 && nights > 0) {
-      return { 
-        price, 
-        type: 'total', 
-        evidence: totalNightsMatch[0].slice(0, 100),
-        nights 
-      };
-    }
-  }
-  
-  // Priority 2: Look for total price indicators
-  const totalPatterns = [
-    /["']?total[:\s]*\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
-    /\$\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s*total/gi,
-    /"priceForDisplay"[:\s]*["\$]*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)/gi,
+  // Priority 0: Look for FINAL TOTAL with taxes (most accurate)
+  // Airbnb often shows "Total (USD)" or similar in the price breakdown
+  const finalTotalPatterns = [
+    // "Total (USD)" or "Total" followed by price - this is the FINAL amount
+    /(?:total\s*(?:\([A-Z]{3}\))?|grand\s+total)[:\s]*\$?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    // Price breakdown JSON patterns - look for final totals
+    /"totalPrice"[:\s]*["\$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    /"total"[:\s]*["\$]*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
+    // "You pay $X" or similar final confirmation
+    /you\s+(?:will\s+)?pay[:\s]*\$?\s*(\d{1,6}(?:,\d{3})?(?:\.\d{2})?)/gi,
   ];
   
-  for (const pattern of totalPatterns) {
+  // Collect all potential final totals
+  let potentialTotals: Array<{price: number; evidence: string}> = [];
+  
+  for (const pattern of finalTotalPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
-      const priceStr = (match[1] || "").replace(/,/g, '');
-      const price = parseFloat(priceStr);
-      if (price >= 20 && price <= 50000) {
-        return { price, type: 'total', evidence: match[0].slice(0, 100), nights: null };
+      const price = parseFloat((match[1] || "").replace(/,/g, ''));
+      if (price >= 30 && price <= 200000) {
+        potentialTotals.push({ price, evidence: match[0].slice(0, 100) });
       }
     }
   }
+  
+  // Priority 1: Look for "X for Y nights" pattern in aria-label or visible text
+  // This is the subtotal (before taxes) Airbnb shows
+  const totalNightsMatch = content.match(/aria-label=["']?\$?\s*(\d{1,5}(?:,\d{3})?(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/i);
+  let subtotalForNights: number | null = null;
+  let nightsDetected: number | null = null;
+  
+  if (totalNightsMatch) {
+    subtotalForNights = parseFloat(totalNightsMatch[1].replace(/,/g, ''));
+    nightsDetected = parseInt(totalNightsMatch[2], 10);
+    if (subtotalForNights >= 20 && subtotalForNights <= 50000 && nightsDetected > 0) {
+      potentialTotals.push({ price: subtotalForNights, evidence: totalNightsMatch[0].slice(0, 100) });
+    }
+  }
+  
+  // If we found multiple totals, prefer the highest one (likely includes taxes)
+  // but only if it's within 30% higher than the subtotal (reasonable tax range)
+  if (potentialTotals.length > 0) {
+    const maxEntry = potentialTotals.reduce((a, b) => a.price > b.price ? a : b);
+    
+    // If we have a subtotal and a higher total (within 30%), use the higher one
+    if (subtotalForNights && maxEntry.price > subtotalForNights && maxEntry.price <= subtotalForNights * 1.3) {
+      return { 
+        price: maxEntry.price, 
+        type: 'total', 
+        evidence: maxEntry.evidence + ' (with taxes)',
+        nights: nightsDetected 
+      };
+    }
+    
+    // Otherwise use the subtotal if available
+    if (subtotalForNights && nightsDetected) {
+      return { 
+        price: subtotalForNights, 
+        type: 'total', 
+        evidence: totalNightsMatch![0].slice(0, 100),
+        nights: nightsDetected 
+      };
+    }
+    
+    // Fallback to highest found
+    return { 
+      price: maxEntry.price, 
+      type: 'total', 
+      evidence: maxEntry.evidence,
+      nights: nightsDetected 
+    };
+  }
+  
+  // Priority 2: Look for total price indicators
   
   // Priority 3: Look for nightly rate
   const nightlyPatterns = [
@@ -317,8 +358,15 @@ async function testZyte(url: string, apiKey: string): Promise<ProviderAttempt> {
         javascript: true,
         screenshot: true,
         screenshotOptions: { fullPage: false },
+        // Click "Show price breakdown" to reveal total with taxes
         actions: [
-          { action: "waitForTimeout", timeout: 8 },  // Zyte timeout is in SECONDS, max 15
+          { action: "waitForTimeout", timeout: 5 },
+          { 
+            action: "click", 
+            selector: { type: "css", value: "button[aria-label*='for'][aria-label*='nights']" },
+            onError: "ignore"
+          },
+          { action: "waitForTimeout", timeout: 3 },
         ],
       }),
     });
