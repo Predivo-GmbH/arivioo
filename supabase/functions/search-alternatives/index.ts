@@ -853,25 +853,54 @@ function extractPriceFromJsonLD(content: string): number | null {
 function extractTotalPriceWithRegex(content: string, nights: number): { price: number | null; currency: string } {
   console.log("Attempting regex TOTAL price extraction, content length:", content.length, "nights:", nights);
   
-  // Collect all potential totals with their currencies
-  let potentialTotals: { price: number; currency: string }[] = [];
+  // Collect all potential totals with their currencies and priority (higher = more trusted)
+  let potentialTotals: { price: number; currency: string; priority: number; source: string }[] = [];
   
-  // Priority 0: Look for "$X,XXX for Y nights" - this is Airbnb's PRIMARY total price display
-  // This appears prominently on the booking widget (e.g., "$2,214 for 4 nights")
+  // Priority 3 (HIGHEST): Look for EXPLICIT TOTAL labels that include fees
+  // "Total before taxes" is Airbnb's label that includes cleaning fee + service fee
+  const explicitTotalPatterns: { pattern: RegExp; currency: string }[] = [
+    // "$2,214 Total before taxes" or "Total before taxes $2,214" (with flexible spacing)
+    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s*total\s*before\s*taxes/gi, currency: 'USD' },
+    { pattern: /total\s*before\s*taxes\s*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /€\s*([\d,]+(?:\.\d{2})?)\s*total\s*before\s*taxes/gi, currency: 'EUR' },
+    { pattern: /total\s*before\s*taxes\s*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    { pattern: /£\s*([\d,]+(?:\.\d{2})?)\s*total\s*before\s*taxes/gi, currency: 'GBP' },
+    { pattern: /total\s*before\s*taxes\s*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
+    
+    // "Trip total" / "Grand total" patterns
+    { pattern: /trip\s+total\s*[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /grand\s+total\s*[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /trip\s+total\s*[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    { pattern: /grand\s+total\s*[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    
+    // "You pay $X" / "You will pay $X"
+    { pattern: /you\s+(?:will\s+)?pay\s*[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /you\s+(?:will\s+)?pay\s*[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+  ];
+  
+  for (const { pattern, currency } of explicitTotalPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
+      if (totalPrice >= 30 && totalPrice <= 500000) {
+        console.log(`[P3-EXPLICIT] Found: ${currency} ${totalPrice} from "${match[0].slice(0, 80)}"`);
+        potentialTotals.push({ price: totalPrice, currency, priority: 3, source: 'explicit_total' });
+      }
+    }
+  }
+  
+  // Priority 2: Look for "$X,XXX for Y nights" headline - Airbnb's booking widget display
+  // This appears prominently and SHOULD include fees for the total
   const forNightsPatterns: { pattern: RegExp; currency: string }[] = [
-    // "$2,214 for 4 nights" - USD
+    // Standard formats: "$2,214 for 4 nights"
     { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'USD' },
-    // "€2,214 for 4 nights" - EUR
     { pattern: /€\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'EUR' },
-    // "£2,214 for 4 nights" - GBP
     { pattern: /£\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'GBP' },
-    // "CHF 2,214 for 4 nights" - CHF
     { pattern: /CHF\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'CHF' },
-    // "2,214 AUD for 4 nights" - AUD
     { pattern: /A\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'AUD' },
-    // "2,214 CAD for 4 nights" - CAD
     { pattern: /C\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'CAD' },
-    // aria-label="$2,214 for 4 nights" - Airbnb's accessibility format (USD)
+    
+    // aria-label="$2,214 for 4 nights" - Airbnb accessibility
     { pattern: /aria-label=["']?\$\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'USD' },
     { pattern: /aria-label=["']?€\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'EUR' },
     { pattern: /aria-label=["']?£\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'GBP' },
@@ -882,67 +911,83 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
     for (const match of matches) {
       const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
       const detectedNights = parseInt(match[2], 10);
-      // Only accept if nights match what we expect (within +/- 1 for edge cases)
       if (totalPrice >= 30 && totalPrice <= 500000 && detectedNights > 0 && Math.abs(detectedNights - nights) <= 1) {
-        console.log(`Found TOTAL from 'for X nights' pattern: ${currency} ${totalPrice} for ${detectedNights} nights`);
-        potentialTotals.push({ price: totalPrice, currency });
+        console.log(`[P2-FOR-NIGHTS] Found: ${currency} ${totalPrice} for ${detectedNights} nights from "${match[0].slice(0, 80)}"`);
+        potentialTotals.push({ price: totalPrice, currency, priority: 2, source: 'for_nights' });
       }
     }
   }
   
-  // Priority 1: Look for explicit total markers in price breakdown
-  // These appear in the expanded price details
-  const totalMarkerPatterns: { pattern: RegExp; currency: string }[] = [
-    // "Total before taxes $2,214" (Airbnb commonly uses this label)
-    { pattern: /total\s+before\s+taxes[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    { pattern: /total\s+before\s+taxes[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    { pattern: /total\s+before\s+taxes[:\s]*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-    { pattern: /total\s+before\s+taxes[:\s]*CHF\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'CHF' },
-
-    // "Trip total $2,214" / "Total $2,214" or "Total: $2,214"
-    { pattern: /trip\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    { pattern: /total[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    // "Total (USD) $2,214" or "Total (USD): $2,214"
+  // Priority 1: General "Total" patterns (may include subtotals, less reliable)
+  const generalTotalPatterns: { pattern: RegExp; currency: string }[] = [
+    // "Total $2,214" or "Total: $2,214" (word boundary to avoid "Subtotal")
+    { pattern: /\btotal\b[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /\btotal\b[:\s]+€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    { pattern: /\btotal\b[:\s]+£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
+    
+    // "Total (USD) $2,214"
     { pattern: /total\s*\(USD\)[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-
-    { pattern: /trip\s+total[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    { pattern: /total[:\s]+€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
     { pattern: /total\s*\(EUR\)[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-
-    { pattern: /trip\s+total[:\s]*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-    { pattern: /total[:\s]+£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-
-    // "Grand total $2,214" / "You pay $2,214"
-    { pattern: /grand\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    { pattern: /grand\s+total[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    { pattern: /grand\s+total[:\s]*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-    { pattern: /you\s+(?:will\s+)?pay[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    { pattern: /you\s+(?:will\s+)?pay[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-
-    // "US$2,214" (Airbnb sometimes renders with country prefix)
-    { pattern: /US\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-
-    // JSON-ish patterns (last resort)
-    { pattern: /"totalPrice"[:\s]*"?\$?\s*([\d,]+(?:\.\d{2})?)"?/gi, currency: 'USD' },
   ];
   
-  for (const { pattern, currency } of totalMarkerPatterns) {
+  for (const { pattern, currency } of generalTotalPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
       const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
       if (totalPrice >= 30 && totalPrice <= 500000) {
-        console.log(`Found TOTAL from explicit marker: ${currency} ${totalPrice} from "${match[0].slice(0, 60)}"`);
-        potentialTotals.push({ price: totalPrice, currency });
+        console.log(`[P1-GENERAL] Found: ${currency} ${totalPrice} from "${match[0].slice(0, 80)}"`);
+        potentialTotals.push({ price: totalPrice, currency, priority: 1, source: 'general_total' });
       }
     }
   }
   
-  // Use the highest found price - taxes/fees make final total highest
+  // Priority 0 (LOWEST): Currency prefix patterns as last resort (e.g., "US$2,214")
+  const currencyPrefixPatterns: { pattern: RegExp; currency: string }[] = [
+    { pattern: /US\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /"totalPrice"[:\s]*"?\$?\s*([\d,]+(?:\.\d{2})?)"?/gi, currency: 'USD' },
+  ];
+  
+  for (const { pattern, currency } of currencyPrefixPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
+      if (totalPrice >= 30 && totalPrice <= 500000) {
+        console.log(`[P0-FALLBACK] Found: ${currency} ${totalPrice} from "${match[0].slice(0, 80)}"`);
+        potentialTotals.push({ price: totalPrice, currency, priority: 0, source: 'fallback' });
+      }
+    }
+  }
+  
   if (potentialTotals.length > 0) {
-    // Sort by price descending and take the highest
-    potentialTotals.sort((a, b) => b.price - a.price);
+    // First sort by priority (highest first), then by price (highest first within same priority)
+    // This ensures "Total before taxes" beats "X for Y nights" which beats general totals
+    potentialTotals.sort((a, b) => {
+      if (b.priority !== a.priority) return b.priority - a.priority;
+      return b.price - a.price;
+    });
+    
     const best = potentialTotals[0];
-    console.log(`Regex extraction: Using highest total ${best.currency} ${best.price} from ${potentialTotals.length} candidates: [${potentialTotals.map(t => `${t.currency}${t.price}`).join(', ')}]`);
+    const allCandidates = potentialTotals.map(t => `${t.source}:${t.currency}${t.price}(p${t.priority})`).join(', ');
+    console.log(`Regex extraction: Using ${best.source} ${best.currency} ${best.price} (p${best.priority}) from ${potentialTotals.length} candidates: [${allCandidates}]`);
+    
+    // CRITICAL: If we found both "for X nights" and explicit total, prefer explicit total
+    // But if only "for X nights" found, use the HIGHEST price from that pattern
+    // (Airbnb may show base in one place and total in another)
+    const forNightsPrices = potentialTotals.filter(t => t.source === 'for_nights');
+    const explicitTotals = potentialTotals.filter(t => t.priority >= 3);
+    
+    if (explicitTotals.length > 0) {
+      // Use explicit total - most reliable
+      return { price: explicitTotals[0].price, currency: explicitTotals[0].currency };
+    }
+    
+    if (forNightsPrices.length > 0) {
+      // Use highest "for X nights" price - may have base and total from same pattern
+      const highest = forNightsPrices.reduce((max, t) => t.price > max.price ? t : max);
+      console.log(`Using highest 'for X nights' price: ${highest.currency} ${highest.price}`);
+      return { price: highest.price, currency: highest.currency };
+    }
+    
     return { price: best.price, currency: best.currency };
   }
   
@@ -2988,6 +3033,18 @@ async function runSearchWithStreaming(
         // Extract price - use the highest found price (latest total with taxes)
         checkStage1Timeout();
         sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless (no fallback mode)");
+        
+        // Debug: Log price-related snippets from HTML
+        const priceSnippets = browserlessResult.html.match(/\$[\d,]+(?:\.\d{2})?[^<]{0,50}/gi)?.slice(0, 10) || [];
+        console.log("Price-related snippets found:", JSON.stringify(priceSnippets));
+        
+        // Also look for aria-labels with prices
+        const ariaLabels = browserlessResult.html.match(/aria-label="[^"]*\$[\d,]+[^"]*"/gi)?.slice(0, 5) || [];
+        console.log("Aria-label price snippets:", JSON.stringify(ariaLabels));
+        
+        // Look for "for X nights" patterns
+        const forNightsSnippets = browserlessResult.html.match(/\$[\d,]+(?:\.\d{2})?\s*(?:for\s*)?\d+\s*nights?/gi) || [];
+        console.log("'For X nights' patterns:", JSON.stringify(forNightsSnippets));
         
         // Extract price and currency
         let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
