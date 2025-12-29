@@ -226,6 +226,48 @@ export function PipelineProgress({
 
   const activity = getLiveActivity();
 
+  // Get failure-specific messaging
+  const getFailureDetails = (): { title: string; message: string; canRetry: boolean } => {
+    const errorCode = (errorMessage?.toLowerCase() || '');
+    
+    if (errorCode.includes('blocked') || errorCode.includes('captcha')) {
+      return {
+        title: "Airbnb Blocked the Request",
+        message: "Airbnb is temporarily blocking automated requests. This usually resolves within a few minutes.",
+        canRetry: true
+      };
+    }
+    if (errorCode.includes('dates_not_applied') || errorCode.includes('dates')) {
+      return {
+        title: "Dates Not Applied",
+        message: "The check-in and check-out dates from your URL weren't applied to the listing. Make sure your Airbnb URL includes valid dates.",
+        canRetry: false
+      };
+    }
+    if (errorCode.includes('total_not_visible') || errorCode.includes('element_missing')) {
+      return {
+        title: "Price Not Visible",
+        message: "Airbnb isn't displaying the total price for your dates. The property may require interaction or the dates may be unavailable.",
+        canRetry: true
+      };
+    }
+    if (errorCode.includes('timeout')) {
+      return {
+        title: "Request Timed Out",
+        message: "The request took too long to complete. This can happen during high traffic periods.",
+        canRetry: true
+      };
+    }
+    
+    return {
+      title: "Couldn't Read Price",
+      message: errorMessage || "We couldn't extract the Airbnb price for your dates.",
+      canRetry: true
+    };
+  };
+
+  const failureDetails = isFailed ? getFailureDetails() : null;
+
   return (
     <div className="max-w-xl mx-auto py-8 animate-fade-in">
       {/* Header with overall progress */}
@@ -239,11 +281,28 @@ export function PipelineProgress({
         </div>
         
         <h2 className="text-2xl font-bold text-foreground mb-2">
-          {isFailed ? "Search Failed" : isComplete ? "Search Complete" : "Finding Better Deals"}
+          {isFailed ? (failureDetails?.title || "Search Failed") : isComplete ? "Search Complete" : "Finding Better Deals"}
         </h2>
 
-        {isFailed && errorMessage && (
-          <p className="text-destructive mb-4">{errorMessage}</p>
+        {isFailed && failureDetails && (
+          <div className="max-w-md mx-auto mb-6">
+            <p className="text-muted-foreground mb-4">{failureDetails.message}</p>
+            <div className="flex items-center justify-center gap-3">
+              {failureDetails.canRetry && onCancel && (
+                <Button variant="default" onClick={() => window.location.reload()}>
+                  Try Again
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => window.location.href = '/dashboard'}>
+                Paste Different Link
+              </Button>
+              {onCancel && (
+                <Button variant="ghost" onClick={onCancel}>
+                  Cancel
+                </Button>
+              )}
+            </div>
+          </div>
         )}
 
         {!isComplete && !isFailed && (
