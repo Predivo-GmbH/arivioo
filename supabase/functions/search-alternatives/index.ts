@@ -3003,659 +3003,276 @@ async function runSearchWithStreaming(
     check_out: checkOut,
   });
 
+  // =====================================================================
+  // MULTI-PROVIDER DEBUGGING MODE: Run all 3 providers and compare prices
+  // =====================================================================
+  interface ProviderPriceResult {
+    provider: AirbnbProvider | 'firecrawl';
+    price: number | null;
+    currency: string;
+    error?: string;
+    contentLength?: number;
+    durationMs?: number;
+  }
+  
+  const providerResults: ProviderPriceResult[] = [];
+  
+  // Helper to extract price from content
+  const extractPriceFromContent = async (html: string, markdown: string, screenshot: string | null, provider: string): Promise<{ price: number | null; currency: string }> => {
+    // 1) HTML extraction
+    let priceResult = extractTotalPriceWithRegex(html, nights);
+    if (priceResult.price) {
+      console.log(`[${provider}] Regex extracted from HTML: ${priceResult.currency} ${priceResult.price}`);
+      return priceResult;
+    }
+    
+    // 2) Markdown
+    if (markdown.length > 100) {
+      priceResult = extractTotalPriceWithRegex(markdown, nights);
+      if (priceResult.price) {
+        console.log(`[${provider}] Regex extracted from markdown: ${priceResult.currency} ${priceResult.price}`);
+        return priceResult;
+      }
+    }
+    
+    // 3) Screenshot
+    if (screenshot) {
+      const screenshotPrice = await extractAirbnbTotalFromScreenshotBase64(screenshot, nights);
+      if (screenshotPrice) {
+        console.log(`[${provider}] Screenshot extracted: ${screenshotPrice}`);
+        return { price: screenshotPrice, currency: 'USD' };
+      }
+    }
+    
+    // 4) AI fallback
+    if (markdown.length > 100 || html.length > 100) {
+      const aiResult = await extractAirbnbTotalPriceWithAI(
+        [markdown, html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+        nights
+      );
+      if (aiResult.price) {
+        console.log(`[${provider}] AI extracted: ${aiResult.currency} ${aiResult.price}`);
+        return aiResult;
+      }
+    }
+    
+    return { price: null, currency: 'USD' };
+  };
+  
   try {
-    // Step 1: Extract Airbnb data
-    sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
+    // Step 1: Extract Airbnb data - RUN ALL 3 PROVIDERS IN PARALLEL
+    sendProgress(controller, "Multi-provider extraction", "Running Firecrawl, Zyte, and Browserless in parallel for price comparison");
     await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
-
-    // Normal fallback chain: Firecrawl > Zyte > Browserless (ScrapingBee removed)
-
-    // Continue with normal fallback chain ONLY if NOT in Browserless-only test mode
-    if (firecrawlApiKey && !airbnbPrice) {
-      checkStage1Timeout();
-      sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
-      await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
-
-      // If the user clicks "Skip", we should advance to the next phase and keep going (even if Airbnb price is missing).
-
-      const scrapeWithFirecrawl = async (formats: string[], waitForMs: number) => {
-        // NOTE: Claiming skip here may occur while we're between attempts.
-        // For in-flight requests, we also poll and abort the fetch.
-        const fetchAbort = new AbortController();
-        const pollId = setInterval(async () => {
-          try {
-            if (await claimSkipNow()) {
-              skipAirbnbPrice = true;
-              fetchAbort.abort();
-            }
-          } catch {
-            // ignore
-          }
-        }, 750);
-
-        try {
-          await heartbeat();
-          checkStage1Timeout();
-
-          const resp = await fetchWithTimeout(
-            "https://api.firecrawl.dev/v1/scrape",
-            {
-              method: "POST",
-              signal: fetchAbort.signal,
-              headers: {
-                Authorization: `Bearer ${firecrawlApiKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                url: search.airbnb_url,
-                formats,
-                onlyMainContent: false,
-                waitFor: waitForMs,
-                // NOTE: Firecrawl requires waitFor <= timeout/2. Use 2.5x waitFor.
-                timeout: Math.max(30000, Math.ceil(waitForMs * 2.5)),
-              }),
-            },
-            // Strict client-side timeout (required to prevent stuck stage 1)
-            28_000
-          );
-
-          if (!resp.ok) {
-            const errText = await resp.text().catch(() => "");
-            console.error("Firecrawl scrape failed:", resp.status, errText.slice(0, 800));
-            return { ok: false as const, status: resp.status, errorText: errText };
-          }
-
-          const data = await resp.json().catch(() => null);
-          return { ok: true as const, data };
-        } catch (e) {
-          if ((e as any)?.name === "AbortError" && skipAirbnbPrice) {
-            return { ok: false as const, status: 499, errorText: "skipped" };
-          }
-          throw e;
-        } finally {
-          clearInterval(pollId);
-        }
-      };
-
+    
+    const zyteApiKey = Deno.env.get("ZYTE_API_KEY");
+    const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
+    
+    // Define parallel extraction tasks
+    const firecrawlTask = async (): Promise<ProviderPriceResult> => {
+      const start = Date.now();
       try {
-        // Attempt 1: full content + screenshot (waitFor=10s, timeout=30s to satisfy waitFor <= timeout/2)
-        let attempt = await scrapeWithFirecrawl(["markdown", "html", "rawHtml", "screenshot"], 10000);
-
-        if (attempt.status === 499) {
-          console.log("SKIP requested during Airbnb scrape");
-          sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction and continuing", { skipped: true });
-          // We'll fall back to direct fetch for images, but we won't block the entire run on Airbnb pricing.
-          skipAirbnbPrice = true;
-          throw new Error("__SKIP_AIRBNB_PRICE__");
+        if (!firecrawlApiKey) return { provider: 'firecrawl', price: null, currency: 'USD', error: 'No API key' };
+        
+        const resp = await fetchWithTimeout(
+          "https://api.firecrawl.dev/v1/scrape",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${firecrawlApiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              url: search.airbnb_url,
+              formats: ["markdown", "html", "rawHtml", "screenshot"],
+              onlyMainContent: false,
+              waitFor: 10000,
+              timeout: 30000,
+            }),
+          },
+          35_000
+        );
+        
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => "");
+          return { provider: 'firecrawl', price: null, currency: 'USD', error: `HTTP ${resp.status}: ${errText.slice(0, 100)}`, durationMs: Date.now() - start };
         }
-
-        // Attempt 2: retry with longer wait (Airbnb sometimes renders totals very late)
-        if (!attempt.ok) {
-          checkStage1Timeout();
-          sendProgress(controller, "Loading Airbnb listing", "Retrying with longer wait");
-          // Retry with waitFor=15s (timeout will be 37.5s)
-          attempt = await scrapeWithFirecrawl(["screenshot", "html", "rawHtml"], 15000);
-        }
-
-        if (attempt.status === 499) {
-          console.log("SKIP requested during Airbnb scrape (retry)");
-          sendProgress(controller, "Skipped current step", "Skipping Airbnb price extraction and continuing", { skipped: true });
-          skipAirbnbPrice = true;
-          throw new Error("__SKIP_AIRBNB_PRICE__");
-        }
-
-        if (attempt.ok) {
-          const firecrawlData = attempt.data;
-          const markdown = firecrawlData?.data?.markdown || "";
-          const html = firecrawlData?.data?.html || "";
-          const rawHtml = firecrawlData?.data?.rawHtml || html;
-          const screenshotBase64: string | null = firecrawlData?.data?.screenshot || null;
-
-          console.log(
-            "Firecrawl received. markdown:",
-            markdown.length,
-            "html:",
-            html.length,
-            "screenshot:",
-            !!screenshotBase64
-          );
-          
-          // Track content for failure diagnosis
-          lastScrapedContent = { 
-            markdown, 
-            html: rawHtml || html, 
-            hasScreenshot: !!screenshotBase64 
-          };
-
-          // Extract title
-          const metaTitle = firecrawlData?.data?.metadata?.title;
-          if (metaTitle) {
-            airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-          }
-
-          // Extract images (Airbnb rotates subdomains and path variants frequently)
+        
+        const data = await resp.json();
+        const html = data?.data?.rawHtml || data?.data?.html || "";
+        const markdown = data?.data?.markdown || "";
+        const screenshot = data?.data?.screenshot || null;
+        
+        // Extract images for later use
+        if (imageUrls.length === 0) {
           const imagePatterns = [
             /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
             /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
           ];
-
           const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
           let allImages: string[] = [];
           for (const pattern of imagePatterns) {
-            allImages.push(...((rawHtml || html).match(pattern) || []));
+            allImages.push(...(html.match(pattern) || []));
           }
           const unique = [...new Set(allImages.map(canonicalize))];
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-
-          sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images`, {
-            imageCount: imageUrls.length,
-          });
-
-          if (!skipAirbnbPrice) {
-            // Extract price
-            checkStage1Timeout();
-            sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
-            await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
-
-            // 1) HTML/Raw HTML (JSON-LD / embedded data) - Extract TOTAL price with currency
-            let priceResult = extractTotalPriceWithRegex(rawHtml || html, nights);
-            airbnbPrice = priceResult.price;
-            if (priceResult.price) airbnbCurrency = priceResult.currency;
-
-            // 2) Markdown
-            if (!airbnbPrice && markdown.length > 100) {
-              priceResult = extractTotalPriceWithRegex(markdown, nights);
-              airbnbPrice = priceResult.price;
-              if (priceResult.price) airbnbCurrency = priceResult.currency;
-            }
-
-            // 3) Screenshot (dynamic totals)
-            if (!airbnbPrice && screenshotBase64) {
-              checkStage1Timeout();
-              sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading it from the rendered page");
-              airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(screenshotBase64, nights);
-              if (airbnbPrice) {
-                console.log("Screenshot extracted TOTAL price:", airbnbPrice);
-              }
-            }
-
-            // 4) AI over combined text
-            if (!airbnbPrice && (markdown.length > 100 || html.length > 100)) {
-              checkStage1Timeout();
-              sendProgress(controller, "Using AI for price extraction", "Fallback analysis of page text");
-              const aiResult = await extractAirbnbTotalPriceWithAI(
-                [markdown, (rawHtml || html).slice(0, 12000)].filter(Boolean).join("\n\n"),
-                nights
-              );
-              airbnbPrice = aiResult.price;
-              if (aiResult.price) airbnbCurrency = aiResult.currency;
-            }
-
-            if (airbnbPrice) {
-              const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-              sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice}`, { airbnbPrice, airbnbCurrency });
-
-              await supabase
-                .from("searches")
-                .update({
-                  status: "searching_platforms",
-                  last_progress_at: new Date().toISOString(),
-                  airbnb_title: airbnbTitle,
-                  airbnb_price: airbnbPrice,
-                  airbnb_currency: airbnbCurrency,
-                  airbnb_image_url: imageUrls[0] || null,
-                  airbnb_images: imageUrls.slice(0, 5),
-                  check_in_date: checkIn,
-                  check_out_date: checkOut,
-                  nights_count: nights,
-                })
-                .eq("id", searchId);
-            } else {
-              console.log("Price extraction failed for URL:", search.airbnb_url);
-            }
-          }
-        } else {
-          // Firecrawl failed (likely 403 blocking Airbnb) - try Zyte as fallback
-          console.log("Firecrawl failed for Airbnb, attempting Zyte fallback...");
-          sendProgress(controller, "Switching providers", "Primary scraper blocked, using fallback provider");
-          
-          const zyteApiKey = Deno.env.get("ZYTE_API_KEY");
-          if (zyteApiKey && !skipAirbnbPrice) {
-            const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
-            
-            if (zyteResult.ok) {
-              console.log("Zyte Airbnb scrape succeeded. HTML:", zyteResult.html.length, "Screenshot:", !!zyteResult.screenshot);
-              
-              // Track content for failure diagnosis
-              lastScrapedContent = { 
-                markdown: zyteResult.markdown, 
-                html: zyteResult.html, 
-                hasScreenshot: !!zyteResult.screenshot,
-                providerUsed: 'zyte',
-              } as any;
-
-              // Extract title
-              const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
-              if (titleMatch) {
-                airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-              }
-
-              // Extract images
-              const imagePatterns = [
-                /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-              ];
-              const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-              let allImages: string[] = [];
-              for (const pattern of imagePatterns) {
-                allImages.push(...(zyteResult.html.match(pattern) || []));
-              }
-              const unique = [...new Set(allImages.map(canonicalize))];
-              imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-
-              sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via fallback`, {
-                imageCount: imageUrls.length,
-                provider: 'zyte',
-              });
-
-              // Extract price from Zyte content
-              checkStage1Timeout();
-              sendProgress(controller, "Extracting Airbnb price", "Reading price from fallback provider");
-              await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
-
-              // 1) HTML extraction - TOTAL price with currency
-              let priceResult = extractTotalPriceWithRegex(zyteResult.html, nights);
-              airbnbPrice = priceResult.price;
-              if (priceResult.price) airbnbCurrency = priceResult.currency;
-
-              // 2) Markdown
-              if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                priceResult = extractTotalPriceWithRegex(zyteResult.markdown, nights);
-                airbnbPrice = priceResult.price;
-                if (priceResult.price) airbnbCurrency = priceResult.currency;
-              }
-
-              // 3) Screenshot
-              if (!airbnbPrice && zyteResult.screenshot) {
-                checkStage1Timeout();
-                sendProgress(controller, "Extracting Airbnb price", "Price is dynamic — reading from screenshot");
-                airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
-                if (airbnbPrice) {
-                  console.log("Zyte screenshot extracted TOTAL:", airbnbPrice);
-                }
-              }
-
-              // 4) AI fallback
-              if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
-                checkStage1Timeout();
-                sendProgress(controller, "Using AI for price extraction", "Analyzing page content from fallback");
-                const aiResult = await extractAirbnbTotalPriceWithAI(
-                  [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-                  nights
-                );
-                airbnbPrice = aiResult.price;
-                if (aiResult.price) airbnbCurrency = aiResult.currency;
-              }
-
-              if (airbnbPrice) {
-                const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-                sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Zyte)`, { airbnbPrice, airbnbCurrency, provider: 'zyte' });
-
-                await supabase
-                  .from("searches")
-                  .update({
-                    status: "searching_platforms",
-                    last_progress_at: new Date().toISOString(),
-                    airbnb_title: airbnbTitle,
-                    airbnb_price: airbnbPrice,
-                    airbnb_currency: airbnbCurrency,
-                    airbnb_image_url: imageUrls[0] || null,
-                    airbnb_images: imageUrls.slice(0, 5),
-                    check_in_date: checkIn,
-                    check_out_date: checkOut,
-                    nights_count: nights,
-                  })
-                  .eq("id", searchId);
-              } else {
-                console.log("Zyte price extraction failed for URL:", search.airbnb_url);
-              }
-            } else {
-              console.log("Zyte Airbnb scrape failed:", zyteResult.error);
-              // Track the Zyte failure for diagnosis
-              (lastScrapedContent as any).zyteError = zyteResult.error;
-              (lastScrapedContent as any).zyteBotIndicators = zyteResult.botIndicators;
-              
-              // Check if Zyte hit a bot wall - if so, stop the chain
-              const zyteBotWall = zyteResult.botIndicators && zyteResult.botIndicators.length > 0;
-              
-              if (!zyteBotWall && !airbnbPrice) {
-                // Tier 3: Try Browserless
-                const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
-                if (browserlessApiKey) {
-                  console.log("Zyte failed without bot wall, trying Browserless fallback...");
-                  sendProgress(controller, "Switching providers", "Trying Browserless (Tier 3)");
-                  
-                  const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
-                  
-                  if (browserlessResult.ok) {
-                    console.log("Browserless Airbnb scrape succeeded. HTML:", browserlessResult.html.length);
-                    
-                    lastScrapedContent = { 
-                      markdown: browserlessResult.markdown, 
-                      html: browserlessResult.html, 
-                      hasScreenshot: false,
-                      providerUsed: 'browserless',
-                    } as any;
-
-                    // Extract title
-                    const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
-                    if (titleMatch) {
-                      airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-                    }
-
-                    // Extract images
-                    const imagePatterns = [
-                      /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                      /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                    ];
-                    const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-                    let allImages: string[] = [];
-                    for (const pattern of imagePatterns) {
-                      allImages.push(...(browserlessResult.html.match(pattern) || []));
-                    }
-                    const unique = [...new Set(allImages.map(canonicalize))];
-                    if (imageUrls.length === 0) {
-                      imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-                    }
-
-                    // Extract price
-                    checkStage1Timeout();
-                    sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless");
-                    
-                    let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
-                    airbnbPrice = priceResult.price;
-                    if (priceResult.price) airbnbCurrency = priceResult.currency;
-                    if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                      priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
-                      airbnbPrice = priceResult.price;
-                      if (priceResult.price) airbnbCurrency = priceResult.currency;
-                    }
-                    if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
-                      const aiResult = await extractAirbnbTotalPriceWithAI(
-                        [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-                        nights
-                      );
-                      airbnbPrice = aiResult.price;
-                      if (aiResult.price) airbnbCurrency = aiResult.currency;
-                    }
-
-                    if (airbnbPrice) {
-                      const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
-                      await supabase
-                        .from("searches")
-                        .update({
-                          status: "searching_platforms",
-                          last_progress_at: new Date().toISOString(),
-                          airbnb_title: airbnbTitle,
-                          airbnb_price: airbnbPrice,
-                          airbnb_currency: airbnbCurrency,
-                          airbnb_image_url: imageUrls[0] || null,
-                          airbnb_images: imageUrls.slice(0, 5),
-                          check_in_date: checkIn,
-                          check_out_date: checkOut,
-                          nights_count: nights,
-                        })
-                        .eq("id", searchId);
-                    }
-                  } else {
-                    console.log("Browserless scrape failed:", browserlessResult.error);
-                    (lastScrapedContent as any).browserlessError = browserlessResult.error;
-                    (lastScrapedContent as any).browserlessBotIndicators = browserlessResult.botIndicators;
-                    
-                    // Check if Browserless hit a bot wall
-                    const browserlessBotWall = browserlessResult.botIndicators && browserlessResult.botIndicators.length > 0;
-                    
-                    // Tier 5: Try ScrapingBee (break glass - last resort)
-                    if (!browserlessBotWall && !airbnbPrice) {
-                      // ScrapingBee removed - Browserless is the final fallback
-                    }
-                  }
-                }
-              } else if (zyteBotWall) {
-                console.log("Zyte detected bot wall, stopping fallback chain");
-                sendProgress(controller, "Bot detection", "Airbnb blocked the request (bot wall detected)");
-              }
-              
-              if (!airbnbPrice) {
-                sendProgress(controller, "Fallback extraction", "All scrapers failed, trying direct page fetch");
-              }
-            }
-          } else {
-            sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
-          }
         }
+        
+        // Extract title
+        const metaTitle = data?.data?.metadata?.title;
+        if (metaTitle && airbnbTitle === "Vacation Rental") {
+          airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        }
+        
+        const result = await extractPriceFromContent(html, markdown, screenshot, 'Firecrawl');
+        return { provider: 'firecrawl', price: result.price, currency: result.currency, contentLength: html.length, durationMs: Date.now() - start };
       } catch (e) {
-        if ((e as Error)?.message === "__SKIP_AIRBNB_PRICE__") {
-          // intentional; continue
-        } else {
-          console.error("Firecrawl error:", e);
-          // Try Zyte as fallback on Firecrawl exception
-          const zyteApiKey = Deno.env.get("ZYTE_API_KEY");
-          if (zyteApiKey && !skipAirbnbPrice) {
-            console.log("Firecrawl threw exception, trying Zyte fallback...");
-            sendProgress(controller, "Switching providers", "Primary scraper failed, using fallback provider");
-            
-            try {
-              const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
-              
-              if (zyteResult.ok) {
-                // Same extraction logic as above
-                lastScrapedContent = { 
-                  markdown: zyteResult.markdown, 
-                  html: zyteResult.html, 
-                  hasScreenshot: !!zyteResult.screenshot,
-                  providerUsed: 'zyte',
-                } as any;
-
-                const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
-                if (titleMatch) {
-                  airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-                }
-
-                const imagePatterns = [
-                  /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                  /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                ];
-                const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-                let allImages: string[] = [];
-                for (const pattern of imagePatterns) {
-                  allImages.push(...(zyteResult.html.match(pattern) || []));
-                }
-                const unique = [...new Set(allImages.map(canonicalize))];
-                imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-
-                let priceResult = extractTotalPriceWithRegex(zyteResult.html, nights);
-                airbnbPrice = priceResult.price;
-                if (priceResult.price) airbnbCurrency = priceResult.currency;
-                if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                  priceResult = extractTotalPriceWithRegex(zyteResult.markdown, nights);
-                  airbnbPrice = priceResult.price;
-                  if (priceResult.price) airbnbCurrency = priceResult.currency;
-                }
-                if (!airbnbPrice && zyteResult.screenshot) {
-                  airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
-                }
-                if (!airbnbPrice && (zyteResult.markdown.length > 100 || zyteResult.html.length > 100)) {
-                  const aiResult = await extractAirbnbTotalPriceWithAI(
-                    [zyteResult.markdown, zyteResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-                    nights
-                  );
-                  airbnbPrice = aiResult.price;
-                  if (aiResult.price) airbnbCurrency = aiResult.currency;
-                }
-
-                if (airbnbPrice) {
-                  const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-                  sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Zyte)`, { airbnbPrice, airbnbCurrency, provider: 'zyte' });
-                  await supabase
-                    .from("searches")
-                    .update({
-                      status: "searching_platforms",
-                      last_progress_at: new Date().toISOString(),
-                      airbnb_title: airbnbTitle,
-                      airbnb_price: airbnbPrice,
-                      airbnb_currency: airbnbCurrency,
-                      airbnb_image_url: imageUrls[0] || null,
-                      airbnb_images: imageUrls.slice(0, 5),
-                      check_in_date: checkIn,
-                      check_out_date: checkOut,
-                      nights_count: nights,
-                    })
-                    .eq("id", searchId);
-                }
-              } else {
-                // Zyte failed - try Browserless and ScrapingBee if no bot wall
-                const zyteBotIndicators = (zyteResult as any).botIndicators || [];
-                const zyteBotWall = zyteBotIndicators.length > 0;
-                
-                if (!zyteBotWall && !airbnbPrice) {
-                  // Tier 3: Try Browserless
-                  const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
-                  if (browserlessApiKey) {
-                    console.log("Zyte failed in catch block, trying Browserless...");
-                    sendProgress(controller, "Switching providers", "Trying Browserless (Tier 3)");
-                    
-                    try {
-                      const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
-                      
-                      if (browserlessResult.ok) {
-                        lastScrapedContent = { 
-                          markdown: browserlessResult.markdown, 
-                          html: browserlessResult.html, 
-                          hasScreenshot: false,
-                          providerUsed: 'browserless',
-                        } as any;
-
-                        const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
-                        if (titleMatch) {
-                          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-                        }
-
-                        const imagePatterns = [
-                          /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                          /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-                        ];
-                        const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-                        let allImages: string[] = [];
-                        for (const pattern of imagePatterns) {
-                          allImages.push(...(browserlessResult.html.match(pattern) || []));
-                        }
-                        const unique = [...new Set(allImages.map(canonicalize))];
-                        if (imageUrls.length === 0) {
-                          imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-                        }
-
-                        let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
-                        airbnbPrice = priceResult.price;
-                        if (priceResult.price) airbnbCurrency = priceResult.currency;
-                        if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                          priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
-                          airbnbPrice = priceResult.price;
-                          if (priceResult.price) airbnbCurrency = priceResult.currency;
-                        }
-                        if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
-                          const aiResult = await extractAirbnbTotalPriceWithAI(
-                            [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-                            nights
-                          );
-                          airbnbPrice = aiResult.price;
-                          if (aiResult.price) airbnbCurrency = aiResult.currency;
-                        }
-
-                        if (airbnbPrice) {
-                          const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-                          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
-                          await supabase.from("searches").update({
-                            status: "searching_platforms",
-                            last_progress_at: new Date().toISOString(),
-                            airbnb_title: airbnbTitle,
-                            airbnb_price: airbnbPrice,
-                            airbnb_currency: airbnbCurrency,
-                            airbnb_image_url: imageUrls[0] || null,
-                            airbnb_images: imageUrls.slice(0, 5),
-                            check_in_date: checkIn,
-                            check_out_date: checkOut,
-                            nights_count: nights,
-                          }).eq("id", searchId);
-                        }
-                      } else {
-                        // Browserless failed - try ScrapingBee if no bot wall
-                        const browserlessBotWall = browserlessResult.botIndicators && browserlessResult.botIndicators.length > 0;
-                        
-                        // ScrapingBee removed - Browserless is the final fallback
-                      }
-                    } catch (browserlessError) {
-                      console.error("Browserless fallback failed:", browserlessError);
-                    }
-                  }
-                }
-              }
-            } catch (zyteError) {
-              console.error("Zyte fallback also failed:", zyteError);
-              
-              // Even if Zyte threw, try Browserless and ScrapingBee
-              const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
-              if (browserlessApiKey && !airbnbPrice) {
-                console.log("Zyte threw exception, trying Browserless...");
-                try {
-                  const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
-                  if (browserlessResult.ok) {
-                    lastScrapedContent = { 
-                      markdown: browserlessResult.markdown, 
-                      html: browserlessResult.html, 
-                      hasScreenshot: false,
-                      providerUsed: 'browserless',
-                    } as any;
-                    
-                    let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
-                    airbnbPrice = priceResult.price;
-                    if (priceResult.price) airbnbCurrency = priceResult.currency;
-                    if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                      priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
-                      airbnbPrice = priceResult.price;
-                      if (priceResult.price) airbnbCurrency = priceResult.currency;
-                    }
-                    if (!airbnbPrice) {
-                      const aiResult = await extractAirbnbTotalPriceWithAI(
-                        [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-                        nights
-                      );
-                      airbnbPrice = aiResult.price;
-                      if (aiResult.price) airbnbCurrency = aiResult.currency;
-                    }
-                    
-                    if (airbnbPrice) {
-                      const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
-                      await supabase.from("searches").update({
-                        status: "searching_platforms",
-                        airbnb_price: airbnbPrice,
-                        airbnb_currency: airbnbCurrency,
-                      }).eq("id", searchId);
-                    }
-                  }
-                  // ScrapingBee removed - Browserless is the final fallback
-                } catch (e) {
-                  console.error("Browserless also failed after Zyte exception:", e);
-                }
-              }
-            }
-          }
-          sendProgress(controller, "Fallback extraction", "Dynamic scrape failed, trying direct page fetch");
+        return { provider: 'firecrawl', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
+      }
+    };
+    
+    const zyteTask = async (): Promise<ProviderPriceResult> => {
+      const start = Date.now();
+      try {
+        if (!zyteApiKey) return { provider: 'zyte', price: null, currency: 'USD', error: 'No API key' };
+        
+        const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
+        
+        if (!zyteResult.ok) {
+          return { provider: 'zyte', price: null, currency: 'USD', error: zyteResult.error || 'Failed', durationMs: Date.now() - start };
         }
+        
+        // Extract images for later use
+        if (imageUrls.length === 0) {
+          const imagePatterns = [
+            /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+            /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+          ];
+          const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+          let allImages: string[] = [];
+          for (const pattern of imagePatterns) {
+            allImages.push(...(zyteResult.html.match(pattern) || []));
+          }
+          const unique = [...new Set(allImages.map(canonicalize))];
+          imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+        }
+        
+        // Extract title
+        const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
+        if (titleMatch && airbnbTitle === "Vacation Rental") {
+          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        }
+        
+        const result = await extractPriceFromContent(zyteResult.html, zyteResult.markdown, zyteResult.screenshot, 'Zyte');
+        return { provider: 'zyte', price: result.price, currency: result.currency, contentLength: zyteResult.html.length, durationMs: Date.now() - start };
+      } catch (e) {
+        return { provider: 'zyte', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
+      }
+    };
+    
+    const browserlessTask = async (): Promise<ProviderPriceResult> => {
+      const start = Date.now();
+      try {
+        if (!browserlessApiKey) return { provider: 'browserless', price: null, currency: 'USD', error: 'No API key' };
+        
+        const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
+        
+        if (!browserlessResult.ok) {
+          return { provider: 'browserless', price: null, currency: 'USD', error: browserlessResult.error || 'Failed', durationMs: Date.now() - start };
+        }
+        
+        // Extract images for later use
+        if (imageUrls.length === 0) {
+          const imagePatterns = [
+            /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+            /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+          ];
+          const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+          let allImages: string[] = [];
+          for (const pattern of imagePatterns) {
+            allImages.push(...(browserlessResult.html.match(pattern) || []));
+          }
+          const unique = [...new Set(allImages.map(canonicalize))];
+          imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+        }
+        
+        // Extract title
+        const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
+        if (titleMatch && airbnbTitle === "Vacation Rental") {
+          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        }
+        
+        const result = await extractPriceFromContent(browserlessResult.html, browserlessResult.markdown, null, 'Browserless');
+        return { provider: 'browserless', price: result.price, currency: result.currency, contentLength: browserlessResult.html.length, durationMs: Date.now() - start };
+      } catch (e) {
+        return { provider: 'browserless', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
+      }
+    };
+    
+    // Run all 3 providers in parallel
+    sendProgress(controller, "Running 3 providers", "Firecrawl + Zyte + Browserless running simultaneously");
+    const [firecrawlResult, zyteResult, browserlessResult] = await Promise.all([
+      firecrawlTask(),
+      zyteTask(),
+      browserlessTask(),
+    ]);
+    
+    providerResults.push(firecrawlResult, zyteResult, browserlessResult);
+    
+    // Log all results
+    console.log("=== MULTI-PROVIDER PRICE COMPARISON ===");
+    for (const r of providerResults) {
+      const priceStr = r.price ? `${r.currency} ${r.price}` : 'NO PRICE';
+      console.log(`[${r.provider.toUpperCase()}] ${priceStr} (${r.contentLength || 0} chars, ${r.durationMs}ms) ${r.error ? `ERROR: ${r.error}` : ''}`);
+    }
+    console.log("========================================");
+    
+    // Send each result to the UI
+    for (const r of providerResults) {
+      const currencySymbol = r.currency === 'EUR' ? '€' : r.currency === 'GBP' ? '£' : r.currency === 'CHF' ? 'CHF ' : '$';
+      if (r.price) {
+        sendProgress(controller, `${r.provider.toUpperCase()} price`, `${currencySymbol}${r.price} (${r.durationMs}ms)`, { provider: r.provider, price: r.price, currency: r.currency });
+      } else {
+        sendProgress(controller, `${r.provider.toUpperCase()} failed`, r.error || 'No price found', { provider: r.provider, error: r.error });
       }
     }
+    
+    // Select the BEST price (prefer highest total - usually includes fees)
+    const pricesFound = providerResults.filter(r => r.price !== null);
+    if (pricesFound.length > 0) {
+      // Sort by price descending (highest = most complete total)
+      pricesFound.sort((a, b) => (b.price || 0) - (a.price || 0));
+      const best = pricesFound[0];
+      airbnbPrice = best.price;
+      airbnbCurrency = best.currency;
+      
+      const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+      sendProgress(controller, "Selected price", `Using ${best.provider.toUpperCase()}: ${currencySymbol}${airbnbPrice} (highest total)`, { airbnbPrice, airbnbCurrency, provider: best.provider });
+      
+      // Show comparison summary
+      const summary = providerResults.map(r => `${r.provider}: ${r.price || 'N/A'}`).join(' | ');
+      sendProgress(controller, "Price comparison", summary, { comparison: providerResults });
+    } else {
+      sendProgress(controller, "All providers failed", "No prices extracted from any provider");
+    }
+    
+    // Update the database
+    await supabase
+      .from("searches")
+      .update({
+        status: "searching_platforms",
+        last_progress_at: new Date().toISOString(),
+        airbnb_title: airbnbTitle,
+        airbnb_price: airbnbPrice,
+        airbnb_currency: airbnbCurrency,
+        airbnb_image_url: imageUrls[0] || null,
+        airbnb_images: imageUrls.slice(0, 5),
+        check_in_date: checkIn,
+        check_out_date: checkOut,
+        nights_count: nights,
+      })
+      .eq("id", searchId);
+    
+    // Old fallback chain code removed - now using parallel multi-provider extraction above
 
     // Fallback direct fetch if needed
     if (imageUrls.length === 0 || !airbnbPrice) {
@@ -3708,7 +3325,7 @@ async function runSearchWithStreaming(
 
     // Abort if no price (unless the user explicitly skipped this step)
     if (!airbnbPrice) {
-      if (typeof skipAirbnbPrice !== "undefined" && skipAirbnbPrice === true) {
+      if (skipAirbnbPrice) {
         sendProgress(controller, "Continuing without Airbnb price", "Proceeding to find alternatives (savings may be unavailable)", { skipped: true });
         await supabase
           .from("searches")
