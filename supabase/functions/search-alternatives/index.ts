@@ -2964,7 +2964,92 @@ async function runSearchWithStreaming(
     sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
     await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
-    if (firecrawlApiKey) {
+    // TESTING MODE: Try ScrapingBee first (temporary - for one-time test)
+    const SCRAPINGBEE_FIRST_TEST = true; // TODO: Remove after testing
+    const scrapingBeeApiKeyFirst = Deno.env.get("SCRAPINGBEE_API_KEY");
+    
+    if (SCRAPINGBEE_FIRST_TEST && scrapingBeeApiKeyFirst) {
+      checkStage1Timeout();
+      sendProgress(controller, "Loading Airbnb listing", "Testing ScrapingBee as primary provider");
+      await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
+      
+      console.log("TESTING: Trying ScrapingBee FIRST for Airbnb extraction");
+      const scrapingBeeTestResult = await scrapeAirbnbWithScrapingBee(search.airbnb_url, scrapingBeeApiKeyFirst);
+      
+      if (scrapingBeeTestResult.ok) {
+        console.log("ScrapingBee (test first) scrape succeeded. HTML:", scrapingBeeTestResult.html.length);
+        
+        lastScrapedContent = { 
+          markdown: scrapingBeeTestResult.markdown, 
+          html: scrapingBeeTestResult.html, 
+          hasScreenshot: false,
+          providerUsed: 'scrapingbee',
+        } as any;
+
+        // Extract title
+        const titleMatch = scrapingBeeTestResult.html.match(/<title>([^<]+)<\/title>/i);
+        if (titleMatch) {
+          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        }
+
+        // Extract images
+        const imagePatterns = [
+          /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+          /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+        ];
+        const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+        let allImages: string[] = [];
+        for (const pattern of imagePatterns) {
+          allImages.push(...(scrapingBeeTestResult.html.match(pattern) || []));
+        }
+        const unique = [...new Set(allImages.map(canonicalize))];
+        imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+
+        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via ScrapingBee (test)`, {
+          imageCount: imageUrls.length,
+          provider: 'scrapingbee',
+        });
+
+        // Extract price
+        checkStage1Timeout();
+        sendProgress(controller, "Extracting Airbnb price", "Reading price from ScrapingBee (test first)");
+        
+        airbnbPrice = extractTotalPriceWithRegex(scrapingBeeTestResult.html, nights);
+        if (!airbnbPrice && scrapingBeeTestResult.markdown.length > 100) {
+          airbnbPrice = extractTotalPriceWithRegex(scrapingBeeTestResult.markdown, nights);
+        }
+        if (!airbnbPrice && (scrapingBeeTestResult.markdown.length > 100 || scrapingBeeTestResult.html.length > 100)) {
+          airbnbPrice = await extractAirbnbTotalPriceWithAI(
+            [scrapingBeeTestResult.markdown, scrapingBeeTestResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
+            nights
+          );
+        }
+
+        if (airbnbPrice) {
+          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via ScrapingBee test)`, { airbnbPrice, provider: 'scrapingbee' });
+          await supabase
+            .from("searches")
+            .update({
+              status: "searching_platforms",
+              last_progress_at: new Date().toISOString(),
+              airbnb_title: airbnbTitle,
+              airbnb_price: airbnbPrice,
+              airbnb_image_url: imageUrls[0] || null,
+              airbnb_images: imageUrls.slice(0, 5),
+              check_in_date: checkIn,
+              check_out_date: checkOut,
+              nights_count: nights,
+            })
+            .eq("id", searchId);
+        }
+      } else {
+        console.log("ScrapingBee (test first) failed:", scrapingBeeTestResult.error);
+        (lastScrapedContent as any).scrapingBeeTestError = scrapingBeeTestResult.error;
+      }
+    }
+
+    // Continue with normal fallback chain if ScrapingBee test didn't get a price
+    if (firecrawlApiKey && !airbnbPrice) {
       checkStage1Timeout();
       sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
       await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
