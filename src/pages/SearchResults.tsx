@@ -841,11 +841,9 @@ export default function SearchResults() {
   const hasValidDates = checkIn && checkOut;
   const nights = dbNights || (hasValidDates ? calculateNights(checkIn!, checkOut!) : null);
 
-  // airbnb_price is now TOTAL price for the entire stay (not per-night)
+  // airbnb_price is TOTAL price for the entire stay (not per-night)
   // result.price from alternatives is also TOTAL price
   const airbnbTotal = search?.airbnb_price || (results.length > 0 ? results[0].original_price : null);
-  const estimatedServiceFee = airbnbTotal ? Math.round(airbnbTotal * 0.14) : null;
-  const airbnbGrandTotal = airbnbTotal && estimatedServiceFee ? airbnbTotal + estimatedServiceFee : null;
 
   // CRITICAL: Filter out Tier C (blocked) platforms from price comparisons
   // They should NEVER show prices or be marked as "Best Deal"
@@ -860,16 +858,16 @@ export default function SearchResults() {
   const sortedByPrice = [...resultsWithPrices].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
 
   // Separate results into cheaper (savings) and more expensive (no savings)
-  // result.price is now TOTAL price - compare directly
+  // result.price is TOTAL price - compare directly to Airbnb TOTAL
   const cheaperResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal) return true;
-    return r.price! < airbnbGrandTotal;
+    if (!airbnbTotal) return true;
+    return r.price! < airbnbTotal;
   });
 
   // More expensive alternatives for collapsed section
   const moreExpensiveResults = sortedByPrice.filter((r) => {
-    if (!airbnbGrandTotal) return false;
-    return r.price! >= airbnbGrandTotal;
+    if (!airbnbTotal) return false;
+    return r.price! >= airbnbTotal;
   });
 
   // For backward compatibility, validResults = results with prices (excluding Tier C)
@@ -905,9 +903,9 @@ export default function SearchResults() {
       )
     : null;
 
-  // Calculate potential savings - prices are now TOTAL
+  // Calculate potential savings - prices are TOTAL
   const cheapestTotal = cheapestResult?.price || null;
-  const potentialSavings = airbnbGrandTotal && cheapestTotal ? airbnbGrandTotal - cheapestTotal : null;
+  const potentialSavings = airbnbTotal && cheapestTotal ? airbnbTotal - cheapestTotal : null;
 
 
   // Helper to generate key differences based on platform
@@ -1166,7 +1164,7 @@ export default function SearchResults() {
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-foreground text-lg">
-                              €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
+                              €{airbnbTotal ? Math.round(airbnbTotal) : "—"}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
                               <span className="text-xs">AirCover protection, service fee, cleaning fee may apply</span>
@@ -1239,10 +1237,10 @@ export default function SearchResults() {
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-success text-lg">
-                              €{airbnbGrandTotal ? Math.round(airbnbGrandTotal) : "—"}
+                              €{airbnbTotal ? Math.round(airbnbTotal) : "—"}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
-                              <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
+                              <span className="text-xs">Baseline price from Airbnb for these dates</span>
                             </td>
                             <td className="py-4 px-4 text-center">
                               <Button size="sm" asChild>
@@ -1272,8 +1270,8 @@ export default function SearchResults() {
                             <table className="w-full text-sm">
                               <tbody>
                                 {moreExpensiveResults.map((result) => {
-                                  const alternativeTotal = (result.price || 0) * (nights || 1);
-                                  const priceDiff = Math.round(alternativeTotal - (airbnbGrandTotal || 0));
+                                  const alternativeTotal = result.price || 0;
+                                  const priceDiff = Math.round(alternativeTotal - (airbnbTotal || 0));
                                   return (
                                     <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
                                       <td className="py-4 px-4">
@@ -1298,9 +1296,6 @@ export default function SearchResults() {
                                       <td className="py-4 px-4 text-right">
                                         <span className="font-semibold text-foreground">€{Math.round(alternativeTotal)}</span>
                                         <span className="text-amber-600 text-xs ml-2">(+€{priceDiff})</span>
-                                      </td>
-                                      <td className="py-4 px-4 text-right text-muted-foreground">
-                                        €{Math.round(result.price || 0)}/night
                                       </td>
                                       <td className="py-4 px-4 hidden lg:table-cell">
                                         <span className="text-xs text-muted-foreground">May have different terms</span>
@@ -1479,8 +1474,8 @@ export default function SearchResults() {
                               </span>
                             </td>
                             <td className="py-4 px-4 text-right font-semibold text-foreground">
-                              {airbnbGrandTotal ? (
-                                `€${Math.round(airbnbGrandTotal)}`
+                              {airbnbTotal ? (
+                                `€${Math.round(airbnbTotal)}`
                               ) : (
                                 <div className="flex justify-end">
                                   <div className="h-5 w-16 bg-muted animate-pulse rounded" />
@@ -1488,7 +1483,7 @@ export default function SearchResults() {
                               )}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
-                              <span className="text-xs">AirCover protection, ~14% service fee, cleaning fee may apply</span>
+                              <span className="text-xs">Baseline price from Airbnb for these dates</span>
                             </td>
                             <td className="py-4 px-4 text-center">
                               <Button variant="outline" size="sm" asChild>
@@ -1501,7 +1496,6 @@ export default function SearchResults() {
                           {displayResults.map((result) => {
                             const isCheapest = cheapestResult && result.id === cheapestResult.id;
                             const isDirect = result.platform_name.includes("(Direct)");
-                            const totalPrice = result.price && nights ? result.price * nights : null;
                             const keyDiffs = getKeyDifferences(result);
                             const resultImages = toStringArray(result.images);
                             const isExpanded = expandedComparison === result.id;
@@ -1682,12 +1676,12 @@ export default function SearchResults() {
                             <>
                               <p className="text-5xl font-bold text-success">€{Math.round(potentialSavings)}</p>
                               <span className="text-success text-xl font-semibold">
-                                ({airbnbGrandTotal ? Math.round((potentialSavings / airbnbGrandTotal) * 100) : '~'}% off)
+                                ({airbnbTotal ? Math.round((potentialSavings / airbnbTotal) * 100) : '~'}% off)
                               </span>
                             </>
                           ) : (
                             <p className="text-3xl font-bold text-success">
-                              Best price: €{cheapestResult.price && nights ? cheapestResult.price * nights : cheapestResult.price}/total
+                              Best price: €{cheapestResult.price}/total
                             </p>
                           )}
                         </div>
