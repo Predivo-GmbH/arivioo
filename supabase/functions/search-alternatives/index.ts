@@ -3008,131 +3008,10 @@ async function runSearchWithStreaming(
     sendProgress(controller, "Extracting property photos", "Downloading images from Airbnb listing");
     await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
-    // TESTING MODE: Browserless only (no fallback) - temporary for testing
-    const BROWSERLESS_ONLY_TEST = true; // TODO: Remove after testing
-    const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
-    
-    if (BROWSERLESS_ONLY_TEST && browserlessApiKey) {
-      checkStage1Timeout();
-      sendProgress(controller, "Loading Airbnb listing", "Using Browserless (test mode - no fallback)");
-      await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
-      
-      // Build URL with dates to ensure price is shown
-      const airbnbUrlWithDates = (() => {
-        const urlObj = new URL(search.airbnb_url);
-        if (checkIn) urlObj.searchParams.set('check_in', checkIn);
-        if (checkOut) urlObj.searchParams.set('check_out', checkOut);
-        return urlObj.toString();
-      })();
-      
-      console.log("TESTING: Using Browserless ONLY (no fallback) for Airbnb extraction");
-      console.log("Scraping URL with dates:", airbnbUrlWithDates);
-      const browserlessResult = await scrapeAirbnbWithBrowserless(airbnbUrlWithDates, browserlessApiKey);
-      
-      if (browserlessResult.ok) {
-        console.log("Browserless scrape succeeded. HTML:", browserlessResult.html.length);
-        
-        lastScrapedContent = { 
-          markdown: browserlessResult.markdown, 
-          html: browserlessResult.html, 
-          hasScreenshot: false,
-          providerUsed: 'browserless',
-        } as any;
-
-        // Extract title
-        const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch) {
-          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-        }
-
-        // Extract images
-        const imagePatterns = [
-          /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-          /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
-        ];
-        const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
-        let allImages: string[] = [];
-        for (const pattern of imagePatterns) {
-          allImages.push(...(browserlessResult.html.match(pattern) || []));
-        }
-        const unique = [...new Set(allImages.map(canonicalize))];
-        imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
-
-        sendProgress(controller, "Found property photos", `Extracted ${imageUrls.length} images via Browserless`, {
-          imageCount: imageUrls.length,
-          provider: 'browserless',
-        });
-
-        // Extract price - use the highest found price (latest total with taxes)
-        checkStage1Timeout();
-        sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless (no fallback mode)");
-        
-        // Debug: Log price-related snippets from HTML
-        const priceSnippets = browserlessResult.html.match(/\$[\d,]+(?:\.\d{2})?[^<]{0,50}/gi)?.slice(0, 10) || [];
-        console.log("Price-related snippets found:", JSON.stringify(priceSnippets));
-        
-        // Also look for aria-labels with prices
-        const ariaLabels = browserlessResult.html.match(/aria-label="[^"]*\$[\d,]+[^"]*"/gi)?.slice(0, 5) || [];
-        console.log("Aria-label price snippets:", JSON.stringify(ariaLabels));
-        
-        // Look for "for X nights" patterns
-        const forNightsSnippets = browserlessResult.html.match(/\$[\d,]+(?:\.\d{2})?\s*(?:for\s*)?\d+\s*nights?/gi) || [];
-        console.log("'For X nights' patterns:", JSON.stringify(forNightsSnippets));
-        
-        // Extract price and currency
-        let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
-        if (!priceResult.price && browserlessResult.markdown.length > 100) {
-          priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
-        }
-        if (!priceResult.price && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
-          priceResult = await extractAirbnbTotalPriceWithAI(
-            [browserlessResult.markdown, browserlessResult.html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-            nights
-          );
-        }
-        
-        // Update the tracking variables
-        airbnbPrice = priceResult.price;
-        airbnbCurrency = priceResult.currency;
-
-        if (airbnbPrice) {
-          const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-          console.log("Browserless extracted Airbnb price:", airbnbCurrency, airbnbPrice);
-          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
-          await supabase
-            .from("searches")
-            .update({
-              status: "searching_platforms",
-              last_progress_at: new Date().toISOString(),
-              airbnb_title: airbnbTitle,
-              airbnb_price: airbnbPrice,
-              airbnb_currency: airbnbCurrency,
-              airbnb_image_url: imageUrls[0] || null,
-              airbnb_images: imageUrls.slice(0, 5),
-              check_in_date: checkIn,
-              check_out_date: checkOut,
-              nights_count: nights,
-            })
-            .eq("id", searchId);
-          
-          // Mark that we have everything we need - skip remaining fallback chain
-          console.log("Browserless extraction complete with price. Skipping fallback chain.");
-        } else {
-          console.log("Browserless price extraction failed - no fallback will be attempted");
-          sendProgress(controller, "Price not found", "Browserless could not extract price (no fallback mode)", { provider: 'browserless' });
-        }
-      } else {
-        console.log("Browserless scrape failed:", browserlessResult.error);
-        sendProgress(controller, "Browserless failed", browserlessResult.error || "Unknown error", { provider: 'browserless' });
-        (lastScrapedContent as any).browserlessError = browserlessResult.error;
-      }
-      
-      // In test mode, we DON'T fall back to other providers - this is intentional
-      // Skip the rest of the fallback chain entirely
-    }
+    // Normal fallback chain: Firecrawl > Zyte > Browserless (ScrapingBee removed)
 
     // Continue with normal fallback chain ONLY if NOT in Browserless-only test mode
-    if (firecrawlApiKey && !airbnbPrice && !BROWSERLESS_ONLY_TEST) {
+    if (firecrawlApiKey && !airbnbPrice) {
       checkStage1Timeout();
       sendProgress(controller, "Loading Airbnb listing", "Using JavaScript rendering to capture dynamic content");
       await supabase.from("searches").update({ status: "scraping_airbnb_page" }).eq("id", searchId);
@@ -3278,12 +3157,16 @@ async function runSearchWithStreaming(
             sendProgress(controller, "Extracting Airbnb price", "Reading the total price shown for your dates");
             await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
-            // 1) HTML/Raw HTML (JSON-LD / embedded data) - Extract TOTAL price
-            airbnbPrice = extractPriceOnly(rawHtml || html, nights);
+            // 1) HTML/Raw HTML (JSON-LD / embedded data) - Extract TOTAL price with currency
+            let priceResult = extractTotalPriceWithRegex(rawHtml || html, nights);
+            airbnbPrice = priceResult.price;
+            if (priceResult.price) airbnbCurrency = priceResult.currency;
 
             // 2) Markdown
             if (!airbnbPrice && markdown.length > 100) {
-              airbnbPrice = extractPriceOnly(markdown, nights);
+              priceResult = extractTotalPriceWithRegex(markdown, nights);
+              airbnbPrice = priceResult.price;
+              if (priceResult.price) airbnbCurrency = priceResult.currency;
             }
 
             // 3) Screenshot (dynamic totals)
@@ -3309,17 +3192,17 @@ async function runSearchWithStreaming(
             }
 
             if (airbnbPrice) {
-              sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice}`, { airbnbPrice });
+              const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+              sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice}`, { airbnbPrice, airbnbCurrency });
 
               await supabase
                 .from("searches")
                 .update({
-                  // Ensure DB reflects we're past the initial parsing stage.
-                  // The UI stepper depends on status transitions; missing these makes it look stuck.
                   status: "searching_platforms",
                   last_progress_at: new Date().toISOString(),
                   airbnb_title: airbnbTitle,
                   airbnb_price: airbnbPrice,
+                  airbnb_currency: airbnbCurrency,
                   airbnb_image_url: imageUrls[0] || null,
                   airbnb_images: imageUrls.slice(0, 5),
                   check_in_date: checkIn,
@@ -3380,12 +3263,16 @@ async function runSearchWithStreaming(
               sendProgress(controller, "Extracting Airbnb price", "Reading price from fallback provider");
               await supabase.from("searches").update({ status: "extracting_price" }).eq("id", searchId);
 
-              // 1) HTML extraction - TOTAL price
-              airbnbPrice = extractPriceOnly(zyteResult.html, nights);
+              // 1) HTML extraction - TOTAL price with currency
+              let priceResult = extractTotalPriceWithRegex(zyteResult.html, nights);
+              airbnbPrice = priceResult.price;
+              if (priceResult.price) airbnbCurrency = priceResult.currency;
 
               // 2) Markdown
               if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                airbnbPrice = extractPriceOnly(zyteResult.markdown, nights);
+                priceResult = extractTotalPriceWithRegex(zyteResult.markdown, nights);
+                airbnbPrice = priceResult.price;
+                if (priceResult.price) airbnbCurrency = priceResult.currency;
               }
 
               // 3) Screenshot
@@ -3411,7 +3298,8 @@ async function runSearchWithStreaming(
               }
 
               if (airbnbPrice) {
-                sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via fallback)`, { airbnbPrice, provider: 'zyte' });
+                const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+                sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Zyte)`, { airbnbPrice, airbnbCurrency, provider: 'zyte' });
 
                 await supabase
                   .from("searches")
@@ -3420,6 +3308,7 @@ async function runSearchWithStreaming(
                     last_progress_at: new Date().toISOString(),
                     airbnb_title: airbnbTitle,
                     airbnb_price: airbnbPrice,
+                    airbnb_currency: airbnbCurrency,
                     airbnb_image_url: imageUrls[0] || null,
                     airbnb_images: imageUrls.slice(0, 5),
                     check_in_date: checkIn,
@@ -3483,9 +3372,13 @@ async function runSearchWithStreaming(
                     checkStage1Timeout();
                     sendProgress(controller, "Extracting Airbnb price", "Reading price from Browserless");
                     
-                    airbnbPrice = extractPriceOnly(browserlessResult.html, nights);
+                    let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                    airbnbPrice = priceResult.price;
+                    if (priceResult.price) airbnbCurrency = priceResult.currency;
                     if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                      airbnbPrice = extractPriceOnly(browserlessResult.markdown, nights);
+                      priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                      airbnbPrice = priceResult.price;
+                      if (priceResult.price) airbnbCurrency = priceResult.currency;
                     }
                     if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
                       const aiResult = await extractAirbnbTotalPriceWithAI(
@@ -3497,7 +3390,8 @@ async function runSearchWithStreaming(
                     }
 
                     if (airbnbPrice) {
-                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
+                      const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
                       await supabase
                         .from("searches")
                         .update({
@@ -3505,6 +3399,7 @@ async function runSearchWithStreaming(
                           last_progress_at: new Date().toISOString(),
                           airbnb_title: airbnbTitle,
                           airbnb_price: airbnbPrice,
+                          airbnb_currency: airbnbCurrency,
                           airbnb_image_url: imageUrls[0] || null,
                           airbnb_images: imageUrls.slice(0, 5),
                           check_in_date: checkIn,
@@ -3580,9 +3475,13 @@ async function runSearchWithStreaming(
                 const unique = [...new Set(allImages.map(canonicalize))];
                 imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
 
-                airbnbPrice = extractPriceOnly(zyteResult.html, nights);
+                let priceResult = extractTotalPriceWithRegex(zyteResult.html, nights);
+                airbnbPrice = priceResult.price;
+                if (priceResult.price) airbnbCurrency = priceResult.currency;
                 if (!airbnbPrice && zyteResult.markdown.length > 100) {
-                  airbnbPrice = extractPriceOnly(zyteResult.markdown, nights);
+                  priceResult = extractTotalPriceWithRegex(zyteResult.markdown, nights);
+                  airbnbPrice = priceResult.price;
+                  if (priceResult.price) airbnbCurrency = priceResult.currency;
                 }
                 if (!airbnbPrice && zyteResult.screenshot) {
                   airbnbPrice = await extractAirbnbTotalFromScreenshotBase64(zyteResult.screenshot, nights);
@@ -3597,7 +3496,8 @@ async function runSearchWithStreaming(
                 }
 
                 if (airbnbPrice) {
-                  sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via fallback)`, { airbnbPrice, provider: 'zyte' });
+                  const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+                  sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Zyte)`, { airbnbPrice, airbnbCurrency, provider: 'zyte' });
                   await supabase
                     .from("searches")
                     .update({
@@ -3605,6 +3505,7 @@ async function runSearchWithStreaming(
                       last_progress_at: new Date().toISOString(),
                       airbnb_title: airbnbTitle,
                       airbnb_price: airbnbPrice,
+                      airbnb_currency: airbnbCurrency,
                       airbnb_image_url: imageUrls[0] || null,
                       airbnb_images: imageUrls.slice(0, 5),
                       check_in_date: checkIn,
@@ -3655,9 +3556,13 @@ async function runSearchWithStreaming(
                           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
                         }
 
-                        airbnbPrice = extractPriceOnly(browserlessResult.html, nights);
+                        let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                        airbnbPrice = priceResult.price;
+                        if (priceResult.price) airbnbCurrency = priceResult.currency;
                         if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                          airbnbPrice = extractPriceOnly(browserlessResult.markdown, nights);
+                          priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                          airbnbPrice = priceResult.price;
+                          if (priceResult.price) airbnbCurrency = priceResult.currency;
                         }
                         if (!airbnbPrice && (browserlessResult.markdown.length > 100 || browserlessResult.html.length > 100)) {
                           const aiResult = await extractAirbnbTotalPriceWithAI(
@@ -3669,12 +3574,14 @@ async function runSearchWithStreaming(
                         }
 
                         if (airbnbPrice) {
-                          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
+                          const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+                          sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
                           await supabase.from("searches").update({
                             status: "searching_platforms",
                             last_progress_at: new Date().toISOString(),
                             airbnb_title: airbnbTitle,
                             airbnb_price: airbnbPrice,
+                            airbnb_currency: airbnbCurrency,
                             airbnb_image_url: imageUrls[0] || null,
                             airbnb_images: imageUrls.slice(0, 5),
                             check_in_date: checkIn,
@@ -3711,9 +3618,13 @@ async function runSearchWithStreaming(
                       providerUsed: 'browserless',
                     } as any;
                     
-                    airbnbPrice = extractPriceOnly(browserlessResult.html, nights);
+                    let priceResult = extractTotalPriceWithRegex(browserlessResult.html, nights);
+                    airbnbPrice = priceResult.price;
+                    if (priceResult.price) airbnbCurrency = priceResult.currency;
                     if (!airbnbPrice && browserlessResult.markdown.length > 100) {
-                      airbnbPrice = extractPriceOnly(browserlessResult.markdown, nights);
+                      priceResult = extractTotalPriceWithRegex(browserlessResult.markdown, nights);
+                      airbnbPrice = priceResult.price;
+                      if (priceResult.price) airbnbCurrency = priceResult.currency;
                     }
                     if (!airbnbPrice) {
                       const aiResult = await extractAirbnbTotalPriceWithAI(
@@ -3725,10 +3636,12 @@ async function runSearchWithStreaming(
                     }
                     
                     if (airbnbPrice) {
-                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: $${airbnbPrice} (via Browserless)`, { airbnbPrice, provider: 'browserless' });
+                      const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
+                      sendProgress(controller, "Price extracted", `Found Airbnb TOTAL: ${currencySymbol}${airbnbPrice} (via Browserless)`, { airbnbPrice, airbnbCurrency, provider: 'browserless' });
                       await supabase.from("searches").update({
                         status: "searching_platforms",
                         airbnb_price: airbnbPrice,
+                        airbnb_currency: airbnbCurrency,
                       }).eq("id", searchId);
                     }
                   }
