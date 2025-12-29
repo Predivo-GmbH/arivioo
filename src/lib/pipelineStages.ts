@@ -68,7 +68,7 @@ export const PIPELINE_STAGES: readonly PipelineStage[] = [
     description: 'Parsing Airbnb URL and extracting property details...',
     icon: 'Sparkles',
     fallbackTypicalSeconds: [5, 12],
-    backendStatuses: ['pending', 'searching', 'extracting_price', 'scraping_airbnb_page', 'extracting_price_with_ai'],
+    backendStatuses: ['pending', 'searching', 'extracting_price', 'scraping_airbnb_page', 'extracting_price_with_ai', 'scraping_airbnb'],
   },
   {
     id: 'collect_photos',
@@ -76,7 +76,7 @@ export const PIPELINE_STAGES: readonly PipelineStage[] = [
     description: 'Downloading property images for visual matching...',
     icon: 'Camera',
     fallbackTypicalSeconds: [3, 8],
-    backendStatuses: ['extracting_photos'],
+    backendStatuses: ['extracting_photos', 'collecting_photos'],
   },
   {
     id: 'find_matches',

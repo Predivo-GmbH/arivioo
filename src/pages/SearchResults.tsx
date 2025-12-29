@@ -326,6 +326,11 @@ export default function SearchResults() {
                       lastProgressAtRef.current = Date.now();
                       autoSkipRequestedRef.current = false;
 
+                      // Update search status in real-time if backend sends it
+                      if (data.status) {
+                        setSearch((prev) => prev ? { ...prev, status: data.status } : prev);
+                      }
+
                       // Add to activity feed with dedup
                       const key = `${data.step}__${data.detail ?? ""}`;
                       if (!seenActivityKeysRef.current.has(key)) {
@@ -338,6 +343,11 @@ export default function SearchResults() {
                           id: `activity-${activityIdCounterRef.current}`,
                         };
                         setActivityFeed((prev) => [...prev, newItem].slice(-12));
+                      }
+                    } else if (eventType === "status_update") {
+                      // Dedicated status update event
+                      if (data.status) {
+                        setSearch((prev) => prev ? { ...prev, status: data.status } : prev);
                       }
                     } else if (eventType === "price_extraction_start") {
                       // Starting price extraction phase
