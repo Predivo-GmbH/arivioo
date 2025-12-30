@@ -18,7 +18,7 @@ function normalizeAmount(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// Global guardrail patterns to reject
+// Global guardrail patterns to reject for TOTAL extraction
 const REJECT_PATTERNS = [
   /for\s+\d+\s+nights?/i,
   /\d+\s+nights?\s*[×x]/i,
@@ -32,6 +32,42 @@ const REJECT_PATTERNS = [
 
 function isRejectedContext(context: string): boolean {
   return REJECT_PATTERNS.some(p => p.test(context));
+}
+
+// Extract subtotal (nights only) from HTML - this is NOT the final total
+function extractSubtotal(html: string): { amount: number; currency: string; nights: number | null; context: string } | null {
+  // Pattern: $X,XXX for N nights or similar
+  const patterns = [
+    /(\$|€|£)([\d,.]+)\s+for\s+(\d+)\s+nights?/i,
+    /(\$|€|£)([\d,.]+)\s*[×x]\s*(\d+)\s+nights?/i,
+    /(\d+)\s+nights?\s*[×x]\s*(\$|€|£)([\d,.]+)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) {
+      let amount: number | null = null;
+      let currency = 'USD';
+      let nights: number | null = null;
+      
+      if (pattern === patterns[0] || pattern === patterns[1]) {
+        currency = match[1] === '$' ? 'USD' : match[1] === '€' ? 'EUR' : 'GBP';
+        amount = normalizeAmount(match[2]);
+        nights = parseInt(match[3], 10);
+      } else {
+        nights = parseInt(match[1], 10);
+        currency = match[2] === '$' ? 'USD' : match[2] === '€' ? 'EUR' : 'GBP';
+        amount = normalizeAmount(match[3]);
+      }
+      
+      if (amount && amount > 50) {
+        const idx = html.indexOf(match[0]);
+        const context = html.slice(Math.max(0, idx - 50), idx + match[0].length + 50);
+        return { amount, currency, nights, context: safeSnippet(context, 200) };
+      }
+    }
+  }
+  return null;
 }
 
 // Extract total prices from embedded JSON
@@ -107,15 +143,35 @@ async function runZyte(url: string): Promise<any> {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) return { status: 'provider_fetch_failed', durationMs, error: `HTTP ${resp.status}` };
     const html = data.browserHtml || '';
+    
+    // Try JSON extraction first
     const jsonPrices = extractJsonPricing(html);
     if (jsonPrices.length > 0) {
       const best = jsonPrices.sort((a, b) => b.amount - a.amount)[0];
       return { status: 'total_price_including_taxes_and_fees', durationMs, extracted_price: best.amount, currency: best.currency, json_path: best.jsonPath, json_excerpt: best.jsonExcerpt, evidence_snippet: `JSON: ${best.jsonPath}=${best.amount}`, source: 'json' };
     }
+    
+    // Try DOM total extraction
     const domTotal = extractDomTotal(html);
     if (domTotal) {
       return { status: 'total_price_including_taxes_and_fees', durationMs, extracted_price: domTotal.amount, currency: domTotal.currency, json_path: 'dom.Total', json_excerpt: domTotal.context, evidence_snippet: `DOM Total: ${domTotal.context}`, source: 'dom' };
     }
+    
+    // Check for subtotal (nights only) - triggers needs_user_confirmation
+    const subtotal = extractSubtotal(html);
+    if (subtotal) {
+      return { 
+        status: 'needs_user_confirmation', 
+        durationMs, 
+        extracted_price: null, // Never return subtotal as price
+        subtotal_nights_only: subtotal.amount,
+        subtotal_nights_count: subtotal.nights,
+        currency: subtotal.currency, 
+        evidence_snippet: `Subtotal found: ${subtotal.context}`,
+        source: 'subtotal_only'
+      };
+    }
+    
     return { status: 'price_not_available_in_content', durationMs, evidence_snippet: 'No proven total found' };
   } catch (e) { return { status: 'provider_error', error: String(e), durationMs: Date.now() - start }; }
 }
@@ -148,16 +204,38 @@ async function runBrowserless(url: string): Promise<any> {
     const html = result.html || '';
     const pageTitle = result.title || 'unknown';
     const finalUrl = result.url || url;
+    
+    // Try JSON extraction first
     const jsonPrices = extractJsonPricing(html);
     if (jsonPrices.length > 0) {
       const best = jsonPrices.sort((a, b) => b.amount - a.amount)[0];
       return { status: 'total_price_including_taxes_and_fees', durationMs, extracted_price: best.amount, currency: best.currency, json_path: best.jsonPath, json_excerpt: best.jsonExcerpt, evidence_snippet: `JSON: ${best.jsonPath}=${best.amount}`, source: 'json', page_title: pageTitle, final_url: finalUrl };
     }
+    
+    // Try DOM total extraction
     const domTotal = extractDomTotal(html);
     if (domTotal) {
-      return { status: 'total_price_including_taxes_and_fees', durationMs, extracted_price: domTotal.amount, currency: domTotal.currency, json_path: 'dom.Total', json_excerpt: domTotal.context, evidence_snippet: `DOM Total: ${domTotal.context}`, source: 'dom' };
+      return { status: 'total_price_including_taxes_and_fees', durationMs, extracted_price: domTotal.amount, currency: domTotal.currency, json_path: 'dom.Total', json_excerpt: domTotal.context, evidence_snippet: `DOM Total: ${domTotal.context}`, source: 'dom', page_title: pageTitle, final_url: finalUrl };
     }
-    return { status: 'price_not_available_in_content', durationMs, evidence_snippet: 'No proven total found' };
+    
+    // Check for subtotal (nights only) - triggers needs_user_confirmation
+    const subtotal = extractSubtotal(html);
+    if (subtotal) {
+      return { 
+        status: 'needs_user_confirmation', 
+        durationMs, 
+        extracted_price: null, // Never return subtotal as price
+        subtotal_nights_only: subtotal.amount,
+        subtotal_nights_count: subtotal.nights,
+        currency: subtotal.currency, 
+        evidence_snippet: `Subtotal found: ${subtotal.context}`,
+        source: 'subtotal_only',
+        page_title: pageTitle,
+        final_url: finalUrl
+      };
+    }
+    
+    return { status: 'price_not_available_in_content', durationMs, evidence_snippet: 'No proven total found', page_title: pageTitle, final_url: finalUrl };
   } catch (e) { return { status: 'provider_error', error: String(e), durationMs: Date.now() - start }; }
 }
 
@@ -189,13 +267,39 @@ Deno.serve(async (req) => {
       airbnb_url: url,
     });
 
-    results.push({ run_id: runId, provider, status: result.status, extracted_price: result.extracted_price, currency: result.currency, json_path: result.json_path, json_excerpt: result.json_excerpt, evidence_snippet: result.evidence_snippet, source: result.source });
+    results.push({ 
+      run_id: runId, 
+      provider, 
+      status: result.status, 
+      extracted_price: result.extracted_price, 
+      subtotal_nights_only: result.subtotal_nights_only || null,
+      subtotal_nights_count: result.subtotal_nights_count || null,
+      currency: result.currency, 
+      json_path: result.json_path, 
+      json_excerpt: result.json_excerpt, 
+      evidence_snippet: result.evidence_snippet, 
+      source: result.source 
+    });
 
+    // Accept only proven totals with evidence
     if (result.status === 'total_price_including_taxes_and_fees' && result.json_path && result.json_excerpt) {
       accepted = provider;
       break;
     }
   }
 
-  return new Response(JSON.stringify({ run_id: runId, url, accepted_provider: accepted, results }, null, 2), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  // Determine final status based on all results
+  const hasNeedsConfirmation = results.some(r => r.status === 'needs_user_confirmation');
+  const subtotalResult = results.find(r => r.subtotal_nights_only);
+  
+  return new Response(JSON.stringify({ 
+    run_id: runId, 
+    url, 
+    accepted_provider: accepted, 
+    final_status: accepted ? 'total_price_including_taxes_and_fees' : (hasNeedsConfirmation ? 'needs_user_confirmation' : 'price_not_available_in_content'),
+    subtotal_nights_only: subtotalResult?.subtotal_nights_only || null,
+    subtotal_nights_count: subtotalResult?.subtotal_nights_count || null,
+    subtotal_currency: subtotalResult?.currency || null,
+    results 
+  }, null, 2), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 });
