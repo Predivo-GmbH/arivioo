@@ -125,18 +125,33 @@ async function runBrowserless(url: string): Promise<any> {
   if (!apiKey) return { status: 'provider_not_configured', error: 'No BROWSERLESS_API_KEY' };
   const start = Date.now();
   try {
-    const resp = await fetchWithTimeout(`https://chrome.browserless.io/content?token=${apiKey}`, {
+    // Use /function endpoint with Playwright for full page interaction
+    const functionPayload = {
+      code: `export default async function({ page }) {
+        await page.goto('${url}', { waitUntil: 'networkidle2', timeout: 40000 });
+        await new Promise(r => setTimeout(r, 5000));
+        return { html: await page.content(), title: await page.title(), url: page.url() };
+      }`,
+      context: {},
+    };
+    const resp = await fetchWithTimeout(`https://chrome.browserless.io/function?token=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, waitFor: 5000 }),
+      body: JSON.stringify(functionPayload),
     }, 60000);
     const durationMs = Date.now() - start;
-    if (!resp.ok) return { status: 'provider_fetch_failed', durationMs, error: `HTTP ${resp.status}` };
-    const html = await resp.text();
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      return { status: 'provider_fetch_failed', durationMs, error: `HTTP ${resp.status}: ${errText.slice(0,200)}` };
+    }
+    const result = await resp.json().catch(() => ({}));
+    const html = result.html || '';
+    const pageTitle = result.title || 'unknown';
+    const finalUrl = result.url || url;
     const jsonPrices = extractJsonPricing(html);
     if (jsonPrices.length > 0) {
       const best = jsonPrices.sort((a, b) => b.amount - a.amount)[0];
-      return { status: 'total_price_including_taxes_and_fees', durationMs, extracted_price: best.amount, currency: best.currency, json_path: best.jsonPath, json_excerpt: best.jsonExcerpt, evidence_snippet: `JSON: ${best.jsonPath}=${best.amount}`, source: 'json' };
+      return { status: 'total_price_including_taxes_and_fees', durationMs, extracted_price: best.amount, currency: best.currency, json_path: best.jsonPath, json_excerpt: best.jsonExcerpt, evidence_snippet: `JSON: ${best.jsonPath}=${best.amount}`, source: 'json', page_title: pageTitle, final_url: finalUrl };
     }
     const domTotal = extractDomTotal(html);
     if (domTotal) {
