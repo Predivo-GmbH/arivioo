@@ -104,6 +104,8 @@ interface AirbnbScrapeResult {
   ok: boolean;
   markdown: string;
   html: string;
+  roomsHtml?: string; // HTML from rooms page (for title/images)
+  roomsTitle?: string; // Title from rooms page
   screenshot: string | null;
   providerUsed: AirbnbProvider;
   botIndicators: string[];
@@ -383,7 +385,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     console.log("Scraping Airbnb with Browserless (book/stays primary):", url.slice(0, 100));
     console.log("Generated book/stays URL:", bookStaysUrl?.slice(0, 120) || 'none');
 
-    // Use Browserless /function endpoint - PRIMARY: book/stays page
+    // Use Browserless /function endpoint - PRIMARY: book/stays page for price, but capture title/images from rooms first
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${browserlessApiKey}`;
 
     const functionPayload = {
@@ -414,8 +416,19 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
 
           let usedFallback = false;
           let breakdownOpened = false;
+          let roomsTitle = '';
+          let roomsHtml = '';
 
-          // ========== PRIMARY: Navigate to book/stays ==========
+          // ========== STEP 1: Visit rooms page first to get title and images ==========
+          await page.goto(roomsUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+          await sleep(2000);
+          
+          // Extract title from rooms page
+          roomsTitle = await page.title();
+          roomsHtml = await page.content();
+
+          // ========== STEP 2: Navigate to book/stays for price ==========
+          let checkoutHtml = '';
           if (bookStaysUrl) {
             await page.goto(bookStaysUrl, { waitUntil: 'networkidle2', timeout: 60000 });
             await sleep(2000);
@@ -426,19 +439,28 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
             
             if (!isBookStaysPage || isLoginRedirect) {
               usedFallback = true;
+              // Go back to rooms page for price fallback
+              await page.goto(roomsUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+              await sleep(4000);
+              
+              // Try to open price breakdown
+              try {
+                const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+                if (target) {
+                  target.click();
+                  breakdownOpened = true;
+                  await sleep(2500);
+                }
+              } catch {}
+              checkoutHtml = await page.content();
             } else {
               breakdownOpened = true; // book/stays page already shows full breakdown
+              checkoutHtml = await page.content();
             }
           } else {
             usedFallback = true;
-          }
-
-          // ========== FALLBACK: rooms page with breakdown click ==========
-          if (usedFallback) {
-            await page.goto(roomsUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-            await sleep(4000);
-            
-            // Try to open price breakdown
+            // Stay on rooms page, try to open breakdown
             try {
               const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
               const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
@@ -448,14 +470,15 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
                 await sleep(2500);
               }
             } catch {}
+            checkoutHtml = await page.content();
           }
 
-          // Capture screenshot
+          // Capture screenshot from checkout/price page
           await page.evaluate(() => window.scrollTo(0, 0));
           await sleep(300);
           const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
 
-          const html = await page.content();
+          const html = checkoutHtml || roomsHtml;
 
           // Debug: return a snippet around "total" or "Pay"
           const totalSnippet = await page.evaluate(() => {
@@ -471,6 +494,8 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
 
           return {
             html,
+            roomsHtml,
+            roomsTitle,
             breakdownOpened,
             usedFallback,
             totalSnippet: (totalSnippet || '').slice(0, 1200),
@@ -530,6 +555,10 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
 
     result.ok = true;
     result.html = html;
+    
+    // Store rooms page data for title/images extraction
+    result.roomsHtml = fnJson?.roomsHtml || '';
+    result.roomsTitle = fnJson?.roomsTitle || '';
 
     // Store screenshot for OCR
     const screenshotForOcr = fnJson?.breakdownScreenshot || fnJson?.bookingCardScreenshot || null;
@@ -549,7 +578,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       .replace(/\s+/g, " ")
       .trim();
 
-    console.log("Browserless function scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms", "Has OCR:", !!result.ocrReference);
+    console.log("Browserless function scrape successful. HTML length:", html.length, "roomsHtml length:", result.roomsHtml?.length || 0, "Duration:", Date.now() - startTime, "ms", "Has OCR:", !!result.ocrReference);
 
     return result;
   } catch (e) {
@@ -4318,8 +4347,9 @@ async function runSearchWithStreaming(
 
         lastScrapedContent = { markdown: browserlessResult.markdown, html: browserlessResult.html, hasScreenshot: Boolean(browserlessResult.screenshot) };
 
-        // Extract images for later use
+        // Extract images from ROOMS page HTML (not checkout page)
         if (imageUrls.length === 0) {
+          const roomsHtmlContent = browserlessResult.roomsHtml || browserlessResult.html;
           const imagePatterns = [
             /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
             /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
@@ -4327,16 +4357,21 @@ async function runSearchWithStreaming(
           const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
           let allImages: string[] = [];
           for (const pattern of imagePatterns) {
-            allImages.push(...(browserlessResult.html.match(pattern) || []));
+            allImages.push(...(roomsHtmlContent.match(pattern) || []));
           }
           const unique = [...new Set(allImages.map(canonicalize))];
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+          console.log(`Extracted ${imageUrls.length} images from rooms page HTML`);
         }
 
-        // Extract title
-        const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch && airbnbTitle === "Vacation Rental") {
-          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        // Extract title from ROOMS page (not checkout page which says "Confirm and pay")
+        if (browserlessResult.roomsTitle && airbnbTitle === "Vacation Rental") {
+          airbnbTitle = browserlessResult.roomsTitle
+            .replace(" - Airbnb", "")
+            .replace(" · Airbnb", "")
+            .replace(/\s*-\s*(Houses|Apartments|Homes|Villas|Cabins|Cottages|Condos)?\s*(for Rent|to Rent|zur Miete|in)?\s*.*$/i, "")
+            .trim();
+          console.log(`Extracted title from rooms page: ${airbnbTitle}`);
         }
 
         // Capture OCR reference for validation (store for other providers too)
