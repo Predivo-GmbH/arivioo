@@ -1920,33 +1920,46 @@ async function extractOcrVisualReference(
   }
 
   try {
-    const prompt = `You are analyzing a screenshot of an Airbnb listing page. Extract ALL visible price information exactly as shown.
+    // Updated prompt to handle BOTH rooms page and book/stays checkout page
+    const prompt = `You are analyzing a screenshot of an Airbnb page. This could be either:
+A) A ROOMS page with a booking card on the right
+B) A BOOK/STAYS checkout page with payment summary
 
-TASK: Read and extract the following prices VERBATIM from the screenshot:
+Extract ALL visible price information exactly as shown.
 
-1. BOOKING CARD (the main price widget on the right side):
-   - Look for the headline price like "$2,214 for 4 nights" or "$553 x 4 nights"
-   - Extract the exact text, the numeric amount, and number of nights
+TASK: Read and extract these prices VERBATIM from the screenshot:
 
-2. PRICE BREAKDOWN (if a modal/section is open showing itemized costs):
-   - Look for "Total", "Trip total", "Total USD", or "Total before taxes" line
-   - This is usually at the bottom of a price breakdown section
-   - Also look for taxes/fees line if visible
+1. BOOKING CARD / HEADLINE PRICE:
+   - Look for "$X for Y nights" or "$X × Y nights" format
+   - Extract the exact text, numeric amount, and nights
+
+2. CHECKOUT / PAYMENT SUMMARY (MOST IMPORTANT for book/stays pages):
+   - Look for these patterns which indicate the FINAL TOTAL:
+     * "Pay $X now" or "Pay now $X"
+     * "Total (USD) $X" or "Total USD $X"  
+     * "Due today $X"
+     * "Amount due $X"
+     * "Trip total $X"
+     * "Total $X" (at bottom of price summary)
+   - This is the ALL-IN price including taxes and fees
+   - Also extract any visible breakdown items
+
+3. For book/stays checkout pages, the "Pay $X now" or "Total (USD)" line IS the breakdown total
 
 CRITICAL RULES:
-- Return EXACTLY what you see - do not calculate or estimate
-- Include currency symbols as shown
-- If price breakdown is not visible/open, return null for breakdown fields
-- The breakdown total is the most authoritative price when visible
+- Return EXACTLY what you see - do not calculate
+- Include currency symbols as shown  
+- For book/stays pages: "Pay now" or "Total (USD)" = breakdownTotalAmountValue
+- The largest "total" or "pay" amount is usually the correct final price
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON:
 {
   "bookingCardAmountRaw": "<exact text like '$2,214' or null>",
   "bookingCardAmountValue": <number or null>,
   "bookingCardNights": <number or null>,
   "bookingCardSnippet": "<full text like '$2,214 for 4 nights' or null>",
-  "breakdownTotalAmountRaw": "<exact text like 'Total USD $2,213.34' or null>",
-  "breakdownTotalAmountValue": <number or null>,
+  "breakdownTotalAmountRaw": "<exact text like 'Pay $2,213.34 now' or 'Total (USD) $2,213.34' or null>",
+  "breakdownTotalAmountValue": <number or null - THIS IS THE KEY FIELD FOR FINAL PRICE>,
   "breakdownTotalSnippet": "<the full total line text or null>",
   "breakdownTaxesAmountValue": <number or null if taxes line visible>
 }`;
@@ -4337,37 +4350,71 @@ async function runSearchWithStreaming(
           }));
         }
 
-        const baseline = extractBaselineFromContent(browserlessResult.html, browserlessResult.markdown, 'Browserless');
+        // ============ CRITICAL FIX: Use OCR breakdown total as primary source ============
+        // The book/stays page has the all-in total visible. OCR extracts it directly.
+        // Regex extraction doesn't work well on book/stays pages, so prioritize OCR.
         
-        // Apply OCR validation to provider price
-        const ocrValidation = validateProviderPriceWithOcr(
-          baseline.price,
-          baseline.currency,
-          baseline.evidence_snippet,
-          ocrRef
-        );
+        let finalBaseline: AirbnbBaselineExtraction;
+        let ocrValidation: OcrValidationResult | null = null;
         
-        console.log(`Browserless OCR validation: accepted=${ocrValidation.accepted}, status=${ocrValidation.status}, acceptedVia=${ocrValidation.acceptedVia}`);
-        
-        // If OCR validation rejects the price, update baseline
-        let finalBaseline = baseline;
-        if (!ocrValidation.accepted && baseline.price !== null) {
-          console.log(`OCR rejected Browserless price ${baseline.price}: ${ocrValidation.mismatchReason}`);
+        // If OCR found a breakdown total (from book/stays "Pay now" or "Total USD"), use it directly
+        if (ocrRef?.breakdownTotalAmountValue && ocrRef.breakdownTotalAmountValue > 0) {
+          console.log(`Browserless: Using OCR breakdown total directly: $${ocrRef.breakdownTotalAmountValue}`);
           finalBaseline = {
-            ...baseline,
-            status: ocrValidation.status,
-            price: ocrValidation.validatedPrice,
-            includes_taxes_fees: ocrValidation.includesTaxesFees,
-            evidence_snippet: ocrValidation.evidenceSnippet,
+            status: 'total_price_including_taxes_and_fees',
+            price: ocrRef.breakdownTotalAmountValue,
+            currency: 'USD', // OCR captures from page, default USD
+            includes_taxes_fees: true,
+            evidence_snippet: ocrRef.breakdownTotalSnippet || ocrRef.breakdownTotalAmountRaw || `OCR: $${ocrRef.breakdownTotalAmountValue}`,
+            debug: {
+              provider: 'Browserless',
+              content_hash: hashContent(browserlessResult.html),
+              candidates: [],
+            },
           };
-        } else if (ocrValidation.accepted && ocrValidation.acceptedVia) {
-          // OCR accepted - update status based on acceptance reason
-          finalBaseline = {
-            ...baseline,
-            status: ocrValidation.status,
-            includes_taxes_fees: ocrValidation.includesTaxesFees,
-            evidence_snippet: ocrValidation.evidenceSnippet,
+          ocrValidation = {
+            accepted: true,
+            status: 'total_price_including_taxes_and_fees',
+            includesTaxesFees: true,
+            acceptedVia: 'breakdown_match',
+            mismatchReason: null,
+            evidenceSnippet: ocrRef.breakdownTotalSnippet || `OCR: $${ocrRef.breakdownTotalAmountValue}`,
+            validatedPrice: ocrRef.breakdownTotalAmountValue,
           };
+        } else {
+          // Fallback to regex extraction + OCR validation
+          const baseline = extractBaselineFromContent(browserlessResult.html, browserlessResult.markdown, 'Browserless');
+          
+          // Apply OCR validation to provider price
+          ocrValidation = validateProviderPriceWithOcr(
+            baseline.price,
+            baseline.currency,
+            baseline.evidence_snippet,
+            ocrRef
+          );
+          
+          console.log(`Browserless OCR validation: accepted=${ocrValidation.accepted}, status=${ocrValidation.status}, acceptedVia=${ocrValidation.acceptedVia}`);
+          
+          // If OCR validation rejects the price, update baseline
+          finalBaseline = baseline;
+          if (!ocrValidation.accepted && baseline.price !== null) {
+            console.log(`OCR rejected Browserless price ${baseline.price}: ${ocrValidation.mismatchReason}`);
+            finalBaseline = {
+              ...baseline,
+              status: ocrValidation.status,
+              price: ocrValidation.validatedPrice,
+              includes_taxes_fees: ocrValidation.includesTaxesFees,
+              evidence_snippet: ocrValidation.evidenceSnippet,
+            };
+          } else if (ocrValidation.accepted && ocrValidation.acceptedVia) {
+            // OCR accepted - update status based on acceptance reason
+            finalBaseline = {
+              ...baseline,
+              status: ocrValidation.status,
+              includes_taxes_fees: ocrValidation.includesTaxesFees,
+              evidence_snippet: ocrValidation.evidenceSnippet,
+            };
+          }
         }
         
         return { 
