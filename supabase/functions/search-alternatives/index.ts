@@ -1149,6 +1149,7 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
 type AirbnbBaselineStatus =
   | 'total_price_including_taxes_and_fees'
   | 'total_price_excluding_taxes_and_fees'
+  | 'needs_user_confirmation'
   | 'price_not_available_in_content';
 
 type PriceCandidate = {
@@ -1171,6 +1172,9 @@ type AirbnbBaselineExtraction = {
   currency: string | null;
   includes_taxes_fees: boolean;
   evidence_snippet: string;
+  // Subtotal info when only a subtotal (e.g., "$X for N nights") is found
+  subtotal_nights_only?: number | null;
+  subtotal_nights_count?: number | null;
   debug: {
     provider: string;
     content_hash: string;
@@ -1256,6 +1260,14 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
         'strikethrough',
         'before discount',
         'coupon',
+        // Pet, deposit, and security-related fees - NEVER trip totals
+        'pet',
+        'pets',
+        'deposit',
+        'damage',
+        'security',
+        'cleaning fee',
+        'service fee',
       ];
 
       const ignoreHit = ignoreTerms.find((t) => ctxLower.includes(t));
@@ -1438,8 +1450,52 @@ function extractAirbnbBaselineGrounded(
     rejectedReason: c.rejectedReason,
   }));
 
+  // Extract subtotal from "$X for N nights" patterns if no proven total is found
+  function extractSubtotalFromContent(): { amount: number; currency: string; nights: number | null } | null {
+    // Look for "$X for N nights" pattern specifically
+    const subtotalPatterns: Array<{ re: RegExp; currency: string }> = [
+      { re: /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'USD' },
+      { re: /€\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'EUR' },
+      { re: /£\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'GBP' },
+    ];
+    
+    for (const { re, currency } of subtotalPatterns) {
+      re.lastIndex = 0;
+      const m = re.exec(content);
+      if (m) {
+        const amount = parseFloat((m[1] || '').replace(/,/g, ''));
+        const nightsFound = parseInt(m[2], 10);
+        if (amount >= 30 && amount <= 500000 && nightsFound > 0) {
+          return { amount, currency, nights: nightsFound };
+        }
+      }
+    }
+    return null;
+  }
+
   if (!sorted.length) {
+    // No proven total found - check if we have a subtotal
+    const subtotal = extractSubtotalFromContent();
     const fallbackEvidence = safeSnippet(content.replace(/<[^>]+>/g, ' '), 340);
+    
+    if (subtotal) {
+      // We have a subtotal but no proven total - needs user confirmation
+      return {
+        status: 'needs_user_confirmation',
+        price: null, // Don't return subtotal as the price
+        currency: subtotal.currency,
+        includes_taxes_fees: false,
+        evidence_snippet: `$${subtotal.amount} for ${subtotal.nights} nights (subtotal only - taxes/fees not included)`,
+        subtotal_nights_only: subtotal.amount,
+        subtotal_nights_count: subtotal.nights,
+        debug: {
+          provider,
+          content_hash: contentHash,
+          candidates: debugCandidates,
+        },
+      };
+    }
+    
     return {
       status: 'price_not_available_in_content',
       price: null,
@@ -3879,9 +3935,29 @@ async function runSearchWithStreaming(
       }
     }
 
+    // Track subtotal info from any provider that found needs_user_confirmation
+    let subtotalInfo: { amount: number; nights: number | null; currency: string } | null = null;
+    for (const r of providerResults) {
+      if (r.baseline.status === 'needs_user_confirmation' && r.baseline.subtotal_nights_only) {
+        subtotalInfo = {
+          amount: r.baseline.subtotal_nights_only,
+          nights: r.baseline.subtotal_nights_count ?? null,
+          currency: r.baseline.currency || 'USD',
+        };
+        break;
+      }
+    }
 
     if (!airbnbPrice) {
-      sendProgress(controller, "Airbnb baseline failed", "No Airbnb total price extracted from any provider");
+      if (subtotalInfo) {
+        sendProgress(controller, "Subtotal found", `$${subtotalInfo.amount} for ${subtotalInfo.nights || '?'} nights (needs user confirmation for total)`, {
+          subtotal_nights_only: subtotalInfo.amount,
+          subtotal_nights_count: subtotalInfo.nights,
+          subtotal_currency: subtotalInfo.currency,
+        });
+      } else {
+        sendProgress(controller, "Airbnb baseline failed", "No Airbnb total price extracted from any provider");
+      }
     }
 
     // Emit quick comparison summary for debugging (even though we stop early on success)
@@ -3979,6 +4055,65 @@ async function runSearchWithStreaming(
           })
           .eq("id", searchId);
         // Continue the pipeline.
+      } else if (subtotalInfo) {
+        // We have a subtotal but no proven total - allow user to confirm
+        const subtotalMessage = `Found subtotal $${subtotalInfo.amount} for ${subtotalInfo.nights || '?'} nights, but could not extract the final total including taxes/fees.`;
+        const apiErrorJson = JSON.stringify({
+          status: 'needs_user_confirmation',
+          subtotal_nights_only: subtotalInfo.amount,
+          subtotal_nights_count: subtotalInfo.nights,
+          subtotal_currency: subtotalInfo.currency,
+          message: subtotalMessage,
+        });
+        
+        // Update search to needs_user_confirmation status - NOT error
+        await supabase.from("searches").update({ 
+          status: "needs_user_confirmation",
+          api_error: apiErrorJson,
+          api_error_code: 'needs_user_confirmation',
+          airbnb_title: airbnbTitle || null,
+          airbnb_price: null, // Don't store subtotal as the price
+          airbnb_currency: subtotalInfo.currency,
+          airbnb_image_url: imageUrls[0] || null,
+          airbnb_images: imageUrls.slice(0, 5),
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          nights_count: nights,
+          last_progress_at: new Date().toISOString(),
+        }).eq("id", searchId);
+        
+        sendProgress(controller, "Needs confirmation", subtotalMessage, {
+          subtotal_nights_only: subtotalInfo.amount,
+          subtotal_nights_count: subtotalInfo.nights,
+          subtotal_currency: subtotalInfo.currency,
+        });
+        
+        // Send special event for needs_user_confirmation so frontend can show the form
+        sendSSE(controller, "needs_confirmation", {
+          subtotal_nights_only: subtotalInfo.amount,
+          subtotal_nights_count: subtotalInfo.nights,
+          subtotal_currency: subtotalInfo.currency,
+          message: "Please confirm the Airbnb total price to continue",
+        });
+        
+        // Complete with success=true but flag that confirmation is needed
+        sendSSE(controller, "complete", { 
+          success: true, 
+          needs_user_confirmation: true,
+          subtotal_nights_only: subtotalInfo.amount,
+          subtotal_nights_count: subtotalInfo.nights,
+          subtotal_currency: subtotalInfo.currency,
+          airbnb: { 
+            title: airbnbTitle, 
+            price: null, 
+            url: search.airbnb_url, 
+            images: imageUrls,
+            subtotal_nights_only: subtotalInfo.amount,
+            subtotal_nights_count: subtotalInfo.nights,
+          },
+          dates: { checkIn, checkOut, nights },
+        });
+        return;
       } else {
         // Determine specific failure reason based on what we observed
         let failureCode = 'airbnb_price_element_missing';
