@@ -177,6 +177,13 @@ export type Database = {
       airbnb_baseline_debug: {
         Row: {
           airbnb_url: string | null
+          booking_card_ocr_matched_substring: string | null
+          booking_card_ocr_text_normalized: string | null
+          booking_card_ocr_text_raw: string | null
+          booking_card_screenshot_base64: string | null
+          booking_card_screenshot_bbox: Json | null
+          booking_card_screenshot_dimensions: Json | null
+          booking_card_screenshot_sha256: string | null
           breakdown_opened: boolean | null
           candidates_summary: Json | null
           check_in_date: string | null
@@ -200,6 +207,8 @@ export type Database = {
           ocr_breakdown_total_amount_raw: string | null
           ocr_breakdown_total_amount_value: number | null
           ocr_breakdown_total_snippet: string | null
+          ocr_input_image_sha256: string | null
+          ocr_input_source_type: string | null
           ocr_mismatch_reason: string | null
           ocr_validation_status: string | null
           provider: string
@@ -213,6 +222,13 @@ export type Database = {
         }
         Insert: {
           airbnb_url?: string | null
+          booking_card_ocr_matched_substring?: string | null
+          booking_card_ocr_text_normalized?: string | null
+          booking_card_ocr_text_raw?: string | null
+          booking_card_screenshot_base64?: string | null
+          booking_card_screenshot_bbox?: Json | null
+          booking_card_screenshot_dimensions?: Json | null
+          booking_card_screenshot_sha256?: string | null
           breakdown_opened?: boolean | null
           candidates_summary?: Json | null
           check_in_date?: string | null
@@ -236,6 +252,8 @@ export type Database = {
           ocr_breakdown_total_amount_raw?: string | null
           ocr_breakdown_total_amount_value?: number | null
           ocr_breakdown_total_snippet?: string | null
+          ocr_input_image_sha256?: string | null
+          ocr_input_source_type?: string | null
           ocr_mismatch_reason?: string | null
           ocr_validation_status?: string | null
           provider: string
@@ -249,6 +267,13 @@ export type Database = {
         }
         Update: {
           airbnb_url?: string | null
+          booking_card_ocr_matched_substring?: string | null
+          booking_card_ocr_text_normalized?: string | null
+          booking_card_ocr_text_raw?: string | null
+          booking_card_screenshot_base64?: string | null
+          booking_card_screenshot_bbox?: Json | null
+          booking_card_screenshot_dimensions?: Json | null
+          booking_card_screenshot_sha256?: string | null
           breakdown_opened?: boolean | null
           candidates_summary?: Json | null
           check_in_date?: string | null
@@ -272,6 +297,8 @@ export type Database = {
           ocr_breakdown_total_amount_raw?: string | null
           ocr_breakdown_total_amount_value?: number | null
           ocr_breakdown_total_snippet?: string | null
+          ocr_input_image_sha256?: string | null
+          ocr_input_source_type?: string | null
           ocr_mismatch_reason?: string | null
           ocr_validation_status?: string | null
           provider?: string
