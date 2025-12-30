@@ -23,15 +23,33 @@ const REJECT_PATTERNS = [
   /for\s+\d+\s+nights?/i,
   /\d+\s+nights?\s*[×x]/i,
   /per\s+night/i,
-  /\bpet\s*(policy|fee)/i,
+  /\bpet\s*(policy|fee|deposit)?/i,
+  /\bpets?\b/i,
   /\btransaction\s+(charge|fee)/i,
   /\bdeposit\b/i,
   /\bcleaning\s+fee\b/i,
   /\bservice\s+fee\b/i,
+  /\bdamage\b/i,
+  /\bsecurity\b/i,
+];
+
+// Patterns to reject based on JSON path (key names in the path)
+const REJECT_PATH_PATTERNS = [
+  /pet/i,
+  /deposit/i,
+  /damage/i,
+  /security/i,
+  /fee(?!s?\b)/i, // "fee" but not at end of word (avoids "fees" in totals)
+  /cleaning/i,
+  /service/i,
 ];
 
 function isRejectedContext(context: string): boolean {
   return REJECT_PATTERNS.some(p => p.test(context));
+}
+
+function isRejectedPath(path: string): boolean {
+  return REJECT_PATH_PATTERNS.some(p => p.test(path));
 }
 
 // Extract subtotal (nights only) from HTML - this is NOT the final total
@@ -94,9 +112,14 @@ function findTotalsInJson(obj: any, path: string, results: any[], depth = 0): vo
     const val = obj[key];
     const newPath = `${path}.${key}`;
     const keyLower = key.toLowerCase();
+    
+    // Skip if path contains rejected keywords (pet, deposit, etc.)
+    if (isRejectedPath(newPath)) continue;
+    
     if (keyLower.includes('total') && !keyLower.includes('subtotal') && typeof val === 'number' && val > 50 && val < 500000) {
-      const excerpt = JSON.stringify(obj).slice(0, 150);
-      if (!isRejectedContext(excerpt)) {
+      const excerpt = JSON.stringify(obj).slice(0, 200);
+      // Double-check excerpt doesn't contain pet/deposit references
+      if (!isRejectedContext(excerpt) && !isRejectedPath(excerpt)) {
         results.push({ amount: val, currency: obj.currency || 'USD', jsonPath: newPath, jsonExcerpt: excerpt });
       }
     }
