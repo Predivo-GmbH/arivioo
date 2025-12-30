@@ -2,153 +2,40 @@ import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+// ============================================================================
+// CANONICAL IMPORTS - Single Source of Truth
+// DO NOT duplicate any of this logic locally. Import from _shared/ instead.
+// ============================================================================
+import {
+  // HTTP utilities
+  corsHeaders,
+  handleCorsPreFlight,
+  fetchWithTimeout,
+  withTimeout,
+  sleep,
+  // Airbnb utilities
+  buildBookStaysUrl,
+  detectBotIndicators,
+  // Logging utilities
+  logProviderRequest,
+  // Types
+  type AirbnbProvider,
+  type AirbnbScrapeResult,
+  type OcrVisualReference,
+  // Module versions for debugging
+  SHARED_MODULES_VERSION,
+} from "../_shared/mod.ts";
 
-// SSE helper to send streaming events
+// Log shared module version for debugging
+console.log(`[search-alternatives] Using _shared modules version: ${SHARED_MODULES_VERSION}`);
+
+// SSE helper types - specific to this streaming endpoint
 type SSEController = ReadableStreamDefaultController<Uint8Array>;
 const encoder = new TextEncoder();
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 12_000) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// Generic timeout wrapper for any async operation - prevents stuck processes
-async function withTimeout<T>(
-  operation: () => Promise<T>,
-  timeoutMs: number,
-  fallback: T,
-  operationName: string
-): Promise<T> {
-  return new Promise((resolve) => {
-    const timeoutId = setTimeout(() => {
-      console.log(`TIMEOUT: ${operationName} exceeded ${timeoutMs}ms - skipping`);
-      resolve(fallback);
-    }, timeoutMs);
-
-    operation()
-      .then((result) => {
-        clearTimeout(timeoutId);
-        resolve(result);
-      })
-      .catch((error) => {
-        clearTimeout(timeoutId);
-        console.log(`ERROR in ${operationName}:`, error.message || error);
-        resolve(fallback);
-      });
-  });
-}
-
 // ============================================================================
-// Provider Request Logging - Track every API call for quota management
+// Local Utility Functions - Specific to this endpoint
 // ============================================================================
-
-type ProviderLogName = 'firecrawl' | 'zyte' | 'browserless' | 'serpapi';
-
-interface ProviderLogParams {
-  supabase: any;
-  provider: ProviderLogName;
-  endpointType: string;
-  searchId?: string;
-  extractionId?: string;
-  url?: string;
-  success: boolean;
-  httpStatus?: number;
-  durationMs?: number;
-  errorMessage?: string;
-  correlationId?: string;
-}
-
-async function logProviderRequest(params: ProviderLogParams): Promise<void> {
-  try {
-    await params.supabase.from('api_request_logs').insert({
-      provider_name: params.provider,
-      endpoint_type: params.endpointType,
-      search_id: params.searchId || null,
-      extraction_id: params.extractionId || null,
-      request_url: params.url?.slice(0, 500) || null,
-      success: params.success,
-      response_status: params.httpStatus || null,
-      duration_ms: params.durationMs || null,
-      error_message: params.errorMessage?.slice(0, 500) || null,
-      correlation_id: params.correlationId || null,
-      cost_units: 1, // Each provider call = 1 request unit
-    });
-    console.log(`[ProviderLog] ${params.provider}/${params.endpointType} - success:${params.success} ${params.durationMs ? `(${params.durationMs}ms)` : ''}`);
-  } catch (e) {
-    // Don't let logging failures break the main flow
-    console.error('[ProviderLog] Failed to log request:', e);
-  }
-}
-
-// ============================================================================
-// Airbnb Fallback Chain Types and Helpers
-// ============================================================================
-
-// Provider identifiers for the 5-tier fallback chain
-type AirbnbProvider = 'firecrawl' | 'zyte' | 'browserless';
-
-interface AirbnbScrapeResult {
-  ok: boolean;
-  markdown: string;
-  html: string;
-  roomsHtml?: string; // HTML from rooms page (for title/images)
-  roomsTitle?: string; // Title from rooms page
-  screenshot: string | null;
-  providerUsed: AirbnbProvider;
-  botIndicators: string[];
-  error: string | null;
-  statusCode?: number;
-  evidenceSnippet?: string;
-  // OCR reference data (captured via screenshot + AI OCR)
-  ocrReference?: OcrVisualReference | null;
-}
-
-// OCR Visual Reference - ground truth from what's visually displayed
-interface OcrVisualReference {
-  // Booking card OCR (always captured if screenshot available)
-  bookingCardAmountRaw: string | null; // e.g. "$2,214"
-  bookingCardAmountValue: number | null;
-  bookingCardNights: number | null;
-  bookingCardSnippet: string | null; // e.g. "$2,214 for 4 nights"
-  // Breakdown OCR (only if breakdown modal opened)
-  breakdownTotalAmountRaw: string | null; // e.g. "Total USD $2,213.34"
-  breakdownTotalAmountValue: number | null;
-  breakdownTotalSnippet: string | null;
-  breakdownTaxesAmountValue: number | null;
-  breakdownOpened: boolean;
-}
-
-// Consolidated trace record for a single Airbnb extraction run
-interface AirbnbExtractionTrace {
-  attemptOrder: AirbnbProvider[];
-  outcomes: Record<AirbnbProvider, {
-    attempted: boolean;
-    success: boolean;
-    error?: string;
-    botIndicators?: string[];
-    contentLength?: number;
-    contentHash?: string;
-    evidenceSnippet?: string;
-    durationMs?: number;
-  }>;
-  finalProvider?: AirbnbProvider;
-  finalPrice?: number;
-  finalOutcome: 'success' | 'bot_wall' | 'price_not_found' | 'all_failed';
-  totalDurationMs: number;
-}
 
 // Create a simple content hash for deduplication/logging
 function hashContent(content: string): string {
@@ -179,49 +66,6 @@ function extractEvidenceSnippet(content: string, priceValue?: number): string {
   // Otherwise return first 200 chars of meaningful content
   const cleaned = content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   return cleaned.slice(0, 200);
-}
-
-// ============================================================================
-// Bot/Captcha Detection - Shared across all providers
-// ============================================================================
-
-// Detect bot/captcha indicators in content
-// IMPORTANT: Only detect real bot walls, not CSS class names or script content
-function detectBotIndicators(content: string): string[] {
-  const indicators: string[] = [];
-  
-  // Strip out CSS, scripts, and style blocks to avoid false positives from class names
-  const visibleContent = content
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/\{[^}]*\}/g, ' ') // Remove CSS rule blocks
-    .replace(/class\s*=\s*["'][^"']*["']/gi, ' ') // Remove class attributes
-    .replace(/id\s*=\s*["'][^"']*["']/gi, ' '); // Remove id attributes
-  
-  // These patterns must appear in visible text context, not CSS/class names
-  const patterns = [
-    { pattern: /please\s+complete\s+the\s+captcha/i, label: "captcha" },
-    { pattern: /solve\s+the\s+captcha/i, label: "captcha" },
-    { pattern: /verify\s+you['']?re\s+human/i, label: "human_verification" },
-    { pattern: /verify\s+you\s+are\s+human/i, label: "human_verification" },
-    { pattern: /i['']?m\s+not\s+a\s+robot/i, label: "captcha" },
-    { pattern: /checking\s+your\s+browser/i, label: "browser_check" },
-    { pattern: /just\s+a\s+moment[\.\!\s]/i, label: "cloudflare_wait" },
-    { pattern: /please\s+wait\s+while\s+we\s+verify/i, label: "verification_wait" },
-    { pattern: /unusual\s+traffic\s+from\s+your/i, label: "unusual_traffic" },
-    { pattern: /too\s+many\s+requests/i, label: "too_many_requests" },
-    { pattern: /access\s+to\s+this\s+page\s+has\s+been\s+denied/i, label: "access_denied" },
-    { pattern: /ray\s+id[:\s]+[a-f0-9]+/i, label: "cloudflare" },
-    { pattern: /performance\s+&\s+security\s+by\s+cloudflare/i, label: "cloudflare" },
-  ];
-  
-  for (const { pattern, label } of patterns) {
-    if (pattern.test(visibleContent)) {
-      indicators.push(label);
-    }
-  }
-  
-  return indicators;
 }
 
 // ============================================================================
@@ -322,46 +166,8 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Ai
 
 // ============================================================================
 // Tier 3: Browserless Scraper for Airbnb
+// Uses buildBookStaysUrl from _shared/airbnb/url-utils.ts
 // ============================================================================
-
-// Build book/stays URL from rooms URL
-function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
-  book_stays_url: string;
-  room_id: string;
-  check_in: string;
-  check_out: string;
-} | null {
-  try {
-    const parsed = new URL(roomsUrl);
-    const pathMatch = parsed.pathname.match(/\/rooms\/(\d+)/);
-    if (!pathMatch) return null;
-    const roomId = pathMatch[1];
-    
-    const checkIn = parsed.searchParams.get('check_in') || '';
-    const checkOut = parsed.searchParams.get('check_out') || '';
-    if (!checkIn || !checkOut) return null;
-    
-    const adultsParam = parsed.searchParams.get('adults');
-    const guestsParam = parsed.searchParams.get('guests');
-    const adults = adultsParam ? parseInt(adultsParam, 10) : (guestsParam ? parseInt(guestsParam, 10) : 1);
-    
-    const bookStaysUrl = new URL(`https://www.airbnb.com/book/stays/${roomId}`);
-    bookStaysUrl.searchParams.set('checkin', checkIn);
-    bookStaysUrl.searchParams.set('checkout', checkOut);
-    bookStaysUrl.searchParams.set('numberOfGuests', String(adults));
-    bookStaysUrl.searchParams.set('numberOfAdults', String(adults));
-    bookStaysUrl.searchParams.set('numberOfChildren', '0');
-    bookStaysUrl.searchParams.set('numberOfInfants', '0');
-    bookStaysUrl.searchParams.set('numberOfPets', '0');
-    bookStaysUrl.searchParams.set('isWorkTrip', 'false');
-    bookStaysUrl.searchParams.set('guestCurrency', guestCurrency);
-    bookStaysUrl.searchParams.set('productId', roomId);
-    
-    return { book_stays_url: bookStaysUrl.toString(), room_id: roomId, check_in: checkIn, check_out: checkOut };
-  } catch {
-    return null;
-  }
-}
 
 async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: string, nights: number = 1): Promise<AirbnbScrapeResult> {
   const startTime = Date.now();

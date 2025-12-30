@@ -18,14 +18,29 @@ export const MODULE_VERSION = "1.0.0";
  * These must appear in visible text context, not CSS class names or scripts.
  */
 export const BOT_PATTERNS: Array<{ pattern: RegExp; indicator: string }> = [
-  { pattern: /please verify you are a human/i, indicator: "captcha" },
-  { pattern: /checking your browser/i, indicator: "browser_check" },
-  { pattern: /access denied/i, indicator: "access_denied" },
-  { pattern: /blocked/i, indicator: "blocked" },
-  { pattern: /unusual traffic/i, indicator: "unusual_traffic" },
+  // Captcha patterns
+  { pattern: /please\s+complete\s+the\s+captcha/i, indicator: "captcha" },
+  { pattern: /solve\s+the\s+captcha/i, indicator: "captcha" },
+  { pattern: /i['']?m\s+not\s+a\s+robot/i, indicator: "captcha" },
+  // Human verification
+  { pattern: /verify\s+you['']?re\s+human/i, indicator: "human_verification" },
+  { pattern: /verify\s+you\s+are\s+human/i, indicator: "human_verification" },
+  { pattern: /prove you['']?re not a robot/i, indicator: "robot_check" },
+  // Browser checks
+  { pattern: /checking\s+your\s+browser/i, indicator: "browser_check" },
+  { pattern: /just\s+a\s+moment[\.\!\s]/i, indicator: "cloudflare_wait" },
+  { pattern: /please\s+wait\s+while\s+we\s+verify/i, indicator: "verification_wait" },
+  // Traffic blocks
+  { pattern: /unusual\s+traffic\s+from\s+your/i, indicator: "unusual_traffic" },
+  { pattern: /too\s+many\s+requests/i, indicator: "too_many_requests" },
+  // Access denied
+  { pattern: /access\s+to\s+this\s+page\s+has\s+been\s+denied/i, indicator: "access_denied" },
+  // Cloudflare signatures
+  { pattern: /ray\s+id[:\s]+[a-f0-9]+/i, indicator: "cloudflare" },
+  { pattern: /performance\s+&\s+security\s+by\s+cloudflare/i, indicator: "cloudflare" },
+  // Security challenges
   { pattern: /security check/i, indicator: "security_check" },
   { pattern: /complete the challenge/i, indicator: "challenge" },
-  { pattern: /prove you['']?re not a robot/i, indicator: "robot_check" },
 ];
 
 /**
