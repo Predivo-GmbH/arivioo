@@ -86,19 +86,29 @@ console.log(`Using airbnb/url-utils v${MODULE_VERSION}`);
 
 ## Enforcement
 
-### Build-Time Guard
+### ⚠️ Build-Time Guard (ACTIVE)
 
-A lint script scans for forbidden patterns outside `_shared/`:
+Duplication prevention is **automatically enforced** via lint:
 
 ```bash
-# Run before deploy
+# Run before deploy (or via deno task)
+cd supabase/functions
 deno task lint:shared
 ```
 
-Fails if:
-- `buildBookStaysUrl` is defined outside `_shared/airbnb/url-utils.ts`
-- `corsHeaders` is defined outside `_shared/http/cors.ts`
-- muscache regex patterns appear outside `_shared/airbnb/image-extraction.ts`
+**Deployment will fail** if forbidden patterns are detected outside `_shared/`.
+
+#### Currently Enforced Patterns
+| Pattern | Canonical Location |
+|---------|-------------------|
+| `buildBookStaysUrl` | `_shared/airbnb/url-utils.ts` |
+| `fetchWithTimeout` | `_shared/http/fetch-utils.ts` |
+| `detectBotIndicators` | `_shared/airbnb/bot-detection.ts` |
+| `isValidPropertyImage` | `_shared/airbnb/image-extraction.ts` |
+| `logProviderRequest` | `_shared/logging/provider-logs.ts` |
+
+#### Pending Enforcement (Phase 2)
+- `corsHeaders` - 27 files need migration before this can be enforced
 
 ### Runtime Guard (Deprecated Stubs)
 
@@ -145,7 +155,7 @@ When migrating existing duplicated logic:
 | `search-alternatives` | 🟢 Migrated | corsHeaders, fetchWithTimeout, buildBookStaysUrl, detectBotIndicators, logProviderRequest |
 | `airbnb-baseline-test` | 🟢 Migrated | corsHeaders, fetchWithTimeout, buildBookStaysUrl, logProviderRequest, types |
 | `airbnb-selftest` | 🟢 Migrated | corsHeaders, fetchWithTimeout, buildBookStaysUrl, calculateNights |
-| `airbnb-diagnostic` | ⚪ Pending | |
+| `airbnb-diagnostic` | 🟢 Migrated | corsHeaders, detectBotIndicators |
 | `extract-prices` | ⚪ Pending | |
 
 ### Modules
