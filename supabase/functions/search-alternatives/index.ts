@@ -884,7 +884,37 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
   // Collect all potential totals with their currencies and priority (higher = more trusted)
   let potentialTotals: { price: number; currency: string; priority: number; source: string }[] = [];
   
-  // Priority 3 (HIGHEST): Look for EXPLICIT TOTAL labels that include fees
+  // Priority 4 (HIGHEST): Final guest-facing totals (includes taxes) when visible
+  // Examples: "Total USD $2,213.34" or "Total $2,213.34" at bottom of breakdown
+  const finalTotalPatterns: { pattern: RegExp; currency: string }[] = [
+    { pattern: /\btotal\s+USD\s*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /\btotal\s+EUR\s*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    { pattern: /\btotal\s+GBP\s*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
+    { pattern: /\btotal\s+CHF\s*CHF\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'CHF' },
+
+    // Sometimes currency code appears AFTER the amount
+    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s*\btotal\s+USD\b/gi, currency: 'USD' },
+    { pattern: /€\s*([\d,]+(?:\.\d{2})?)\s*\btotal\s+EUR\b/gi, currency: 'EUR' },
+    { pattern: /£\s*([\d,]+(?:\.\d{2})?)\s*\btotal\s+GBP\b/gi, currency: 'GBP' },
+
+    // Generic "Total: $X" style — keep last in this tier to avoid matching non-final totals
+    { pattern: /\btotal\b\s*[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
+    { pattern: /\btotal\b\s*[:\s]+€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
+    { pattern: /\btotal\b\s*[:\s]+£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
+  ];
+
+  for (const { pattern, currency } of finalTotalPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
+      if (totalPrice >= 30 && totalPrice <= 500000) {
+        console.log(`[P4-FINAL] Found: ${currency} ${totalPrice} from "${match[0].slice(0, 80)}"`);
+        potentialTotals.push({ price: totalPrice, currency, priority: 4, source: 'final_total' });
+      }
+    }
+  }
+
+  // Priority 3: Look for EXPLICIT TOTAL labels (often excludes taxes)
   // "Total before taxes" is Airbnb's label that includes cleaning fee + service fee
   const explicitTotalPatterns: { pattern: RegExp; currency: string }[] = [
     // "$2,214 Total before taxes" or "Total before taxes $2,214" (with flexible spacing)
@@ -894,18 +924,18 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
     { pattern: /total\s*before\s*taxes\s*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
     { pattern: /£\s*([\d,]+(?:\.\d{2})?)\s*total\s*before\s*taxes/gi, currency: 'GBP' },
     { pattern: /total\s*before\s*taxes\s*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-    
+
     // "Trip total" / "Grand total" patterns
     { pattern: /trip\s+total\s*[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     { pattern: /grand\s+total\s*[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     { pattern: /trip\s+total\s*[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
     { pattern: /grand\s+total\s*[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    
+
     // "You pay $X" / "You will pay $X"
     { pattern: /you\s+(?:will\s+)?pay\s*[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
     { pattern: /you\s+(?:will\s+)?pay\s*[:\s]*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
   ];
-  
+
   for (const { pattern, currency } of explicitTotalPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
@@ -916,7 +946,7 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
       }
     }
   }
-  
+
   // Priority 2: Look for "$X,XXX for Y nights" headline - Airbnb's booking widget display
   // This appears prominently and SHOULD include fees for the total
   const forNightsPatterns: { pattern: RegExp; currency: string }[] = [
@@ -3055,19 +3085,19 @@ async function runSearchWithStreaming(
   };
   
   try {
-    // Step 1: Extract Airbnb data - RUN ALL 3 PROVIDERS IN PARALLEL
-    sendProgress(controller, "Multi-provider extraction", "Running Firecrawl, Zyte, and Browserless in parallel for price comparison");
+    // Step 1: Extract Airbnb baseline using classic fallback order (Firecrawl -> Zyte -> Browserless)
+    sendProgress(controller, "Airbnb baseline", "Extracting Airbnb total (Firecrawl → Zyte → Browserless)");
     await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
-    
+
     const zyteApiKey = Deno.env.get("ZYTE_API_KEY");
     const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
-    
-    // Define parallel extraction tasks
+
+    // Define extraction tasks (re-used by fallback chain)
     const firecrawlTask = async (): Promise<ProviderPriceResult> => {
       const start = Date.now();
       try {
         if (!firecrawlApiKey) return { provider: 'firecrawl', price: null, currency: 'USD', error: 'No API key' };
-        
+
         const resp = await fetchWithTimeout(
           "https://api.firecrawl.dev/v1/scrape",
           {
@@ -3086,17 +3116,17 @@ async function runSearchWithStreaming(
           },
           35_000
         );
-        
+
         if (!resp.ok) {
           const errText = await resp.text().catch(() => "");
           return { provider: 'firecrawl', price: null, currency: 'USD', error: `HTTP ${resp.status}: ${errText.slice(0, 100)}`, durationMs: Date.now() - start };
         }
-        
+
         const data = await resp.json();
         const html = data?.data?.rawHtml || data?.data?.html || "";
         const markdown = data?.data?.markdown || "";
         const screenshot = data?.data?.screenshot || null;
-        
+
         // Extract images for later use
         if (imageUrls.length === 0) {
           const imagePatterns = [
@@ -3111,31 +3141,31 @@ async function runSearchWithStreaming(
           const unique = [...new Set(allImages.map(canonicalize))];
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
         }
-        
+
         // Extract title
         const metaTitle = data?.data?.metadata?.title;
         if (metaTitle && airbnbTitle === "Vacation Rental") {
           airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
-        
+
         const result = await extractPriceFromContent(html, markdown, screenshot, 'Firecrawl');
         return { provider: 'firecrawl', price: result.price, currency: result.currency, contentLength: html.length, durationMs: Date.now() - start };
       } catch (e) {
         return { provider: 'firecrawl', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
       }
     };
-    
+
     const zyteTask = async (): Promise<ProviderPriceResult> => {
       const start = Date.now();
       try {
         if (!zyteApiKey) return { provider: 'zyte', price: null, currency: 'USD', error: 'No API key' };
-        
+
         const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
-        
+
         if (!zyteResult.ok) {
           return { provider: 'zyte', price: null, currency: 'USD', error: zyteResult.error || 'Failed', durationMs: Date.now() - start };
         }
-        
+
         // Extract images for later use
         if (imageUrls.length === 0) {
           const imagePatterns = [
@@ -3150,31 +3180,31 @@ async function runSearchWithStreaming(
           const unique = [...new Set(allImages.map(canonicalize))];
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
         }
-        
+
         // Extract title
         const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
         if (titleMatch && airbnbTitle === "Vacation Rental") {
           airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
-        
+
         const result = await extractPriceFromContent(zyteResult.html, zyteResult.markdown, zyteResult.screenshot, 'Zyte');
         return { provider: 'zyte', price: result.price, currency: result.currency, contentLength: zyteResult.html.length, durationMs: Date.now() - start };
       } catch (e) {
         return { provider: 'zyte', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
       }
     };
-    
+
     const browserlessTask = async (): Promise<ProviderPriceResult> => {
       const start = Date.now();
       try {
         if (!browserlessApiKey) return { provider: 'browserless', price: null, currency: 'USD', error: 'No API key' };
-        
+
         const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
-        
+
         if (!browserlessResult.ok) {
           return { provider: 'browserless', price: null, currency: 'USD', error: browserlessResult.error || 'Failed', durationMs: Date.now() - start };
         }
-        
+
         // Extract images for later use
         if (imageUrls.length === 0) {
           const imagePatterns = [
@@ -3189,67 +3219,55 @@ async function runSearchWithStreaming(
           const unique = [...new Set(allImages.map(canonicalize))];
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
         }
-        
+
         // Extract title
         const titleMatch = browserlessResult.html.match(/<title>([^<]+)<\/title>/i);
         if (titleMatch && airbnbTitle === "Vacation Rental") {
           airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
-        
+
         const result = await extractPriceFromContent(browserlessResult.html, browserlessResult.markdown, null, 'Browserless');
         return { provider: 'browserless', price: result.price, currency: result.currency, contentLength: browserlessResult.html.length, durationMs: Date.now() - start };
       } catch (e) {
         return { provider: 'browserless', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
       }
     };
-    
-    // Run all 3 providers in parallel
-    sendProgress(controller, "Running 3 providers", "Firecrawl + Zyte + Browserless running simultaneously");
-    const [firecrawlResult, zyteResult, browserlessResult] = await Promise.all([
-      firecrawlTask(),
-      zyteTask(),
-      browserlessTask(),
-    ]);
-    
-    providerResults.push(firecrawlResult, zyteResult, browserlessResult);
-    
-    // Log all results
-    console.log("=== MULTI-PROVIDER PRICE COMPARISON ===");
-    for (const r of providerResults) {
-      const priceStr = r.price ? `${r.currency} ${r.price}` : 'NO PRICE';
-      console.log(`[${r.provider.toUpperCase()}] ${priceStr} (${r.contentLength || 0} chars, ${r.durationMs}ms) ${r.error ? `ERROR: ${r.error}` : ''}`);
-    }
-    console.log("========================================");
-    
-    // Send each result to the UI
-    for (const r of providerResults) {
+
+    const fallbackChain: { provider: AirbnbProvider; run: () => Promise<ProviderPriceResult> }[] = [
+      { provider: 'firecrawl', run: firecrawlTask },
+      { provider: 'zyte', run: zyteTask },
+      { provider: 'browserless', run: browserlessTask },
+    ];
+
+    for (const step of fallbackChain) {
+      const label = step.provider.toUpperCase();
+      sendProgress(controller, `${label} attempt`, `Trying ${label}…`);
+
+      const r = await step.run();
+      providerResults.push(r);
+
       const currencySymbol = r.currency === 'EUR' ? '€' : r.currency === 'GBP' ? '£' : r.currency === 'CHF' ? 'CHF ' : '$';
       if (r.price) {
-        sendProgress(controller, `${r.provider.toUpperCase()} price`, `${currencySymbol}${r.price} (${r.durationMs}ms)`, { provider: r.provider, price: r.price, currency: r.currency });
+        sendProgress(controller, `${label} price`, `${currencySymbol}${r.price} (${r.durationMs}ms)`, { provider: r.provider, price: r.price, currency: r.currency });
+        airbnbPrice = r.price;
+        airbnbCurrency = r.currency;
+        sendProgress(controller, "Selected price", `Using ${label}: ${currencySymbol}${airbnbPrice}`, { airbnbPrice, airbnbCurrency, provider: r.provider });
+        break;
       } else {
-        sendProgress(controller, `${r.provider.toUpperCase()} failed`, r.error || 'No price found', { provider: r.provider, error: r.error });
+        sendProgress(controller, `${label} failed`, r.error || 'No price found', { provider: r.provider, error: r.error });
       }
     }
-    
-    // Select the BEST price (prefer highest total - usually includes fees)
-    const pricesFound = providerResults.filter(r => r.price !== null);
-    if (pricesFound.length > 0) {
-      // Sort by price descending (highest = most complete total)
-      pricesFound.sort((a, b) => (b.price || 0) - (a.price || 0));
-      const best = pricesFound[0];
-      airbnbPrice = best.price;
-      airbnbCurrency = best.currency;
-      
-      const currencySymbol = airbnbCurrency === 'EUR' ? '€' : airbnbCurrency === 'GBP' ? '£' : airbnbCurrency === 'CHF' ? 'CHF ' : '$';
-      sendProgress(controller, "Selected price", `Using ${best.provider.toUpperCase()}: ${currencySymbol}${airbnbPrice} (highest total)`, { airbnbPrice, airbnbCurrency, provider: best.provider });
-      
-      // Show comparison summary
-      const summary = providerResults.map(r => `${r.provider}: ${r.price || 'N/A'}`).join(' | ');
-      sendProgress(controller, "Price comparison", summary, { comparison: providerResults });
-    } else {
-      sendProgress(controller, "All providers failed", "No prices extracted from any provider");
+
+    if (!airbnbPrice) {
+      sendProgress(controller, "Airbnb baseline failed", "No Airbnb total price extracted from any provider");
     }
-    
+
+    // Emit quick comparison summary for debugging (even though we stop early on success)
+    if (providerResults.length > 0) {
+      const summary = providerResults.map((r) => `${r.provider}: ${r.price ?? 'N/A'}`).join(' | ');
+      sendProgress(controller, "Price comparison", summary, { comparison: providerResults });
+    }
+
     // Update the database
     await supabase
       .from("searches")
