@@ -52,6 +52,48 @@ async function withTimeout<T>(
 }
 
 // ============================================================================
+// Provider Request Logging - Track every API call for quota management
+// ============================================================================
+
+type ProviderLogName = 'firecrawl' | 'zyte' | 'browserless' | 'serpapi';
+
+interface ProviderLogParams {
+  supabase: any;
+  provider: ProviderLogName;
+  endpointType: string;
+  searchId?: string;
+  extractionId?: string;
+  url?: string;
+  success: boolean;
+  httpStatus?: number;
+  durationMs?: number;
+  errorMessage?: string;
+  correlationId?: string;
+}
+
+async function logProviderRequest(params: ProviderLogParams): Promise<void> {
+  try {
+    await params.supabase.from('api_request_logs').insert({
+      provider_name: params.provider,
+      endpoint_type: params.endpointType,
+      search_id: params.searchId || null,
+      extraction_id: params.extractionId || null,
+      request_url: params.url?.slice(0, 500) || null,
+      success: params.success,
+      response_status: params.httpStatus || null,
+      duration_ms: params.durationMs || null,
+      error_message: params.errorMessage?.slice(0, 500) || null,
+      correlation_id: params.correlationId || null,
+      cost_units: 1, // Each provider call = 1 request unit
+    });
+    console.log(`[ProviderLog] ${params.provider}/${params.endpointType} - success:${params.success} ${params.durationMs ? `(${params.durationMs}ms)` : ''}`);
+  } catch (e) {
+    // Don't let logging failures break the main flow
+    console.error('[ProviderLog] Failed to log request:', e);
+  }
+}
+
+// ============================================================================
 // Airbnb Fallback Chain Types and Helpers
 // ============================================================================
 
@@ -3508,15 +3550,45 @@ async function runSearchWithStreaming(
           35_000
         );
 
+        const durationMs = Date.now() - start;
+        const httpStatus = resp.status;
+
         if (!resp.ok) {
           const errText = await resp.text().catch(() => "");
+          const errorMsg = `HTTP ${resp.status}: ${errText.slice(0, 100)}`;
+          
+          // Log failed request
+          await logProviderRequest({
+            supabase,
+            provider: 'firecrawl',
+            endpointType: 'airbnb_scrape',
+            searchId,
+            url: search.airbnb_url,
+            success: false,
+            httpStatus,
+            durationMs,
+            errorMessage: errorMsg,
+          });
+          
           return {
             provider,
             baseline: emptyBaseline('Firecrawl'),
-            error: `HTTP ${resp.status}: ${errText.slice(0, 100)}`,
-            durationMs: Date.now() - start,
+            error: errorMsg,
+            durationMs,
           };
         }
+
+        // Log successful request
+        await logProviderRequest({
+          supabase,
+          provider: 'firecrawl',
+          endpointType: 'airbnb_scrape',
+          searchId,
+          url: search.airbnb_url,
+          success: true,
+          httpStatus,
+          durationMs,
+        });
 
         const data = await resp.json();
         const html = data?.data?.rawHtml || data?.data?.html || "";
@@ -3547,9 +3619,24 @@ async function runSearchWithStreaming(
         }
 
         const baseline = extractBaselineFromContent(html, markdown, 'Firecrawl');
-        return { provider, baseline, contentLength: html.length, durationMs: Date.now() - start };
+        return { provider, baseline, contentLength: html.length, durationMs };
       } catch (e) {
-        return { provider, baseline: emptyBaseline('Firecrawl'), error: String(e), durationMs: Date.now() - start };
+        const durationMs = Date.now() - start;
+        const errorMsg = String(e);
+        
+        // Log exception as failed request
+        await logProviderRequest({
+          supabase,
+          provider: 'firecrawl',
+          endpointType: 'airbnb_scrape',
+          searchId,
+          url: search.airbnb_url,
+          success: false,
+          durationMs,
+          errorMessage: errorMsg,
+        });
+        
+        return { provider, baseline: emptyBaseline('Firecrawl'), error: errorMsg, durationMs };
       }
     };
 
@@ -3562,13 +3649,27 @@ async function runSearchWithStreaming(
         }
 
         const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
+        const durationMs = Date.now() - start;
+
+        // Log every Zyte request (success or failure)
+        await logProviderRequest({
+          supabase,
+          provider: 'zyte',
+          endpointType: 'airbnb_scrape',
+          searchId,
+          url: search.airbnb_url,
+          success: zyteResult.ok,
+          httpStatus: zyteResult.statusCode,
+          durationMs,
+          errorMessage: zyteResult.ok ? undefined : zyteResult.error || 'Failed',
+        });
 
         if (!zyteResult.ok) {
           return {
             provider,
             baseline: emptyBaseline('Zyte'),
             error: zyteResult.error || 'Failed',
-            durationMs: Date.now() - start,
+            durationMs,
           };
         }
 
@@ -3596,9 +3697,24 @@ async function runSearchWithStreaming(
         }
 
         const baseline = extractBaselineFromContent(zyteResult.html, zyteResult.markdown, 'Zyte');
-        return { provider, baseline, contentLength: zyteResult.html.length, durationMs: Date.now() - start };
+        return { provider, baseline, contentLength: zyteResult.html.length, durationMs };
       } catch (e) {
-        return { provider, baseline: emptyBaseline('Zyte'), error: String(e), durationMs: Date.now() - start };
+        const durationMs = Date.now() - start;
+        const errorMsg = String(e);
+        
+        // Log exception as failed request
+        await logProviderRequest({
+          supabase,
+          provider: 'zyte',
+          endpointType: 'airbnb_scrape',
+          searchId,
+          url: search.airbnb_url,
+          success: false,
+          durationMs,
+          errorMessage: errorMsg,
+        });
+        
+        return { provider, baseline: emptyBaseline('Zyte'), error: errorMsg, durationMs };
       }
     };
 
@@ -3611,13 +3727,27 @@ async function runSearchWithStreaming(
         }
 
         const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
+        const durationMs = Date.now() - start;
+
+        // Log every Browserless request (success or failure)
+        await logProviderRequest({
+          supabase,
+          provider: 'browserless',
+          endpointType: 'airbnb_scrape',
+          searchId,
+          url: search.airbnb_url,
+          success: browserlessResult.ok,
+          httpStatus: browserlessResult.statusCode,
+          durationMs,
+          errorMessage: browserlessResult.ok ? undefined : browserlessResult.error || 'Failed',
+        });
 
         if (!browserlessResult.ok) {
           return {
             provider,
             baseline: emptyBaseline('Browserless'),
             error: browserlessResult.error || 'Failed',
-            durationMs: Date.now() - start,
+            durationMs,
           };
         }
 
@@ -3645,9 +3775,24 @@ async function runSearchWithStreaming(
         }
 
         const baseline = extractBaselineFromContent(browserlessResult.html, browserlessResult.markdown, 'Browserless');
-        return { provider, baseline, contentLength: browserlessResult.html.length, durationMs: Date.now() - start };
+        return { provider, baseline, contentLength: browserlessResult.html.length, durationMs };
       } catch (e) {
-        return { provider, baseline: emptyBaseline('Browserless'), error: String(e), durationMs: Date.now() - start };
+        const durationMs = Date.now() - start;
+        const errorMsg = String(e);
+        
+        // Log exception as failed request
+        await logProviderRequest({
+          supabase,
+          provider: 'browserless',
+          endpointType: 'airbnb_scrape',
+          searchId,
+          url: search.airbnb_url,
+          success: false,
+          durationMs,
+          errorMessage: errorMsg,
+        });
+        
+        return { provider, baseline: emptyBaseline('Browserless'), error: errorMsg, durationMs };
       }
     };
 
