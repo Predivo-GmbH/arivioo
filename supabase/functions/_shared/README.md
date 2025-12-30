@@ -138,19 +138,31 @@ When migrating existing duplicated logic:
 
 ## Current Migration Status
 
+### Consumers
+
+| Edge Function | Status | Notes |
+|---------------|--------|-------|
+| `search-alternatives` | 🟢 Migrated | corsHeaders, fetchWithTimeout, buildBookStaysUrl, detectBotIndicators, logProviderRequest |
+| `airbnb-baseline-test` | ⚪ Pending | |
+| `airbnb-selftest` | ⚪ Pending | |
+| `airbnb-diagnostic` | ⚪ Pending | |
+| `extract-prices` | ⚪ Pending | |
+
+### Modules
+
 | Module | Status | Notes |
 |--------|--------|-------|
-| `http/cors` | 🟡 Ready | Canonical implementation ready |
-| `http/fetch-utils` | 🟡 Ready | Canonical implementation ready |
-| `airbnb/url-utils` | 🟡 Ready | Canonical implementation ready |
+| `http/cors` | 🟢 Ready | Canonical implementation active |
+| `http/fetch-utils` | 🟢 Ready | Canonical implementation active |
+| `airbnb/url-utils` | 🟢 Ready | Canonical implementation active |
 | `airbnb/image-extraction` | 🟡 Ready | Canonical implementation ready |
 | `airbnb/price-extraction` | ⚪ Pending | Complex, requires careful extraction |
 | `airbnb/ocr-validation` | ⚪ Pending | Depends on price-extraction |
-| `airbnb/bot-detection` | 🟡 Ready | Canonical implementation ready |
-| `logging/provider-logs` | 🟡 Ready | Canonical implementation ready |
+| `airbnb/bot-detection` | 🟢 Ready | Canonical implementation active |
+| `logging/provider-logs` | 🟢 Ready | Canonical implementation active |
 | `scraping/*` | ⚪ Pending | Large refactor needed |
 
-Legend: 🟢 Migrated | 🟡 Ready | ⚪ Pending
+Legend: 🟢 Active | 🟡 Ready (not yet consumed) | ⚪ Pending
 
 ---
 
