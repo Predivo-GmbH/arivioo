@@ -93,9 +93,29 @@ function extractPriceCandidates(content: string): Array<{
         rejectedReason = 'taxes_line_only';
       }
 
+      // POLICY/FEE REJECTION - must come before total classification
+      const policyFeePatterns = [
+        /\bpet\s+(policy|fee)/i,
+        /\bfee\s+charged\b/i,
+        /\btransaction\s+(charge|fee|amount)/i,
+        /\bdeposit\b/i,
+        /\bcleaning\s+(fee|cost)/i,
+        /\bsurcharge\b/i,
+        /\bpenalty\b/i,
+        /\b(cancellation|refund)\s+policy/i,
+        /\bif.*pet.*brought/i,
+        /\bprofessional\s+.*cleaning\s+cost/i,
+      ];
+      const isPolicyFee = policyFeePatterns.some(p => p.test(context));
+      if (!rejectedReason && isPolicyFee) {
+        candidateType = 'unknown';
+        rejectedReason = 'policy_or_fee_context';
+      }
+
       const hasExplicitTotal = /\b(total\s*\([A-Z]{3}\)|total\s+USD|total\s+EUR|total\s+GBP|trip\s+total|grand\s+total|you\s+pay)\b/i.test(context);
       const hasGenericTotal = /\btotal\b/i.test(context) && !hasForNightsPattern;
 
+      // Only mark as total_final if NOT already rejected and has explicit total label
       if (!rejectedReason && (hasExplicitTotal || hasGenericTotal)) {
         candidateType = 'total_final';
       }
@@ -140,10 +160,12 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
   }
 }
 
-// Apply final guardrail
+// Apply final guardrail - blocks subtotals AND policy fees
 function applyGuardrail(selected: any): { blocked: boolean; reason?: string } {
   if (!selected) return { blocked: false };
   const evidenceContext = selected.context || '';
+  
+  // Block subtotal patterns
   const subtotalPatterns = [
     /for\s+\d+\s+nights?/i,
     /\d+\s+nights?\s*[×x]/i,
@@ -154,6 +176,23 @@ function applyGuardrail(selected: any): { blocked: boolean; reason?: string } {
   if (hasSubtotalPattern) {
     return { blocked: true, reason: 'GUARDRAIL: Evidence contains subtotal pattern' };
   }
+  
+  // Block policy/fee patterns
+  const policyFeePatterns = [
+    /\bpet\s*(policy|fee)/i,
+    /\bfee\s+charged\b/i,
+    /\btransaction\s+(charge|fee|amount)/i,
+    /\bif.*pet.*brought/i,
+    /\bprofessional\s+.*cleaning\b/i,
+    /\bsurcharge\b/i,
+    /\bdeposit\b/i,
+    /\bpenalty\b/i,
+  ];
+  const hasPolicyFeePattern = policyFeePatterns.some(p => p.test(evidenceContext));
+  if (hasPolicyFeePattern) {
+    return { blocked: true, reason: 'GUARDRAIL: Evidence contains policy/fee context, not booking total' };
+  }
+  
   return { blocked: false };
 }
 
@@ -185,6 +224,19 @@ async function runFirecrawl(url: string, runId: string): Promise<any> {
     const data = await resp.json().catch(() => ({}));
 
     if (!resp.ok) {
+      // Check if Firecrawl explicitly blocks Airbnb (enterprise policy)
+      const errorMsg = data.error || '';
+      if (/not.*currently\s+supported|enterprise/i.test(errorMsg)) {
+        return {
+          status: 'provider_not_supported_for_airbnb',
+          durationMs,
+          page_title: null,
+          final_url: url,
+          body_snippet: safeSnippet(JSON.stringify(data), 300),
+          error: errorMsg,
+          evidence_snippet: `Firecrawl explicitly blocks Airbnb: ${errorMsg}`,
+        };
+      }
       return {
         status: 'provider_fetch_failed',
         durationMs,
@@ -434,8 +486,20 @@ async function runBrowserless(url: string, runId: string): Promise<any> {
             };
           }
           
-          // Quick check for captcha/block
-          if (/captcha|please verify|checking your browser/i.test(fullHtml)) {
+          // Quick check for captcha/block - use text content only to avoid false positives from CSS class names
+          const bodyText = await page.evaluate(() => document.body ? document.body.innerText : '');
+          const explicitBlockPatterns = [
+            /please\s+complete.*captcha/i,
+            /verify\s+you\s+are\s+(human|a\s+human)/i,
+            /checking\s+your\s+browser/i,
+            /please\s+verify\s+you/i,
+            /access\s+denied/i,
+            /security\s+check/i,
+          ];
+          const isActuallyBlocked = explicitBlockPatterns.some(p => p.test(bodyText));
+          
+          if (isActuallyBlocked) {
+            clickLog.push('BLOCKED: Explicit captcha/security check detected in page text');
             return { 
               html: fullHtml.slice(0, 5000),
               pageTitle,
