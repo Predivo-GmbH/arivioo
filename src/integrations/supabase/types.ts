@@ -177,6 +177,7 @@ export type Database = {
       airbnb_baseline_debug: {
         Row: {
           airbnb_url: string | null
+          breakdown_opened: boolean | null
           candidates_summary: Json | null
           check_in_date: string | null
           check_out_date: string | null
@@ -190,6 +191,17 @@ export type Database = {
           id: string
           includes_taxes_fees: boolean | null
           nights_count: number | null
+          ocr_accepted_via: string | null
+          ocr_booking_card_amount_raw: string | null
+          ocr_booking_card_amount_value: number | null
+          ocr_booking_card_nights: number | null
+          ocr_booking_card_snippet: string | null
+          ocr_breakdown_taxes_amount_value: number | null
+          ocr_breakdown_total_amount_raw: string | null
+          ocr_breakdown_total_amount_value: number | null
+          ocr_breakdown_total_snippet: string | null
+          ocr_mismatch_reason: string | null
+          ocr_validation_status: string | null
           provider: string
           provider_order: number
           raw_matched_string: string | null
@@ -201,6 +213,7 @@ export type Database = {
         }
         Insert: {
           airbnb_url?: string | null
+          breakdown_opened?: boolean | null
           candidates_summary?: Json | null
           check_in_date?: string | null
           check_out_date?: string | null
@@ -214,6 +227,17 @@ export type Database = {
           id?: string
           includes_taxes_fees?: boolean | null
           nights_count?: number | null
+          ocr_accepted_via?: string | null
+          ocr_booking_card_amount_raw?: string | null
+          ocr_booking_card_amount_value?: number | null
+          ocr_booking_card_nights?: number | null
+          ocr_booking_card_snippet?: string | null
+          ocr_breakdown_taxes_amount_value?: number | null
+          ocr_breakdown_total_amount_raw?: string | null
+          ocr_breakdown_total_amount_value?: number | null
+          ocr_breakdown_total_snippet?: string | null
+          ocr_mismatch_reason?: string | null
+          ocr_validation_status?: string | null
           provider: string
           provider_order: number
           raw_matched_string?: string | null
@@ -225,6 +249,7 @@ export type Database = {
         }
         Update: {
           airbnb_url?: string | null
+          breakdown_opened?: boolean | null
           candidates_summary?: Json | null
           check_in_date?: string | null
           check_out_date?: string | null
@@ -238,6 +263,17 @@ export type Database = {
           id?: string
           includes_taxes_fees?: boolean | null
           nights_count?: number | null
+          ocr_accepted_via?: string | null
+          ocr_booking_card_amount_raw?: string | null
+          ocr_booking_card_amount_value?: number | null
+          ocr_booking_card_nights?: number | null
+          ocr_booking_card_snippet?: string | null
+          ocr_breakdown_taxes_amount_value?: number | null
+          ocr_breakdown_total_amount_raw?: string | null
+          ocr_breakdown_total_amount_value?: number | null
+          ocr_breakdown_total_snippet?: string | null
+          ocr_mismatch_reason?: string | null
+          ocr_validation_status?: string | null
           provider?: string
           provider_order?: number
           raw_matched_string?: string | null

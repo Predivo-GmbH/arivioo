@@ -110,6 +110,23 @@ interface AirbnbScrapeResult {
   error: string | null;
   statusCode?: number;
   evidenceSnippet?: string;
+  // OCR reference data (captured via screenshot + AI OCR)
+  ocrReference?: OcrVisualReference | null;
+}
+
+// OCR Visual Reference - ground truth from what's visually displayed
+interface OcrVisualReference {
+  // Booking card OCR (always captured if screenshot available)
+  bookingCardAmountRaw: string | null; // e.g. "$2,214"
+  bookingCardAmountValue: number | null;
+  bookingCardNights: number | null;
+  bookingCardSnippet: string | null; // e.g. "$2,214 for 4 nights"
+  // Breakdown OCR (only if breakdown modal opened)
+  breakdownTotalAmountRaw: string | null; // e.g. "Total USD $2,213.34"
+  breakdownTotalAmountValue: number | null;
+  breakdownTotalSnippet: string | null;
+  breakdownTaxesAmountValue: number | null;
+  breakdownOpened: boolean;
 }
 
 // Consolidated trace record for a single Airbnb extraction run
@@ -305,7 +322,7 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Ai
 // Tier 3: Browserless Scraper for Airbnb
 // ============================================================================
 
-async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: string): Promise<AirbnbScrapeResult> {
+async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: string, nights: number = 1): Promise<AirbnbScrapeResult> {
   const startTime = Date.now();
   const result: AirbnbScrapeResult = {
     ok: false,
@@ -315,10 +332,11 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     providerUsed: 'browserless',
     botIndicators: [],
     error: null,
+    ocrReference: null,
   };
   
   try {
-    console.log("Scraping Airbnb with Browserless:", url.slice(0, 100));
+    console.log("Scraping Airbnb with Browserless (with OCR):", url.slice(0, 100));
 
     // Use Browserless /function endpoint so we can interact with the page (expand price breakdown)
     // This is necessary because the headline "$X for Y nights" can sometimes reflect a partial amount.
@@ -333,6 +351,9 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
           await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
           // Let dynamic pricing hydrate
           await sleep(9000);
+
+          // Capture screenshot BEFORE opening breakdown (booking card view)
+          const bookingCardScreenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
 
           // Attempt to expand the price breakdown (needed to reveal final total incl. taxes)
           // Try multiple strategies: known selectors + text-based click.
@@ -375,6 +396,12 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
           // Extra wait for modal content to render/hydrate
           await sleep(2500);
 
+          // Capture screenshot AFTER opening breakdown (if opened)
+          let breakdownScreenshot = null;
+          if (breakdownOpened) {
+            breakdownScreenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
+          }
+
           // Return full HTML content
           const html = await page.content();
 
@@ -393,6 +420,8 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
             html,
             breakdownOpened,
             totalSnippet: (totalSnippet || '').slice(0, 1200),
+            bookingCardScreenshot,
+            breakdownScreenshot,
           };
         }
       `,
@@ -430,6 +459,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     if (fnJson?.totalSnippet) {
       console.log("Browserless total snippet:", String(fnJson.totalSnippet).replace(/\s+/g, ' ').slice(0, 300));
     }
+    const breakdownOpened = typeof fnJson?.breakdownOpened === 'boolean' ? fnJson.breakdownOpened : false;
     if (typeof fnJson?.breakdownOpened === 'boolean') {
       console.log("Browserless breakdownOpened:", fnJson.breakdownOpened);
     }
@@ -448,6 +478,16 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     result.ok = true;
     result.html = html;
 
+    // Store screenshot for OCR (prefer breakdown screenshot if available)
+    const screenshotForOcr = fnJson?.breakdownScreenshot || fnJson?.bookingCardScreenshot || null;
+    result.screenshot = screenshotForOcr;
+
+    // Run OCR extraction on the screenshot
+    if (screenshotForOcr) {
+      console.log("Running OCR extraction on Browserless screenshot...");
+      result.ocrReference = await extractOcrVisualReference(screenshotForOcr, nights, breakdownOpened);
+    }
+
     // Generate markdown from HTML
     result.markdown = html
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -456,7 +496,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       .replace(/\s+/g, " ")
       .trim();
 
-    console.log("Browserless function scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms");
+    console.log("Browserless function scrape successful. HTML length:", html.length, "Duration:", Date.now() - startTime, "ms", "Has OCR:", !!result.ocrReference);
 
     return result;
   } catch (e) {
@@ -1796,6 +1836,281 @@ Return ONLY JSON in this exact format:
     console.error("AI price extraction error:", error);
     return { perNight: null, total: null, currency: null, confidence: "low", datesConfirmed: false };
   }
+}
+
+// ============================================================================
+// OCR Visual Reference Extraction - Ground truth from screenshots
+// ============================================================================
+
+// Extract OCR reference from screenshot using AI vision
+async function extractOcrVisualReference(
+  screenshotBase64: string,
+  nights: number,
+  breakdownOpened: boolean
+): Promise<OcrVisualReference> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  const emptyResult: OcrVisualReference = {
+    bookingCardAmountRaw: null,
+    bookingCardAmountValue: null,
+    bookingCardNights: null,
+    bookingCardSnippet: null,
+    breakdownTotalAmountRaw: null,
+    breakdownTotalAmountValue: null,
+    breakdownTotalSnippet: null,
+    breakdownTaxesAmountValue: null,
+    breakdownOpened,
+  };
+
+  if (!lovableApiKey || !screenshotBase64) {
+    console.log("OCR: No API key or screenshot available");
+    return emptyResult;
+  }
+
+  try {
+    const prompt = `You are analyzing a screenshot of an Airbnb listing page. Extract ALL visible price information exactly as shown.
+
+TASK: Read and extract the following prices VERBATIM from the screenshot:
+
+1. BOOKING CARD (the main price widget on the right side):
+   - Look for the headline price like "$2,214 for 4 nights" or "$553 x 4 nights"
+   - Extract the exact text, the numeric amount, and number of nights
+
+2. PRICE BREAKDOWN (if a modal/section is open showing itemized costs):
+   - Look for "Total", "Trip total", "Total USD", or "Total before taxes" line
+   - This is usually at the bottom of a price breakdown section
+   - Also look for taxes/fees line if visible
+
+CRITICAL RULES:
+- Return EXACTLY what you see - do not calculate or estimate
+- Include currency symbols as shown
+- If price breakdown is not visible/open, return null for breakdown fields
+- The breakdown total is the most authoritative price when visible
+
+Return ONLY valid JSON in this exact format:
+{
+  "bookingCardAmountRaw": "<exact text like '$2,214' or null>",
+  "bookingCardAmountValue": <number or null>,
+  "bookingCardNights": <number or null>,
+  "bookingCardSnippet": "<full text like '$2,214 for 4 nights' or null>",
+  "breakdownTotalAmountRaw": "<exact text like 'Total USD $2,213.34' or null>",
+  "breakdownTotalAmountValue": <number or null>,
+  "breakdownTotalSnippet": "<the full total line text or null>",
+  "breakdownTaxesAmountValue": <number or null if taxes line visible>
+}`;
+
+    const imageUrl = `data:image/png;base64,${screenshotBase64}`;
+
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.5-flash",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          max_tokens: 300,
+        }),
+      },
+      25_000
+    );
+
+    if (!response.ok) {
+      console.error("OCR AI request failed:", response.status);
+      return emptyResult;
+    }
+
+    const data = await response.json();
+    const responseText = data.choices?.[0]?.message?.content?.trim() || "";
+
+    // Parse JSON from response
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1].trim();
+    } else if (responseText.startsWith("{")) {
+      jsonStr = responseText;
+    }
+
+    try {
+      const parsed = JSON.parse(jsonStr);
+      
+      const result: OcrVisualReference = {
+        bookingCardAmountRaw: typeof parsed.bookingCardAmountRaw === 'string' ? parsed.bookingCardAmountRaw : null,
+        bookingCardAmountValue: typeof parsed.bookingCardAmountValue === 'number' ? parsed.bookingCardAmountValue : null,
+        bookingCardNights: typeof parsed.bookingCardNights === 'number' ? parsed.bookingCardNights : null,
+        bookingCardSnippet: typeof parsed.bookingCardSnippet === 'string' ? parsed.bookingCardSnippet : null,
+        breakdownTotalAmountRaw: typeof parsed.breakdownTotalAmountRaw === 'string' ? parsed.breakdownTotalAmountRaw : null,
+        breakdownTotalAmountValue: typeof parsed.breakdownTotalAmountValue === 'number' ? parsed.breakdownTotalAmountValue : null,
+        breakdownTotalSnippet: typeof parsed.breakdownTotalSnippet === 'string' ? parsed.breakdownTotalSnippet : null,
+        breakdownTaxesAmountValue: typeof parsed.breakdownTaxesAmountValue === 'number' ? parsed.breakdownTaxesAmountValue : null,
+        breakdownOpened,
+      };
+
+      console.log("OCR extraction result:", JSON.stringify(result, null, 2));
+      return result;
+    } catch (parseErr) {
+      console.error("OCR: Failed to parse AI response:", responseText.slice(0, 200));
+      return emptyResult;
+    }
+  } catch (error) {
+    console.error("OCR extraction error:", error);
+    return emptyResult;
+  }
+}
+
+// ============================================================================
+// OCR-Based Validation Rules - Validate provider prices against OCR reference
+// ============================================================================
+
+type OcrValidationResult = {
+  accepted: boolean;
+  status: AirbnbBaselineStatus;
+  includesTaxesFees: boolean;
+  acceptedVia: 'breakdown_match' | 'equal_baseline' | 'higher_than_baseline' | null;
+  mismatchReason: string | null;
+  evidenceSnippet: string;
+  validatedPrice: number | null;
+};
+
+function validateProviderPriceWithOcr(
+  providerPrice: number | null,
+  providerCurrency: string | null,
+  providerEvidence: string,
+  ocrRef: OcrVisualReference | null
+): OcrValidationResult {
+  const noOcrResult: OcrValidationResult = {
+    accepted: providerPrice !== null,
+    status: providerPrice !== null ? 'total_price_excluding_taxes_and_fees' : 'price_not_available_in_content',
+    includesTaxesFees: false,
+    acceptedVia: null,
+    mismatchReason: providerPrice !== null ? null : 'no_provider_price',
+    evidenceSnippet: providerEvidence,
+    validatedPrice: providerPrice,
+  };
+
+  if (!ocrRef) {
+    console.log("OCR validation: No OCR reference available - passing through provider price");
+    return noOcrResult;
+  }
+
+  // Rule A: Breakdown Total has absolute priority
+  if (ocrRef.breakdownTotalAmountValue !== null && ocrRef.breakdownTotalAmountValue > 0) {
+    const B_total = ocrRef.breakdownTotalAmountValue;
+    const tolerance = 2; // Allow $2 rounding tolerance
+
+    if (providerPrice === null) {
+      return {
+        accepted: false,
+        status: 'price_not_available_in_content',
+        includesTaxesFees: false,
+        acceptedVia: null,
+        mismatchReason: 'provider_returned_null_but_breakdown_visible',
+        evidenceSnippet: ocrRef.breakdownTotalSnippet || providerEvidence,
+        validatedPrice: null,
+      };
+    }
+
+    if (Math.abs(providerPrice - B_total) <= tolerance) {
+      console.log(`OCR validation [Rule A]: Provider price ${providerPrice} matches breakdown total ${B_total}`);
+      return {
+        accepted: true,
+        status: 'total_price_including_taxes_and_fees',
+        includesTaxesFees: true,
+        acceptedVia: 'breakdown_match',
+        mismatchReason: null,
+        evidenceSnippet: ocrRef.breakdownTotalSnippet || providerEvidence,
+        validatedPrice: providerPrice,
+      };
+    }
+
+    // Breakdown visible but provider price doesn't match - REJECT
+    console.log(`OCR validation [Rule A REJECT]: Provider ${providerPrice} != breakdown ${B_total}`);
+    return {
+      accepted: false,
+      status: 'price_not_available_in_content',
+      includesTaxesFees: false,
+      acceptedVia: null,
+      mismatchReason: `provider_price_mismatch_with_breakdown:${providerPrice}_vs_${B_total}`,
+      evidenceSnippet: `Provider: ${providerPrice}, OCR breakdown: ${ocrRef.breakdownTotalSnippet}`,
+      validatedPrice: null,
+    };
+  }
+
+  // Rule B: No breakdown, booking card only (baseline case)
+  if (ocrRef.bookingCardAmountValue !== null && ocrRef.bookingCardAmountValue > 0) {
+    const B = ocrRef.bookingCardAmountValue;
+    const P = providerPrice;
+
+    if (P === null) {
+      return {
+        accepted: false,
+        status: 'price_not_available_in_content',
+        includesTaxesFees: false,
+        acceptedVia: null,
+        mismatchReason: 'provider_returned_null',
+        evidenceSnippet: ocrRef.bookingCardSnippet || providerEvidence,
+        validatedPrice: null,
+      };
+    }
+
+    // Rule B1: Provider price lower than OCR baseline → REJECT
+    if (P < B) {
+      console.log(`OCR validation [Rule B1 REJECT]: Provider ${P} < OCR baseline ${B}`);
+      return {
+        accepted: false,
+        status: 'price_not_available_in_content',
+        includesTaxesFees: false,
+        acceptedVia: null,
+        mismatchReason: 'provider_price_lower_than_visible_price',
+        evidenceSnippet: `Provider: ${P}, OCR baseline: ${ocrRef.bookingCardSnippet}`,
+        validatedPrice: null,
+      };
+    }
+
+    // Rule B2: Provider price equal to OCR baseline → ACCEPT (but not taxes proven)
+    const tolerance = 2;
+    if (Math.abs(P - B) <= tolerance) {
+      console.log(`OCR validation [Rule B2]: Provider ${P} ≈ OCR baseline ${B}`);
+      return {
+        accepted: true,
+        status: 'total_price_excluding_taxes_and_fees',
+        includesTaxesFees: false,
+        acceptedVia: 'equal_baseline',
+        mismatchReason: null,
+        evidenceSnippet: ocrRef.bookingCardSnippet || providerEvidence,
+        validatedPrice: P,
+      };
+    }
+
+    // Rule B3: Provider price higher than OCR baseline → ACCEPT AS TOTAL
+    if (P > B) {
+      console.log(`OCR validation [Rule B3]: Provider ${P} > OCR baseline ${B} - accepting as total incl. fees`);
+      return {
+        accepted: true,
+        status: 'total_price_including_taxes_and_fees',
+        includesTaxesFees: true,
+        acceptedVia: 'higher_than_baseline',
+        mismatchReason: null,
+        evidenceSnippet: providerEvidence,
+        validatedPrice: P,
+      };
+    }
+  }
+
+  // No OCR data to validate against - pass through
+  console.log("OCR validation: No usable OCR amounts - passing through provider price");
+  return noOcrResult;
 }
 
 // Screenshot-based fallback: ask the multimodal model to read the total from the rendered page.
@@ -3825,7 +4140,7 @@ async function runSearchWithStreaming(
           return { provider, baseline: emptyBaseline('Browserless'), error: 'No API key', durationMs: Date.now() - start };
         }
 
-        const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
+        const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey, nights);
         const durationMs = Date.now() - start;
 
         // Log every Browserless request (success or failure)
