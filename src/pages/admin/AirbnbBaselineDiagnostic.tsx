@@ -19,6 +19,7 @@ interface CandidateSummary {
   kind: string;
   label_hint: string;
   rejected_reason?: string;
+  candidate_type?: string;
 }
 
 interface ProviderAttemptResult {
@@ -163,17 +164,24 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
             </Label>
             <div className="mt-1 space-y-1">
               {result.candidates_summary.map((c, i) => (
-                <div key={i} className="flex items-center justify-between text-xs p-2 bg-muted/50 rounded">
-                  <span className="font-medium">
-                    {c.currency} {c.amount.toLocaleString()}
-                  </span>
+                <div key={i} className="flex items-center justify-between text-xs p-2 bg-muted/50 rounded gap-2">
                   <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-xs">
-                      {c.kind.replace(/_/g, ' ').slice(0, 20)}
-                    </Badge>
+                    <span className="font-mono font-bold">
+                      {c.currency} {c.amount.toLocaleString()}
+                    </span>
+                    {c.candidate_type && (
+                      <Badge 
+                        variant={c.candidate_type === 'total_final' ? 'default' : 'outline'} 
+                        className={`text-xs ${c.candidate_type === 'total_final' ? 'bg-green-600' : c.candidate_type === 'subtotal_nights' ? 'bg-orange-500/20 text-orange-700 border-orange-400' : ''}`}
+                      >
+                        {c.candidate_type}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
                     {c.rejected_reason && (
                       <Badge variant="destructive" className="text-xs">
-                        {c.rejected_reason}
+                        ✗ {c.rejected_reason}
                       </Badge>
                     )}
                   </div>

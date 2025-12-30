@@ -45,6 +45,7 @@ interface ProviderAttemptResult {
     kind: string;
     label_hint: string;
     rejected_reason?: string;
+    candidate_type?: string;
   }>;
 }
 
@@ -84,7 +85,15 @@ function normalizeAmount(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// Extract price candidates
+// Candidate classification types
+type CandidateType = 
+  | 'total_final'           // Explicit "Total USD $X" - the only selectable type
+  | 'subtotal_nights'       // "X nights × $Y" or "$Z for X nights" - always reject
+  | 'taxes_only'            // "Taxes $X" - always reject
+  | 'nightly_rate'          // "per night" - always reject
+  | 'unknown';              // No clear classification - reject
+
+// Extract price candidates with strict classification
 function extractPriceCandidates(content: string, nights: number): Array<{
   amount: number;
   currency: string;
@@ -93,6 +102,7 @@ function extractPriceCandidates(content: string, nights: number): Array<{
   labelHint: string;
   context: string;
   rejectedReason?: string;
+  candidateType: CandidateType;
 }> {
   const moneyPatterns: Array<{ currency: string; re: RegExp }> = [
     { currency: 'USD', re: /(\$\s*[\d,.]+(?:\.\d{2})?)/g },
@@ -113,80 +123,99 @@ function extractPriceCandidates(content: string, nights: number): Array<{
       const amount = normalizeAmount(amountRaw);
       if (!amount || amount < 10 || amount > 500000) continue;
 
-      const start = Math.max(0, index - 120);
-      const end = Math.min(content.length, index + rawMatch.length + 120);
+      // Get context window around the price
+      const start = Math.max(0, index - 150);
+      const end = Math.min(content.length, index + rawMatch.length + 150);
       const context = content.slice(start, end);
       const ctxLower = context.toLowerCase();
 
-      // Nightly detection = immediate rejection
-      const hasNightOnly = /\bper\s+night\b|\/night|\bnightly\b/i.test(context);
-      if (hasNightOnly) {
-        candidates.push({
-          amount,
-          currency,
-          kind: 'price_not_available_in_content',
-          includesTaxesFees: false,
-          labelHint: safeSnippet(context, 100),
-          context: safeSnippet(context, 200),
-          rejectedReason: `nightly_price_only`,
-        });
-        continue;
+      // ============================================================
+      // STEP 1: Classify candidate type using strict rules
+      // ============================================================
+      let candidateType: CandidateType = 'unknown';
+      let rejectedReason: string | undefined;
+
+      // Rule A: Detect nightly rate - ALWAYS REJECT
+      const hasNightlyRate = /\bper\s+night\b|\/night|\bnightly\b|\bnight\s+rate\b/i.test(context);
+      if (hasNightlyRate) {
+        candidateType = 'nightly_rate';
+        rejectedReason = 'nightly_price_only';
       }
 
-      // Ignore terms
-      const ignoreTerms = ['from ', 'starting at', 'save ', 'discount', 'was ', 'original'];
+      // Rule B: Detect subtotal (nights × amount or amount for X nights) - ALWAYS REJECT
+      // This is the key fix: "$1,977 for 4 nights" is a SUBTOTAL, not the total
+      const hasMultiplicationPattern = /\d+\s*nights?\s*[×x]\s*[\$€£]|[\$€£][\d,.]+\s*[×x]\s*\d+\s*nights?/i.test(context);
+      const hasForNightsPattern = /\bfor\s+\d+\s+nights?\b/i.test(context);
+      const hasNightsTimesPattern = /\d+\s+nights?\s+at\b/i.test(context);
+      
+      if (!rejectedReason && (hasMultiplicationPattern || hasForNightsPattern || hasNightsTimesPattern)) {
+        candidateType = 'subtotal_nights';
+        rejectedReason = 'subtotal_nights_only';
+      }
+
+      // Rule C: Detect taxes line - ALWAYS REJECT
+      const hasTaxesOnlyPattern = /\btaxes?\s*[\$€£]|^taxes?\s*$/i.test(context) && 
+                                   !/\btotal\b/i.test(context);
+      if (!rejectedReason && hasTaxesOnlyPattern) {
+        candidateType = 'taxes_only';
+        rejectedReason = 'taxes_line_only';
+      }
+
+      // Rule D: Detect explicit TOTAL - the ONLY selectable type
+      // Must have "Total" without "before taxes" unless we verify taxes are shown separately
+      const hasExplicitTotal = /\b(total\s*\([A-Z]{3}\)|total\s+USD|total\s+EUR|total\s+GBP|trip\s+total|grand\s+total|you\s+pay)\b/i.test(context);
+      const hasGenericTotal = /\btotal\b/i.test(context) && !hasForNightsPattern;
+      const hasTotalBeforeTaxes = /\btotal\s+before\s+taxes\b/i.test(context);
+
+      if (!rejectedReason && (hasExplicitTotal || (hasGenericTotal && !hasTotalBeforeTaxes))) {
+        candidateType = 'total_final';
+        // No rejection - this is valid
+      }
+
+      // ============================================================
+      // STEP 2: Determine if includes taxes/fees
+      // ============================================================
+      const hasTaxesFeesIncluded = /\b(includes?\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees\s+included|including\s+taxes)\b/i.test(context);
+      const hasTaxesLineNearby = /\btaxes?\s*[\$€£]\s*[\d,.]+/i.test(context);
+      
+      // If we see "Total" AND "Taxes" as separate line items, the total includes taxes
+      const includesTaxesFees = hasTaxesFeesIncluded || 
+                                 (hasExplicitTotal && hasTaxesLineNearby) ||
+                                 (hasGenericTotal && hasTaxesLineNearby);
+
+      // ============================================================
+      // STEP 3: Ignore terms that indicate non-prices
+      // ============================================================
+      const ignoreTerms = ['from ', 'starting at', 'save ', 'discount', 'was ', 'original', 'compare at'];
       const ignoreHit = ignoreTerms.find((t) => ctxLower.includes(t));
-      if (ignoreHit) {
-        candidates.push({
-          amount,
-          currency,
-          kind: 'price_not_available_in_content',
-          includesTaxesFees: false,
-          labelHint: safeSnippet(context, 100),
-          context: safeSnippet(context, 200),
-          rejectedReason: `ignored_term:${ignoreHit}`,
-        });
-        continue;
+      if (!rejectedReason && ignoreHit) {
+        candidateType = 'unknown';
+        rejectedReason = `ignored_term:${ignoreHit}`;
       }
 
-      // Classify
-      const hasTotalLabel = /\b(trip total|grand total|total before taxes|total|you pay)\b/i.test(context);
-      const hasTaxesFeesLabel = /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes)\b/i.test(context);
-      const hasBeforeTaxesLabel = /\btotal\s+before\s+taxes\b/i.test(context);
-      const hasForNights = new RegExp(`\\bfor\\s+${nights}\\s+nights?\\b`, 'i').test(context) || /\bfor\s+\d+\s+nights?\b/i.test(context);
-
+      // ============================================================
+      // STEP 4: Final classification and kind assignment
+      // ============================================================
       let kind: AirbnbBaselineStatus = 'price_not_available_in_content';
-      let includesTaxesFees = false;
 
-      if (hasTotalLabel || hasForNights) {
-        kind = hasBeforeTaxesLabel ? 'total_price_excluding_taxes_and_fees' : 'total_price_excluding_taxes_and_fees';
-      }
-
-      if (hasTaxesFeesLabel) {
-        includesTaxesFees = true;
-        kind = 'total_price_including_taxes_and_fees';
-      }
-
-      if (kind === 'price_not_available_in_content') {
-        candidates.push({
-          amount,
-          currency,
-          kind,
-          includesTaxesFees: false,
-          labelHint: safeSnippet(context, 100),
-          context: safeSnippet(context, 200),
-          rejectedReason: 'no_total_label_found',
-        });
-        continue;
+      if (candidateType === 'total_final' && !rejectedReason) {
+        kind = includesTaxesFees 
+          ? 'total_price_including_taxes_and_fees' 
+          : 'total_price_excluding_taxes_and_fees';
+      } else if (!rejectedReason) {
+        // If not explicitly classified as total_final, reject it
+        rejectedReason = 'no_explicit_total_label';
       }
 
       candidates.push({
         amount,
         currency,
         kind,
-        includesTaxesFees,
+        includesTaxesFees: candidateType === 'total_final' ? includesTaxesFees : false,
         labelHint: safeSnippet(context, 100),
         context: safeSnippet(context, 200),
+        rejectedReason,
+        candidateType,
       });
     }
   }
@@ -340,12 +369,13 @@ async function testFirecrawl(url: string, nights: number, supabase: any): Promis
       includes_taxes_fees: selected?.includesTaxesFees || false,
       evidence_snippet: selected?.context || safeSnippet(content, 300),
       duration_ms: durationMs,
-      candidates_summary: candidates.slice(0, 5).map(c => ({
+      candidates_summary: candidates.slice(0, 10).map(c => ({
         amount: c.amount,
         currency: c.currency,
         kind: c.kind,
         label_hint: c.labelHint,
         rejected_reason: c.rejectedReason,
+        candidate_type: c.candidateType,
       })),
     };
   } catch (e) {
@@ -478,12 +508,13 @@ async function testZyte(url: string, nights: number, supabase: any): Promise<Pro
       includes_taxes_fees: selected?.includesTaxesFees || false,
       evidence_snippet: selected?.context || safeSnippet(html, 300),
       duration_ms: durationMs,
-      candidates_summary: candidates.slice(0, 5).map(c => ({
+      candidates_summary: candidates.slice(0, 10).map(c => ({
         amount: c.amount,
         currency: c.currency,
         kind: c.kind,
         label_hint: c.labelHint,
         rejected_reason: c.rejectedReason,
+        candidate_type: c.candidateType,
       })),
     };
   } catch (e) {
@@ -533,21 +564,59 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
           await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-          await sleep(8000);
+          await sleep(6000);
 
-          // Try to expand price breakdown
-          const clickSelectors = [
+          // STEP 1: Try to expand price breakdown by clicking on the price summary
+          // Airbnb shows "$X for Y nights" as a button that expands to show taxes/total
+          const priceBreakdownSelectors = [
+            // Data-testid based selectors
             "button[data-testid='price-breakdown-trigger']",
-            "button[aria-label*='Show price breakdown']",
+            "[data-testid='book-it-default-bookitnow-button'] ~ button",
+            
+            // Aria-label based selectors for the price display
+            "button[aria-label*='for'][aria-label*='nights']",
+            "[aria-label*='for'][aria-label*='nights']",
+            
+            // Text content based - click on price area
+            "button:has-text('for') :has-text('nights')",
+            
+            // Structure-based selectors for Airbnb price breakdown
+            "._1ld6sh3 button", // Common price container class
+            "._ymq6as button",  // Another price container
+            
+            // Generic underlined price (Airbnb uses underline to indicate expandable)
+            "[style*='text-decoration: underline']",
+            "span[style*='underline']",
           ];
 
-          for (const sel of clickSelectors) {
+          let clicked = false;
+          for (const sel of priceBreakdownSelectors) {
             try {
               const el = await page.$(sel);
               if (el) {
-                await el.click({ delay: 30 });
-                await sleep(1500);
-                break;
+                const box = await el.boundingBox();
+                if (box && box.width > 0 && box.height > 0) {
+                  await el.click({ delay: 50 });
+                  await sleep(1500);
+                  clicked = true;
+                  break;
+                }
+              }
+            } catch (e) {}
+          }
+
+          // STEP 2: If no explicit button found, try clicking on any "$X,XXX for N nights" text
+          if (!clicked) {
+            try {
+              const priceElements = await page.$$('span, button, div');
+              for (const el of priceElements) {
+                const text = await el.textContent().catch(() => '');
+                if (text && /\\$[\\d,]+\\s+for\\s+\\d+\\s+nights?/i.test(text)) {
+                  await el.click({ delay: 50 });
+                  await sleep(1500);
+                  clicked = true;
+                  break;
+                }
               }
             } catch (e) {}
           }
@@ -555,7 +624,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
           await sleep(2000);
           const html = await page.content();
 
-          return { html };
+          return { html, priceBreakdownClicked: clicked };
         }
       `,
       context: { url },
@@ -628,10 +697,17 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     }
 
     const candidates = extractPriceCandidates(html, nights);
-    const accepted = candidates.filter(c => !c.rejectedReason);
-    const sorted = accepted.sort((a, b) => {
-      const kindRank = (k: string) => k === 'total_price_including_taxes_and_fees' ? 3 : k === 'total_price_excluding_taxes_and_fees' ? 2 : 0;
-      return kindRank(b.kind) - kindRank(a.kind) || b.amount - a.amount;
+    
+    // STRICT SELECTION: Only accept total_final candidates
+    const totalFinalCandidates = candidates.filter(c => c.candidateType === 'total_final' && !c.rejectedReason);
+    
+    // Sort by: includes_taxes_fees first (prefer totals with taxes), then by amount (highest)
+    const sorted = totalFinalCandidates.sort((a, b) => {
+      // Prefer including taxes/fees
+      if (a.includesTaxesFees && !b.includesTaxesFees) return -1;
+      if (!a.includesTaxesFees && b.includesTaxesFees) return 1;
+      // Then prefer higher amount (likely includes fees)
+      return b.amount - a.amount;
     });
 
     const selected = sorted[0];
@@ -644,12 +720,13 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
       includes_taxes_fees: selected?.includesTaxesFees || false,
       evidence_snippet: selected?.context || safeSnippet(html, 300),
       duration_ms: durationMs,
-      candidates_summary: candidates.slice(0, 5).map(c => ({
+      candidates_summary: candidates.slice(0, 10).map(c => ({
         amount: c.amount,
         currency: c.currency,
         kind: c.kind,
         label_hint: c.labelHint,
         rejected_reason: c.rejectedReason,
+        candidate_type: c.candidateType,
       })),
     };
   } catch (e) {
