@@ -45,7 +45,7 @@ async function ocrImageToText(imageBase64Png: string): Promise<string> {
           {
             type: 'text',
             text:
-              'Read the text in this Airbnb booking-card screenshot. Return ONLY the recognized text with line breaks. Do not add commentary.',
+              'Read ALL visible text in this Airbnb page screenshot, from top to bottom. Include all prices, amounts with dollar signs, and text like "for X nights". Return ONLY the recognized text with line breaks. Do not add commentary.',
           },
           {
             type: 'image_url',
@@ -331,7 +331,6 @@ async function runBrowserless(url: string): Promise<any> {
     const functionPayload = {
       code: `export default async function({ page }) {
         const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-        // Polyfill for older/newer runtimes that removed page.waitForTimeout
         if (!page.waitForTimeout || typeof page.waitForTimeout !== 'function') {
           page.waitForTimeout = (ms) => sleep(ms);
         }
@@ -339,15 +338,29 @@ async function runBrowserless(url: string): Promise<any> {
         const requestedUrl = '${url}';
         const targetRoomPath = '/rooms/903802242341279498';
 
-        // Realistic Chrome UA to reduce weird variants
+        // Step 1: Enforce consistent session context
         await page.setUserAgent(
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
         );
+        await page.setExtraHTTPHeaders({
+          'Accept-Language': 'en-US,en;q=0.9'
+        });
 
-        // Viewport first
-        await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 2 });
+        // Set viewport before navigation (larger height to capture booking card)
+        await page.setViewport({ width: 1280, height: 1200, deviceScaleFactor: 2 });
 
-        // Capture redirect / navigation chain (best-effort)
+        // Set timezone via CDP
+        try {
+          const client = await page.target().createCDPSession();
+          await client.send('Emulation.setTimezoneOverride', { timezoneId: 'America/New_York' });
+          await client.send('Network.enable');
+          await client.send('Network.clearBrowserCookies');
+          await client.send('Network.clearBrowserCache');
+        } catch (cdpErr) {
+          console.log('CDP setup partial failure:', cdpErr);
+        }
+
+        // Capture redirect / navigation chain
         const chain = [];
         page.on('response', (res) => {
           try {
@@ -357,14 +370,6 @@ async function runBrowserless(url: string): Promise<any> {
           } catch {}
         });
 
-        // Hard reset (best-effort) - clear cookies/cache
-        try {
-          const client = await page.target().createCDPSession();
-          await client.send('Network.enable');
-          await client.send('Network.clearBrowserCookies');
-          await client.send('Network.clearBrowserCache');
-        } catch {}
-
         // Establish origin, then clear storage
         await page.goto('https://www.airbnb.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
         await sleep(500);
@@ -373,7 +378,6 @@ async function runBrowserless(url: string): Promise<any> {
             localStorage.clear();
             sessionStorage.clear();
             if ('caches' in window) {
-              // @ts-ignore
               caches.keys().then((keys) => keys.forEach((k) => caches.delete(k)));
             }
           });
@@ -383,7 +387,7 @@ async function runBrowserless(url: string): Promise<any> {
         await page.goto(requestedUrl, { waitUntil: 'networkidle2', timeout: 45000 });
         await sleep(1000);
 
-        // Reset scroll BEFORE capture
+        // Reset scroll BEFORE anything
         await page.evaluate(() => window.scrollTo(0, 0));
         await sleep(500);
 
@@ -391,18 +395,94 @@ async function runBrowserless(url: string): Promise<any> {
         const pageTitle = await page.title().catch(() => '');
         const bodyText = await page.evaluate(() => (document.body?.innerText || '').slice(0, 500)).catch(() => '');
 
-        const screenshotTopClip = { x: 0, y: 0, width: 1280, height: 900 };
-        const scrollY = await page.evaluate(() => Math.round(window.scrollY || 0));
-        const screenshotTopBase64 = await page
-          .screenshot({ encoding: 'base64', clip: screenshotTopClip })
-          .catch(() => null);
-
         const finalPathOk = typeof finalUrl === 'string' && finalUrl.includes(targetRoomPath);
-        const bookingConfirmedContamination = /BOOKING\s+CONFIRMED|Your\s+trip\s+to/i.test(bodyText);
+        const bookingConfirmedContamination = /BOOKING\\s+CONFIRMED|Your\\s+trip\\s+to/i.test(bodyText);
 
         let wrongReason = null;
         if (!finalPathOk) wrongReason = 'final_url_not_target_room';
         else if (bookingConfirmedContamination) wrongReason = 'booking_confirmed_contamination';
+
+        // If wrong page, return early with evidence
+        if (wrongReason) {
+          const screenshotTopClip = { x: 0, y: 0, width: 1280, height: 1200 };
+          const scrollY = await page.evaluate(() => Math.round(window.scrollY || 0));
+          const screenshotTopBase64 = await page.screenshot({ encoding: 'base64', clip: screenshotTopClip }).catch(() => null);
+          return {
+            requestedUrl,
+            finalUrl,
+            pageTitle,
+            bodyTextSnippet: bodyText,
+            redirectChain: chain.slice(-5),
+            wrongPageContextReason: wrongReason,
+            screenshotTopBase64,
+            screenshotTopClip,
+            scrollY,
+            html: '',
+            candidateSetsOverTime: [],
+            waitExitReason: 'navigation_failed',
+          };
+        }
+
+        // Step 2: Wait loop to let headline price settle (up to 25 seconds)
+        // Poll for "$X for 4 nights" patterns, exit early if 2214 found
+        const extractCandidates = () => {
+          const text = document.body?.innerText || '';
+          const pattern = /\\$(\\d{1,3}(?:,\\d{3})*)\\s+for\\s+4\\s+nights?/gi;
+          const matches = [];
+          let m;
+          while ((m = pattern.exec(text)) !== null) {
+            const raw = m[1].replace(/,/g, '');
+            const val = parseInt(raw, 10);
+            if (!isNaN(val)) matches.push(val);
+          }
+          return matches;
+        };
+
+        const candidateSetsOverTime = [];
+        let waitExitReason = 'timeout';
+        const waitStart = Date.now();
+        const maxWaitMs = 25000;
+        let lastSetString = '';
+        let stableCount = 0;
+
+        while (Date.now() - waitStart < maxWaitMs) {
+          const candidates = await page.evaluate(extractCandidates);
+          const sortedSet = [...new Set(candidates)].sort((a, b) => b - a);
+          const setString = sortedSet.join(',');
+
+          candidateSetsOverTime.push({
+            timestamp: Date.now() - waitStart,
+            candidates: sortedSet,
+          });
+
+          // Exit A: 2214 found
+          if (sortedSet.includes(2214)) {
+            waitExitReason = 'found_2214';
+            break;
+          }
+
+          // Exit B: Candidates stable for 3 consecutive polls (1s apart)
+          if (setString === lastSetString) {
+            stableCount++;
+            if (stableCount >= 3) {
+              waitExitReason = 'stabilised';
+              break;
+            }
+          } else {
+            stableCount = 0;
+            lastSetString = setString;
+          }
+
+          await sleep(1000);
+        }
+
+        // Ensure scroll is still at 0
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await sleep(200);
+
+        const screenshotTopClip = { x: 0, y: 0, width: 1280, height: 1200 };
+        const scrollY = await page.evaluate(() => Math.round(window.scrollY || 0));
+        const screenshotTopBase64 = await page.screenshot({ encoding: 'base64', clip: screenshotTopClip }).catch(() => null);
 
         return {
           requestedUrl,
@@ -410,11 +490,13 @@ async function runBrowserless(url: string): Promise<any> {
           pageTitle,
           bodyTextSnippet: bodyText,
           redirectChain: chain.slice(-5),
-          wrongPageContextReason: wrongReason,
+          wrongPageContextReason: null,
           screenshotTopBase64,
           screenshotTopClip,
           scrollY,
           html: await page.content(),
+          candidateSetsOverTime,
+          waitExitReason,
         };
       }`,
       context: {},
@@ -424,7 +506,7 @@ async function runBrowserless(url: string): Promise<any> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(functionPayload),
-    }, 65000);
+    }, 90000);
 
     const durationMs = Date.now() - start;
     if (!resp.ok) {
@@ -440,6 +522,8 @@ async function runBrowserless(url: string): Promise<any> {
     const screenshot_top_base64 = result.screenshotTopBase64 || null;
     const screenshot_top_clip = result.screenshotTopClip || null;
     const scroll_y_at_capture = typeof result.scrollY === 'number' ? result.scrollY : null;
+    const candidate_sets_over_time = result.candidateSetsOverTime || [];
+    const wait_exit_reason = result.waitExitReason || null;
 
     const navigation_phase = {
       requested_url: result.requestedUrl || url,
@@ -450,7 +534,7 @@ async function runBrowserless(url: string): Promise<any> {
       wrong_page_context_reason: result.wrongPageContextReason || null,
     };
 
-    // If Browserless isn't on the correct room (or is contaminated), FAIL EARLY.
+    // If Browserless isn't on the correct room, FAIL EARLY.
     if (navigation_phase.wrong_page_context_reason) {
       return {
         status: 'wrong_page_context',
@@ -463,10 +547,12 @@ async function runBrowserless(url: string): Promise<any> {
         screenshot_top_base64,
         screenshot_top_clip,
         scroll_y_at_capture,
+        candidate_sets_over_time,
+        wait_exit_reason,
       };
     }
 
-    // Reuse existing booking_card_* naming in provider results so downstream code doesn't change.
+    // Reuse booking_card_* naming for downstream code
     const booking_card_screenshot_base64 = screenshot_top_base64;
     const booking_card_screenshot_bbox = screenshot_top_clip;
     const booking_card_screenshot_dimensions = screenshot_top_clip
@@ -494,6 +580,8 @@ async function runBrowserless(url: string): Promise<any> {
         screenshot_top_base64,
         screenshot_top_clip,
         scroll_y_at_capture,
+        candidate_sets_over_time,
+        wait_exit_reason,
       };
     }
 
@@ -517,6 +605,8 @@ async function runBrowserless(url: string): Promise<any> {
         screenshot_top_base64,
         screenshot_top_clip,
         scroll_y_at_capture,
+        candidate_sets_over_time,
+        wait_exit_reason,
       };
     }
 
@@ -539,6 +629,8 @@ async function runBrowserless(url: string): Promise<any> {
         screenshot_top_base64,
         screenshot_top_clip,
         scroll_y_at_capture,
+        candidate_sets_over_time,
+        wait_exit_reason,
       };
     }
 
@@ -554,6 +646,8 @@ async function runBrowserless(url: string): Promise<any> {
       screenshot_top_base64,
       screenshot_top_clip,
       scroll_y_at_capture,
+      candidate_sets_over_time,
+      wait_exit_reason,
     };
   } catch (e) {
     return { status: 'provider_error', error: String(e), durationMs: Date.now() - start };
@@ -609,6 +703,8 @@ Deno.serve(async (req) => {
   const screenshotTopBase64: string | null = browserless?.screenshot_top_base64 ?? null;
   const screenshotTopClip = browserless?.screenshot_top_clip ?? null;
   const scrollYAtCapture: number | null = browserless?.scroll_y_at_capture ?? null;
+  const candidateSetsOverTime = browserless?.candidate_sets_over_time ?? [];
+  const waitExitReason = browserless?.wait_exit_reason ?? null;
 
   const requiredNights = 4;
 
@@ -621,6 +717,10 @@ Deno.serve(async (req) => {
     screenshot_top_sha256: null,
     screenshot_top_clip: screenshotTopClip,
     scroll_y_at_capture: scrollYAtCapture,
+
+    // Wait loop artifacts
+    candidate_sets_over_time: candidateSetsOverTime,
+    wait_exit_reason: waitExitReason,
 
     // Back-compat: keep the older booking_card_screenshot_* fields populated with screenshot-top
     booking_card_screenshot_sha256: null,
@@ -927,6 +1027,10 @@ Deno.serve(async (req) => {
         screenshot_top_sha256: ocrArtifacts.screenshot_top_sha256,
         screenshot_top_clip: ocrArtifacts.screenshot_top_clip,
         scroll_y_at_capture: ocrArtifacts.scroll_y_at_capture,
+
+        // Wait loop artifacts
+        candidate_sets_over_time: ocrArtifacts.candidate_sets_over_time,
+        wait_exit_reason: ocrArtifacts.wait_exit_reason,
 
         booking_card_screenshot_sha256: ocrArtifacts.booking_card_screenshot_sha256,
         ocr_input_image_sha256: ocrArtifacts.ocr_input_image_sha256,
