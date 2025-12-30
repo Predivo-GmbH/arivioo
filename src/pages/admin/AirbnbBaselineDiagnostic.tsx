@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Play, RefreshCw, CheckCircle, XCircle, AlertCircle, Clock, Copy, History, ExternalLink } from 'lucide-react';
+import { Play, RefreshCw, CheckCircle, XCircle, AlertCircle, Clock, Copy, History, ExternalLink, Beaker, AlertTriangle } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,6 +12,7 @@ import { toast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
 import { format } from 'date-fns';
+import { DiagnosticTotalConfirmation } from '@/components/admin/DiagnosticTotalConfirmation';
 
 interface CandidateSummary {
   amount: number;
@@ -72,12 +73,22 @@ function StatusBadge({ status }: { status: string }) {
   const isSuccess = status.startsWith('total_price_');
   const isBlocked = status.includes('blocked') || status.includes('captcha');
   const isNotSupported = status.includes('not_supported');
+  const isNeedsConfirmation = status === 'needs_user_confirmation' || status === 'subtotal_nights_only';
   
   if (isSuccess) {
     return (
       <Badge className="bg-green-500/20 text-green-700 border-green-500/30">
         <CheckCircle className="w-3 h-3 mr-1" />
         {status.replace(/_/g, ' ')}
+      </Badge>
+    );
+  }
+
+  if (isNeedsConfirmation) {
+    return (
+      <Badge className="bg-amber-500/20 text-amber-700 border-amber-500/30">
+        <AlertTriangle className="w-3 h-3 mr-1" />
+        Needs Confirmation
       </Badge>
     );
   }
@@ -259,6 +270,58 @@ export default function AirbnbBaselineDiagnostic() {
   const [history, setHistory] = useState<DebugHistoryItem[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [activeTab, setActiveTab] = useState('run');
+  const [diagnosticConfirmation, setDiagnosticConfirmation] = useState<{
+    confirmed_total_amount: number;
+    confirmed_currency: string;
+    confirmation_source: string;
+    confirmed_at: string;
+    confirmation_note?: string;
+  } | null>(null);
+
+  // Load confirmation for current run_id
+  const loadConfirmation = async (runId: string) => {
+    try {
+      const token = getToken();
+      const { data, error } = await supabase.functions.invoke(`admin-dashboard/get-diagnostic-confirmation?runId=${runId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        method: 'GET',
+      });
+      if (error) throw error;
+      setDiagnosticConfirmation(data.confirmation || null);
+    } catch (err: any) {
+      console.error('Error loading confirmation:', err);
+    }
+  };
+
+  // Get subtotal info from results
+  const getSubtotalFromResults = (): { amount: number | null; nights: number | null; currency: string } => {
+    if (!results?.results?.[0]) return { amount: null, nights: null, currency: 'USD' };
+    
+    // Look for subtotal candidates in the first run's provider results
+    for (const providerResult of results.results[0].provider_results) {
+      const subtotalCandidate = providerResult.candidates_summary?.find(
+        c => c.candidate_type === 'subtotal_nights' || c.kind === 'subtotal'
+      );
+      if (subtotalCandidate) {
+        return {
+          amount: subtotalCandidate.amount,
+          nights: results.nights,
+          currency: subtotalCandidate.currency || 'USD',
+        };
+      }
+    }
+    return { amount: null, nights: results.nights, currency: 'USD' };
+  };
+
+  // Check if any run needs confirmation (no proven total)
+  const needsConfirmation = (): boolean => {
+    if (!results) return false;
+    // If no run has a proven total, we need confirmation
+    const hasProvenTotal = results.results.some(r => 
+      r.final_status.startsWith('total_price_') && r.final_price !== null
+    );
+    return !hasProvenTotal;
+  };
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -533,6 +596,19 @@ export default function AirbnbBaselineDiagnostic() {
                   </div>
                 </CardContent>
               </Card>
+
+              {/* Confirmation UI for when no proven total */}
+              {needsConfirmation() && (
+                <DiagnosticTotalConfirmation
+                  runId={results.run_id}
+                  subtotalAmount={getSubtotalFromResults().amount}
+                  subtotalNights={getSubtotalFromResults().nights}
+                  subtotalCurrency={getSubtotalFromResults().currency}
+                  existingConfirmation={diagnosticConfirmation}
+                  onConfirmed={() => loadConfirmation(results.run_id)}
+                  onCleared={() => setDiagnosticConfirmation(null)}
+                />
+              )}
 
               <Separator />
 
