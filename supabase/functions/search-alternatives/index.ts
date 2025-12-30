@@ -1099,10 +1099,356 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
   return { price: null, currency: 'USD' };
 }
 
+
+// ============================================================================
+// Grounded Airbnb price extraction (no guessing, always evidence + debug)
+// ============================================================================
+
+type AirbnbBaselineStatus =
+  | 'total_price_including_taxes_and_fees'
+  | 'total_price_excluding_taxes_and_fees'
+  | 'per_night_price_only'
+  | 'price_not_available_in_content';
+
+type PriceCandidate = {
+  rawMatch: string; // verbatim matched string (includes currency symbol/label when possible)
+  amountRaw: string;
+  amount: number;
+  currency: string;
+  index: number;
+  context: string; // +/- context window
+  labelHint: string; // extracted label-ish context
+  kind: AirbnbBaselineStatus;
+  includesTaxesFees: boolean;
+  score: number;
+  rejectedReason?: string;
+};
+
+type AirbnbBaselineExtraction = {
+  status: AirbnbBaselineStatus;
+  price: number | null;
+  currency: string | null;
+  includes_taxes_fees: boolean;
+  evidence_snippet: string;
+  debug: {
+    provider: string;
+    content_hash: string;
+    candidates: Array<{
+      amount: number;
+      currency: string;
+      kind: AirbnbBaselineStatus;
+      includes_taxes_fees: boolean;
+      score: number;
+      labelHint: string;
+      context: string;
+      rejectedReason?: string;
+    }>;
+    selected?: {
+      amount: number;
+      currency: string;
+      kind: AirbnbBaselineStatus;
+      includes_taxes_fees: boolean;
+      score: number;
+      labelHint: string;
+      context: string;
+      selection_reason: string;
+    };
+  };
+};
+
+function normalizeAmount(raw: string): number | null {
+  const cleaned = raw
+    .replace(/\s/g, '')
+    .replace(/,(?=\d{3}(?:\D|$))/g, '') // remove thousand separators
+    .replace(/(\d)\.(\d)\.(\d)/g, '$1$2.$3');
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+function safeSnippet(s: string, max = 260): string {
+  return (s || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function extractAirbnbPriceCandidates(content: string, nights: number): PriceCandidate[] {
+  const lower = content.toLowerCase();
+
+  // Broad money patterns; we will classify using nearby label context.
+  const moneyPatterns: Array<{ currency: string; re: RegExp }> = [
+    { currency: 'USD', re: /(\$\s*[\d,.]+(?:\.\d{2})?)/g },
+    { currency: 'EUR', re: /(€\s*[\d,.]+(?:\.\d{2})?)/g },
+    { currency: 'GBP', re: /(£\s*[\d,.]+(?:\.\d{2})?)/g },
+    { currency: 'CHF', re: /(CHF\s*[\d,.]+(?:\.\d{2})?)/gi },
+    { currency: 'AUD', re: /(A\$\s*[\d,.]+(?:\.\d{2})?)/gi },
+    { currency: 'CAD', re: /(C\$\s*[\d,.]+(?:\.\d{2})?)/gi },
+    { currency: 'USD', re: /(US\$\s*[\d,.]+(?:\.\d{2})?)/gi },
+  ];
+
+  const candidates: PriceCandidate[] = [];
+
+  for (const { currency, re } of moneyPatterns) {
+    let match: RegExpExecArray | null;
+    re.lastIndex = 0;
+    while ((match = re.exec(content)) !== null) {
+      const rawMatch = match[1];
+      const index = match.index;
+      const amountRaw = rawMatch.replace(/[^0-9.,]/g, '');
+      const amount = normalizeAmount(amountRaw);
+      if (!amount || amount < 10 || amount > 500000) continue;
+
+      const start = Math.max(0, index - 120);
+      const end = Math.min(content.length, index + rawMatch.length + 120);
+      const context = content.slice(start, end);
+      const ctxLower = context.toLowerCase();
+
+      // Hard ignore contexts (non-total signals)
+      const ignoreTerms = [
+        'per night',
+        '/night',
+        'nightly',
+        'from ',
+        'starting at',
+        'save ',
+        'discount',
+        'was ',
+        'original',
+        'crossed',
+        'strikethrough',
+        'before discount',
+        'coupon',
+      ];
+
+      const ignoreHit = ignoreTerms.find((t) => ctxLower.includes(t));
+      if (ignoreHit) {
+        candidates.push({
+          rawMatch,
+          amountRaw,
+          amount,
+          currency,
+          index,
+          context: safeSnippet(context, 240),
+          labelHint: safeSnippet(context, 120),
+          kind: 'price_not_available_in_content',
+          includesTaxesFees: false,
+          score: -10,
+          rejectedReason: `ignored_due_to_term:${ignoreHit}`,
+        });
+        continue;
+      }
+
+      // Classify using label context.
+      const hasTotalLabel = /\b(trip total|grand total|total before taxes|total|you pay|you will pay)\b/i.test(context);
+      const hasTaxesFeesLabel = /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(context);
+      const hasBeforeTaxesLabel = /\btotal\s+before\s+taxes\b/i.test(context);
+      const hasForNights = new RegExp(`\\bfor\\s+${nights}\\s+nights?\\b`, 'i').test(context) || /\bfor\s+\d+\s+nights?\b/i.test(context);
+      const hasNightOnly = /\bper\s+night\b|\/night|\bnightly\b/i.test(context);
+
+      let kind: AirbnbBaselineStatus = 'price_not_available_in_content';
+      let includesTaxesFees = false;
+      let score = 0;
+
+      if (hasNightOnly) {
+        kind = 'per_night_price_only';
+        score = 1;
+      }
+
+      if (hasTotalLabel) {
+        kind = hasBeforeTaxesLabel ? 'total_price_excluding_taxes_and_fees' : 'total_price_excluding_taxes_and_fees';
+        score = 10;
+      }
+
+      if (hasForNights && !hasNightOnly) {
+        // This is the "$X for Y nights" widget headline; not necessarily taxes-inclusive.
+        kind = 'total_price_excluding_taxes_and_fees';
+        score = Math.max(score, 7);
+      }
+
+      if (hasTaxesFeesLabel) {
+        includesTaxesFees = true;
+        kind = 'total_price_including_taxes_and_fees';
+        score = Math.max(score, 14);
+      }
+
+      // Prefer candidates near booking summary language
+      const containerBoostTerms = ['price breakdown', 'booking', 'summary', 'total', 'trip total'];
+      if (containerBoostTerms.some((t) => ctxLower.includes(t))) score += 2;
+
+      // Penalize very small or suspiciously round values slightly
+      if (amount < 30) score -= 1;
+
+      candidates.push({
+        rawMatch,
+        amountRaw,
+        amount,
+        currency,
+        index,
+        context: safeSnippet(context, 240),
+        labelHint: safeSnippet(context, 120),
+        kind,
+        includesTaxesFees,
+        score,
+      });
+    }
+  }
+
+  // De-dupe exact same match+index
+  const seen = new Set<string>();
+  return candidates.filter((c) => {
+    const k = `${c.index}:${c.rawMatch}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function validatePriceExtraction(
+  content: string,
+  selected: PriceCandidate
+): { ok: boolean; reason?: string; evidence: string } {
+  // Deterministic grounding checks:
+  // 1) amount appears exactly as rawMatch in content
+  // 2) currency is present in the same snippet (rawMatch includes it)
+  // 3) label context exists in same section: total/trip total/for nights/taxes label
+  const idx = content.indexOf(selected.rawMatch);
+  const start = Math.max(0, (idx === -1 ? selected.index : idx) - 140);
+  const end = Math.min(content.length, (idx === -1 ? selected.index : idx) + selected.rawMatch.length + 160);
+  const snippet = safeSnippet(content.slice(start, end), 340);
+
+  if (idx === -1) {
+    return { ok: false, reason: 'raw_match_not_found_verbatim', evidence: snippet };
+  }
+
+  const s = snippet.toLowerCase();
+  const hasContext =
+    /\b(trip total|grand total|total before taxes|total|for\s+\d+\s+nights?)\b/i.test(snippet) ||
+    /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(snippet);
+
+  if (!hasContext) {
+    return { ok: false, reason: 'missing_total_or_nights_context', evidence: snippet };
+  }
+
+  // Currency is "present" if rawMatch includes the symbol/prefix already.
+  const hasCurrency = /\$|€|£|\bCHF\b|\bUS\$\b|\bA\$\b|\bC\$\b/i.test(selected.rawMatch);
+  if (!hasCurrency) {
+    return { ok: false, reason: 'currency_missing_in_raw_match', evidence: snippet };
+  }
+
+  return { ok: true, evidence: snippet };
+}
+
+function extractAirbnbBaselineGrounded(
+  content: string,
+  nights: number,
+  provider: string
+): AirbnbBaselineExtraction {
+  const contentHash = hashContent(content);
+  const candidates = extractAirbnbPriceCandidates(content, nights);
+
+  // Choose by score, then prefer taxes+fees proven, then prefer "total"-kind, then highest score.
+  const usable = candidates
+    .map((c) => {
+      if (c.rejectedReason) return c;
+
+      // Reject generic prices with no classification
+      if (c.kind === 'price_not_available_in_content') {
+        return { ...c, rejectedReason: 'unclassified_no_total_or_nights_context' };
+      }
+
+      const v = validatePriceExtraction(content, c);
+      if (!v.ok) {
+        return { ...c, rejectedReason: `validation_failed:${v.reason}` };
+      }
+
+      return c;
+    });
+
+  const accepted = usable.filter((c) => !c.rejectedReason);
+
+  const sorted = [...accepted].sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (Number(b.includesTaxesFees) !== Number(a.includesTaxesFees)) return Number(b.includesTaxesFees) - Number(a.includesTaxesFees);
+    const kindRank = (k: AirbnbBaselineStatus) =>
+      k === 'total_price_including_taxes_and_fees' ? 3 : k === 'total_price_excluding_taxes_and_fees' ? 2 : k === 'per_night_price_only' ? 1 : 0;
+    if (kindRank(b.kind) !== kindRank(a.kind)) return kindRank(b.kind) - kindRank(a.kind);
+    return b.amount - a.amount;
+  });
+
+  const debugCandidates = usable.slice(0, 24).map((c) => ({
+    amount: c.amount,
+    currency: c.currency,
+    kind: c.kind,
+    includes_taxes_fees: c.includesTaxesFees,
+    score: c.score,
+    labelHint: safeSnippet(c.labelHint, 120),
+    context: safeSnippet(c.context, 220),
+    rejectedReason: c.rejectedReason,
+  }));
+
+  if (!sorted.length) {
+    const fallbackEvidence = safeSnippet(content.replace(/<[^>]+>/g, ' '), 340);
+    return {
+      status: 'price_not_available_in_content',
+      price: null,
+      currency: null,
+      includes_taxes_fees: false,
+      evidence_snippet: fallbackEvidence,
+      debug: {
+        provider,
+        content_hash: contentHash,
+        candidates: debugCandidates,
+      },
+    };
+  }
+
+  const selected = sorted[0];
+  const validation = validatePriceExtraction(content, selected);
+
+  // This should always be ok for selected, but keep deterministic guard.
+  if (!validation.ok) {
+    return {
+      status: 'price_not_available_in_content',
+      price: null,
+      currency: null,
+      includes_taxes_fees: false,
+      evidence_snippet: validation.evidence,
+      debug: {
+        provider,
+        content_hash: contentHash,
+        candidates: debugCandidates,
+      },
+    };
+  }
+
+  const selection_reason = `selected_highest_score_candidate(score=${selected.score}, kind=${selected.kind}, includes_taxes_fees=${selected.includesTaxesFees})`;
+
+  return {
+    status: selected.kind,
+    price: selected.amount,
+    currency: selected.currency,
+    includes_taxes_fees: selected.includesTaxesFees,
+    evidence_snippet: validation.evidence,
+    debug: {
+      provider,
+      content_hash: contentHash,
+      candidates: debugCandidates,
+      selected: {
+        amount: selected.amount,
+        currency: selected.currency,
+        kind: selected.kind,
+        includes_taxes_fees: selected.includesTaxesFees,
+        score: selected.score,
+        labelHint: safeSnippet(selected.labelHint, 120),
+        context: safeSnippet(selected.context, 220),
+        selection_reason,
+      },
+    },
+  };
+}
+
 // Use Lovable AI to extract Airbnb TOTAL STAY PRICE (including mandatory fees) from scraped content.
 // Returns the TOTAL price for the entire stay and currency, NOT per-night.
+// NOTE: This function is legacy; Airbnb baseline selection must be grounded by extractAirbnbBaselineGrounded().
 async function extractAirbnbTotalPriceWithAI(content: string, nights: number): Promise<{ price: number | null; currency: string }> {
-  // Try regex extraction first (fast path)
+
   const regexResult = extractTotalPriceWithRegex(content, nights);
   if (regexResult.price) {
     console.log("Using regex-extracted TOTAL price:", regexResult.price, regexResult.currency);
@@ -3073,61 +3419,50 @@ async function runSearchWithStreaming(
   });
 
   // =====================================================================
-  // MULTI-PROVIDER DEBUGGING MODE: Run all 3 providers and compare prices
+  // MULTI-PROVIDER DEBUGGING MODE: Run providers and compare prices
+  // NOTE: Airbnb baseline must be GROUNDED: never return a number without
+  // verbatim evidence + explicit classification.
   // =====================================================================
   interface ProviderPriceResult {
     provider: AirbnbProvider | 'firecrawl';
-    price: number | null;
-    currency: string;
+    baseline: AirbnbBaselineExtraction;
     error?: string;
     contentLength?: number;
     durationMs?: number;
   }
-  
+
   const providerResults: ProviderPriceResult[] = [];
-  
-  // Helper to extract price from content
-  const extractPriceFromContent = async (html: string, markdown: string, screenshot: string | null, provider: string): Promise<{ price: number | null; currency: string }> => {
-    // 1) HTML extraction
-    let priceResult = extractTotalPriceWithRegex(html, nights);
-    if (priceResult.price) {
-      console.log(`[${provider}] Regex extracted from HTML: ${priceResult.currency} ${priceResult.price}`);
-      return priceResult;
+
+  // Helper to extract GROUNDED Airbnb baseline from content (HTML preferred, then markdown)
+  const extractBaselineFromContent = (html: string, markdown: string, provider: string): AirbnbBaselineExtraction => {
+    const htmlExtraction = html && html.length > 200
+      ? extractAirbnbBaselineGrounded(html, nights, provider)
+      : null;
+
+    // If HTML produced a usable classification (including a clear per-night-only), keep it.
+    if (htmlExtraction && htmlExtraction.status !== 'price_not_available_in_content') {
+      return htmlExtraction;
     }
-    
-    // 2) Markdown
-    if (markdown.length > 100) {
-      priceResult = extractTotalPriceWithRegex(markdown, nights);
-      if (priceResult.price) {
-        console.log(`[${provider}] Regex extracted from markdown: ${priceResult.currency} ${priceResult.price}`);
-        return priceResult;
-      }
+
+    const mdExtraction = markdown && markdown.length > 200
+      ? extractAirbnbBaselineGrounded(markdown, nights, provider)
+      : null;
+
+    if (mdExtraction && mdExtraction.status !== 'price_not_available_in_content') {
+      return mdExtraction;
     }
-    
-    // 3) Screenshot
-    if (screenshot) {
-      const screenshotPrice = await extractAirbnbTotalFromScreenshotBase64(screenshot, nights);
-      if (screenshotPrice) {
-        console.log(`[${provider}] Screenshot extracted: ${screenshotPrice}`);
-        return { price: screenshotPrice, currency: 'USD' };
-      }
-    }
-    
-    // 4) AI fallback
-    if (markdown.length > 100 || html.length > 100) {
-      const aiResult = await extractAirbnbTotalPriceWithAI(
-        [markdown, html.slice(0, 12000)].filter(Boolean).join("\n\n"),
-        nights
-      );
-      if (aiResult.price) {
-        console.log(`[${provider}] AI extracted: ${aiResult.currency} ${aiResult.price}`);
-        return aiResult;
-      }
-    }
-    
-    return { price: null, currency: 'USD' };
+
+    // Fall back to whichever had the richer debug bundle.
+    return htmlExtraction || mdExtraction || {
+      status: 'price_not_available_in_content',
+      price: null,
+      currency: null,
+      includes_taxes_fees: false,
+      evidence_snippet: '',
+      debug: { provider, content_hash: hashContent(html || markdown || ''), candidates: [] },
+    };
   };
-  
+
   try {
     // Step 1: Extract Airbnb baseline using classic fallback order (Firecrawl -> Zyte -> Browserless)
     sendProgress(controller, "Airbnb baseline", "Extracting Airbnb total (Firecrawl → Zyte → Browserless)");
@@ -3137,10 +3472,22 @@ async function runSearchWithStreaming(
     const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
 
     // Define extraction tasks (re-used by fallback chain)
+    const emptyBaseline = (provider: string): AirbnbBaselineExtraction => ({
+      status: 'price_not_available_in_content',
+      price: null,
+      currency: null,
+      includes_taxes_fees: false,
+      evidence_snippet: '',
+      debug: { provider, content_hash: hashContent(''), candidates: [] },
+    });
+
     const firecrawlTask = async (): Promise<ProviderPriceResult> => {
       const start = Date.now();
+      const provider = 'firecrawl' as const;
       try {
-        if (!firecrawlApiKey) return { provider: 'firecrawl', price: null, currency: 'USD', error: 'No API key' };
+        if (!firecrawlApiKey) {
+          return { provider, baseline: emptyBaseline('Firecrawl'), error: 'No API key', durationMs: Date.now() - start };
+        }
 
         const resp = await fetchWithTimeout(
           "https://api.firecrawl.dev/v1/scrape",
@@ -3163,13 +3510,20 @@ async function runSearchWithStreaming(
 
         if (!resp.ok) {
           const errText = await resp.text().catch(() => "");
-          return { provider: 'firecrawl', price: null, currency: 'USD', error: `HTTP ${resp.status}: ${errText.slice(0, 100)}`, durationMs: Date.now() - start };
+          return {
+            provider,
+            baseline: emptyBaseline('Firecrawl'),
+            error: `HTTP ${resp.status}: ${errText.slice(0, 100)}`,
+            durationMs: Date.now() - start,
+          };
         }
 
         const data = await resp.json();
         const html = data?.data?.rawHtml || data?.data?.html || "";
         const markdown = data?.data?.markdown || "";
-        const screenshot = data?.data?.screenshot || null;
+
+        // Track for failure diagnosis downstream
+        lastScrapedContent = { markdown, html, hasScreenshot: Boolean(data?.data?.screenshot) };
 
         // Extract images for later use
         if (imageUrls.length === 0) {
@@ -3192,23 +3546,33 @@ async function runSearchWithStreaming(
           airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
 
-        const result = await extractPriceFromContent(html, markdown, screenshot, 'Firecrawl');
-        return { provider: 'firecrawl', price: result.price, currency: result.currency, contentLength: html.length, durationMs: Date.now() - start };
+        const baseline = extractBaselineFromContent(html, markdown, 'Firecrawl');
+        return { provider, baseline, contentLength: html.length, durationMs: Date.now() - start };
       } catch (e) {
-        return { provider: 'firecrawl', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
+        return { provider, baseline: emptyBaseline('Firecrawl'), error: String(e), durationMs: Date.now() - start };
       }
     };
 
     const zyteTask = async (): Promise<ProviderPriceResult> => {
       const start = Date.now();
+      const provider = 'zyte' as const;
       try {
-        if (!zyteApiKey) return { provider: 'zyte', price: null, currency: 'USD', error: 'No API key' };
+        if (!zyteApiKey) {
+          return { provider, baseline: emptyBaseline('Zyte'), error: 'No API key', durationMs: Date.now() - start };
+        }
 
         const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
 
         if (!zyteResult.ok) {
-          return { provider: 'zyte', price: null, currency: 'USD', error: zyteResult.error || 'Failed', durationMs: Date.now() - start };
+          return {
+            provider,
+            baseline: emptyBaseline('Zyte'),
+            error: zyteResult.error || 'Failed',
+            durationMs: Date.now() - start,
+          };
         }
+
+        lastScrapedContent = { markdown: zyteResult.markdown, html: zyteResult.html, hasScreenshot: Boolean(zyteResult.screenshot) };
 
         // Extract images for later use
         if (imageUrls.length === 0) {
@@ -3231,23 +3595,33 @@ async function runSearchWithStreaming(
           airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
 
-        const result = await extractPriceFromContent(zyteResult.html, zyteResult.markdown, zyteResult.screenshot, 'Zyte');
-        return { provider: 'zyte', price: result.price, currency: result.currency, contentLength: zyteResult.html.length, durationMs: Date.now() - start };
+        const baseline = extractBaselineFromContent(zyteResult.html, zyteResult.markdown, 'Zyte');
+        return { provider, baseline, contentLength: zyteResult.html.length, durationMs: Date.now() - start };
       } catch (e) {
-        return { provider: 'zyte', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
+        return { provider, baseline: emptyBaseline('Zyte'), error: String(e), durationMs: Date.now() - start };
       }
     };
 
     const browserlessTask = async (): Promise<ProviderPriceResult> => {
       const start = Date.now();
+      const provider = 'browserless' as const;
       try {
-        if (!browserlessApiKey) return { provider: 'browserless', price: null, currency: 'USD', error: 'No API key' };
+        if (!browserlessApiKey) {
+          return { provider, baseline: emptyBaseline('Browserless'), error: 'No API key', durationMs: Date.now() - start };
+        }
 
         const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey);
 
         if (!browserlessResult.ok) {
-          return { provider: 'browserless', price: null, currency: 'USD', error: browserlessResult.error || 'Failed', durationMs: Date.now() - start };
+          return {
+            provider,
+            baseline: emptyBaseline('Browserless'),
+            error: browserlessResult.error || 'Failed',
+            durationMs: Date.now() - start,
+          };
         }
+
+        lastScrapedContent = { markdown: browserlessResult.markdown, html: browserlessResult.html, hasScreenshot: Boolean(browserlessResult.screenshot) };
 
         // Extract images for later use
         if (imageUrls.length === 0) {
@@ -3270,10 +3644,10 @@ async function runSearchWithStreaming(
           airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
 
-        const result = await extractPriceFromContent(browserlessResult.html, browserlessResult.markdown, null, 'Browserless');
-        return { provider: 'browserless', price: result.price, currency: result.currency, contentLength: browserlessResult.html.length, durationMs: Date.now() - start };
+        const baseline = extractBaselineFromContent(browserlessResult.html, browserlessResult.markdown, 'Browserless');
+        return { provider, baseline, contentLength: browserlessResult.html.length, durationMs: Date.now() - start };
       } catch (e) {
-        return { provider: 'browserless', price: null, currency: 'USD', error: String(e), durationMs: Date.now() - start };
+        return { provider, baseline: emptyBaseline('Browserless'), error: String(e), durationMs: Date.now() - start };
       }
     };
 
@@ -3291,17 +3665,68 @@ async function runSearchWithStreaming(
       const r = await step.run();
       providerResults.push(r);
 
-      const currencySymbol = r.currency === 'EUR' ? '€' : r.currency === 'GBP' ? '£' : r.currency === 'CHF' ? 'CHF ' : '$';
-      if (r.price) {
-        sendProgress(controller, `${label} price`, `${currencySymbol}${r.price} (${r.durationMs}ms)`, { provider: r.provider, price: r.price, currency: r.currency });
-        airbnbPrice = r.price;
-        airbnbCurrency = r.currency;
-        sendProgress(controller, "Selected price", `Using ${label}: ${currencySymbol}${airbnbPrice}`, { airbnbPrice, airbnbCurrency, provider: r.provider });
+      // Always emit grounded debug bundle for this provider attempt
+      sendProgress(controller, `${label} debug`, `Baseline status: ${r.baseline.status}`, {
+        provider: r.provider,
+        baseline: {
+          status: r.baseline.status,
+          price: r.baseline.price,
+          currency: r.baseline.currency,
+          includes_taxes_fees: r.baseline.includes_taxes_fees,
+          evidence_snippet: r.baseline.evidence_snippet,
+          debug: r.baseline.debug,
+        },
+      });
+
+      // Only accept a baseline price when it is a *total* (incl or excl taxes) and grounded.
+      if (
+        (r.baseline.status === 'total_price_including_taxes_and_fees' ||
+          r.baseline.status === 'total_price_excluding_taxes_and_fees') &&
+        typeof r.baseline.price === 'number' &&
+        r.baseline.currency
+      ) {
+        const currencySymbol = r.baseline.currency === 'EUR'
+          ? '€'
+          : r.baseline.currency === 'GBP'
+            ? '£'
+            : r.baseline.currency === 'CHF'
+              ? 'CHF '
+              : '$';
+
+        airbnbPrice = r.baseline.price;
+        airbnbCurrency = r.baseline.currency;
+
+        sendProgress(controller, "Selected Airbnb baseline", `${label}: ${currencySymbol}${airbnbPrice}`, {
+          provider: r.provider,
+          airbnbPrice,
+          airbnbCurrency,
+          baseline_status: r.baseline.status,
+          includes_taxes_fees: r.baseline.includes_taxes_fees,
+          evidence_snippet: r.baseline.evidence_snippet,
+        });
+
         break;
+      }
+
+      // If we only found per-night pricing, treat as terminal for baseline (no guessing).
+      if (r.baseline.status === 'per_night_price_only') {
+        sendProgress(controller, "Airbnb baseline not usable", "Only per-night pricing visible; refusing to derive totals.", {
+          provider: r.provider,
+          evidence_snippet: r.baseline.evidence_snippet,
+          debug: r.baseline.debug,
+        });
+      }
+
+      if (r.error) {
+        sendProgress(controller, `${label} failed`, r.error, { provider: r.provider, error: r.error });
       } else {
-        sendProgress(controller, `${label} failed`, r.error || 'No price found', { provider: r.provider, error: r.error });
+        sendProgress(controller, `${label} no total`, `No grounded total found (${r.baseline.status})`, {
+          provider: r.provider,
+          baseline_status: r.baseline.status,
+        });
       }
     }
+
 
     if (!airbnbPrice) {
       sendProgress(controller, "Airbnb baseline failed", "No Airbnb total price extracted from any provider");
@@ -3309,7 +3734,9 @@ async function runSearchWithStreaming(
 
     // Emit quick comparison summary for debugging (even though we stop early on success)
     if (providerResults.length > 0) {
-      const summary = providerResults.map((r) => `${r.provider}: ${r.price ?? 'N/A'}`).join(' | ');
+      const summary = providerResults
+        .map((r) => `${r.provider}: ${r.baseline.price ?? 'N/A'} (${r.baseline.status})`)
+        .join(' | ');
       sendProgress(controller, "Price comparison", summary, { comparison: providerResults });
     }
 
