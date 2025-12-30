@@ -79,13 +79,15 @@ export function AirbnbTotalConfirmationModal({
 
       if (error) throw error;
 
-      // Update search with the confirmed price
+      // Update search with the confirmed price and resume pipeline
       await supabase
         .from('searches')
         .update({
           airbnb_price: amount,
           airbnb_currency: subtotalCurrency,
-          status: 'completed', // Mark as completed now that we have the price
+          status: 'pending',
+          api_error: null,
+          api_error_code: null,
         })
         .eq('id', searchId);
 

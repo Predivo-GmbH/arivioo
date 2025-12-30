@@ -3474,6 +3474,47 @@ async function runSearchWithStreaming(
     last_progress_at: new Date().toISOString() 
   }).eq("id", searchId);
 
+  // If user already confirmed the Airbnb total, reuse it and continue.
+  try {
+    const { data: confirmed } = await supabase
+      .from('airbnb_confirmed_totals')
+      .select('confirmed_total_amount, confirmed_currency, confirmation_source')
+      .eq('search_id', searchId)
+      .maybeSingle();
+
+    if (confirmed?.confirmed_total_amount && confirmed.confirmation_source === 'user') {
+      airbnbPrice = confirmed.confirmed_total_amount;
+      airbnbCurrency = confirmed.confirmed_currency || airbnbCurrency;
+      // Reuse any previously stored images/title to avoid re-scraping when possible
+      const existingImages = Array.isArray(search.airbnb_images)
+        ? (search.airbnb_images as unknown[]).filter((u): u is string => typeof u === 'string')
+        : [];
+      if (existingImages.length > 0) {
+        imageUrls = existingImages;
+      }
+      if (typeof search.airbnb_title === 'string' && search.airbnb_title.trim()) {
+        airbnbTitle = search.airbnb_title;
+      }
+
+      const confirmedAmount = confirmed.confirmed_total_amount;
+      sendProgress(
+        controller,
+        'Airbnb total confirmed',
+        `Using your confirmed total: ${airbnbCurrency} ${confirmedAmount.toLocaleString()}`
+      );
+
+      await supabase.from('searches').update({
+        airbnb_price: airbnbPrice,
+        airbnb_currency: airbnbCurrency,
+        api_error: null,
+        api_error_code: null,
+        last_progress_at: new Date().toISOString(),
+      }).eq('id', searchId);
+    }
+  } catch (e) {
+    console.log('Confirmed total lookup failed:', (e as Error)?.message || e);
+  }
+
   // Heartbeat helper - updates last_progress_at so UI can detect stalls
   const heartbeat = async () => {
     await supabase.from("searches").update({ last_progress_at: new Date().toISOString() }).eq("id", searchId);
