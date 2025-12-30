@@ -167,13 +167,31 @@ function OcrValidationBadge({ status, acceptedVia, mismatchReason }: {
 function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
   const isSuccess = result.status.startsWith('total_price_');
   const hasOcrData = result.ocr_booking_card_amount_value || result.ocr_breakdown_total_amount_value;
-  
+
+  const currencySymbol = result.currency === 'CHF' ? 'CHF ' : result.currency === 'EUR' ? '€' : '$';
+
   // Calculate OCR baseline and diff for comparison
   const ocrBaseline = result.ocr_breakdown_total_amount_value || result.ocr_booking_card_amount_value;
   const providerPrice = result.price;
   const priceDiff = (providerPrice && ocrBaseline) ? providerPrice - ocrBaseline : null;
   const priceDiffPercent = (providerPrice && ocrBaseline) ? ((priceDiff! / ocrBaseline) * 100) : null;
-  
+
+  const diffLabel = priceDiff === null
+    ? '—'
+    : priceDiff === 0
+      ? '='
+      : priceDiff > 0
+        ? `+${currencySymbol}${Math.abs(priceDiff).toFixed(0)}`
+        : `-${currencySymbol}${Math.abs(priceDiff).toFixed(0)}`;
+
+  const diffTone = priceDiff === null
+    ? 'text-muted-foreground'
+    : priceDiff === 0
+      ? 'text-foreground'
+      : priceDiff > 0
+        ? 'text-primary'
+        : 'text-destructive';
+
   return (
     <Card className={isSuccess ? 'border-green-500/50' : 'border-muted'}>
       <CardHeader className="pb-2">
@@ -191,62 +209,45 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
       <CardContent className="space-y-3">
         {/* Provider vs OCR Side-by-Side Comparison */}
         {hasOcrData && (
-          <div className="p-3 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-300 dark:border-slate-600">
-            <Label className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2 block">
+          <div className="p-3 bg-muted/40 rounded-lg border border-border">
+            <Label className="text-xs font-semibold text-foreground mb-2 block">
               Provider vs OCR Comparison
             </Label>
             <div className="grid grid-cols-3 gap-2 items-center">
-              {/* Provider Price Column */}
-              <div className="text-center p-2 rounded bg-background border">
+              <div className="text-center p-2 rounded bg-card border border-border">
                 <div className="text-xs text-muted-foreground mb-1">Provider</div>
-                <div className={`text-lg font-bold font-mono ${providerPrice ? (isSuccess ? 'text-green-600' : 'text-orange-600') : 'text-muted-foreground'}`}>
-                  {providerPrice 
-                    ? `$${providerPrice.toLocaleString()}`
-                    : '—'
-                  }
+                <div className={`text-lg font-bold font-mono ${providerPrice ? (isSuccess ? 'text-foreground' : 'text-foreground') : 'text-muted-foreground'}`}>
+                  {providerPrice ? `${currencySymbol}${providerPrice.toLocaleString()}` : '—'}
                 </div>
               </div>
-              
-              {/* Diff Column */}
+
               <div className="text-center p-2">
-                {priceDiff !== null ? (
-                  <div className={`text-sm font-bold ${
-                    priceDiff === 0 ? 'text-emerald-600' :
-                    priceDiff > 0 ? 'text-blue-600' :
-                    'text-red-600'
-                  }`}>
-                    {priceDiff === 0 ? '=' : priceDiff > 0 ? `+$${priceDiff.toFixed(0)}` : `-$${Math.abs(priceDiff).toFixed(0)}`}
-                    {priceDiffPercent !== null && priceDiff !== 0 && (
-                      <div className="text-xs font-normal">
-                        ({priceDiffPercent > 0 ? '+' : ''}{priceDiffPercent.toFixed(1)}%)
-                      </div>
-                    )}
+                <div className={`text-sm font-bold ${diffTone}`}>{diffLabel}</div>
+                {priceDiffPercent !== null && priceDiff !== 0 && (
+                  <div className="text-xs text-muted-foreground">
+                    ({priceDiffPercent > 0 ? '+' : ''}{priceDiffPercent.toFixed(1)}%)
                   </div>
-                ) : (
-                  <span className="text-muted-foreground text-sm">—</span>
                 )}
               </div>
-              
-              {/* OCR Baseline Column */}
-              <div className="text-center p-2 rounded bg-background border">
+
+              <div className="text-center p-2 rounded bg-card border border-border">
                 <div className="text-xs text-muted-foreground mb-1">
                   {result.ocr_breakdown_total_amount_value ? 'OCR Total' : 'OCR Card'}
                 </div>
-                <div className="text-lg font-bold font-mono text-blue-600">
-                  ${ocrBaseline?.toLocaleString() || '—'}
+                <div className="text-lg font-bold font-mono text-foreground">
+                  {ocrBaseline ? `${currencySymbol}${ocrBaseline.toLocaleString()}` : '—'}
                 </div>
               </div>
             </div>
-            
-            {/* Validation Status Row */}
-            <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-600 flex items-center justify-between">
+
+            <div className="mt-2 pt-2 border-t border-border flex items-center justify-between gap-2">
               <OcrValidationBadge 
                 status={result.ocr_validation_status} 
                 acceptedVia={result.ocr_accepted_via}
                 mismatchReason={result.ocr_mismatch_reason}
               />
               {result.ocr_booking_card_snippet && (
-                <span className="text-xs text-muted-foreground truncate max-w-40">
+                <span className="text-xs text-muted-foreground truncate max-w-64">
                   "{result.ocr_booking_card_snippet}"
                 </span>
               )}
@@ -259,7 +260,7 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
           <div className="p-3 bg-green-500/10 rounded-lg border border-green-500/20">
             <div className="flex items-baseline gap-2 flex-wrap">
               <span className="text-2xl font-bold text-green-700">
-                {result.currency === 'CHF' ? 'CHF ' : result.currency === 'EUR' ? '€' : '$'}
+                {currencySymbol}
                 {result.price.toLocaleString()}
               </span>
               {result.includes_taxes_fees && (
@@ -271,7 +272,7 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
           </div>
         )}
 
-        {/* OCR Rejection display for failed extractions */}
+        {/* OCR Rejection display for failed extractions (legacy) */}
         {!isSuccess && result.ocr_validation_status === 'rejected' && !hasOcrData && (
           <div className="p-3 bg-red-500/10 rounded-lg border border-red-500/20">
             <div className="flex items-center gap-2 text-red-700">
