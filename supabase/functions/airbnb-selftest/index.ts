@@ -160,9 +160,9 @@ function applyGuardrail(selected: any): { blocked: boolean; reason?: string } {
 // ============ PROVIDER FUNCTIONS ============
 
 async function runFirecrawl(url: string, runId: string): Promise<any> {
-  const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
+  const apiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
   if (!apiKey) {
-    return { status: 'provider_not_configured', error: 'No FIRECRAWL_API_KEY' };
+    return { status: 'provider_not_configured', error: 'No FIRECRAWL_API_KEY configured' };
   }
 
   const start = Date.now();

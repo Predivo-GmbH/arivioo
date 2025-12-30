@@ -294,7 +294,7 @@ async function testFirecrawl(url: string, nights: number, supabase: any): Promis
   const provider: ProviderName = 'firecrawl';
   
   try {
-    const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
+    const apiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
     if (!apiKey) {
       return {
         provider,
