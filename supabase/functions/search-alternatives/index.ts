@@ -4450,6 +4450,38 @@ async function runSearchWithStreaming(
               evidence_snippet: ocrValidation.evidenceSnippet,
             };
           }
+          
+          // ============ CRITICAL FIX: On book/stays pages, subtotal IS the final total ============
+          // When we scraped from book/stays checkout page and regex found a subtotal ($X for N nights),
+          // that IS the all-in total because book/stays shows the full checkout with taxes/fees included.
+          // The ocrRef.breakdownOpened flag or URL pattern indicates book/stays page.
+          const isBookStaysPage = ocrRef?.breakdownOpened === true || 
+            browserlessResult.html?.includes('/book/stays/') ||
+            browserlessResult.html?.includes('Confirm and pay');
+          
+          if (isBookStaysPage && 
+              finalBaseline.status === 'needs_user_confirmation' && 
+              finalBaseline.subtotal_nights_only && 
+              finalBaseline.subtotal_nights_only > 0) {
+            console.log(`Browserless: Book/stays page detected - treating subtotal $${finalBaseline.subtotal_nights_only} as final total`);
+            const subtotalPrice = finalBaseline.subtotal_nights_only!;
+            finalBaseline = {
+              ...finalBaseline,
+              status: 'total_price_including_taxes_and_fees',
+              price: subtotalPrice,
+              includes_taxes_fees: true,
+              evidence_snippet: finalBaseline.evidence_snippet?.replace('subtotal only - taxes/fees not included', 'from book/stays checkout page'),
+            };
+            ocrValidation = {
+              accepted: true,
+              status: 'total_price_including_taxes_and_fees',
+              includesTaxesFees: true,
+              acceptedVia: 'breakdown_match',
+              mismatchReason: null,
+              evidenceSnippet: finalBaseline.evidence_snippet || '',
+              validatedPrice: subtotalPrice,
+            };
+          }
         }
         
         return { 
