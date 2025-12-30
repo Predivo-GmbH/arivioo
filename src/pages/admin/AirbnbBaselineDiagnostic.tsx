@@ -207,53 +207,62 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Provider vs OCR Side-by-Side Comparison */}
-        {hasOcrData && (
-          <div className="p-3 bg-muted/40 rounded-lg border border-border">
-            <Label className="text-xs font-semibold text-foreground mb-2 block">
-              Provider vs OCR Comparison
-            </Label>
-            <div className="grid grid-cols-3 gap-2 items-center">
-              <div className="text-center p-2 rounded bg-card border border-border">
-                <div className="text-xs text-muted-foreground mb-1">Provider</div>
-                <div className={`text-lg font-bold font-mono ${providerPrice ? (isSuccess ? 'text-foreground' : 'text-foreground') : 'text-muted-foreground'}`}>
-                  {providerPrice ? `${currencySymbol}${providerPrice.toLocaleString()}` : '—'}
-                </div>
-              </div>
-
-              <div className="text-center p-2">
-                <div className={`text-sm font-bold ${diffTone}`}>{diffLabel}</div>
-                {priceDiffPercent !== null && priceDiff !== 0 && (
-                  <div className="text-xs text-muted-foreground">
-                    ({priceDiffPercent > 0 ? '+' : ''}{priceDiffPercent.toFixed(1)}%)
-                  </div>
-                )}
-              </div>
-
-              <div className="text-center p-2 rounded bg-card border border-border">
-                <div className="text-xs text-muted-foreground mb-1">
-                  {result.ocr_breakdown_total_amount_value ? 'OCR Total' : 'OCR Card'}
-                </div>
-                <div className="text-lg font-bold font-mono text-foreground">
-                  {ocrBaseline ? `${currencySymbol}${ocrBaseline.toLocaleString()}` : '—'}
-                </div>
+        {/* Provider vs OCR Side-by-Side Comparison (always visible) */}
+        <div className="p-3 bg-muted/40 rounded-lg border border-border">
+          <Label className="text-xs font-semibold text-foreground mb-2 block">
+            Provider vs OCR Comparison
+          </Label>
+          <div className="grid grid-cols-3 gap-2 items-center">
+            <div className="text-center p-2 rounded bg-card border border-border">
+              <div className="text-xs text-muted-foreground mb-1">Provider</div>
+              <div className={`text-lg font-bold font-mono ${providerPrice ? 'text-foreground' : 'text-muted-foreground'}`}>
+                {providerPrice ? `${currencySymbol}${providerPrice.toLocaleString()}` : '—'}
               </div>
             </div>
 
-            <div className="mt-2 pt-2 border-t border-border flex items-center justify-between gap-2">
+            <div className="text-center p-2">
+              <div className={`text-sm font-bold ${diffTone}`}>{diffLabel}</div>
+              {priceDiffPercent !== null && priceDiff !== 0 && (
+                <div className="text-xs text-muted-foreground">
+                  ({priceDiffPercent > 0 ? '+' : ''}{priceDiffPercent.toFixed(1)}%)
+                </div>
+              )}
+            </div>
+
+            <div className="text-center p-2 rounded bg-card border border-border">
+              <div className="text-xs text-muted-foreground mb-1">
+                {hasOcrData ? (result.ocr_breakdown_total_amount_value ? 'OCR Total' : 'OCR Card') : 'OCR Baseline'}
+              </div>
+              <div className={`text-lg font-bold font-mono ${hasOcrData ? 'text-foreground' : 'text-muted-foreground'}`}>
+                {ocrBaseline ? `${currencySymbol}${ocrBaseline.toLocaleString()}` : 'Not found'}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-2 pt-2 border-t border-border flex items-center justify-between gap-2">
+            {result.ocr_validation_status ? (
               <OcrValidationBadge 
                 status={result.ocr_validation_status} 
                 acceptedVia={result.ocr_accepted_via}
                 mismatchReason={result.ocr_mismatch_reason}
               />
-              {result.ocr_booking_card_snippet && (
-                <span className="text-xs text-muted-foreground truncate max-w-64">
-                  "{result.ocr_booking_card_snippet}"
-                </span>
-              )}
-            </div>
+            ) : (
+              <Badge variant="outline" className="text-xs text-muted-foreground">
+                OCR: {hasOcrData ? 'no validation' : 'not found'}
+              </Badge>
+            )}
+
+            {result.ocr_booking_card_snippet ? (
+              <span className="text-xs text-muted-foreground truncate max-w-64">
+                "{result.ocr_booking_card_snippet}"
+              </span>
+            ) : (
+              <span className="text-xs text-muted-foreground truncate max-w-64">
+                {hasOcrData ? '' : 'No OCR snippet captured'}
+              </span>
+            )}
           </div>
-        )}
+        </div>
 
         {/* Success display without OCR */}
         {isSuccess && result.price && !hasOcrData && (
