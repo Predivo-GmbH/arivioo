@@ -1260,14 +1260,6 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
         'strikethrough',
         'before discount',
         'coupon',
-        // Pet, deposit, and security-related fees - NEVER trip totals
-        'pet',
-        'pets',
-        'deposit',
-        'damage',
-        'security',
-        'cleaning fee',
-        'service fee',
       ];
 
       const ignoreHit = ignoreTerms.find((t) => ctxLower.includes(t));
@@ -1288,8 +1280,28 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
         continue;
       }
 
-      // Classify using label context.
-      const hasTotalLabel = /\b(trip total|grand total|total before taxes|total|you pay|you will pay)\b/i.test(context);
+      // Fee/deposit lines are NEVER trip totals (even if the word "total" appears nearby in the UI)
+      const feeTerms = ['pet', 'pets', 'deposit', 'damage', 'security'];
+      const feeHit = feeTerms.find((t) => ctxLower.includes(t));
+      if (feeHit) {
+        candidates.push({
+          rawMatch,
+          amountRaw,
+          amount,
+          currency,
+          index,
+          context: safeSnippet(context, 240),
+          labelHint: safeSnippet(context, 120),
+          kind: 'price_not_available_in_content',
+          includesTaxesFees: false,
+          score: -10,
+          rejectedReason: `fee_context:${feeHit}`,
+        });
+        continue;
+      }
+
+      // Classify using label context (must be *explicit* total labels; plain "total" is too error-prone).
+      const hasTotalLabel = /\b(trip total|grand total|total before taxes|total\s*USD|you pay|you will pay)\b/i.test(context);
       const hasTaxesFeesLabel = /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(context);
       const hasBeforeTaxesLabel = /\btotal\s+before\s+taxes\b/i.test(context);
       const hasForNights = new RegExp(`\\bfor\\s+${nights}\\s+nights?\\b`, 'i').test(context) || /\bfor\s+\d+\s+nights?\b/i.test(context);
