@@ -319,7 +319,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
             try {
               breakdownOpened = await page.evaluate(() => {
                 const candidates = Array.from(document.querySelectorAll('button,a,[role="button"],[role="link"]'));
-                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown')) as HTMLElement | undefined;
+                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
                 if (target) {
                   target.click();
                   return true;
