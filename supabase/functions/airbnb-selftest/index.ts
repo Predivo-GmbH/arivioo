@@ -86,56 +86,58 @@ function extractBookingCardVisibleAmountFromOcrText(args: {
 }): {
   booking_card_ocr_text_raw: string;
   booking_card_ocr_text_normalized: string;
-  booking_card_ocr_matched_substring: string | null;
+  booking_card_ocr_matches: Array<{ matched_substring: string; amount_value: number }>;
+  booking_card_visible_evidence_snippet: string | null;
   booking_card_visible_amount_value: number | null;
 } {
   const raw = args.ocrTextRaw ?? '';
   const normalized = raw.replace(/\r/g, '').replace(/\s+$/gm, '');
+
+  // We intentionally work line-based so we can tie amounts to "for N nights" context.
   const lines = normalized
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
 
   const nightsRe = new RegExp(`for\\s+${args.nightsExpected}\\s+night`, 'i');
-  const amountRe = /(?:\$|US\$)?\s*([0-9]{1,3}(?:,[0-9]{3})+)/;
+
+  // Minimal parsing requirement: only support thousands separator like 2,214
+  const amountTokenRe = /([0-9]{1,3}(?:,[0-9]{3})+)/g;
+
+  const matches: Array<{ matched_substring: string; amount_value: number }> = [];
 
   for (let i = 0; i < lines.length; i++) {
-    if (!nightsRe.test(lines[i])) continue;
+    const line = lines[i];
+    if (!nightsRe.test(line)) continue;
 
-    const sameLine = lines[i];
-    const prevLine = lines[i - 1] ?? '';
+    // Consider same line and one line above, per requirements.
+    const candidates = [line, lines[i - 1]].filter(Boolean) as string[];
 
-    const sameMatch = sameLine.match(amountRe);
-    const prevMatch = prevLine.match(amountRe);
+    for (const candidateLine of candidates) {
+      amountTokenRe.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = amountTokenRe.exec(candidateLine)) !== null) {
+        const token = m[1];
+        const amount = Number.parseInt(token.replace(/,/g, ''), 10);
+        if (!Number.isFinite(amount)) continue;
 
-    const pick = sameMatch?.[1] ? { val: sameMatch[1], ctx: sameLine } : prevMatch?.[1] ? { val: prevMatch[1], ctx: `${prevLine} | ${sameLine}` } : null;
-
-    if (!pick) {
-      return {
-        booking_card_ocr_text_raw: raw,
-        booking_card_ocr_text_normalized: normalized,
-        booking_card_ocr_matched_substring: sameLine,
-        booking_card_visible_amount_value: null,
-      };
+        const matched_substring = candidateLine === line ? line : `${candidateLine} | ${line}`;
+        matches.push({ matched_substring, amount_value: amount });
+      }
     }
-
-    // Minimal parsing requirement: treat comma as thousands separator ONLY for ddd,ddd patterns
-    const thousands = pick.val.replace(/,/g, '');
-    const amount = Number.parseInt(thousands, 10);
-
-    return {
-      booking_card_ocr_text_raw: raw,
-      booking_card_ocr_text_normalized: normalized,
-      booking_card_ocr_matched_substring: pick.ctx,
-      booking_card_visible_amount_value: Number.isFinite(amount) ? amount : null,
-    };
   }
+
+  // Selection rule (exact): among all matches tied to "for N nights", choose the highest numeric amount.
+  const best = matches.length
+    ? matches.reduce((acc, cur) => (cur.amount_value > acc.amount_value ? cur : acc))
+    : null;
 
   return {
     booking_card_ocr_text_raw: raw,
     booking_card_ocr_text_normalized: normalized,
-    booking_card_ocr_matched_substring: null,
-    booking_card_visible_amount_value: null,
+    booking_card_ocr_matches: matches,
+    booking_card_visible_evidence_snippet: best?.matched_substring ?? null,
+    booking_card_visible_amount_value: best?.amount_value ?? null,
   };
 }
 
@@ -328,63 +330,27 @@ async function runBrowserless(url: string): Promise<any> {
   try {
     const functionPayload = {
       code: `export default async function({ page }) {
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-        await page.setViewport({ width: 1400, height: 900 });
+        // IMPORTANT: hard reset scroll + viewport BEFORE any measurements/capture
+        await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 2 });
         await page.goto('${url}', { waitUntil: 'networkidle2', timeout: 45000 });
-        await sleep(5000);
+        await page.waitForTimeout(1000);
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.waitForTimeout(500);
 
-        let bookingCardScreenshot = null;
-        let bookingCardBBox = null;
-        let bookingCardDimensions = null;
-        let strategy = 'none';
+        const screenshotTopClip = { x: 0, y: 0, width: 1280, height: 900 };
+        const scrollY = await page.evaluate(() => Math.round(window.scrollY || 0));
 
-        try {
-          // Strategy 1: Look for the booking sidebar container
-          const sidebar = await page.$('div[data-section-id="BOOK_IT_SIDEBAR"]');
-          
-          if (sidebar) {
-            const sidebarBox = await sidebar.boundingBox();
-            if (sidebarBox) {
-              // Screenshot just the TOP portion of the sidebar (first 120px) which shows the total price header
-              const headerClip = {
-                x: Math.round(sidebarBox.x),
-                y: Math.round(sidebarBox.y),
-                width: Math.round(sidebarBox.width),
-                height: Math.min(120, Math.round(sidebarBox.height / 3))
-              };
-              bookingCardScreenshot = await page.screenshot({ encoding: 'base64', clip: headerClip }).catch(() => null);
-              bookingCardBBox = headerClip;
-              bookingCardDimensions = { width: headerClip.width, height: headerClip.height };
-              strategy = 'sidebar_header_clip';
-            }
-          }
-          
-          // Strategy 2: Fallback to viewport right-side clip at TOP of page
-          if (!bookingCardScreenshot) {
-            // The booking card header with total is at the TOP right of the viewport
-            const clip = {
-              x: 770,   // Right side where booking card appears
-              y: 100,   // Near top of viewport after header
-              width: 450,
-              height: 150,
-            };
-            bookingCardScreenshot = await page.screenshot({ encoding: 'base64', clip }).catch(() => null);
-            bookingCardBBox = clip;
-            bookingCardDimensions = { width: clip.width, height: clip.height };
-            strategy = 'viewport_top_right_clip';
-          }
-        } catch (e) {
-          strategy = 'error: ' + String(e).slice(0, 100);
-        }
+        const screenshotTopBase64 = await page
+          .screenshot({ encoding: 'base64', clip: screenshotTopClip })
+          .catch(() => null);
 
         return {
           html: await page.content(),
           title: await page.title(),
           url: page.url(),
-          bookingCardScreenshot,
-          bookingCardBBox,
-          bookingCardDimensions,
-          strategy,
+          screenshotTopBase64,
+          screenshotTopClip,
+          scrollY,
         };
       }`,
       context: {},
@@ -407,9 +373,16 @@ async function runBrowserless(url: string): Promise<any> {
     const pageTitle = result.title || 'unknown';
     const finalUrl = result.url || url;
 
-    const booking_card_screenshot_base64 = result.bookingCardScreenshot || null;
-    const booking_card_screenshot_bbox = result.bookingCardBBox || null;
-    const booking_card_screenshot_dimensions = result.bookingCardDimensions || null;
+    const screenshot_top_base64 = result.screenshotTopBase64 || null;
+    const screenshot_top_clip = result.screenshotTopClip || null;
+    const scroll_y_at_capture = typeof result.scrollY === 'number' ? result.scrollY : null;
+
+    // Reuse existing booking_card_* naming in provider results so downstream code doesn't change.
+    const booking_card_screenshot_base64 = screenshot_top_base64;
+    const booking_card_screenshot_bbox = screenshot_top_clip;
+    const booking_card_screenshot_dimensions = screenshot_top_clip
+      ? { width: screenshot_top_clip.width, height: screenshot_top_clip.height }
+      : null;
 
     // Try JSON extraction first
     const jsonPrices = extractJsonPricing(html);
@@ -429,6 +402,9 @@ async function runBrowserless(url: string): Promise<any> {
         booking_card_screenshot_base64,
         booking_card_screenshot_bbox,
         booking_card_screenshot_dimensions,
+        screenshot_top_base64,
+        screenshot_top_clip,
+        scroll_y_at_capture,
       };
     }
 
@@ -449,6 +425,9 @@ async function runBrowserless(url: string): Promise<any> {
         booking_card_screenshot_base64,
         booking_card_screenshot_bbox,
         booking_card_screenshot_dimensions,
+        screenshot_top_base64,
+        screenshot_top_clip,
+        scroll_y_at_capture,
       };
     }
 
@@ -468,6 +447,9 @@ async function runBrowserless(url: string): Promise<any> {
         booking_card_screenshot_base64,
         booking_card_screenshot_bbox,
         booking_card_screenshot_dimensions,
+        screenshot_top_base64,
+        screenshot_top_clip,
+        scroll_y_at_capture,
       };
     }
 
@@ -480,6 +462,9 @@ async function runBrowserless(url: string): Promise<any> {
       booking_card_screenshot_base64,
       booking_card_screenshot_bbox,
       booking_card_screenshot_dimensions,
+      screenshot_top_base64,
+      screenshot_top_clip,
+      scroll_y_at_capture,
     };
   } catch (e) {
     return { status: 'provider_error', error: String(e), durationMs: Date.now() - start };
@@ -531,32 +516,66 @@ Deno.serve(async (req) => {
   // Screenshot OCR proof (MUST be image-based)
   // ------------------------------------------------------------
   const browserless = providerResults.find((r) => r.provider === 'browserless');
-  const bookingCardScreenshotBase64: string | null = browserless?.booking_card_screenshot_base64 ?? null;
-  const bookingCardBBox = browserless?.booking_card_screenshot_bbox ?? null;
-  const bookingCardDimensions = browserless?.booking_card_screenshot_dimensions ?? null;
+
+  const screenshotTopBase64: string | null = browserless?.screenshot_top_base64 ?? null;
+  const screenshotTopClip = browserless?.screenshot_top_clip ?? null;
+  const scrollYAtCapture: number | null = browserless?.scroll_y_at_capture ?? null;
 
   const requiredNights = 4;
 
   let ocrArtifacts: any = {
     ocr_input_source_type: 'image',
     ocr_input_image_sha256: null,
+
+    // New deterministic screenshot-top artifacts
+    screenshot_top_base64: screenshotTopBase64,
+    screenshot_top_sha256: null,
+    screenshot_top_clip: screenshotTopClip,
+    scroll_y_at_capture: scrollYAtCapture,
+
+    // Back-compat: keep the older booking_card_screenshot_* fields populated with screenshot-top
     booking_card_screenshot_sha256: null,
-    booking_card_screenshot_base64: bookingCardScreenshotBase64,
-    booking_card_screenshot_dimensions: bookingCardDimensions,
-    booking_card_screenshot_bbox: bookingCardBBox,
+    booking_card_screenshot_base64: screenshotTopBase64,
+    booking_card_screenshot_dimensions: screenshotTopClip
+      ? { width: screenshotTopClip.width, height: screenshotTopClip.height }
+      : null,
+    booking_card_screenshot_bbox: screenshotTopClip,
+
+    // OCR outputs
     booking_card_ocr_text_raw: null,
     booking_card_ocr_text_normalized: null,
-    booking_card_ocr_matched_substring: null,
+    booking_card_ocr_matches: [],
+    booking_card_visible_evidence_snippet: null,
     booking_card_visible_amount_value: null,
   };
 
-  if (!bookingCardScreenshotBase64) {
+  if (!screenshotTopBase64) {
     return new Response(
       JSON.stringify(
         {
           run_id: runId,
           url,
-          final_status: 'booking_card_screenshot_missing',
+          final_status: 'screenshot_top_missing',
+          results: providerResults,
+        },
+        null,
+        2
+      ),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
+  // Enforce scroll_y_at_capture = 0 (prove we captured the TOP of page)
+  if (scrollYAtCapture !== 0) {
+    return new Response(
+      JSON.stringify(
+        {
+          run_id: runId,
+          url,
+          final_status: 'scroll_not_reset',
+          scroll_y_at_capture: scrollYAtCapture,
+          screenshot_top_clip: screenshotTopClip,
+          screenshot_top_sha256: null,
           results: providerResults,
         },
         null,
@@ -567,19 +586,18 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const screenshotBytes = base64ToBytes(bookingCardScreenshotBase64);
-    const bookingCardSha = await sha256Hex(screenshotBytes);
+    const screenshotBytes = base64ToBytes(screenshotTopBase64);
+    const screenshotTopSha = await sha256Hex(screenshotBytes);
 
     // OCR input bytes MUST equal the screenshot bytes we persist
-    const ocrInputBytes = base64ToBytes(bookingCardScreenshotBase64);
+    const ocrInputBytes = base64ToBytes(screenshotTopBase64);
     const ocrInputSha = await sha256Hex(ocrInputBytes);
 
-    ocrArtifacts.booking_card_screenshot_sha256 = bookingCardSha;
+    ocrArtifacts.screenshot_top_sha256 = screenshotTopSha;
+    ocrArtifacts.booking_card_screenshot_sha256 = screenshotTopSha;
     ocrArtifacts.ocr_input_image_sha256 = ocrInputSha;
 
-    if (bookingCardSha !== ocrInputSha) {
-      ocrArtifacts.ocr_input_source_type = 'image';
-
+    if (screenshotTopSha !== ocrInputSha) {
       // Persist debug rows anyway
       for (const r of providerResults) {
         await supabase.from('airbnb_baseline_debug').insert({
@@ -593,8 +611,15 @@ Deno.serve(async (req) => {
           currency: r.currency || null,
           evidence_snippet: safeSnippet(r.evidence_snippet || r.error || '', 2000),
           airbnb_url: url,
+
           ocr_input_source_type: ocrArtifacts.ocr_input_source_type,
           ocr_input_image_sha256: ocrArtifacts.ocr_input_image_sha256,
+
+          screenshot_top_base64: ocrArtifacts.screenshot_top_base64,
+          screenshot_top_sha256: ocrArtifacts.screenshot_top_sha256,
+          screenshot_top_clip: ocrArtifacts.screenshot_top_clip,
+          scroll_y_at_capture: ocrArtifacts.scroll_y_at_capture,
+
           booking_card_screenshot_sha256: ocrArtifacts.booking_card_screenshot_sha256,
           booking_card_screenshot_base64: ocrArtifacts.booking_card_screenshot_base64,
           booking_card_screenshot_dimensions: ocrArtifacts.booking_card_screenshot_dimensions,
@@ -619,12 +644,16 @@ Deno.serve(async (req) => {
     }
 
     // Run OCR on screenshot pixels
-    const ocrTextRaw = await ocrImageToText(bookingCardScreenshotBase64);
-    const extracted = extractBookingCardVisibleAmountFromOcrText({ ocrTextRaw, nightsExpected: requiredNights });
+    const ocrTextRaw = await ocrImageToText(screenshotTopBase64);
+    const extracted = extractBookingCardVisibleAmountFromOcrText({
+      ocrTextRaw,
+      nightsExpected: requiredNights,
+    });
 
     ocrArtifacts.booking_card_ocr_text_raw = extracted.booking_card_ocr_text_raw;
     ocrArtifacts.booking_card_ocr_text_normalized = extracted.booking_card_ocr_text_normalized;
-    ocrArtifacts.booking_card_ocr_matched_substring = extracted.booking_card_ocr_matched_substring;
+    ocrArtifacts.booking_card_ocr_matches = extracted.booking_card_ocr_matches;
+    ocrArtifacts.booking_card_visible_evidence_snippet = extracted.booking_card_visible_evidence_snippet;
     ocrArtifacts.booking_card_visible_amount_value = extracted.booking_card_visible_amount_value;
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -663,15 +692,24 @@ Deno.serve(async (req) => {
         currency: r.currency || null,
         evidence_snippet: safeSnippet(r.evidence_snippet || r.error || '', 2000),
         airbnb_url: url,
+
         ocr_input_source_type: ocrArtifacts.ocr_input_source_type,
         ocr_input_image_sha256: ocrArtifacts.ocr_input_image_sha256,
+
+        screenshot_top_base64: ocrArtifacts.screenshot_top_base64,
+        screenshot_top_sha256: ocrArtifacts.screenshot_top_sha256,
+        screenshot_top_clip: ocrArtifacts.screenshot_top_clip,
+        scroll_y_at_capture: ocrArtifacts.scroll_y_at_capture,
+
         booking_card_screenshot_sha256: ocrArtifacts.booking_card_screenshot_sha256,
         booking_card_screenshot_base64: ocrArtifacts.booking_card_screenshot_base64,
         booking_card_screenshot_dimensions: ocrArtifacts.booking_card_screenshot_dimensions,
         booking_card_screenshot_bbox: ocrArtifacts.booking_card_screenshot_bbox,
+
         booking_card_ocr_text_raw: ocrArtifacts.booking_card_ocr_text_raw,
         booking_card_ocr_text_normalized: ocrArtifacts.booking_card_ocr_text_normalized,
-        booking_card_ocr_matched_substring: ocrArtifacts.booking_card_ocr_matched_substring,
+        booking_card_ocr_matches: ocrArtifacts.booking_card_ocr_matches,
+        booking_card_visible_evidence_snippet: ocrArtifacts.booking_card_visible_evidence_snippet,
         ocr_booking_card_amount_value: ocrArtifacts.booking_card_visible_amount_value,
       });
     }
@@ -737,13 +775,21 @@ Deno.serve(async (req) => {
       // OCR proof + artifacts
       ocr_input_source_type: ocrArtifacts.ocr_input_source_type,
       ocr_input_image_sha256: ocrArtifacts.ocr_input_image_sha256,
+
+      screenshot_top_base64: ocrArtifacts.screenshot_top_base64,
+      screenshot_top_sha256: ocrArtifacts.screenshot_top_sha256,
+      screenshot_top_clip: ocrArtifacts.screenshot_top_clip,
+      scroll_y_at_capture: ocrArtifacts.scroll_y_at_capture,
+
       booking_card_screenshot_sha256: ocrArtifacts.booking_card_screenshot_sha256,
       booking_card_screenshot_base64: ocrArtifacts.booking_card_screenshot_base64,
       booking_card_screenshot_dimensions: ocrArtifacts.booking_card_screenshot_dimensions,
       booking_card_screenshot_bbox: ocrArtifacts.booking_card_screenshot_bbox,
+
       booking_card_ocr_text_raw: ocrArtifacts.booking_card_ocr_text_raw,
       booking_card_ocr_text_normalized: ocrArtifacts.booking_card_ocr_text_normalized,
-      booking_card_ocr_matched_substring: ocrArtifacts.booking_card_ocr_matched_substring,
+      booking_card_ocr_matches: ocrArtifacts.booking_card_ocr_matches,
+      booking_card_visible_evidence_snippet: ocrArtifacts.booking_card_visible_evidence_snippet,
       ocr_booking_card_amount_value: ocrArtifacts.booking_card_visible_amount_value,
       ocr_booking_card_nights: requiredNights,
 
@@ -759,14 +805,21 @@ Deno.serve(async (req) => {
         run_id: runId,
         url,
         final_status: 'pass',
+
+        // Stop-condition payload
         booking_card_visible_amount_value: ocrArtifacts.booking_card_visible_amount_value,
+        booking_card_visible_evidence_snippet: ocrArtifacts.booking_card_visible_evidence_snippet,
+        booking_card_ocr_matches: ocrArtifacts.booking_card_ocr_matches,
+
+        screenshot_top_base64: ocrArtifacts.screenshot_top_base64,
+        screenshot_top_sha256: ocrArtifacts.screenshot_top_sha256,
+        screenshot_top_clip: ocrArtifacts.screenshot_top_clip,
+        scroll_y_at_capture: ocrArtifacts.scroll_y_at_capture,
+
         booking_card_screenshot_sha256: ocrArtifacts.booking_card_screenshot_sha256,
         ocr_input_image_sha256: ocrArtifacts.ocr_input_image_sha256,
-        booking_card_ocr_matched_substring: ocrArtifacts.booking_card_ocr_matched_substring,
         booking_card_ocr_text_raw: ocrArtifacts.booking_card_ocr_text_raw,
-        booking_card_screenshot_base64: ocrArtifacts.booking_card_screenshot_base64,
-        booking_card_screenshot_dimensions: ocrArtifacts.booking_card_screenshot_dimensions,
-        booking_card_screenshot_bbox: ocrArtifacts.booking_card_screenshot_bbox,
+
         results,
       },
       null,
