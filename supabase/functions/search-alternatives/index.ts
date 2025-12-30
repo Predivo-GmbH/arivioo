@@ -4096,23 +4096,13 @@ async function runSearchWithStreaming(
           .eq("id", searchId);
         // Continue the pipeline.
       } else if (subtotalInfo) {
-        // We have a subtotal but no proven total - allow user to confirm
-        const subtotalMessage = `Found subtotal $${subtotalInfo.amount} for ${subtotalInfo.nights || '?'} nights, but could not extract the final total including taxes/fees.`;
-        const apiErrorJson = JSON.stringify({
-          status: 'needs_user_confirmation',
-          subtotal_nights_only: subtotalInfo.amount,
-          subtotal_nights_count: subtotalInfo.nights,
-          subtotal_currency: subtotalInfo.currency,
-          message: subtotalMessage,
-        });
+        // We have a subtotal but no proven total - continue pipeline but show confirmation modal
+        const subtotalMessage = `Found subtotal $${subtotalInfo.amount} for ${subtotalInfo.nights || '?'} nights. Please confirm the final total.`;
         
-        // Update search to needs_user_confirmation status - NOT error
+        // Update search - but keep status as searching_platforms so pipeline continues
         await supabase.from("searches").update({ 
-          status: "needs_user_confirmation",
-          api_error: apiErrorJson,
-          api_error_code: 'needs_user_confirmation',
           airbnb_title: airbnbTitle || null,
-          airbnb_price: null, // Don't store subtotal as the price
+          airbnb_price: null, // Will be set when user confirms
           airbnb_currency: subtotalInfo.currency,
           airbnb_image_url: imageUrls[0] || null,
           airbnb_images: imageUrls.slice(0, 5),
@@ -4128,32 +4118,18 @@ async function runSearchWithStreaming(
           subtotal_currency: subtotalInfo.currency,
         });
         
-        // Send special event for needs_user_confirmation so frontend can show the form
+        // Send event so frontend shows the modal (but DON'T return - continue the pipeline)
         sendSSE(controller, "needs_confirmation", {
           subtotal_nights_only: subtotalInfo.amount,
           subtotal_nights_count: subtotalInfo.nights,
           subtotal_currency: subtotalInfo.currency,
-          message: "Please confirm the Airbnb total price to continue",
+          message: "Please confirm the Airbnb total price",
         });
         
-        // Complete with success=true but flag that confirmation is needed
-        sendSSE(controller, "complete", { 
-          success: true, 
-          needs_user_confirmation: true,
-          subtotal_nights_only: subtotalInfo.amount,
-          subtotal_nights_count: subtotalInfo.nights,
-          subtotal_currency: subtotalInfo.currency,
-          airbnb: { 
-            title: airbnbTitle, 
-            price: null, 
-            url: search.airbnb_url, 
-            images: imageUrls,
-            subtotal_nights_only: subtotalInfo.amount,
-            subtotal_nights_count: subtotalInfo.nights,
-          },
-          dates: { checkIn, checkOut, nights },
-        });
-        return;
+        // Set skipAirbnbPrice to true so pipeline continues without price
+        // Savings will be calculated once user confirms the price
+        skipAirbnbPrice = true;
+        // Continue to visual search (don't return)
       } else {
         // Determine specific failure reason based on what we observed
         let failureCode = 'airbnb_price_element_missing';
@@ -4246,24 +4222,14 @@ async function runSearchWithStreaming(
     stage1Outcome = 'failed';
     stage1Error = e instanceof Error ? e.message : 'Unknown error';
 
-    const failureCode = stage1Error === 'AIRBNB_PARSING_TIMEOUT' ? 'timeout' : 'provider_error';
     const message = stage1Error === 'AIRBNB_PARSING_TIMEOUT'
-      ? 'Could not automatically extract the Airbnb price. Please enter it manually.'
-      : `Could not retrieve Airbnb listing details. Please enter the price manually.`;
+      ? 'Could not automatically extract the Airbnb price. Continuing search...'
+      : `Could not retrieve Airbnb listing details. Continuing search...`;
 
-    console.error('Stage 1 failed:', stage1Error);
+    console.error('Stage 1 error (continuing anyway):', stage1Error);
 
-    // Instead of failing, trigger needs_user_confirmation so user can enter price manually
-    const apiErrorJson = JSON.stringify({
-      status: 'needs_user_confirmation',
-      reason: stage1Error,
-      message: message,
-    });
-
+    // Update search but DON'T set status to error - continue with visual search
     await supabase.from('searches').update({
-      status: 'needs_user_confirmation',
-      api_error: apiErrorJson,
-      api_error_code: 'needs_user_confirmation',
       airbnb_title: airbnbTitle || null,
       last_progress_at: new Date().toISOString(),
     }).eq('id', searchId);
@@ -4276,14 +4242,9 @@ async function runSearchWithStreaming(
       reason: message,
     });
 
-    sendSSE(controller, 'complete', { 
-      success: true, 
-      needs_user_confirmation: true,
-      subtotal_nights_only: null,
-      subtotal_nights_count: nights,
-      subtotal_currency: 'USD',
-    });
-    return;
+    // Set skipAirbnbPrice so pipeline continues
+    skipAirbnbPrice = true;
+    // DON'T return - continue to visual search
   } finally {
     await finishStageRun(supabase, searchId, 'analyze_listing', stage1Outcome, stage1Error);
   }
