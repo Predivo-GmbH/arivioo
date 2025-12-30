@@ -180,6 +180,7 @@ export type Database = {
           candidates_summary: Json | null
           check_in_date: string | null
           check_out_date: string | null
+          click_log: string | null
           content_hash: string | null
           created_at: string
           currency: string | null
@@ -191,6 +192,7 @@ export type Database = {
           nights_count: number | null
           provider: string
           provider_order: number
+          raw_matched_string: string | null
           rejected_reason: string | null
           run_id: string
           run_number: number
@@ -202,6 +204,7 @@ export type Database = {
           candidates_summary?: Json | null
           check_in_date?: string | null
           check_out_date?: string | null
+          click_log?: string | null
           content_hash?: string | null
           created_at?: string
           currency?: string | null
@@ -213,6 +216,7 @@ export type Database = {
           nights_count?: number | null
           provider: string
           provider_order: number
+          raw_matched_string?: string | null
           rejected_reason?: string | null
           run_id: string
           run_number: number
@@ -224,6 +228,7 @@ export type Database = {
           candidates_summary?: Json | null
           check_in_date?: string | null
           check_out_date?: string | null
+          click_log?: string | null
           content_hash?: string | null
           created_at?: string
           currency?: string | null
@@ -235,6 +240,7 @@ export type Database = {
           nights_count?: number | null
           provider?: string
           provider_order?: number
+          raw_matched_string?: string | null
           rejected_reason?: string | null
           run_id?: string
           run_number?: number
