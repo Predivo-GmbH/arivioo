@@ -11,6 +11,7 @@ import { PipelineProgress, type ActivityItem } from "@/components/PipelineProgre
 import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS } from "@/hooks/useEnrichedSearchResults";
 import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/lib/pipelineStages";
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
+import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -194,6 +195,7 @@ export default function SearchResults() {
     nights: number | null;
     currency: string;
   } | null>(null);
+  const [showConfirmationModal, setShowConfirmationModal] = useState(false);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -415,24 +417,26 @@ export default function SearchResults() {
                       setExtractingPrices(false);
                       setPriceExtractionCompleted(data.totalExtracted || priceExtractionTotal);
                     } else if (eventType === "needs_confirmation") {
-                      // Subtotal found but no proven total - user needs to confirm
+                      // Subtotal found but no proven total - show modal for user to confirm
                       setSubtotalInfo({
                         amount: data.subtotal_nights_only || null,
                         nights: data.subtotal_nights_count || null,
                         currency: data.subtotal_currency || 'USD',
                       });
+                      setShowConfirmationModal(true);
                       // Continue to complete event which will set the status
                     } else if (eventType === "complete") {
                       searchComplete = true;
                       actualDurationRef.current = Date.now() - startedAt;
 
-                      // Handle needs_user_confirmation - not an error, just need user input
+                      // Handle needs_user_confirmation - show modal for user input
                       if (data.needs_user_confirmation) {
                         setSubtotalInfo({
                           amount: data.subtotal_nights_only || null,
                           nights: data.subtotal_nights_count || null,
                           currency: data.subtotal_currency || 'USD',
                         });
+                        setShowConfirmationModal(true);
                         // Fetch search to get the updated status
                         const { data: updatedSearch } = await supabase
                           .from("searches")
@@ -943,7 +947,36 @@ export default function SearchResults() {
         });
       }
     }
+    
+    // Also try parsing JSON from api_error
+    if (search.api_error) {
+      try {
+        const errorData = JSON.parse(search.api_error);
+        if (errorData.subtotal_nights_only) {
+          setSubtotalInfo({
+            amount: errorData.subtotal_nights_only,
+            nights: errorData.subtotal_nights_count || null,
+            currency: errorData.subtotal_currency || search.airbnb_currency || 'USD',
+          });
+        }
+      } catch {}
+    }
   }, [search, subtotalInfo]);
+
+  // Show confirmation modal for existing searches that need confirmation
+  useEffect(() => {
+    if (!search || confirmedTotal) return;
+    
+    // If search completed with a price but we don't have a confirmed total, show modal
+    if (search.status === 'completed' && search.airbnb_price && !confirmedTotal) {
+      setShowConfirmationModal(true);
+    }
+    
+    // If status is needs_user_confirmation, show modal
+    if (search.status === 'needs_user_confirmation') {
+      setShowConfirmationModal(true);
+    }
+  }, [search, confirmedTotal]);
 
   // Handle confirmation callbacks
   const handleTotalConfirmed = (amount: number, currency: string) => {
@@ -2056,6 +2089,20 @@ export default function SearchResults() {
           </div>
         )}
       </main>
+
+      {/* Modal for confirming Airbnb total during search */}
+      <AirbnbTotalConfirmationModal
+        open={showConfirmationModal}
+        onOpenChange={setShowConfirmationModal}
+        searchId={searchId!}
+        subtotalAmount={subtotalInfo?.amount ?? search?.airbnb_price ?? null}
+        subtotalNights={subtotalInfo?.nights || nights}
+        subtotalCurrency={subtotalInfo?.currency || search?.airbnb_currency || 'USD'}
+        onConfirmed={(amount, currency) => {
+          handleTotalConfirmed(amount, currency);
+          setShowConfirmationModal(false);
+        }}
+      />
     </div>
   );
 }
