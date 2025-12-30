@@ -174,6 +174,83 @@ export type Database = {
         }
         Relationships: []
       }
+      airbnb_baseline_debug: {
+        Row: {
+          airbnb_url: string | null
+          candidates_summary: Json | null
+          check_in_date: string | null
+          check_out_date: string | null
+          content_hash: string | null
+          created_at: string
+          currency: string | null
+          duration_ms: number | null
+          evidence_snippet: string | null
+          extracted_price: number | null
+          id: string
+          includes_taxes_fees: boolean | null
+          nights_count: number | null
+          provider: string
+          provider_order: number
+          rejected_reason: string | null
+          run_id: string
+          run_number: number
+          search_id: string | null
+          status: string
+        }
+        Insert: {
+          airbnb_url?: string | null
+          candidates_summary?: Json | null
+          check_in_date?: string | null
+          check_out_date?: string | null
+          content_hash?: string | null
+          created_at?: string
+          currency?: string | null
+          duration_ms?: number | null
+          evidence_snippet?: string | null
+          extracted_price?: number | null
+          id?: string
+          includes_taxes_fees?: boolean | null
+          nights_count?: number | null
+          provider: string
+          provider_order: number
+          rejected_reason?: string | null
+          run_id: string
+          run_number: number
+          search_id?: string | null
+          status: string
+        }
+        Update: {
+          airbnb_url?: string | null
+          candidates_summary?: Json | null
+          check_in_date?: string | null
+          check_out_date?: string | null
+          content_hash?: string | null
+          created_at?: string
+          currency?: string | null
+          duration_ms?: number | null
+          evidence_snippet?: string | null
+          extracted_price?: number | null
+          id?: string
+          includes_taxes_fees?: boolean | null
+          nights_count?: number | null
+          provider?: string
+          provider_order?: number
+          rejected_reason?: string | null
+          run_id?: string
+          run_number?: number
+          search_id?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "airbnb_baseline_debug_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       api_providers: {
         Row: {
           auth_secret_name: string
