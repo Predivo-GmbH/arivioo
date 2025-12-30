@@ -719,6 +719,7 @@ Deno.serve(async (req) => {
 
     const providerOrder: ProviderName[] = ['browserless', 'firecrawl', 'zyte'];
     const results: ValidationRunResult[] = [];
+    const runId = crypto.randomUUID();
 
     for (let i = 0; i < runs; i++) {
       const runNumber = i + 1;
@@ -746,6 +747,31 @@ Deno.serve(async (req) => {
 
         providerResults.push(result);
         console.log(`${provider}: ${result.status}, price: ${result.price || 'N/A'}`);
+
+        // Persist debug bundle for this provider attempt
+        try {
+          await supabase.from('airbnb_baseline_debug').insert({
+            run_id: runId,
+            run_number: runNumber,
+            provider: provider,
+            provider_order: providerOrder.indexOf(provider) + 1,
+            status: result.status,
+            duration_ms: result.duration_ms,
+            extracted_price: result.price,
+            currency: result.currency,
+            includes_taxes_fees: result.includes_taxes_fees,
+            evidence_snippet: result.evidence_snippet?.slice(0, 2000),
+            candidates_summary: result.candidates_summary,
+            rejected_reason: result.candidates_summary?.find(c => c.rejected_reason)?.rejected_reason || null,
+            airbnb_url: url,
+            check_in_date: checkIn,
+            check_out_date: checkOut,
+            nights_count: nights,
+          });
+          console.log(`Persisted debug bundle for ${provider} run ${runNumber}`);
+        } catch (persistErr) {
+          console.error(`Failed to persist debug bundle:`, persistErr);
+        }
 
         // If we got a total price, use it and stop
         if (result.status === 'total_price_including_taxes_and_fees' || 
@@ -789,6 +815,7 @@ Deno.serve(async (req) => {
 
     // Summary
     const summary = {
+      run_id: runId,
       url,
       check_in: checkIn,
       check_out: checkOut,
