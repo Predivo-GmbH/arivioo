@@ -168,6 +168,12 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
   const isSuccess = result.status.startsWith('total_price_');
   const hasOcrData = result.ocr_booking_card_amount_value || result.ocr_breakdown_total_amount_value;
   
+  // Calculate OCR baseline and diff for comparison
+  const ocrBaseline = result.ocr_breakdown_total_amount_value || result.ocr_booking_card_amount_value;
+  const providerPrice = result.price;
+  const priceDiff = (providerPrice && ocrBaseline) ? providerPrice - ocrBaseline : null;
+  const priceDiffPercent = (providerPrice && ocrBaseline) ? ((priceDiff! / ocrBaseline) * 100) : null;
+  
   return (
     <Card className={isSuccess ? 'border-green-500/50' : 'border-muted'}>
       <CardHeader className="pb-2">
@@ -183,7 +189,73 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {isSuccess && result.price && (
+        {/* Provider vs OCR Side-by-Side Comparison */}
+        {hasOcrData && (
+          <div className="p-3 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-300 dark:border-slate-600">
+            <Label className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2 block">
+              Provider vs OCR Comparison
+            </Label>
+            <div className="grid grid-cols-3 gap-2 items-center">
+              {/* Provider Price Column */}
+              <div className="text-center p-2 rounded bg-background border">
+                <div className="text-xs text-muted-foreground mb-1">Provider</div>
+                <div className={`text-lg font-bold font-mono ${providerPrice ? (isSuccess ? 'text-green-600' : 'text-orange-600') : 'text-muted-foreground'}`}>
+                  {providerPrice 
+                    ? `$${providerPrice.toLocaleString()}`
+                    : '—'
+                  }
+                </div>
+              </div>
+              
+              {/* Diff Column */}
+              <div className="text-center p-2">
+                {priceDiff !== null ? (
+                  <div className={`text-sm font-bold ${
+                    priceDiff === 0 ? 'text-emerald-600' :
+                    priceDiff > 0 ? 'text-blue-600' :
+                    'text-red-600'
+                  }`}>
+                    {priceDiff === 0 ? '=' : priceDiff > 0 ? `+$${priceDiff.toFixed(0)}` : `-$${Math.abs(priceDiff).toFixed(0)}`}
+                    {priceDiffPercent !== null && priceDiff !== 0 && (
+                      <div className="text-xs font-normal">
+                        ({priceDiffPercent > 0 ? '+' : ''}{priceDiffPercent.toFixed(1)}%)
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-muted-foreground text-sm">—</span>
+                )}
+              </div>
+              
+              {/* OCR Baseline Column */}
+              <div className="text-center p-2 rounded bg-background border">
+                <div className="text-xs text-muted-foreground mb-1">
+                  {result.ocr_breakdown_total_amount_value ? 'OCR Total' : 'OCR Card'}
+                </div>
+                <div className="text-lg font-bold font-mono text-blue-600">
+                  ${ocrBaseline?.toLocaleString() || '—'}
+                </div>
+              </div>
+            </div>
+            
+            {/* Validation Status Row */}
+            <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-600 flex items-center justify-between">
+              <OcrValidationBadge 
+                status={result.ocr_validation_status} 
+                acceptedVia={result.ocr_accepted_via}
+                mismatchReason={result.ocr_mismatch_reason}
+              />
+              {result.ocr_booking_card_snippet && (
+                <span className="text-xs text-muted-foreground truncate max-w-40">
+                  "{result.ocr_booking_card_snippet}"
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Success display without OCR */}
+        {isSuccess && result.price && !hasOcrData && (
           <div className="p-3 bg-green-500/10 rounded-lg border border-green-500/20">
             <div className="flex items-baseline gap-2 flex-wrap">
               <span className="text-2xl font-bold text-green-700">
@@ -195,17 +267,12 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
                   Incl. taxes & fees
                 </Badge>
               )}
-              <OcrValidationBadge 
-                status={result.ocr_validation_status} 
-                acceptedVia={result.ocr_accepted_via}
-                mismatchReason={result.ocr_mismatch_reason}
-              />
             </div>
           </div>
         )}
 
         {/* OCR Rejection display for failed extractions */}
-        {!isSuccess && result.ocr_validation_status === 'rejected' && (
+        {!isSuccess && result.ocr_validation_status === 'rejected' && !hasOcrData && (
           <div className="p-3 bg-red-500/10 rounded-lg border border-red-500/20">
             <div className="flex items-center gap-2 text-red-700">
               <XCircle className="w-4 h-4" />
@@ -216,48 +283,6 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
                 Reason: {result.ocr_mismatch_reason.replace(/_/g, ' ')}
               </p>
             )}
-          </div>
-        )}
-
-        {/* OCR Reference Section */}
-        {hasOcrData && (
-          <div className="p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
-            <Label className="text-xs text-blue-700 font-medium flex items-center gap-1">
-              <Eye className="w-3 h-3" />
-              OCR Visual Reference
-            </Label>
-            <div className="mt-2 space-y-2">
-              {result.ocr_booking_card_amount_value && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Booking Card:</span>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold text-blue-700">
-                      ${result.ocr_booking_card_amount_value.toLocaleString()}
-                    </span>
-                    {result.ocr_booking_card_snippet && (
-                      <span className="text-xs text-muted-foreground truncate max-w-32">
-                        "{result.ocr_booking_card_snippet}"
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-              {result.ocr_breakdown_total_amount_value && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Breakdown Total:</span>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold text-emerald-700">
-                      ${result.ocr_breakdown_total_amount_value.toLocaleString()}
-                    </span>
-                    {result.ocr_breakdown_total_snippet && (
-                      <span className="text-xs text-muted-foreground truncate max-w-32">
-                        "{result.ocr_breakdown_total_snippet}"
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
           </div>
         )}
         
