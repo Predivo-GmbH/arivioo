@@ -37,6 +37,8 @@ interface ProviderAttemptResult {
   currency: string | null;
   includes_taxes_fees: boolean;
   evidence_snippet: string;
+  click_log?: string;
+  raw_matched_string?: string;
   error?: string;
   duration_ms: number;
   candidates_summary: Array<{
@@ -46,6 +48,7 @@ interface ProviderAttemptResult {
     label_hint: string;
     rejected_reason?: string;
     candidate_type?: string;
+    raw_matched_string?: string;
   }>;
 }
 
@@ -78,10 +81,42 @@ function safeSnippet(s: string, max = 260): string {
   return (s || '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
-// Normalize amount
+// Normalize amount (locale-safe)
 function normalizeAmount(raw: string): number | null {
-  const cleaned = raw.replace(/\s/g, '').replace(/,(?=\d{3}(?:\D|$))/g, '');
-  const n = parseFloat(cleaned);
+  const s = (raw || '').trim();
+  if (!s) return null;
+
+  // Keep only digits and separators
+  const cleaned = s.replace(/[^0-9.,]/g, '');
+  if (!cleaned) return null;
+
+  const hasDot = cleaned.includes('.');
+  const hasComma = cleaned.includes(',');
+
+  let normalized = cleaned;
+
+  // If both separators exist, decide decimal separator by last occurrence
+  if (hasDot && hasComma) {
+    const lastDot = cleaned.lastIndexOf('.');
+    const lastComma = cleaned.lastIndexOf(',');
+
+    if (lastComma > lastDot) {
+      // 1.976,20 -> thousands='.' decimal=','
+      normalized = cleaned.replace(/\./g, '').replace(/,/g, '.');
+    } else {
+      // 1,976.20 -> thousands=',' decimal='.'
+      normalized = cleaned.replace(/,/g, '');
+    }
+  } else if (hasComma && !hasDot) {
+    // If only comma exists and looks like decimal (two digits), treat as decimal separator
+    if (/,[0-9]{1,2}$/.test(cleaned)) normalized = cleaned.replace(/,/g, '.');
+    else normalized = cleaned.replace(/,/g, '');
+  } else {
+    // Only dot or none -> remove thousands commas just in case
+    normalized = cleaned.replace(/,(?=\d{3}(?:\D|$))/g, '');
+  }
+
+  const n = Number.parseFloat(normalized);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -103,6 +138,7 @@ function extractPriceCandidates(content: string, nights: number): Array<{
   context: string;
   rejectedReason?: string;
   candidateType: CandidateType;
+  rawMatchedString: string;
 }> {
   const moneyPatterns: Array<{ currency: string; re: RegExp }> = [
     { currency: 'USD', re: /(\$\s*[\d,.]+(?:\.\d{2})?)/g },
@@ -216,6 +252,7 @@ function extractPriceCandidates(content: string, nights: number): Array<{
         context: safeSnippet(context, 200),
         rejectedReason,
         candidateType,
+        rawMatchedString: rawMatch,
       });
     }
   }
@@ -878,6 +915,8 @@ Deno.serve(async (req) => {
             evidence_snippet: result.evidence_snippet?.slice(0, 2000),
             candidates_summary: result.candidates_summary,
             rejected_reason: result.candidates_summary?.find(c => c.rejected_reason)?.rejected_reason || null,
+            click_log: result.click_log || null,
+            raw_matched_string: result.raw_matched_string || null,
             airbnb_url: url,
             check_in_date: checkIn,
             check_out_date: checkOut,
