@@ -414,9 +414,36 @@ export default function SearchResults() {
                       // Price extraction phase complete
                       setExtractingPrices(false);
                       setPriceExtractionCompleted(data.totalExtracted || priceExtractionTotal);
+                    } else if (eventType === "needs_confirmation") {
+                      // Subtotal found but no proven total - user needs to confirm
+                      setSubtotalInfo({
+                        amount: data.subtotal_nights_only || null,
+                        nights: data.subtotal_nights_count || null,
+                        currency: data.subtotal_currency || 'USD',
+                      });
+                      // Continue to complete event which will set the status
                     } else if (eventType === "complete") {
                       searchComplete = true;
                       actualDurationRef.current = Date.now() - startedAt;
+
+                      // Handle needs_user_confirmation - not an error, just need user input
+                      if (data.needs_user_confirmation) {
+                        setSubtotalInfo({
+                          amount: data.subtotal_nights_only || null,
+                          nights: data.subtotal_nights_count || null,
+                          currency: data.subtotal_currency || 'USD',
+                        });
+                        // Fetch search to get the updated status
+                        const { data: updatedSearch } = await supabase
+                          .from("searches")
+                          .select("*")
+                          .eq("id", searchId)
+                          .single();
+                        setSearch(updatedSearch as SearchData);
+                        setSearchPhase("done");
+                        setLoading(false);
+                        return;
+                      }
 
                       if (data.success === false) {
                         throw new Error(data.error || "Search failed");
@@ -456,6 +483,25 @@ export default function SearchResults() {
                .select("*")
                .eq("id", searchId)
                .single();
+
+             // Handle needs_user_confirmation status - not an error
+             if (updatedSearch?.status === "needs_user_confirmation") {
+               // Parse subtotal info from api_error JSON
+               try {
+                 const errorData = JSON.parse(updatedSearch.api_error || '{}');
+                 if (errorData.subtotal_nights_only) {
+                   setSubtotalInfo({
+                     amount: errorData.subtotal_nights_only,
+                     nights: errorData.subtotal_nights_count || null,
+                     currency: errorData.subtotal_currency || 'USD',
+                   });
+                 }
+               } catch {}
+               setSearch(updatedSearch as SearchData);
+               setSearchPhase("done");
+               setLoading(false);
+               return;
+             }
 
              // Handle terminal failure states (DB constraint only allows 'error', not 'failed')
              if (updatedSearch?.status === "error") {
