@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Play, RefreshCw, CheckCircle, XCircle, AlertCircle, Clock, Copy, History, ExternalLink, Beaker, AlertTriangle } from 'lucide-react';
+import { Play, RefreshCw, CheckCircle, XCircle, AlertCircle, Clock, Copy, History, ExternalLink, Beaker, AlertTriangle, Eye } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,6 +33,14 @@ interface ProviderAttemptResult {
   error?: string;
   duration_ms: number;
   candidates_summary: CandidateSummary[];
+  // OCR validation fields
+  ocr_booking_card_amount_value?: number | null;
+  ocr_booking_card_snippet?: string | null;
+  ocr_breakdown_total_amount_value?: number | null;
+  ocr_breakdown_total_snippet?: string | null;
+  ocr_validation_status?: string | null;
+  ocr_accepted_via?: string | null;
+  ocr_mismatch_reason?: string | null;
 }
 
 interface ValidationRunResult {
@@ -119,8 +127,46 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function OcrValidationBadge({ status, acceptedVia, mismatchReason }: { 
+  status?: string | null; 
+  acceptedVia?: string | null;
+  mismatchReason?: string | null;
+}) {
+  if (!status) return null;
+  
+  const isAccepted = status === 'accepted';
+  const isRejected = status === 'rejected';
+  
+  if (isAccepted) {
+    return (
+      <div className="flex items-center gap-1">
+        <Badge className="bg-emerald-500/20 text-emerald-700 border-emerald-500/30 text-xs">
+          <CheckCircle className="w-3 h-3 mr-1" />
+          OCR: {acceptedVia?.replace(/_/g, ' ') || 'accepted'}
+        </Badge>
+      </div>
+    );
+  }
+  
+  if (isRejected) {
+    return (
+      <Badge className="bg-red-500/20 text-red-700 border-red-500/30 text-xs">
+        <XCircle className="w-3 h-3 mr-1" />
+        OCR Rejected: {mismatchReason?.replace(/_/g, ' ') || 'mismatch'}
+      </Badge>
+    );
+  }
+  
+  return (
+    <Badge variant="outline" className="text-xs text-muted-foreground">
+      OCR: {status}
+    </Badge>
+  );
+}
+
 function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
   const isSuccess = result.status.startsWith('total_price_');
+  const hasOcrData = result.ocr_booking_card_amount_value || result.ocr_breakdown_total_amount_value;
   
   return (
     <Card className={isSuccess ? 'border-green-500/50' : 'border-muted'}>
@@ -139,7 +185,7 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
       <CardContent className="space-y-3">
         {isSuccess && result.price && (
           <div className="p-3 bg-green-500/10 rounded-lg border border-green-500/20">
-            <div className="flex items-baseline gap-2">
+            <div className="flex items-baseline gap-2 flex-wrap">
               <span className="text-2xl font-bold text-green-700">
                 {result.currency === 'CHF' ? 'CHF ' : result.currency === 'EUR' ? '€' : '$'}
                 {result.price.toLocaleString()}
@@ -148,6 +194,68 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
                 <Badge variant="outline" className="text-green-600 border-green-400 text-xs">
                   Incl. taxes & fees
                 </Badge>
+              )}
+              <OcrValidationBadge 
+                status={result.ocr_validation_status} 
+                acceptedVia={result.ocr_accepted_via}
+                mismatchReason={result.ocr_mismatch_reason}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* OCR Rejection display for failed extractions */}
+        {!isSuccess && result.ocr_validation_status === 'rejected' && (
+          <div className="p-3 bg-red-500/10 rounded-lg border border-red-500/20">
+            <div className="flex items-center gap-2 text-red-700">
+              <XCircle className="w-4 h-4" />
+              <span className="font-medium">Rejected by OCR validation</span>
+            </div>
+            {result.ocr_mismatch_reason && (
+              <p className="text-xs text-red-600 mt-1">
+                Reason: {result.ocr_mismatch_reason.replace(/_/g, ' ')}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* OCR Reference Section */}
+        {hasOcrData && (
+          <div className="p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
+            <Label className="text-xs text-blue-700 font-medium flex items-center gap-1">
+              <Eye className="w-3 h-3" />
+              OCR Visual Reference
+            </Label>
+            <div className="mt-2 space-y-2">
+              {result.ocr_booking_card_amount_value && (
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">Booking Card:</span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-blue-700">
+                      ${result.ocr_booking_card_amount_value.toLocaleString()}
+                    </span>
+                    {result.ocr_booking_card_snippet && (
+                      <span className="text-xs text-muted-foreground truncate max-w-32">
+                        "{result.ocr_booking_card_snippet}"
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {result.ocr_breakdown_total_amount_value && (
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">Breakdown Total:</span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-emerald-700">
+                      ${result.ocr_breakdown_total_amount_value.toLocaleString()}
+                    </span>
+                    {result.ocr_breakdown_total_snippet && (
+                      <span className="text-xs text-muted-foreground truncate max-w-32">
+                        "{result.ocr_breakdown_total_snippet}"
+                      </span>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           </div>
@@ -386,6 +494,14 @@ export default function AirbnbBaselineDiagnostic() {
             evidence_snippet: p.evidenceSnippet || '',
             duration_ms: p.durationMs || 0,
             candidates_summary: p.candidatesSummary || [],
+            // OCR validation fields
+            ocr_booking_card_amount_value: p.ocrBookingCardAmountValue,
+            ocr_booking_card_snippet: p.ocrBookingCardSnippet,
+            ocr_breakdown_total_amount_value: p.ocrBreakdownTotalAmountValue,
+            ocr_breakdown_total_snippet: p.ocrBreakdownTotalSnippet,
+            ocr_validation_status: p.ocrValidationStatus,
+            ocr_accepted_via: p.ocrAcceptedVia,
+            ocr_mismatch_reason: p.ocrMismatchReason,
           })),
           final_status: successProvider?.status || lastProvider?.status || 'unknown',
           final_price: successProvider?.extractedPrice || null,
