@@ -10,6 +10,7 @@ import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/compon
 import { PipelineProgress, type ActivityItem } from "@/components/PipelineProgress";
 import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS } from "@/hooks/useEnrichedSearchResults";
 import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/lib/pipelineStages";
+import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -180,6 +181,19 @@ export default function SearchResults() {
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
   const [priceExtractionTotal, setPriceExtractionTotal] = useState(0);
   const [priceExtractionCompleted, setPriceExtractionCompleted] = useState(0);
+  
+  // User confirmation state for Airbnb total
+  const [confirmedTotal, setConfirmedTotal] = useState<{
+    confirmed_total_amount: number;
+    confirmed_currency: string;
+    confirmation_source: string;
+    confirmed_at: string;
+  } | null>(null);
+  const [subtotalInfo, setSubtotalInfo] = useState<{
+    amount: number | null;
+    nights: number | null;
+    currency: string;
+  } | null>(null);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -841,6 +855,41 @@ export default function SearchResults() {
     return () => clearInterval(pollInterval);
   }, [loading, searchId, extractingPrices]);
 
+  // Fetch confirmed Airbnb total if exists
+  useEffect(() => {
+    if (!searchId) return;
+    
+    const fetchConfirmation = async () => {
+      const { data } = await supabase
+        .from('airbnb_confirmed_totals')
+        .select('confirmed_total_amount, confirmed_currency, confirmation_source, confirmed_at')
+        .eq('search_id', searchId)
+        .maybeSingle();
+      
+      if (data) {
+        setConfirmedTotal(data);
+      }
+    };
+    
+    fetchConfirmation();
+  }, [searchId]);
+
+  // Handle confirmation callbacks
+  const handleTotalConfirmed = (amount: number, currency: string) => {
+    setConfirmedTotal({
+      confirmed_total_amount: amount,
+      confirmed_currency: currency,
+      confirmation_source: 'user',
+      confirmed_at: new Date().toISOString(),
+    });
+    // Update search's airbnb_price locally for UI consistency
+    setSearch(prev => prev ? { ...prev, airbnb_price: amount, airbnb_currency: currency } : prev);
+  };
+
+  const handleTotalCleared = () => {
+    setConfirmedTotal(null);
+  };
+
   if (!user) return null;
   const airbnbImages = toStringArray(search?.airbnb_images);
 
@@ -1107,7 +1156,20 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </div>
-                ) : (search?.status === "price_unavailable") || (search?.status === "completed" && !search?.airbnb_price) ? (
+                ) : (search?.status === "needs_user_confirmation" && !confirmedTotal) ? (
+                  // User needs to confirm the Airbnb trip total
+                  <div className="py-8">
+                    <AirbnbTotalConfirmation
+                      searchId={searchId!}
+                      subtotalAmount={subtotalInfo?.amount}
+                      subtotalNights={subtotalInfo?.nights || nights}
+                      subtotalCurrency={subtotalInfo?.currency || search?.airbnb_currency || 'USD'}
+                      existingConfirmation={confirmedTotal}
+                      onConfirmed={handleTotalConfirmed}
+                      onCleared={handleTotalCleared}
+                    />
+                  </div>
+                ) : (search?.status === "price_unavailable") || (search?.status === "completed" && !search?.airbnb_price && !confirmedTotal) ? (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-amber-500" />
@@ -1127,12 +1189,21 @@ export default function SearchResults() {
                                  search.api_error_code}
                       </p>
                     )}
-                    <p className="text-sm text-muted-foreground mb-6">
-                      {search?.api_error_code === 'airbnb_timeout' || search?.api_error_code === 'provider_error' 
-                        ? "This is usually temporary. Please try again in a moment."
-                        : "Try different dates or another listing."}
-                    </p>
-                    <Button asChild>
+                    
+                    {/* Show confirmation option as fallback */}
+                    <div className="max-w-lg mx-auto mb-6">
+                      <AirbnbTotalConfirmation
+                        searchId={searchId!}
+                        subtotalAmount={null}
+                        subtotalNights={nights}
+                        subtotalCurrency={search?.airbnb_currency || 'USD'}
+                        existingConfirmation={confirmedTotal}
+                        onConfirmed={handleTotalConfirmed}
+                        onCleared={handleTotalCleared}
+                      />
+                    </div>
+                    
+                    <Button variant="outline" asChild>
                       <Link to="/dashboard">
                         <Search className="w-4 h-4 mr-2" />
                         Try Another Search
