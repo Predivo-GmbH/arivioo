@@ -557,7 +557,27 @@ export default function AirbnbBaselineDiagnostic() {
       });
 
       if (error) throw error;
-      setResults(data);
+      
+      // Map OCR fields from nested objects in API response to flat fields expected by UI
+      const mappedData = {
+        ...data,
+        results: data.results?.map((run: any) => ({
+          ...run,
+          provider_results: run.provider_results?.map((pr: any) => ({
+            ...pr,
+            // Map nested ocr_reference to flat fields
+            ocr_booking_card_amount_value: pr.ocr_reference?.bookingCardAmount ?? null,
+            ocr_booking_card_snippet: pr.ocr_reference?.bookingCardSnippet ?? null,
+            ocr_breakdown_total_amount_value: pr.ocr_reference?.breakdownTotalAmount ?? null,
+            ocr_breakdown_total_snippet: pr.ocr_reference?.breakdownTotalSnippet ?? null,
+            // Map nested ocr_validation to flat fields
+            ocr_validation_status: pr.ocr_validation?.status ?? null,
+            ocr_accepted_via: pr.ocr_validation?.acceptedVia ?? null,
+            ocr_mismatch_reason: pr.ocr_validation?.mismatchReason ?? null,
+          })),
+        })),
+      };
+      setResults(mappedData);
       
       // Refresh history after test
       loadHistory();
