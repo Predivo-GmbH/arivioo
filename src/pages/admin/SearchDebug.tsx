@@ -18,7 +18,10 @@ import {
   ShieldAlert,
   Ban,
   CloudOff,
-  Eye
+  Eye,
+  ScanEye,
+  CheckCircle,
+  XOctagon
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -63,6 +66,14 @@ interface PlatformExtraction {
   priceType: string;
   pageContentHash: string | null;
   extractionMetadata: any;
+  // OCR validation fields
+  ocrBookingCardAmountValue?: number | null;
+  ocrBookingCardSnippet?: string | null;
+  ocrBreakdownTotalAmountValue?: number | null;
+  ocrBreakdownTotalSnippet?: string | null;
+  ocrValidationStatus?: string | null;
+  ocrAcceptedVia?: string | null;
+  ocrMismatchReason?: string | null;
 }
 
 interface RecentSearch {
@@ -476,17 +487,32 @@ export default function SearchDebug() {
                       <DollarSign className="h-4 w-4 text-muted-foreground mt-0.5" />
                       <div>
                         <p className="text-muted-foreground">Extracted Price</p>
-                        <p className="font-semibold">
-                          {extraction.extractedPrice 
-                            ? `${extraction.currency} ${extraction.extractedPrice.toLocaleString()}`
-                            : '—'}
-                          {extraction.includesTaxesFees === true && (
-                            <span className="text-xs text-muted-foreground ml-1">(incl. taxes)</span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="font-semibold">
+                            {extraction.extractedPrice 
+                              ? `${extraction.currency} ${extraction.extractedPrice.toLocaleString()}`
+                              : '—'}
+                            {extraction.includesTaxesFees === true && (
+                              <span className="text-xs text-muted-foreground ml-1">(incl. taxes)</span>
+                            )}
+                            {extraction.includesTaxesFees === false && (
+                              <span className="text-xs text-muted-foreground ml-1">(excl. taxes)</span>
+                            )}
+                          </p>
+                          {/* OCR Validation Status Badge */}
+                          {extraction.ocrValidationStatus === 'accepted' && (
+                            <Badge className="bg-emerald-500/20 text-emerald-700 border-emerald-500/30 text-xs">
+                              <CheckCircle className="w-3 h-3 mr-1" />
+                              OCR: {extraction.ocrAcceptedVia?.replace(/_/g, ' ') || 'validated'}
+                            </Badge>
                           )}
-                          {extraction.includesTaxesFees === false && (
-                            <span className="text-xs text-muted-foreground ml-1">(excl. taxes)</span>
+                          {extraction.ocrValidationStatus === 'rejected' && (
+                            <Badge className="bg-red-500/20 text-red-700 border-red-500/30 text-xs">
+                              <XOctagon className="w-3 h-3 mr-1" />
+                              OCR rejected
+                            </Badge>
                           )}
-                        </p>
+                        </div>
                       </div>
                     </div>
 
@@ -528,6 +554,63 @@ export default function SearchDebug() {
                       </div>
                     </div>
                   </div>
+
+                  {/* OCR Visual Reference Section */}
+                  {(extraction.ocrBookingCardAmountValue || extraction.ocrBreakdownTotalAmountValue) && (
+                    <div className="mt-3 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
+                      <div className="flex items-center gap-2 mb-2">
+                        <ScanEye className="h-4 w-4 text-blue-600" />
+                        <span className="text-sm font-medium text-blue-700">OCR Visual Reference</span>
+                      </div>
+                      <div className="grid gap-2 text-sm">
+                        {extraction.ocrBookingCardAmountValue && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted-foreground">Booking Card:</span>
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-bold text-blue-700">
+                                ${extraction.ocrBookingCardAmountValue.toLocaleString()}
+                              </span>
+                              {extraction.ocrBookingCardSnippet && (
+                                <span className="text-xs text-muted-foreground truncate max-w-40">
+                                  "{extraction.ocrBookingCardSnippet}"
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        {extraction.ocrBreakdownTotalAmountValue && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted-foreground">Breakdown Total:</span>
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-bold text-emerald-700">
+                                ${extraction.ocrBreakdownTotalAmountValue.toLocaleString()}
+                              </span>
+                              {extraction.ocrBreakdownTotalSnippet && (
+                                <span className="text-xs text-muted-foreground truncate max-w-40">
+                                  "{extraction.ocrBreakdownTotalSnippet}"
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* OCR Rejection Reason */}
+                  {extraction.ocrValidationStatus === 'rejected' && extraction.ocrMismatchReason && (
+                    <div className="mt-3 p-2 bg-red-500/10 rounded border border-red-500/20">
+                      <div className="flex items-start gap-2">
+                        <XOctagon className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
+                        <div>
+                          <p className="text-sm font-medium text-red-700">OCR Validation Failed</p>
+                          <p className="text-xs text-red-600 mt-0.5">
+                            {extraction.ocrMismatchReason.replace(/_/g, ' ')}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Failure Reason (enhanced) */}
                   {extraction.failureReason && (

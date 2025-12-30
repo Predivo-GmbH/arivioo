@@ -1542,6 +1542,14 @@ Deno.serve(async (req) => {
           checkOutDate: bundle.check_out_date,
           nightsCount: bundle.nights_count,
           createdAt: bundle.created_at,
+          // OCR validation fields
+          ocrBookingCardAmountValue: bundle.ocr_booking_card_amount_value,
+          ocrBookingCardSnippet: bundle.ocr_booking_card_snippet,
+          ocrBreakdownTotalAmountValue: bundle.ocr_breakdown_total_amount_value,
+          ocrBreakdownTotalSnippet: bundle.ocr_breakdown_total_snippet,
+          ocrValidationStatus: bundle.ocr_validation_status,
+          ocrAcceptedVia: bundle.ocr_accepted_via,
+          ocrMismatchReason: bundle.ocr_mismatch_reason,
         });
       });
 
