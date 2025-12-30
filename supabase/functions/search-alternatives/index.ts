@@ -4207,20 +4207,41 @@ async function runSearchWithStreaming(
 
     const failureCode = stage1Error === 'AIRBNB_PARSING_TIMEOUT' ? 'timeout' : 'provider_error';
     const message = stage1Error === 'AIRBNB_PARSING_TIMEOUT'
-      ? 'Could not retrieve Airbnb listing details (timeout)'
-      : `Could not retrieve Airbnb listing details (${stage1Error})`;
+      ? 'Could not automatically extract the Airbnb price. Please enter it manually.'
+      : `Could not retrieve Airbnb listing details. Please enter the price manually.`;
 
     console.error('Stage 1 failed:', stage1Error);
 
+    // Instead of failing, trigger needs_user_confirmation so user can enter price manually
+    const apiErrorJson = JSON.stringify({
+      status: 'needs_user_confirmation',
+      reason: stage1Error,
+      message: message,
+    });
+
     await supabase.from('searches').update({
-      status: 'error',
-      api_error: message,
-      api_error_code: `airbnb_parsing_${failureCode}`,
+      status: 'needs_user_confirmation',
+      api_error: apiErrorJson,
+      api_error_code: 'needs_user_confirmation',
+      airbnb_title: airbnbTitle || null,
       last_progress_at: new Date().toISOString(),
     }).eq('id', searchId);
 
-    sendSSE(controller, 'error', { message });
-    sendSSE(controller, 'complete', { success: false, error: stage1Error, failureCode });
+    // Send needs_confirmation event so frontend shows the modal
+    sendSSE(controller, 'needs_confirmation', {
+      subtotal_nights_only: null,
+      subtotal_nights_count: nights,
+      subtotal_currency: 'USD',
+      reason: message,
+    });
+
+    sendSSE(controller, 'complete', { 
+      success: true, 
+      needs_user_confirmation: true,
+      subtotal_nights_only: null,
+      subtotal_nights_count: nights,
+      subtotal_currency: 'USD',
+    });
     return;
   } finally {
     await finishStageRun(supabase, searchId, 'analyze_listing', stage1Outcome, stage1Error);
