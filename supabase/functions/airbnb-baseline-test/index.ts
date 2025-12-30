@@ -230,12 +230,13 @@ function extractPriceCandidates(content: string, nights: number): Array<{
       }
 
       // Rule D: Detect explicit TOTAL - the ONLY selectable type
-      // Must have "Total" without "before taxes" unless we verify taxes are shown separately
+      // Must have "Total" or "Pay $X now" (book/stays checkout page)
+      const hasPayNow = /\bPay\s+[\$€£]\s*[\d,]+.*now\b/i.test(context);
       const hasExplicitTotal = /\b(total\s*\([A-Z]{3}\)|total\s+USD|total\s+EUR|total\s+GBP|trip\s+total|grand\s+total|you\s+pay)\b/i.test(context);
       const hasGenericTotal = /\btotal\b/i.test(context) && !hasForNightsPattern;
       const hasTotalBeforeTaxes = /\btotal\s+before\s+taxes\b/i.test(context);
 
-      if (!rejectedReason && (hasExplicitTotal || (hasGenericTotal && !hasTotalBeforeTaxes))) {
+      if (!rejectedReason && (hasPayNow || hasExplicitTotal || (hasGenericTotal && !hasTotalBeforeTaxes))) {
         candidateType = 'total_final';
         // No rejection - this is valid
       }
@@ -493,16 +494,25 @@ function extractOcrFromHtml(html: string, nights: number): OcrVisualReference | 
     }
 
 // --------------------
-    // Breakdown total
+    // Breakdown total (also handles book/stays checkout page)
     // --------------------
     // STRICT PATTERNS: Only match explicit Airbnb breakdown totals
-    // These patterns MUST include currency code/symbol + "Total" in close proximity
-    // Examples: "Total (USD) $2,213.34", "Total USD $2,213", "Total €1.234,00"
+    // These patterns MUST include currency code/symbol + "Total" or "Pay" in close proximity
+    // Examples: "Total (USD) $2,213.34", "Total USD $2,213", "Pay $2,213.34 now"
     const breakdownTotalCandidates: Array<{ amount: number; snippet: string; priority: number }> = [];
+
+    // Priority 0: "Pay $X now" - book/stays checkout page pattern (highest priority)
+    const pattern0 = /\bPay\s+(?:US\$|\$|€|£|CHF)\s*([\d][\d.,]+)\s+now\b/gi;
+    let m: RegExpExecArray | null;
+    pattern0.lastIndex = 0;
+    while ((m = pattern0.exec(text)) !== null) {
+      const amount = normalizeAmount(m[1]);
+      if (!amount || amount < 100 || amount > 500000) continue;
+      breakdownTotalCandidates.push({ amount, snippet: safeSnippet(m[0], 160), priority: 0 });
+    }
 
     // Priority 1: "Total (USD) $X" - the gold standard Airbnb pattern
     const pattern1 = /\bTotal\s*\(\s*(USD|EUR|GBP|CHF)\s*\)\s*(?:US\$|\$|€|£|CHF)?\s*([\d][\d.,]+)/gi;
-    let m: RegExpExecArray | null;
     pattern1.lastIndex = 0;
     while ((m = pattern1.exec(text)) !== null) {
       const amount = normalizeAmount(m[2]);
@@ -948,7 +958,47 @@ async function testZyte(url: string, nights: number, supabase: any): Promise<Pro
   }
 }
 
-// Test with Browserless - Deterministic 2-step flow with breakdown container extraction
+// Build book/stays URL from rooms URL
+function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
+  book_stays_url: string;
+  room_id: string;
+  check_in: string;
+  check_out: string;
+  adults: number;
+} | null {
+  try {
+    const parsed = new URL(roomsUrl);
+    const pathMatch = parsed.pathname.match(/\/rooms\/(\d+)/);
+    if (!pathMatch) return null;
+    const roomId = pathMatch[1];
+    
+    const checkIn = parsed.searchParams.get('check_in') || '';
+    const checkOut = parsed.searchParams.get('check_out') || '';
+    if (!checkIn || !checkOut) return null;
+    
+    const adultsParam = parsed.searchParams.get('adults');
+    const guestsParam = parsed.searchParams.get('guests');
+    const adults = adultsParam ? parseInt(adultsParam, 10) : (guestsParam ? parseInt(guestsParam, 10) : 1);
+    
+    const bookStaysUrl = new URL(`https://www.airbnb.com/book/stays/${roomId}`);
+    bookStaysUrl.searchParams.set('checkin', checkIn);
+    bookStaysUrl.searchParams.set('checkout', checkOut);
+    bookStaysUrl.searchParams.set('numberOfGuests', String(adults));
+    bookStaysUrl.searchParams.set('numberOfAdults', String(adults));
+    bookStaysUrl.searchParams.set('numberOfChildren', '0');
+    bookStaysUrl.searchParams.set('numberOfInfants', '0');
+    bookStaysUrl.searchParams.set('numberOfPets', '0');
+    bookStaysUrl.searchParams.set('isWorkTrip', 'false');
+    bookStaysUrl.searchParams.set('guestCurrency', guestCurrency);
+    bookStaysUrl.searchParams.set('productId', roomId);
+    
+    return { book_stays_url: bookStaysUrl.toString(), room_id: roomId, check_in: checkIn, check_out: checkOut, adults };
+  } catch {
+    return null;
+  }
+}
+
+// Test with Browserless - PRIMARY: book/stays page, FALLBACK: rooms page
 async function testBrowserless(url: string, nights: number, supabase: any): Promise<ProviderAttemptResult> {
   const start = Date.now();
   const provider: ProviderName = 'browserless';
@@ -969,208 +1019,134 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
       };
     }
 
+    // Build book/stays URL from rooms URL
+    const bookStaysParams = buildBookStaysUrl(url);
+    const bookStaysUrl = bookStaysParams?.book_stays_url || null;
+    const roomId = bookStaysParams?.room_id || '';
+    
+    console.log(`[Browserless] Rooms URL: ${url}`);
+    console.log(`[Browserless] Book/Stays URL: ${bookStaysUrl}`);
+
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${apiKey}`;
 
-    // DETERMINISTIC 2-STEP PLAYWRIGHT SCRIPT
+    // BOOK/STAYS PRIMARY SCRIPT
     const functionPayload = {
       code: `
         export default async function({ page, context }) {
-          const url = context.url;
+          const bookStaysUrl = context.bookStaysUrl;
+          const roomsUrl = context.roomsUrl;
+          const roomId = context.roomId;
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           const clickLog = [];
 
-          // ========== STEP 1: Load listing and wait for booking card ==========
-          clickLog.push('STEP1: Loading page');
-          await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-          await sleep(4000);
+          // Session setup
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+          await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+          await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 2 });
           
-          // Verify booking card is present
-          const hasBookingCard = await page.$('[data-section-id="BOOK_IT_SIDEBAR"]') || 
-                                  await page.$('[data-testid="book-it-default"]') ||
-                                  await page.$('div[class*="book"]');
-          clickLog.push('Booking card found: ' + !!hasBookingCard);
-          
-          // ========== STEP 2: Open price breakdown ==========
-          let breakdownOpened = false;
-          let totalRowFound = false;
-          
-          // STRATEGY A: Click explicit "Price breakdown" or "Show price details" link
-          clickLog.push('STEP2A: Looking for Price breakdown link');
           try {
-            const allLinks = await page.$$('a, button, span, div[role="button"]');
-            for (const el of allLinks) {
-              const text = await el.textContent().catch(() => '');
-              const textLower = (text || '').toLowerCase().trim();
-              if (textLower.includes('price breakdown') || 
-                  textLower.includes('show price details') ||
-                  textLower.includes('price details')) {
-                clickLog.push('Found breakdown link: ' + textLower.slice(0, 40));
-                await el.click({ delay: 100 });
-                await sleep(2500);
-                breakdownOpened = true;
-                break;
-              }
-            }
+            const client = await page.target().createCDPSession();
+            await client.send('Emulation.setTimezoneOverride', { timezoneId: 'America/New_York' });
+            await client.send('Network.enable');
+            await client.send('Network.clearBrowserCookies');
+            await client.send('Network.clearBrowserCache');
           } catch (e) {
-            clickLog.push('Strategy A error: ' + e.message);
+            clickLog.push('CDP setup partial: ' + e.message);
           }
-          
-          // Check if Total row appeared after Strategy A
-          if (breakdownOpened) {
-            const htmlAfterA = await page.content();
-            totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(htmlAfterA) ||
-                            /trip\\s+total/i.test(htmlAfterA);
-            clickLog.push('Strategy A Total found: ' + totalRowFound);
+
+          // Clear storage
+          await page.goto('https://www.airbnb.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await sleep(500);
+          try {
+            await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
+          } catch {}
+
+          let usedFallback = false;
+          let finalUrl = '';
+          let pageTitle = '';
+          let totalRowFound = false;
+          let bookingCardScreenshot = null;
+
+          // ========== PRIMARY: Navigate to book/stays ==========
+          if (bookStaysUrl) {
+            clickLog.push('PRIMARY: Navigating to book/stays');
+            await page.goto(bookStaysUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+            await sleep(2000);
+            
+            finalUrl = page.url();
+            pageTitle = await page.title().catch(() => '');
+            
+            const isBookStaysPage = finalUrl.includes('/book/stays/' + roomId);
+            const isLoginRedirect = finalUrl.includes('/login') || finalUrl.includes('/signin');
+            
+            if (!isBookStaysPage || isLoginRedirect) {
+              clickLog.push('Book/stays failed: ' + (isLoginRedirect ? 'login_redirect' : 'wrong_path'));
+              usedFallback = true;
+            } else {
+              // Check for Total on book/stays page
+              const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+              totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(bodyText) ||
+                              /Pay\\s+\\$[\\d,]+/i.test(bodyText);
+              clickLog.push('Book/stays Total found: ' + totalRowFound);
+            }
+          } else {
+            clickLog.push('No book/stays URL, using fallback');
+            usedFallback = true;
           }
-          
-          // STRATEGY B: Click the "$X for Y nights" price line if Strategy A didn't work
-          if (!totalRowFound) {
-            clickLog.push('STEP2B: Looking for price line to click');
+
+          // ========== FALLBACK: rooms page with breakdown click ==========
+          if (usedFallback) {
+            clickLog.push('FALLBACK: Navigating to rooms page');
+            await page.goto(roomsUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+            await sleep(4000);
+            
+            finalUrl = page.url();
+            pageTitle = await page.title().catch(() => '');
+            
+            // Try to open price breakdown
             try {
-              // First try aria-label
-              const ariaElements = await page.$$('[aria-label]');
-              for (const el of ariaElements) {
-                const aria = await el.getAttribute('aria-label');
-                if (aria && /\\$[\\d,]+.*for.*\\d+.*night/i.test(aria)) {
-                  clickLog.push('Clicking aria-label: ' + aria.slice(0, 50));
+              const allLinks = await page.$$('a, button, span, div[role="button"]');
+              for (const el of allLinks) {
+                const text = await el.textContent().catch(() => '');
+                const textLower = (text || '').toLowerCase().trim();
+                if (textLower.includes('price breakdown') || textLower.includes('price details')) {
                   await el.click({ delay: 100 });
                   await sleep(2500);
-                  breakdownOpened = true;
+                  clickLog.push('Clicked: ' + textLower.slice(0, 30));
                   break;
                 }
               }
-              
-              // If still not found, try text content
-              if (!breakdownOpened) {
-                const priceElements = await page.$$('span, button, div');
-                for (const el of priceElements) {
-                  const text = await el.textContent().catch(() => '');
-                  if (text && /\\$[\\d,]+\\s+(for|×)\\s+\\d+\\s+night/i.test(text)) {
-                    clickLog.push('Clicking price text: ' + text.slice(0, 50));
-                    await el.click({ delay: 100 });
-                    await sleep(2500);
-                    breakdownOpened = true;
-                    break;
-                  }
-                }
-              }
             } catch (e) {
-              clickLog.push('Strategy B error: ' + e.message);
+              clickLog.push('Click failed: ' + e.message);
             }
             
-            // Check if Total row appeared after Strategy B
-            if (breakdownOpened) {
-              const htmlAfterB = await page.content();
-              totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(htmlAfterB) ||
-                              /trip\\s+total/i.test(htmlAfterB);
-              clickLog.push('Strategy B Total found: ' + totalRowFound);
-            }
+            const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+            totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(bodyText);
+            clickLog.push('Fallback Total found: ' + totalRowFound);
           }
 
-          await sleep(1000);
-          
-          // ========== STEP 3: Extract breakdown container content ==========
-          let breakdownContainerHtml = '';
-          let fullHtml = await page.content();
-          
-          if (totalRowFound) {
-            // Try to extract just the breakdown modal/container
-            clickLog.push('STEP3: Extracting breakdown container');
-            try {
-              // Common Airbnb breakdown container selectors
-              const containerSelectors = [
-                '[data-testid="price-item-breakdown"]',
-                '[aria-label*="Price breakdown"]',
-                '[class*="price-breakdown"]',
-                '[class*="_1s2krtok"]', // Common Airbnb modal class
-                'div[role="dialog"]',
-                'section[aria-label*="price"]',
-              ];
-              
-              for (const sel of containerSelectors) {
-                try {
-                  const container = await page.$(sel);
-                  if (container) {
-                    breakdownContainerHtml = await container.innerHTML();
-                    if (breakdownContainerHtml && breakdownContainerHtml.length > 100) {
-                      clickLog.push('Found container: ' + sel + ' (len=' + breakdownContainerHtml.length + ')');
-                      break;
-                    }
-                  }
-                } catch (e) {}
-              }
-              
-              // If no container found, try to find a section with both "nights" and "Total"
-              if (!breakdownContainerHtml) {
-                const allSections = await page.$$('div, section');
-                for (const section of allSections) {
-                  const html = await section.innerHTML().catch(() => '');
-                  if (html && 
-                      /\\d+\\s*nights?/i.test(html) && 
-                      /Total\\s*(USD|EUR|GBP)?/i.test(html) &&
-                      html.length < 10000) {
-                    breakdownContainerHtml = html;
-                    clickLog.push('Found breakdown section by content (len=' + html.length + ')');
-                    break;
-                  }
-                }
-              }
-            } catch (e) {
-              clickLog.push('Container extraction error: ' + e.message);
-            }
-          }
-          
-          // Return breakdown container if found, otherwise full HTML
-          const contentToReturn = breakdownContainerHtml || fullHtml;
-          
-          clickLog.push('Final: breakdownOpened=' + breakdownOpened + ', totalRowFound=' + totalRowFound + ', containerLen=' + breakdownContainerHtml.length);
-          
-          // ========== STEP 4: Capture screenshots for OCR ==========
-          let bookingCardScreenshot = null;
-          let breakdownScreenshot = null;
-          
-          try {
-            // Capture booking card area
-            const bookingCard = await page.$('[data-section-id="BOOK_IT_SIDEBAR"]') ||
-                                await page.$('[data-testid="book-it-default"]') ||
-                                await page.$('div[class*="book-it"]');
-            if (bookingCard) {
-              bookingCardScreenshot = await bookingCard.screenshot({ encoding: 'base64' }).catch(() => null);
-              clickLog.push('Booking card screenshot: ' + (bookingCardScreenshot ? 'captured' : 'failed'));
-            }
-            
-            // If breakdown is open, capture it
-            if (breakdownOpened || totalRowFound) {
-              const breakdownContainer = await page.$('[data-testid="price-item-breakdown"]') ||
-                                          await page.$('[aria-label*="Price breakdown"]') ||
-                                          await page.$('div[role="dialog"]') ||
-                                          await page.$('[class*="price-breakdown"]');
-              if (breakdownContainer) {
-                breakdownScreenshot = await breakdownContainer.screenshot({ encoding: 'base64' }).catch(() => null);
-                clickLog.push('Breakdown screenshot: ' + (breakdownScreenshot ? 'captured' : 'failed'));
-              } else {
-                // Fallback: take a viewport screenshot
-                breakdownScreenshot = await page.screenshot({ encoding: 'base64', fullPage: false }).catch(() => null);
-                clickLog.push('Fallback viewport screenshot: ' + (breakdownScreenshot ? 'captured' : 'failed'));
-              }
-            }
-          } catch (screenshotError) {
-            clickLog.push('Screenshot error: ' + screenshotError.message);
-          }
+          // Take screenshot
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await sleep(300);
+          bookingCardScreenshot = await page.screenshot({ encoding: 'base64', clip: { x: 0, y: 0, width: 1440, height: 900 } }).catch(() => null);
 
-          return { 
-            html: contentToReturn,
-            fullHtml: fullHtml,
-            breakdownContainerHtml: breakdownContainerHtml,
-            breakdownOpened: breakdownOpened,
-            totalRowFound: totalRowFound,
+          const html = await page.content();
+
+          return {
+            html,
+            fullHtml: html,
+            bookStaysUrl: bookStaysUrl,
+            usedFallback,
+            finalUrl,
+            pageTitle,
+            totalRowFound,
             clickLog: clickLog.join(' | '),
-            bookingCardScreenshot: bookingCardScreenshot,
-            breakdownScreenshot: breakdownScreenshot
+            bookingCardScreenshot,
+            breakdownOpened: !usedFallback
           };
         }
       `,
-      context: { url },
+      context: { bookStaysUrl, roomsUrl: url, roomId },
     };
 
     const resp = await fetchWithTimeout(
