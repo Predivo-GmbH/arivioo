@@ -2120,6 +2120,7 @@ export default function SearchResults() {
         subtotalAmount={subtotalInfo?.amount ?? search?.airbnb_price ?? null}
         subtotalNights={subtotalInfo?.nights || nights}
         subtotalCurrency={subtotalInfo?.currency || search?.airbnb_currency || 'USD'}
+        currentStageId={currentStep >= 0 && currentStep < PIPELINE_STAGES.length ? PIPELINE_STAGES[currentStep].id : null}
         onConfirmed={(amount, currency) => {
           handleTotalConfirmed(amount, currency);
           setShowConfirmationModal(false);

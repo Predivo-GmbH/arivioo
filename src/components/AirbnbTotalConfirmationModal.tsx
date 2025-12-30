@@ -3,10 +3,12 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { AlertTriangle, DollarSign, Check, X, Loader2 } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+import { AlertTriangle, DollarSign, Check, X, Loader2, Sparkles, Camera, Globe, Calendar, CheckCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { PIPELINE_STAGES, type PipelineStageId } from "@/lib/pipelineStages";
 
 interface AirbnbTotalConfirmationModalProps {
   open: boolean;
@@ -15,6 +17,7 @@ interface AirbnbTotalConfirmationModalProps {
   subtotalAmount: number | null;
   subtotalNights: number | null;
   subtotalCurrency: string;
+  currentStageId?: PipelineStageId | null;
   onConfirmed: (confirmedTotal: number, currency: string) => void;
 }
 
@@ -27,6 +30,15 @@ const getCurrencySymbol = (currency: string): string => {
   }
 };
 
+const stageIcons: Record<string, React.ElementType> = {
+  Sparkles,
+  Camera,
+  Globe,
+  Calendar,
+  DollarSign,
+  CheckCircle,
+};
+
 export function AirbnbTotalConfirmationModal({
   open,
   onOpenChange,
@@ -34,6 +46,7 @@ export function AirbnbTotalConfirmationModal({
   subtotalAmount,
   subtotalNights,
   subtotalCurrency,
+  currentStageId,
   onConfirmed,
 }: AirbnbTotalConfirmationModalProps) {
   const { toast } = useToast();
@@ -41,6 +54,15 @@ export function AirbnbTotalConfirmationModal({
   const [isSaving, setIsSaving] = useState(false);
 
   const currencySymbol = getCurrencySymbol(subtotalCurrency);
+
+  // Find current stage info
+  const currentStageIndex = currentStageId 
+    ? PIPELINE_STAGES.findIndex(s => s.id === currentStageId) 
+    : 0;
+  const currentStage = currentStageId 
+    ? PIPELINE_STAGES.find(s => s.id === currentStageId) 
+    : PIPELINE_STAGES[0];
+  const progressPercent = ((currentStageIndex + 0.5) / PIPELINE_STAGES.length) * 100;
 
   // Pre-fill with subtotal if available
   useEffect(() => {
@@ -125,10 +147,23 @@ export function AirbnbTotalConfirmationModal({
             "sm:rounded-lg"
           )}
         >
-          {/* Background search indicator */}
-          <div className="flex items-center gap-2 text-sm text-muted-foreground mb-4 p-2 rounded-md bg-muted/50">
-            <Loader2 className="w-4 h-4 animate-spin text-primary" />
-            <span>Searching for alternatives in the background...</span>
+          {/* Background search progress indicator */}
+          <div className="mb-4 p-3 rounded-lg bg-muted/50 border border-border/50">
+            <div className="flex items-center gap-2 mb-2">
+              <Loader2 className="w-4 h-4 animate-spin text-primary" />
+              <span className="text-sm font-medium">
+                {currentStage?.title || 'Searching...'}
+              </span>
+            </div>
+            <Progress value={progressPercent} className="h-1.5" />
+            <div className="flex items-center justify-between mt-2">
+              <p className="text-xs text-muted-foreground">
+                {currentStage?.description || 'Processing in background...'}
+              </p>
+              <span className="text-xs text-muted-foreground">
+                Step {currentStageIndex + 1}/{PIPELINE_STAGES.length}
+              </span>
+            </div>
           </div>
 
           <div className="flex flex-col space-y-1.5">
