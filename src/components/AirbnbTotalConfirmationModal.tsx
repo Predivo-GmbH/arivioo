@@ -3,7 +3,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { AlertTriangle, DollarSign, Check, X } from "lucide-react";
+import { AlertTriangle, DollarSign, Check, X, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -125,26 +125,38 @@ export function AirbnbTotalConfirmationModal({
             "sm:rounded-lg"
           )}
         >
+          {/* Background search indicator */}
+          <div className="flex items-center gap-2 text-sm text-muted-foreground mb-4 p-2 rounded-md bg-muted/50">
+            <Loader2 className="w-4 h-4 animate-spin text-primary" />
+            <span>Searching for alternatives in the background...</span>
+          </div>
+
           <div className="flex flex-col space-y-1.5">
             <DialogPrimitive.Title className="flex items-center gap-2 text-lg font-semibold leading-none tracking-tight">
               <AlertTriangle className="w-5 h-5 text-amber-500" />
               Confirm Airbnb Total
             </DialogPrimitive.Title>
             <DialogPrimitive.Description className="text-sm text-muted-foreground">
-              Please enter the final total including taxes & fees while we search.
+              We found a subtotal but need the final price including all fees.
             </DialogPrimitive.Description>
           </div>
 
           <div className="space-y-4">
-            {/* Subtotal found */}
+            {/* Prominent subtotal display */}
             {subtotalAmount && (
-              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
-                <p className="text-sm text-amber-700 dark:text-amber-400">
-                  <span className="font-medium">Found:</span>{" "}
-                  {currencySymbol}{subtotalAmount.toLocaleString()}
-                  {subtotalNights && ` for ${subtotalNights} nights`}
+              <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                <p className="text-xs uppercase tracking-wide text-amber-600 dark:text-amber-400 font-medium mb-1">
+                  Detected Subtotal
                 </p>
-                <p className="text-xs text-muted-foreground mt-1">
+                <p className="text-2xl font-bold text-amber-700 dark:text-amber-300">
+                  {currencySymbol}{subtotalAmount.toLocaleString()}
+                  {subtotalNights && (
+                    <span className="text-base font-normal text-amber-600 dark:text-amber-400 ml-2">
+                      for {subtotalNights} nights
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs text-muted-foreground mt-2">
                   This may not include taxes, cleaning fees, or service fees.
                 </p>
               </div>
