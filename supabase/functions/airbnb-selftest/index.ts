@@ -26,7 +26,7 @@ function base64ToBytes(b64: string): Uint8Array {
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const digest = await crypto.subtle.digest('SHA-256', bytes.buffer as ArrayBuffer);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
@@ -329,42 +329,52 @@ async function runBrowserless(url: string): Promise<any> {
     const functionPayload = {
       code: `export default async function({ page }) {
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        await page.setViewport({ width: 1400, height: 900 });
         await page.goto('${url}', { waitUntil: 'networkidle2', timeout: 45000 });
-        await sleep(6000);
-
-        // Try to find booking module container and screenshot it
-        const el =
-          (await page.$('div[data-section-id="BOOK_IT_SIDEBAR"]')) ||
-          (await page.$('div[class*="book-it" i]')) ||
-          (await page.$('div[class*="bookIt" i]'));
+        await sleep(5000);
 
         let bookingCardScreenshot = null;
         let bookingCardBBox = null;
         let bookingCardDimensions = null;
+        let strategy = 'none';
 
         try {
-          if (el) {
-            const bbox = await el.boundingBox();
-            bookingCardBBox = bbox || null;
-            bookingCardScreenshot = await el.screenshot({ encoding: 'base64' }).catch(() => null);
-            if (bbox) bookingCardDimensions = { width: Math.round(bbox.width), height: Math.round(bbox.height) };
+          // Strategy 1: Look for the booking sidebar container
+          const sidebar = await page.$('div[data-section-id="BOOK_IT_SIDEBAR"]');
+          
+          if (sidebar) {
+            const sidebarBox = await sidebar.boundingBox();
+            if (sidebarBox) {
+              // Screenshot just the TOP portion of the sidebar (first 120px) which shows the total price header
+              const headerClip = {
+                x: Math.round(sidebarBox.x),
+                y: Math.round(sidebarBox.y),
+                width: Math.round(sidebarBox.width),
+                height: Math.min(120, Math.round(sidebarBox.height / 3))
+              };
+              bookingCardScreenshot = await page.screenshot({ encoding: 'base64', clip: headerClip }).catch(() => null);
+              bookingCardBBox = headerClip;
+              bookingCardDimensions = { width: headerClip.width, height: headerClip.height };
+              strategy = 'sidebar_header_clip';
+            }
           }
-
-          // Pragmatic fallback: right-side region crop
+          
+          // Strategy 2: Fallback to viewport right-side clip at TOP of page
           if (!bookingCardScreenshot) {
-            const vp = page.viewportSize() || { width: 1200, height: 800 };
+            // The booking card header with total is at the TOP right of the viewport
             const clip = {
-              x: Math.round(vp.width * 0.52),
-              y: 0,
-              width: Math.round(vp.width * 0.46),
-              height: Math.round(vp.height * 0.72),
+              x: 770,   // Right side where booking card appears
+              y: 100,   // Near top of viewport after header
+              width: 450,
+              height: 150,
             };
+            bookingCardScreenshot = await page.screenshot({ encoding: 'base64', clip }).catch(() => null);
             bookingCardBBox = clip;
             bookingCardDimensions = { width: clip.width, height: clip.height };
-            bookingCardScreenshot = await page.screenshot({ encoding: 'base64', clip }).catch(() => null);
+            strategy = 'viewport_top_right_clip';
           }
         } catch (e) {
-          // ignore, returned below
+          strategy = 'error: ' + String(e).slice(0, 100);
         }
 
         return {
@@ -374,6 +384,7 @@ async function runBrowserless(url: string): Promise<any> {
           bookingCardScreenshot,
           bookingCardBBox,
           bookingCardDimensions,
+          strategy,
         };
       }`,
       context: {},
@@ -615,14 +626,15 @@ Deno.serve(async (req) => {
     ocrArtifacts.booking_card_ocr_text_normalized = extracted.booking_card_ocr_text_normalized;
     ocrArtifacts.booking_card_ocr_matched_substring = extracted.booking_card_ocr_matched_substring;
     ocrArtifacts.booking_card_visible_amount_value = extracted.booking_card_visible_amount_value;
-  } catch (e) {
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
     return new Response(
       JSON.stringify(
         {
           run_id: runId,
           url,
           final_status: 'booking_card_ocr_error',
-          error: String(e?.message || e),
+          error: errMsg,
           ...ocrArtifacts,
           results: providerResults,
         },
