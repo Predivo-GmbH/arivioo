@@ -292,34 +292,66 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
           // Let dynamic pricing hydrate
           await sleep(9000);
 
-          // Attempt to expand the price breakdown (Airbnb often hides "Total before taxes" behind this)
+          // Attempt to expand the price breakdown (needed to reveal final total incl. taxes)
+          // Try multiple strategies: known selectors + text-based click.
           const clickSelectors = [
             "button[data-testid='price-breakdown-trigger']",
             "button[aria-label*='Show price breakdown']",
             "button[aria-label*='Price breakdown']",
+            "a[aria-label*='Price breakdown']",
           ];
+
+          let breakdownOpened = false;
 
           for (const sel of clickSelectors) {
             try {
               const el = await page.$(sel);
               if (el) {
                 await el.click({ delay: 30 });
-                await sleep(1500);
+                breakdownOpened = true;
+                await sleep(1200);
                 break;
               }
             } catch (e) {}
           }
 
-          // Extra wait after click attempt
+          if (!breakdownOpened) {
+            try {
+              breakdownOpened = await page.evaluate(() => {
+                const candidates = Array.from(document.querySelectorAll('button,a,[role="button"],[role="link"]'));
+                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown')) as HTMLElement | undefined;
+                if (target) {
+                  target.click();
+                  return true;
+                }
+                return false;
+              });
+              if (breakdownOpened) await sleep(1200);
+            } catch (e) {}
+          }
+
+          // Extra wait for modal content to render/hydrate
           await sleep(2500);
 
           // Return full HTML content
           const html = await page.content();
 
-          // Also return a small text snapshot for debugging
-          const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 5000) || "");
+          // Debug: return a snippet around "total" to see if final total is present
+          const totalSnippet = await page.evaluate(() => {
+            const text = document.body?.innerText || '';
+            const lower = text.toLowerCase();
+            const idx = lower.indexOf('total');
+            if (idx === -1) return '';
+            const start = Math.max(0, idx - 200);
+            const end = Math.min(text.length, idx + 600);
+            return text.slice(start, end);
+          });
 
-          return { html, bodyTextLength: bodyText.length, bodyTextPreview: bodyText.slice(0, 600) };
+          return {
+            html,
+            breakdownOpened,
+            totalSnippet: (totalSnippet || '').slice(0, 1200),
+          };
         }
       `,
       context: { url },
@@ -352,9 +384,12 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       return result;
     }
 
-    // Debug preview: confirm we actually got text hydrated
-    if (fnJson?.bodyTextPreview) {
-      console.log("Browserless bodyText preview:", String(fnJson.bodyTextPreview).replace(/\s+/g, ' ').slice(0, 200));
+    // Debug preview: confirm we actually got text hydrated (and whether breakdown opened)
+    if (fnJson?.totalSnippet) {
+      console.log("Browserless total snippet:", String(fnJson.totalSnippet).replace(/\s+/g, ' ').slice(0, 300));
+    }
+    if (typeof fnJson?.breakdownOpened === 'boolean') {
+      console.log("Browserless breakdownOpened:", fnJson.breakdownOpened);
     }
 
     // Check for bot indicators
@@ -887,27 +922,36 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
   // Priority 4 (HIGHEST): Final guest-facing totals (includes taxes) when visible
   // Examples: "Total USD $2,213.34" or "Total $2,213.34" at bottom of breakdown
   const finalTotalPatterns: { pattern: RegExp; currency: string }[] = [
-    { pattern: /\btotal\s+USD\s*\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    { pattern: /\btotal\s+EUR\s*€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    { pattern: /\btotal\s+GBP\s*£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
-    { pattern: /\btotal\s+CHF\s*CHF\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'CHF' },
+    // "Total USD $2,213.34" (allow weird spacing / NBSP / optional $)
+    { pattern: /\btotal\s*USD\s*\$?\s*([\d,.]+)\b/gi, currency: 'USD' },
+    { pattern: /\btotal\s*EUR\s*€?\s*([\d,.]+)\b/gi, currency: 'EUR' },
+    { pattern: /\btotal\s*GBP\s*£?\s*([\d,.]+)\b/gi, currency: 'GBP' },
+    { pattern: /\btotal\s*CHF\s*CHF\s*([\d,.]+)\b/gi, currency: 'CHF' },
 
-    // Sometimes currency code appears AFTER the amount
-    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s*\btotal\s+USD\b/gi, currency: 'USD' },
-    { pattern: /€\s*([\d,]+(?:\.\d{2})?)\s*\btotal\s+EUR\b/gi, currency: 'EUR' },
-    { pattern: /£\s*([\d,]+(?:\.\d{2})?)\s*\btotal\s+GBP\b/gi, currency: 'GBP' },
+    // Sometimes: "$2,213.34 Total USD"
+    { pattern: /\$\s*([\d,.]+)\s*\btotal\s*USD\b/gi, currency: 'USD' },
+    { pattern: /€\s*([\d,.]+)\s*\btotal\s*EUR\b/gi, currency: 'EUR' },
+    { pattern: /£\s*([\d,.]+)\s*\btotal\s*GBP\b/gi, currency: 'GBP' },
 
-    // Generic "Total: $X" style — keep last in this tier to avoid matching non-final totals
-    { pattern: /\btotal\b\s*[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'USD' },
-    { pattern: /\btotal\b\s*[:\s]+€\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'EUR' },
-    { pattern: /\btotal\b\s*[:\s]+£\s*([\d,]+(?:\.\d{2})?)/gi, currency: 'GBP' },
+    // US$2,213.34 Total
+    { pattern: /US\$\s*([\d,.]+)\s*\btotal\b/gi, currency: 'USD' },
+
+    // Generic "Total: $X" style (lowest within this tier)
+    { pattern: /\btotal\b\s*[:\s]+\$\s*([\d,.]+)\b/gi, currency: 'USD' },
+    { pattern: /\btotal\b\s*[:\s]+€\s*([\d,.]+)\b/gi, currency: 'EUR' },
+    { pattern: /\btotal\b\s*[:\s]+£\s*([\d,.]+)\b/gi, currency: 'GBP' },
   ];
 
   for (const { pattern, currency } of finalTotalPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
-      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
-      if (totalPrice >= 30 && totalPrice <= 500000) {
+      const raw = (match[1] || "").trim();
+      const normalized = raw
+        .replace(/\s/g, '')
+        .replace(/,/g, '')
+        .replace(/(\d)\.(\d)\.(\d)/g, '$1$2.$3'); // ultra-rare: double dots
+      const totalPrice = parseFloat(normalized);
+      if (Number.isFinite(totalPrice) && totalPrice >= 30 && totalPrice <= 500000) {
         console.log(`[P4-FINAL] Found: ${currency} ${totalPrice} from "${match[0].slice(0, 80)}"`);
         potentialTotals.push({ price: totalPrice, currency, priority: 4, source: 'final_total' });
       }
