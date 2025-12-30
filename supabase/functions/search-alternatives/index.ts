@@ -445,13 +445,13 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
               
               // Try to open price breakdown
               try {
-                const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
-                if (target) {
-                  target.click();
-                  breakdownOpened = true;
-                  await sleep(2500);
-                }
+                await page.evaluate(() => {
+                  const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                  const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+                  if (target) target.click();
+                });
+                breakdownOpened = true;
+                await sleep(2500);
               } catch {}
               checkoutHtml = await page.content();
             } else {
@@ -462,13 +462,13 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
             usedFallback = true;
             // Stay on rooms page, try to open breakdown
             try {
-              const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-              const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
-              if (target) {
-                target.click();
-                breakdownOpened = true;
-                await sleep(2500);
-              }
+              await page.evaluate(() => {
+                const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+                if (target) target.click();
+              });
+              breakdownOpened = true;
+              await sleep(2500);
             } catch {}
             checkoutHtml = await page.content();
           }
