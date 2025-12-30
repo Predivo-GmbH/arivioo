@@ -1,9 +1,25 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
+// ============================================================================
+// CANONICAL IMPORTS - Single Source of Truth
+// DO NOT duplicate any of this logic locally. Import from _shared/ instead.
+// ============================================================================
+import {
+  corsHeaders,
+  handleCorsPreFlight,
+  fetchWithTimeout,
+  buildBookStaysUrl,
+  detectBotIndicators,
+  logProviderRequest,
+  type AirbnbBaselineStatus,
+  type OcrVisualReference as SharedOcrVisualReference,
+  type OcrValidationResult as SharedOcrValidationResult,
+  type ProviderName,
+  SHARED_MODULES_VERSION,
+} from "../_shared/mod.ts";
+
+// Log shared module version for debugging
+console.log(`[airbnb-baseline-test] Using _shared modules version: ${SHARED_MODULES_VERSION}`);
 
 // Verify admin session
 async function verifyAdminSession(supabase: any, token: string): Promise<{ valid: boolean; admin?: any; error?: string }> {
@@ -22,13 +38,8 @@ async function verifyAdminSession(supabase: any, token: string): Promise<{ valid
   return { valid: true, admin: session.admin_users };
 }
 
-// Types matching search-alternatives
-type AirbnbBaselineStatus =
-  | 'total_price_including_taxes_and_fees'
-  | 'total_price_excluding_taxes_and_fees'
-  | 'price_not_available_in_content';
-
-type ProviderName = 'firecrawl' | 'zyte' | 'browserless';
+// Types - using shared types from _shared/types/mod.ts
+// Local extensions for diagnostic-specific needs
 
 interface ProviderAttemptResult {
   provider: ProviderName;
@@ -306,16 +317,7 @@ function extractPriceCandidates(content: string, nights: number): Array<{
   return candidates;
 }
 
-// Fetch with timeout
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 30000) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
+// fetchWithTimeout is imported from _shared/http/fetch-utils.ts
 
 // ========== OCR VISUAL REFERENCE EXTRACTION ==========
 // Uses Lovable AI (multimodal) to extract price info from screenshots
@@ -657,22 +659,18 @@ function validateProviderPriceWithOcr(
 
   return { status: 'no_ocr_data', validationNote: 'no_baseline_for_comparison' };
 }
-
-// Log provider request
-async function logProviderRequest(supabase: any, provider: ProviderName, success: boolean, durationMs: number, url: string, errorMessage?: string): Promise<void> {
-  try {
-    await supabase.from('api_request_logs').insert({
-      provider_name: provider,
-      endpoint_type: 'airbnb_baseline_test',
-      request_url: url.slice(0, 500),
-      success,
-      duration_ms: durationMs,
-      error_message: errorMessage?.slice(0, 500) || null,
-      cost_units: 1,
-    });
-  } catch (e) {
-    console.error('[ProviderLog] Failed:', e);
-  }
+// Provider logging - uses shared logProviderRequest internally
+// This wrapper maintains the local signature used throughout this file
+async function logProviderAttempt(supabase: any, provider: ProviderName, success: boolean, durationMs: number, url: string, errorMessage?: string): Promise<void> {
+  await logProviderRequest({
+    supabase,
+    provider,
+    endpointType: 'airbnb_baseline_test',
+    url,
+    success,
+    durationMs,
+    errorMessage,
+  });
 }
 
 // Test with Firecrawl
@@ -721,7 +719,7 @@ async function testFirecrawl(url: string, nights: number, supabase: any): Promis
       const errText = await resp.text().catch(() => '');
       const isNotSupported = resp.status === 403;
       
-      await logProviderRequest(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
+      await logProviderAttempt(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
       
       return {
         provider,
@@ -736,7 +734,7 @@ async function testFirecrawl(url: string, nights: number, supabase: any): Promis
       };
     }
 
-    await logProviderRequest(supabase, provider, true, durationMs, url);
+    await logProviderAttempt(supabase, provider, true, durationMs, url);
 
     const data = await resp.json();
     const html = data?.data?.rawHtml || data?.data?.html || '';
@@ -804,7 +802,7 @@ async function testFirecrawl(url: string, nights: number, supabase: any): Promis
     };
   } catch (e) {
     const durationMs = Date.now() - start;
-    await logProviderRequest(supabase, provider, false, durationMs, url, String(e));
+    await logProviderAttempt(supabase, provider, false, durationMs, url, String(e));
     return {
       provider,
       status: 'provider_fetch_failed',
@@ -863,7 +861,7 @@ async function testZyte(url: string, nights: number, supabase: any): Promise<Pro
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
-      await logProviderRequest(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
+      await logProviderAttempt(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
       return {
         provider,
         status: 'provider_fetch_failed',
@@ -877,7 +875,7 @@ async function testZyte(url: string, nights: number, supabase: any): Promise<Pro
       };
     }
 
-    await logProviderRequest(supabase, provider, true, durationMs, url);
+    await logProviderAttempt(supabase, provider, true, durationMs, url);
 
     const data = await resp.json();
     const html = data.browserHtml || '';
@@ -943,7 +941,7 @@ async function testZyte(url: string, nights: number, supabase: any): Promise<Pro
     };
   } catch (e) {
     const durationMs = Date.now() - start;
-    await logProviderRequest(supabase, provider, false, durationMs, url, String(e));
+    await logProviderAttempt(supabase, provider, false, durationMs, url, String(e));
     return {
       provider,
       status: 'provider_fetch_failed',
@@ -957,46 +955,7 @@ async function testZyte(url: string, nights: number, supabase: any): Promise<Pro
     };
   }
 }
-
-// Build book/stays URL from rooms URL
-function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
-  book_stays_url: string;
-  room_id: string;
-  check_in: string;
-  check_out: string;
-  adults: number;
-} | null {
-  try {
-    const parsed = new URL(roomsUrl);
-    const pathMatch = parsed.pathname.match(/\/rooms\/(\d+)/);
-    if (!pathMatch) return null;
-    const roomId = pathMatch[1];
-    
-    const checkIn = parsed.searchParams.get('check_in') || '';
-    const checkOut = parsed.searchParams.get('check_out') || '';
-    if (!checkIn || !checkOut) return null;
-    
-    const adultsParam = parsed.searchParams.get('adults');
-    const guestsParam = parsed.searchParams.get('guests');
-    const adults = adultsParam ? parseInt(adultsParam, 10) : (guestsParam ? parseInt(guestsParam, 10) : 1);
-    
-    const bookStaysUrl = new URL(`https://www.airbnb.com/book/stays/${roomId}`);
-    bookStaysUrl.searchParams.set('checkin', checkIn);
-    bookStaysUrl.searchParams.set('checkout', checkOut);
-    bookStaysUrl.searchParams.set('numberOfGuests', String(adults));
-    bookStaysUrl.searchParams.set('numberOfAdults', String(adults));
-    bookStaysUrl.searchParams.set('numberOfChildren', '0');
-    bookStaysUrl.searchParams.set('numberOfInfants', '0');
-    bookStaysUrl.searchParams.set('numberOfPets', '0');
-    bookStaysUrl.searchParams.set('isWorkTrip', 'false');
-    bookStaysUrl.searchParams.set('guestCurrency', guestCurrency);
-    bookStaysUrl.searchParams.set('productId', roomId);
-    
-    return { book_stays_url: bookStaysUrl.toString(), room_id: roomId, check_in: checkIn, check_out: checkOut, adults };
-  } catch {
-    return null;
-  }
-}
+// buildBookStaysUrl is imported from _shared/airbnb/url-utils.ts
 
 // Test with Browserless - PRIMARY: book/stays page, FALLBACK: rooms page
 async function testBrowserless(url: string, nights: number, supabase: any): Promise<ProviderAttemptResult> {
@@ -1163,7 +1122,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
-      await logProviderRequest(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
+      await logProviderAttempt(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
       return {
         provider,
         status: 'provider_fetch_failed',
@@ -1178,7 +1137,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
       };
     }
 
-    await logProviderRequest(supabase, provider, true, durationMs, url);
+    await logProviderAttempt(supabase, provider, true, durationMs, url);
 
     const fnJson = await resp.json().catch(() => null);
     const html = fnJson?.html || '';
@@ -1374,7 +1333,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     };
   } catch (e) {
     const durationMs = Date.now() - start;
-    await logProviderRequest(supabase, provider, false, durationMs, url, String(e));
+    await logProviderAttempt(supabase, provider, false, durationMs, url, String(e));
     return {
       provider,
       status: 'provider_fetch_failed',
@@ -1582,6 +1541,7 @@ Deno.serve(async (req) => {
 
     // Summary
     const summary = {
+      shared_modules_version: SHARED_MODULES_VERSION,
       run_id: runId,
       url,
       check_in: checkIn,

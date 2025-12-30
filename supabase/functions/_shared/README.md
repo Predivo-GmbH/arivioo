@@ -143,8 +143,8 @@ When migrating existing duplicated logic:
 | Edge Function | Status | Notes |
 |---------------|--------|-------|
 | `search-alternatives` | 🟢 Migrated | corsHeaders, fetchWithTimeout, buildBookStaysUrl, detectBotIndicators, logProviderRequest |
-| `airbnb-baseline-test` | ⚪ Pending | |
-| `airbnb-selftest` | ⚪ Pending | |
+| `airbnb-baseline-test` | 🟢 Migrated | corsHeaders, fetchWithTimeout, buildBookStaysUrl, logProviderRequest, types |
+| `airbnb-selftest` | 🟢 Migrated | corsHeaders, fetchWithTimeout, buildBookStaysUrl, calculateNights |
 | `airbnb-diagnostic` | ⚪ Pending | |
 | `extract-prices` | ⚪ Pending | |
 
