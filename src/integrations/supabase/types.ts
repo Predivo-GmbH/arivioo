@@ -178,12 +178,14 @@ export type Database = {
         Row: {
           airbnb_url: string | null
           booking_card_ocr_matched_substring: string | null
+          booking_card_ocr_matches: Json | null
           booking_card_ocr_text_normalized: string | null
           booking_card_ocr_text_raw: string | null
           booking_card_screenshot_base64: string | null
           booking_card_screenshot_bbox: Json | null
           booking_card_screenshot_dimensions: Json | null
           booking_card_screenshot_sha256: string | null
+          booking_card_visible_evidence_snippet: string | null
           breakdown_opened: boolean | null
           candidates_summary: Json | null
           check_in_date: string | null
@@ -217,18 +219,24 @@ export type Database = {
           rejected_reason: string | null
           run_id: string
           run_number: number
+          screenshot_top_base64: string | null
+          screenshot_top_clip: Json | null
+          screenshot_top_sha256: string | null
+          scroll_y_at_capture: number | null
           search_id: string | null
           status: string
         }
         Insert: {
           airbnb_url?: string | null
           booking_card_ocr_matched_substring?: string | null
+          booking_card_ocr_matches?: Json | null
           booking_card_ocr_text_normalized?: string | null
           booking_card_ocr_text_raw?: string | null
           booking_card_screenshot_base64?: string | null
           booking_card_screenshot_bbox?: Json | null
           booking_card_screenshot_dimensions?: Json | null
           booking_card_screenshot_sha256?: string | null
+          booking_card_visible_evidence_snippet?: string | null
           breakdown_opened?: boolean | null
           candidates_summary?: Json | null
           check_in_date?: string | null
@@ -262,18 +270,24 @@ export type Database = {
           rejected_reason?: string | null
           run_id: string
           run_number: number
+          screenshot_top_base64?: string | null
+          screenshot_top_clip?: Json | null
+          screenshot_top_sha256?: string | null
+          scroll_y_at_capture?: number | null
           search_id?: string | null
           status: string
         }
         Update: {
           airbnb_url?: string | null
           booking_card_ocr_matched_substring?: string | null
+          booking_card_ocr_matches?: Json | null
           booking_card_ocr_text_normalized?: string | null
           booking_card_ocr_text_raw?: string | null
           booking_card_screenshot_base64?: string | null
           booking_card_screenshot_bbox?: Json | null
           booking_card_screenshot_dimensions?: Json | null
           booking_card_screenshot_sha256?: string | null
+          booking_card_visible_evidence_snippet?: string | null
           breakdown_opened?: boolean | null
           candidates_summary?: Json | null
           check_in_date?: string | null
@@ -307,6 +321,10 @@ export type Database = {
           rejected_reason?: string | null
           run_id?: string
           run_number?: number
+          screenshot_top_base64?: string | null
+          screenshot_top_clip?: Json | null
+          screenshot_top_sha256?: string | null
+          scroll_y_at_capture?: number | null
           search_id?: string | null
           status?: string
         }
