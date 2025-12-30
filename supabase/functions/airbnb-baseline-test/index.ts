@@ -212,11 +212,21 @@ function extractPriceCandidates(content: string, nights: number): Array<{
       }
 
       // Rule C: Detect taxes line - ALWAYS REJECT
-      const hasTaxesOnlyPattern = /\btaxes?\s*[\$€£]|^taxes?\s*$/i.test(context) && 
+      const hasTaxesOnlyPattern = /\btaxes?\s*[\$€£]|^taxes?\s*$/i.test(context) &&
                                    !/\btotal\b/i.test(context);
       if (!rejectedReason && hasTaxesOnlyPattern) {
         candidateType = 'taxes_only';
         rejectedReason = 'taxes_line_only';
+      }
+
+      // Rule C2: Reject payment/transaction fee contexts (e.g. "total transaction amount", credit card surcharge)
+      // This prevents bogus totals like "Upon booking, $300, plus the c/c fee" from being classified as total_final.
+      const hasPaymentFeeContext =
+        /\btransaction\b|\bsurcharge\b|\bcredit\s*card\b|\bc\/c\b|\bcard\s+is\s+charged\b|\bdue\s+immediately\b/i.test(context) &&
+        /\bfee\b|\bcharged\b|\bsurcharge\b/i.test(context);
+      if (!rejectedReason && hasPaymentFeeContext) {
+        candidateType = 'unknown';
+        rejectedReason = 'fee_or_deposit_not_total';
       }
 
       // Rule D: Detect explicit TOTAL - the ONLY selectable type
@@ -1237,6 +1247,9 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         duration_ms: durationMs,
         candidates_summary: [],
         click_log: clickLog,
+        // Still return OCR reference so other providers can be validated against it
+        ocr_reference: ocrReference,
+        ocr_validation: validateProviderPriceWithOcr(null, ocrReference),
       };
     }
 
@@ -1258,6 +1271,8 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         duration_ms: durationMs,
         candidates_summary: [],
         click_log: clickLog,
+        ocr_reference: ocrReference,
+        ocr_validation: validateProviderPriceWithOcr(null, ocrReference),
       };
     }
 
@@ -1273,6 +1288,9 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         duration_ms: durationMs,
         candidates_summary: [],
         click_log: clickLog,
+        // Return OCR reference even on failure (critical for Zyte/Firecrawl validation)
+        ocr_reference: ocrReference,
+        ocr_validation: validateProviderPriceWithOcr(null, ocrReference),
       };
     }
 
