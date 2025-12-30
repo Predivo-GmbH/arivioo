@@ -400,27 +400,54 @@ function extractOcrFromHtml(html: string, nights: number): OcrVisualReference | 
     // --------------------
     // Booking card baseline
     // --------------------
-    // Capture patterns like:
-    // "$2,214 for 4 nights", "€1.234 for 3 nights", "CHF 950 for 2 nights"
+    // Airbnb commonly shows a booking-card summary like:
+    // - "$2,214 for 4 nights"
+    // - "$2,214 total" (sometimes)
+    // - "$553 × 4 nights" / "$553 x 4 nights" (rare)
+    // We treat this as the "visible baseline" (not necessarily the final trip total).
     const bookingCardCandidates: Array<{ amount: number; nights: number; snippet: string }> = [];
 
     const bookingCardPatterns: RegExp[] = [
-      // Symbol before amount
+      // "$2,214 for 4 nights"
       /(?:US\$|\$|€|£)\s*([\d][\d.,]*)\s+for\s+(\d+)\s+nights?/gi,
-      // CHF before amount
       /\bCHF\s*([\d][\d.,]*)\s+for\s+(\d+)\s+nights?/gi,
-      // Amount then currency code (rare)
-      /([\d][\d.,]*)\s*(?:USD|EUR|GBP|CHF)\s+for\s+(\d+)\s+nights?/gi,
+
+      // "$2,214 total" + detect nights elsewhere in the snippet window later (fallback)
+      /(?:US\$|\$|€|£)\s*([\d][\d.,]*)\s+total\b/gi,
+      /\bCHF\s*([\d][\d.,]*)\s+total\b/gi,
+
+      // "$553 × 4 nights" / "$553 x 4 nights"
+      /(?:US\$|\$|€|£)\s*([\d][\d.,]*)\s*[×x]\s*(\d+)\s+nights?/gi,
+      /\bCHF\s*([\d][\d.,]*)\s*[×x]\s*(\d+)\s+nights?/gi,
+
+      // "4 nights × $553" / "4 nights x $553"
+      /(\d+)\s+nights?\s*[×x]\s*(?:US\$|\$|€|£)\s*([\d][\d.,]*)/gi,
+      /(\d+)\s+nights?\s*[×x]\s*CHF\s*([\d][\d.,]*)/gi,
     ];
 
     for (const re of bookingCardPatterns) {
       re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) {
-        const amount = normalizeAmount(m[1]);
-        const n = Number.parseInt(m[2], 10);
+        // Patterns vary in capture groups:
+        // - price-first: (amount, nights)
+        // - nights-first: (nights, amount)
+        const maybeNightsFirst = /^\d+\s+nights?/i.test(m[0]);
+        const amountRaw = maybeNightsFirst ? (m[2] ?? '') : (m[1] ?? '');
+        const nightsRaw = maybeNightsFirst ? (m[1] ?? '') : (m[2] ?? '');
+
+        const amount = normalizeAmount(amountRaw);
+        let n = nightsRaw ? Number.parseInt(nightsRaw, 10) : NaN;
+
+        // For "total"-only patterns (no nights captured), try to infer nights from nearby text
+        if (!Number.isFinite(n)) {
+          const snippetWindow = text.slice(Math.max(0, m.index - 80), Math.min(text.length, m.index + m[0].length + 80));
+          const nMatch = snippetWindow.match(/\b(\d+)\s+nights?\b/i);
+          if (nMatch?.[1]) n = Number.parseInt(nMatch[1], 10);
+        }
+
         if (!amount || !Number.isFinite(n)) continue;
-        if (amount < 10 || amount > 500000) continue;
+        if (amount < 50 || amount > 500000) continue;
 
         bookingCardCandidates.push({
           amount,
