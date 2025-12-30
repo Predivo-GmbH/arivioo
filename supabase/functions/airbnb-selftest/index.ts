@@ -44,9 +44,9 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
     .join('');
 }
 
-// buildBookStaysUrl is imported from _shared/airbnb/url-utils.ts as sharedBuildBookStaysUrl
-// Using a local wrapper to add nights_count to the result (selftest-specific)
-function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
+// Wrapper over sharedBuildBookStaysUrl that adds nights_count (selftest-specific)
+// Named differently to avoid lint false positive on shared function name
+function buildBookStaysUrlWithNights(roomsUrl: string, guestCurrency = 'USD'): {
   book_stays_url: string;
   room_id: string;
   check_in: string;
@@ -475,7 +475,7 @@ Deno.serve(async (req) => {
   const runId = crypto.randomUUID();
   
   // Part 1: Build book/stays URL from rooms URL
-  const bookStaysParams = buildBookStaysUrl(url, guestCurrency);
+  const bookStaysParams = buildBookStaysUrlWithNights(url, guestCurrency);
   if (!bookStaysParams) {
     return new Response(JSON.stringify({
       error: 'Could not parse rooms URL. Ensure it contains /rooms/<id> and check_in/check_out params.',

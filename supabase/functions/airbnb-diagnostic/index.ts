@@ -1,9 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+import {
+  corsHeaders,
+  detectBotIndicators,
+  SHARED_MODULES_VERSION,
+} from "../_shared/mod.ts";
 
 interface ProviderAttempt {
   provider: "firecrawl" | "zyte" | "direct";
@@ -34,61 +34,8 @@ interface DiagnosticResult {
   bestProvider: string | null;
 }
 
-// Detect bot/captcha indicators in content
-// IMPORTANT: Only detect real bot walls, not CSS class names or script content
-function detectBotIndicators(content: string): string[] {
-  const indicators: string[] = [];
-  
-  // Strip out CSS, scripts, and style blocks to avoid false positives from class names
-  const visibleContent = content
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/\{[^}]*\}/g, ' ') // Remove CSS rule blocks
-    .replace(/class\s*=\s*["'][^"']*["']/gi, ' ') // Remove class attributes
-    .replace(/id\s*=\s*["'][^"']*["']/gi, ' '); // Remove id attributes
-  
-  // These patterns must appear in visible text context, not CSS/class names
-  const patterns = [
-    // Specific phrases that indicate a real bot wall
-    { pattern: /please\s+complete\s+the\s+captcha/i, label: "captcha" },
-    { pattern: /solve\s+the\s+captcha/i, label: "captcha" },
-    { pattern: /verify\s+you['']?re\s+human/i, label: "human_verification" },
-    { pattern: /verify\s+you\s+are\s+human/i, label: "human_verification" },
-    { pattern: /i['']?m\s+not\s+a\s+robot/i, label: "captcha" },
-    { pattern: /checking\s+your\s+browser/i, label: "browser_check" },
-    { pattern: /just\s+a\s+moment[\.\!\s]/i, label: "cloudflare_wait" },
-    { pattern: /please\s+wait\s+while\s+we\s+verify/i, label: "verification_wait" },
-    { pattern: /unusual\s+traffic\s+from\s+your/i, label: "unusual_traffic" },
-    { pattern: /too\s+many\s+requests/i, label: "too_many_requests" },
-    { pattern: /access\s+to\s+this\s+page\s+has\s+been\s+denied/i, label: "access_denied" },
-    { pattern: /this\s+page\s+is\s+not\s+available/i, label: "page_unavailable" },
-    // Cloudflare specific
-    { pattern: /ray\s+id[:\s]+[a-f0-9]+/i, label: "cloudflare" },
-    { pattern: /performance\s+&\s+security\s+by\s+cloudflare/i, label: "cloudflare" },
-  ];
-  
-  for (const { pattern, label } of patterns) {
-    if (pattern.test(visibleContent)) {
-      indicators.push(label);
-    }
-  }
-  
-  // Additional heuristic: if content is very small (under 50KB) and lacks key Airbnb elements,
-  // it might be a block page
-  if (content.length < 50000) {
-    const hasAirbnbPricing = /price|night|total|reserve|book/i.test(content);
-    const hasAirbnbListing = /listing|property|host|amenities/i.test(content);
-    
-    if (!hasAirbnbPricing && !hasAirbnbListing) {
-      // Could be a block page, but only flag if we found other indicators
-      if (indicators.length > 0) {
-        indicators.push("minimal_content");
-      }
-    }
-  }
-  
-  return indicators;
-}
+// Log shared module version for debugging
+console.log(`[airbnb-diagnostic] Using _shared modules version: ${SHARED_MODULES_VERSION}`);
 
 // Extract evidence snippet around bot indicator or price
 function extractEvidenceSnippet(content: string, maxLength: number = 500): string {
