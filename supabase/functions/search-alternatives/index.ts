@@ -3233,10 +3233,11 @@ async function runSearchWithStreaming(
       }
     };
 
+    // Browserless first – it's the only provider that clicks "Show price breakdown" to reveal the true total (incl. taxes)
     const fallbackChain: { provider: AirbnbProvider; run: () => Promise<ProviderPriceResult> }[] = [
+      { provider: 'browserless', run: browserlessTask },
       { provider: 'firecrawl', run: firecrawlTask },
       { provider: 'zyte', run: zyteTask },
-      { provider: 'browserless', run: browserlessTask },
     ];
 
     for (const step of fallbackChain) {
