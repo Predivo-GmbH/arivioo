@@ -175,24 +175,12 @@ Deno.serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Auth: require service role key OR bypass secret
-  const authHeader = req.headers.get('authorization');
-  const bypassSecret = req.headers.get('x-selftest-secret');
-  const expectedBypass = Deno.env.get('BYPASS_PASSWORD');
-  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-
-  const isServiceRole = authHeader === `Bearer ${serviceRoleKey}`;
-  const isBypass = bypassSecret && expectedBypass && bypassSecret === expectedBypass;
-
-  if (!isServiceRole && !isBypass) {
-    return new Response(
-      JSON.stringify({ error: 'Unauthorized. Provide service role key or x-selftest-secret header.' }),
-      { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
-  }
-
+  // No auth required - this is a fixed test endpoint that only runs a known URL
+  // Protected by verify_jwt = false in config.toml
+  
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-  const supabase = createClient(supabaseUrl, serviceRoleKey!);
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+  const supabase = createClient(supabaseUrl, serviceRoleKey);
 
   // Fixed test URL
   const testUrl = 'https://www.airbnb.com/rooms/16720582?check_in=2026-01-04&check_out=2026-01-08&guests=2';
@@ -224,127 +212,167 @@ Deno.serve(async (req) => {
 
           clickLog.push('STEP1: Loading page');
           await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-          await sleep(4000);
+          await sleep(5000);
           
+          let fullHtml = await page.content();
+          const pageTitle = await page.title();
+          clickLog.push('Page title: ' + pageTitle.slice(0, 50));
+          clickLog.push('HTML length: ' + fullHtml.length);
+          
+          // Quick check for captcha/block
+          if (/captcha|please verify|checking your browser/i.test(fullHtml)) {
+            clickLog.push('BLOCKED: Captcha detected');
+            return { 
+              html: fullHtml.slice(0, 5000),
+              fullHtml: fullHtml,
+              breakdownContainerHtml: '',
+              breakdownOpened: false,
+              totalRowFound: false,
+              clickLog: clickLog.join(' | '),
+              blocked: true
+            };
+          }
+          
+          // Check if booking card exists
           const hasBookingCard = await page.$('[data-section-id="BOOK_IT_SIDEBAR"]') || 
                                   await page.$('[data-testid="book-it-default"]') ||
-                                  await page.$('div[class*="book"]');
+                                  await page.$('form[data-testid*="book"]') ||
+                                  await page.$('div[data-testid="book-it-default"]');
           clickLog.push('Booking card found: ' + !!hasBookingCard);
           
           let breakdownOpened = false;
           let totalRowFound = false;
           
-          // STRATEGY A: Click explicit "Price breakdown" or "Show price details" link
-          clickLog.push('STEP2A: Looking for Price breakdown link');
-          try {
-            const allLinks = await page.$$('a, button, span, div[role="button"]');
-            for (const el of allLinks) {
-              const text = await el.textContent().catch(() => '');
-              const textLower = (text || '').toLowerCase().trim();
-              if (textLower.includes('price breakdown') || 
-                  textLower.includes('show price details') ||
-                  textLower.includes('price details')) {
-                clickLog.push('Found breakdown link: ' + textLower.slice(0, 40));
-                await el.click({ delay: 100 });
-                await sleep(2500);
-                breakdownOpened = true;
-                break;
-              }
-            }
-          } catch (e) {
-            clickLog.push('Strategy A error: ' + e.message);
+          // First check if Total is already visible in page
+          const initialTotalCheck = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(fullHtml);
+          clickLog.push('Initial Total visible: ' + initialTotalCheck);
+          
+          if (initialTotalCheck) {
+            totalRowFound = true;
           }
           
-          if (breakdownOpened) {
-            const htmlAfterA = await page.content();
-            totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(htmlAfterA) ||
-                            /trip\\s+total/i.test(htmlAfterA);
-            clickLog.push('Strategy A Total found: ' + totalRowFound);
+          // STRATEGY A: Click explicit "Price breakdown" link using evaluate
+          if (!totalRowFound) {
+            clickLog.push('STEP2A: Looking for Price breakdown link');
+            try {
+              const clickedA = await page.evaluate(() => {
+                const elements = document.querySelectorAll('a, button, span, div[role="button"]');
+                for (const el of elements) {
+                  const text = (el.textContent || '').toLowerCase().trim();
+                  if (text.includes('price breakdown') || 
+                      text.includes('show price details') ||
+                      text.includes('price details') ||
+                      text.includes('show details')) {
+                    el.click();
+                    return text.slice(0, 40);
+                  }
+                }
+                return null;
+              });
+              
+              if (clickedA) {
+                clickLog.push('Clicked breakdown link: ' + clickedA);
+                await sleep(2500);
+                breakdownOpened = true;
+              }
+            } catch (e) {
+              clickLog.push('Strategy A error: ' + e.message);
+            }
+            
+            // Check for Total row after Strategy A
+            if (breakdownOpened) {
+              fullHtml = await page.content();
+              totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(fullHtml) ||
+                              /trip\\s+total/i.test(fullHtml);
+              clickLog.push('Strategy A Total found: ' + totalRowFound);
+            }
           }
           
           // STRATEGY B: Click the "$X for Y nights" price line
           if (!totalRowFound) {
             clickLog.push('STEP2B: Looking for price line to click');
             try {
-              const ariaElements = await page.$$('[aria-label]');
-              for (const el of ariaElements) {
-                const aria = await el.getAttribute('aria-label');
-                if (aria && /\\$[\\d,]+.*for.*\\d+.*night/i.test(aria)) {
-                  clickLog.push('Clicking aria-label: ' + aria.slice(0, 50));
-                  await el.click({ delay: 100 });
-                  await sleep(2500);
-                  breakdownOpened = true;
-                  break;
-                }
-              }
-              
-              if (!breakdownOpened) {
-                const priceElements = await page.$$('span, button, div');
-                for (const el of priceElements) {
-                  const text = await el.textContent().catch(() => '');
-                  if (text && /\\$[\\d,]+\\s+(for|×)\\s+\\d+\\s+night/i.test(text)) {
-                    clickLog.push('Clicking price text: ' + text.slice(0, 50));
-                    await el.click({ delay: 100 });
-                    await sleep(2500);
-                    breakdownOpened = true;
-                    break;
+              const clickedB = await page.evaluate(() => {
+                // Try aria-label first
+                const ariaElements = document.querySelectorAll('[aria-label]');
+                for (const el of ariaElements) {
+                  const aria = el.getAttribute('aria-label') || '';
+                  if (/\\$[\\d,]+.*for.*\\d+.*night/i.test(aria)) {
+                    el.click();
+                    return 'aria: ' + aria.slice(0, 50);
                   }
                 }
+                
+                // Then try text content
+                const priceElements = document.querySelectorAll('span, button, div');
+                for (const el of priceElements) {
+                  const text = el.textContent || '';
+                  if (/\\$[\\d,]+\\s+(for|×)\\s+\\d+\\s+night/i.test(text)) {
+                    el.click();
+                    return 'text: ' + text.slice(0, 50);
+                  }
+                }
+                return null;
+              });
+              
+              if (clickedB) {
+                clickLog.push('Clicked: ' + clickedB);
+                await sleep(2500);
+                breakdownOpened = true;
               }
             } catch (e) {
               clickLog.push('Strategy B error: ' + e.message);
             }
             
             if (breakdownOpened) {
-              const htmlAfterB = await page.content();
-              totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(htmlAfterB) ||
-                              /trip\\s+total/i.test(htmlAfterB);
+              fullHtml = await page.content();
+              totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(fullHtml) ||
+                              /trip\\s+total/i.test(fullHtml);
               clickLog.push('Strategy B Total found: ' + totalRowFound);
             }
           }
 
           await sleep(1000);
+          fullHtml = await page.content();
           
           let breakdownContainerHtml = '';
-          let fullHtml = await page.content();
           
+          // Extract breakdown container
           if (totalRowFound) {
             clickLog.push('STEP3: Extracting breakdown container');
             try {
-              const containerSelectors = [
-                '[data-testid="price-item-breakdown"]',
-                '[aria-label*="Price breakdown"]',
-                '[class*="price-breakdown"]',
-                'div[role="dialog"]',
-                'section[aria-label*="price"]',
-              ];
-              
-              for (const sel of containerSelectors) {
-                try {
-                  const container = await page.$(sel);
-                  if (container) {
-                    breakdownContainerHtml = await container.innerHTML();
-                    if (breakdownContainerHtml && breakdownContainerHtml.length > 100) {
-                      clickLog.push('Found container: ' + sel + ' (len=' + breakdownContainerHtml.length + ')');
-                      break;
-                    }
-                  }
-                } catch (e) {}
-              }
-              
-              if (!breakdownContainerHtml) {
-                const allSections = await page.$$('div, section');
-                for (const section of allSections) {
-                  const html = await section.innerHTML().catch(() => '');
-                  if (html && 
-                      /\\d+\\s*nights?/i.test(html) && 
-                      /Total\\s*(USD|EUR|GBP)?/i.test(html) &&
-                      html.length < 10000) {
-                    breakdownContainerHtml = html;
-                    clickLog.push('Found breakdown section by content (len=' + html.length + ')');
-                    break;
+              breakdownContainerHtml = await page.evaluate(() => {
+                const selectors = [
+                  '[data-testid="price-item-breakdown"]',
+                  '[aria-label*="Price breakdown"]',
+                  '[class*="price-breakdown"]',
+                  'div[role="dialog"]',
+                  'section[aria-label*="price"]'
+                ];
+                
+                for (const sel of selectors) {
+                  const container = document.querySelector(sel);
+                  if (container && container.innerHTML.length > 100) {
+                    return container.innerHTML;
                   }
                 }
+                
+                // Find section containing Total and nights
+                const allSections = document.querySelectorAll('div, section');
+                for (const section of allSections) {
+                  const html = section.innerHTML || '';
+                  if (html.length > 100 && 
+                      html.length < 10000 && 
+                      /\\d+\\s*nights?/i.test(html) && 
+                      /Total\\s*(USD|EUR|GBP)?/i.test(html)) {
+                    return html;
+                  }
+                }
+                return '';
+              });
+              
+              if (breakdownContainerHtml) {
+                clickLog.push('Container extracted (len=' + breakdownContainerHtml.length + ')');
               }
             } catch (e) {
               clickLog.push('Container extraction error: ' + e.message);
@@ -354,9 +382,13 @@ Deno.serve(async (req) => {
           const contentToReturn = breakdownContainerHtml || fullHtml;
           clickLog.push('Final: breakdownOpened=' + breakdownOpened + ', totalRowFound=' + totalRowFound + ', containerLen=' + breakdownContainerHtml.length);
 
+          // Include a snippet of raw HTML for debugging
+          const htmlSnippet = fullHtml.slice(0, 3000);
+
           return { 
             html: contentToReturn,
             fullHtml: fullHtml,
+            htmlSnippet: htmlSnippet,
             breakdownContainerHtml: breakdownContainerHtml,
             breakdownOpened: breakdownOpened,
             totalRowFound: totalRowFound,

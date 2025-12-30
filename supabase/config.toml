@@ -1,31 +1,41 @@
 project_id = "xxhdiekpduvlsovjomkw"
 
-[functions.search-alternatives]
-verify_jwt = true
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
 
-[functions.analyze-image-alignment]
-verify_jwt = true
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
 
-[functions.get-last-success]
-verify_jwt = false
+[studio]
+enabled = true
+port = 54323
+api_url = "http://127.0.0.1"
 
-[functions.verify-bypass-password]
-verify_jwt = false
+[inbucket]
+enabled = true
+port = 54324
 
-[functions.request-skip-step]
-verify_jwt = true
+[storage]
+enabled = true
 
-[functions.cancel-search]
-verify_jwt = true
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = ["https://127.0.0.1:3000"]
+jwt_expiry = 3600
+enable_signup = true
+enable_anonymous_sign_ins = false
 
-[functions.generate-deep-links]
-verify_jwt = true
-
-[functions.extract-prices]
-verify_jwt = false
-
-[functions.generate-platform-adapter]
-verify_jwt = false
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = true
 
 [functions.admin-auth]
 verify_jwt = false
@@ -36,52 +46,43 @@ verify_jwt = false
 [functions.admin-quotas]
 verify_jwt = false
 
-[functions.validate-dates]
-verify_jwt = false
-
-[functions.run-pipeline-test]
-verify_jwt = false
-
-[functions.run-price-pipeline]
-verify_jwt = false
-
-[functions.process-platform-extraction]
-verify_jwt = false
-
-[functions.send-notify-me-email]
-verify_jwt = false
-
-[functions.firecrawl-diagnostic]
-verify_jwt = false
-
-[functions.firecrawl-simple]
-verify_jwt = false
-
-[functions.booking-golden-path-test]
-verify_jwt = false
-
-[functions.hotelscom-diagnostic]
-verify_jwt = false
-
-[functions.extract-hotelscom]
-verify_jwt = false
-
-[functions.extract-expedia]
-verify_jwt = false
-
-[functions.extract-agoda]
-verify_jwt = false
-
-[functions.get-stage-timings]
+[functions.verify-bypass-password]
 verify_jwt = false
 
 [functions.submit-launch-signup]
 verify_jwt = false
 
+[functions.send-notify-me-email]
+verify_jwt = false
+
+[functions.get-last-success]
+verify_jwt = false
+
+[functions.get-stage-timings]
+verify_jwt = false
+
+[functions.firecrawl-diagnostic]
+verify_jwt = false
+
 [functions.airbnb-diagnostic]
 verify_jwt = false
 
+[functions.hotelscom-diagnostic]
+verify_jwt = false
+
+[functions.firecrawl-simple]
+verify_jwt = false
+
+[functions.run-pipeline-test]
+verify_jwt = false
+
 [functions.airbnb-baseline-test]
+verify_jwt = false
+
+[functions.booking-golden-path-test]
+verify_jwt = false
+
+[functions.backfill-platform-evidence]
 verify_jwt = false
 
 [functions.airbnb-selftest]
