@@ -50,6 +50,28 @@ interface ProviderAttemptResult {
     candidate_type?: string;
     raw_matched_string?: string;
   }>;
+  // OCR validation fields
+  ocr_reference?: OcrVisualReference | null;
+  ocr_validation?: OcrValidationResult | null;
+}
+
+// OCR Visual Reference from screenshots
+interface OcrVisualReference {
+  bookingCardAmount: number | null;
+  bookingCardNights: number | null;
+  bookingCardSnippet: string | null;
+  breakdownTotalAmount: number | null;
+  breakdownTotalSnippet: string | null;
+  breakdownTaxesAmount: number | null;
+  breakdownOpened: boolean;
+}
+
+// OCR Validation Result
+interface OcrValidationResult {
+  status: 'accepted' | 'rejected' | 'no_ocr_data';
+  acceptedVia?: string;
+  mismatchReason?: string;
+  validationNote?: string;
 }
 
 interface ValidationRunResult {
@@ -269,6 +291,186 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// ========== OCR VISUAL REFERENCE EXTRACTION ==========
+// Uses Lovable AI (multimodal) to extract price info from screenshots
+
+async function extractOcrVisualReference(
+  bookingCardScreenshot: string | null,
+  breakdownScreenshot: string | null,
+  breakdownOpened: boolean
+): Promise<OcrVisualReference | null> {
+  if (!bookingCardScreenshot && !breakdownScreenshot) {
+    return null;
+  }
+
+  try {
+    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+    if (!LOVABLE_API_KEY) {
+      console.log('[OCR] No LOVABLE_API_KEY configured');
+      return null;
+    }
+
+    const messages: any[] = [];
+    const content: any[] = [
+      {
+        type: 'text',
+        text: `Analyze these Airbnb price screenshots and extract the visible price information.
+
+Return a JSON object with these fields (use null if not found):
+{
+  "bookingCardAmount": <number or null - the total amount shown on the booking card, e.g. "$2,214 for 4 nights" -> 2214>,
+  "bookingCardNights": <number or null - number of nights shown>,
+  "bookingCardSnippet": <string or null - the exact text showing the price, e.g. "$2,214 for 4 nights">,
+  "breakdownTotalAmount": <number or null - the "Total" amount from price breakdown if visible>,
+  "breakdownTotalSnippet": <string or null - the exact "Total" line text, e.g. "Total (USD) $2,213.34">,
+  "breakdownTaxesAmount": <number or null - taxes/fees amount if shown separately>
+}
+
+CRITICAL RULES:
+- Extract ONLY prices that are clearly visible in the screenshots
+- The booking card amount is typically shown as "$X for Y nights" 
+- The breakdown total is typically shown as "Total (USD) $X" or "Total $X"
+- Do NOT calculate or infer prices - only extract what you see
+- Return valid JSON only, no markdown or explanation`
+      }
+    ];
+
+    if (bookingCardScreenshot) {
+      content.push({
+        type: 'image_url',
+        image_url: {
+          url: `data:image/png;base64,${bookingCardScreenshot}`
+        }
+      });
+    }
+
+    if (breakdownScreenshot) {
+      content.push({
+        type: 'image_url', 
+        image_url: {
+          url: `data:image/png;base64,${breakdownScreenshot}`
+        }
+      });
+    }
+
+    messages.push({ role: 'user', content });
+
+    const response = await fetch('https://ai.lovable.dev/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${LOVABLE_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.5-flash',
+        messages,
+        temperature: 0.1,
+        max_tokens: 500,
+      }),
+    });
+
+    if (!response.ok) {
+      console.error('[OCR] Lovable AI error:', response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    const responseText = data.choices?.[0]?.message?.content || '';
+    
+    // Parse JSON from response
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error('[OCR] No JSON found in response');
+      return null;
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    
+    return {
+      bookingCardAmount: parsed.bookingCardAmount || null,
+      bookingCardNights: parsed.bookingCardNights || null,
+      bookingCardSnippet: parsed.bookingCardSnippet || null,
+      breakdownTotalAmount: parsed.breakdownTotalAmount || null,
+      breakdownTotalSnippet: parsed.breakdownTotalSnippet || null,
+      breakdownTaxesAmount: parsed.breakdownTaxesAmount || null,
+      breakdownOpened,
+    };
+  } catch (error) {
+    console.error('[OCR] Extraction error:', error);
+    return null;
+  }
+}
+
+// ========== OCR VALIDATION RULES ==========
+// Validates provider-extracted price against OCR visual reference
+
+function validateProviderPriceWithOcr(
+  providerPrice: number | null,
+  ocrReference: OcrVisualReference | null
+): OcrValidationResult {
+  if (!ocrReference) {
+    return { status: 'no_ocr_data' };
+  }
+
+  if (!providerPrice) {
+    return { status: 'no_ocr_data', validationNote: 'no_provider_price' };
+  }
+
+  const breakdownTotal = ocrReference.breakdownTotalAmount;
+  const bookingCardAmount = ocrReference.bookingCardAmount;
+  const tolerance = 1; // Allow $1 rounding tolerance
+
+  // Rule A: Breakdown Total has absolute priority
+  if (breakdownTotal) {
+    const diff = Math.abs(providerPrice - breakdownTotal);
+    if (diff <= tolerance) {
+      return {
+        status: 'accepted',
+        acceptedVia: 'breakdown_total_match',
+        validationNote: `Provider $${providerPrice} matches OCR breakdown $${breakdownTotal}`
+      };
+    } else {
+      return {
+        status: 'rejected',
+        mismatchReason: 'provider_price_differs_from_breakdown_total',
+        validationNote: `Provider $${providerPrice} differs from OCR breakdown $${breakdownTotal}`
+      };
+    }
+  }
+
+  // Rule B: No breakdown, use booking card as baseline
+  if (bookingCardAmount) {
+    // B1: Provider price lower than OCR baseline -> REJECT
+    if (providerPrice < bookingCardAmount - tolerance) {
+      return {
+        status: 'rejected',
+        mismatchReason: 'provider_price_lower_than_visible_price',
+        validationNote: `Provider $${providerPrice} < OCR baseline $${bookingCardAmount}`
+      };
+    }
+
+    // B2: Provider price equal to OCR baseline -> ACCEPT (excluding taxes)
+    if (Math.abs(providerPrice - bookingCardAmount) <= tolerance) {
+      return {
+        status: 'accepted',
+        acceptedVia: 'equal_to_baseline',
+        validationNote: `Provider $${providerPrice} equals OCR baseline $${bookingCardAmount}`
+      };
+    }
+
+    // B3: Provider price higher than OCR baseline -> ACCEPT (including taxes)
+    if (providerPrice > bookingCardAmount + tolerance) {
+      return {
+        status: 'accepted',
+        acceptedVia: 'higher_than_baseline_includes_fees',
+        validationNote: `Provider $${providerPrice} > OCR baseline $${bookingCardAmount} (includes fees)`
+      };
+    }
+  }
+
+  return { status: 'no_ocr_data', validationNote: 'no_baseline_for_comparison' };
 }
 
 // Log provider request
@@ -747,6 +949,39 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
           const contentToReturn = breakdownContainerHtml || fullHtml;
           
           clickLog.push('Final: breakdownOpened=' + breakdownOpened + ', totalRowFound=' + totalRowFound + ', containerLen=' + breakdownContainerHtml.length);
+          
+          // ========== STEP 4: Capture screenshots for OCR ==========
+          let bookingCardScreenshot = null;
+          let breakdownScreenshot = null;
+          
+          try {
+            // Capture booking card area
+            const bookingCard = await page.$('[data-section-id="BOOK_IT_SIDEBAR"]') ||
+                                await page.$('[data-testid="book-it-default"]') ||
+                                await page.$('div[class*="book-it"]');
+            if (bookingCard) {
+              bookingCardScreenshot = await bookingCard.screenshot({ encoding: 'base64' }).catch(() => null);
+              clickLog.push('Booking card screenshot: ' + (bookingCardScreenshot ? 'captured' : 'failed'));
+            }
+            
+            // If breakdown is open, capture it
+            if (breakdownOpened || totalRowFound) {
+              const breakdownContainer = await page.$('[data-testid="price-item-breakdown"]') ||
+                                          await page.$('[aria-label*="Price breakdown"]') ||
+                                          await page.$('div[role="dialog"]') ||
+                                          await page.$('[class*="price-breakdown"]');
+              if (breakdownContainer) {
+                breakdownScreenshot = await breakdownContainer.screenshot({ encoding: 'base64' }).catch(() => null);
+                clickLog.push('Breakdown screenshot: ' + (breakdownScreenshot ? 'captured' : 'failed'));
+              } else {
+                // Fallback: take a viewport screenshot
+                breakdownScreenshot = await page.screenshot({ encoding: 'base64', fullPage: false }).catch(() => null);
+                clickLog.push('Fallback viewport screenshot: ' + (breakdownScreenshot ? 'captured' : 'failed'));
+              }
+            }
+          } catch (screenshotError) {
+            clickLog.push('Screenshot error: ' + screenshotError.message);
+          }
 
           return { 
             html: contentToReturn,
@@ -754,7 +989,9 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
             breakdownContainerHtml: breakdownContainerHtml,
             breakdownOpened: breakdownOpened,
             totalRowFound: totalRowFound,
-            clickLog: clickLog.join(' | ')
+            clickLog: clickLog.join(' | '),
+            bookingCardScreenshot: bookingCardScreenshot,
+            breakdownScreenshot: breakdownScreenshot
           };
         }
       `,
@@ -797,10 +1034,24 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     const breakdownContainerHtml = fnJson?.breakdownContainerHtml || '';
     const totalRowFound = fnJson?.totalRowFound || false;
     const clickLog = fnJson?.clickLog || 'no click log';
+    const bookingCardScreenshot = fnJson?.bookingCardScreenshot || null;
+    const breakdownScreenshot = fnJson?.breakdownScreenshot || null;
+    const breakdownOpened = fnJson?.breakdownOpened || false;
 
     console.log(`[Browserless] Click log: ${clickLog}`);
     console.log(`[Browserless] HTML length: ${html.length}, breakdown container: ${breakdownContainerHtml.length}`);
     console.log(`[Browserless] Total row found: ${totalRowFound}`);
+    console.log(`[Browserless] Screenshots: bookingCard=${!!bookingCardScreenshot}, breakdown=${!!breakdownScreenshot}`);
+
+    // ========== OCR EXTRACTION ==========
+    let ocrReference: OcrVisualReference | null = null;
+    if (bookingCardScreenshot || breakdownScreenshot) {
+      console.log('[Browserless] Running OCR extraction on screenshots...');
+      ocrReference = await extractOcrVisualReference(bookingCardScreenshot, breakdownScreenshot, breakdownOpened);
+      if (ocrReference) {
+        console.log(`[Browserless] OCR result: bookingCard=$${ocrReference.bookingCardAmount}, breakdown=$${ocrReference.breakdownTotalAmount}`);
+      }
+    }
 
     if (html.length < 500) {
       return {
@@ -918,10 +1169,24 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
       ? `${selected.context}`
       : `No total_final candidate found. Click: ${clickLog}`;
 
+    // ========== OCR VALIDATION ==========
+    const ocrValidation = validateProviderPriceWithOcr(selected?.amount || null, ocrReference);
+    console.log(`[Browserless] OCR validation: ${ocrValidation.status} - ${ocrValidation.acceptedVia || ocrValidation.mismatchReason || ''}`);
+
+    // If OCR rejects the price, override the status
+    let finalStatus = selected ? selected.kind : 'price_not_available_in_content';
+    let finalPrice = selected?.amount || null;
+    
+    if (ocrValidation.status === 'rejected' && finalPrice) {
+      console.log(`[Browserless] OCR REJECTED price $${finalPrice}: ${ocrValidation.mismatchReason}`);
+      finalStatus = 'price_not_available_in_content';
+      finalPrice = null;
+    }
+
     return {
       provider,
-      status: selected ? selected.kind : 'price_not_available_in_content',
-      price: selected?.amount || null,
+      status: finalStatus,
+      price: finalPrice,
       currency: selected?.currency || null,
       includes_taxes_fees: selected?.includesTaxesFees || false,
       evidence_snippet: evidenceWithLog,
@@ -937,6 +1202,8 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
       })),
       click_log: clickLog,
       raw_matched_string: selected?.rawMatchedString || undefined,
+      ocr_reference: ocrReference,
+      ocr_validation: ocrValidation,
     };
   } catch (e) {
     const durationMs = Date.now() - start;
@@ -1019,6 +1286,9 @@ Deno.serve(async (req) => {
       let finalIncludesTaxesFees = false;
       let finalEvidenceSnippet = '';
       let selectedProvider: ProviderName | undefined;
+      
+      // OCR reference captured by Browserless (shared with other providers for validation)
+      let sharedOcrReference: OcrVisualReference | null = null;
 
       for (const provider of providerOrder) {
         console.log(`Testing ${provider}...`);
@@ -1026,17 +1296,47 @@ Deno.serve(async (req) => {
         let result: ProviderAttemptResult;
         if (provider === 'firecrawl') {
           result = await testFirecrawl(url, nights, supabase);
+          // Apply shared OCR validation to Firecrawl result
+          if (sharedOcrReference && result.price) {
+            const ocrVal = validateProviderPriceWithOcr(result.price, sharedOcrReference);
+            result.ocr_reference = sharedOcrReference;
+            result.ocr_validation = ocrVal;
+            if (ocrVal.status === 'rejected') {
+              console.log(`[Firecrawl] OCR REJECTED price $${result.price}: ${ocrVal.mismatchReason}`);
+              result.status = 'price_not_available_in_content';
+              result.price = null;
+            }
+          }
         } else if (provider === 'zyte') {
           result = await testZyte(url, nights, supabase);
+          // Apply shared OCR validation to Zyte result
+          if (sharedOcrReference && result.price) {
+            const ocrVal = validateProviderPriceWithOcr(result.price, sharedOcrReference);
+            result.ocr_reference = sharedOcrReference;
+            result.ocr_validation = ocrVal;
+            if (ocrVal.status === 'rejected') {
+              console.log(`[Zyte] OCR REJECTED price $${result.price}: ${ocrVal.mismatchReason}`);
+              result.status = 'price_not_available_in_content';
+              result.price = null;
+            }
+          }
         } else {
           result = await testBrowserless(url, nights, supabase);
+          // Capture OCR reference from Browserless for other providers
+          if (result.ocr_reference) {
+            sharedOcrReference = result.ocr_reference;
+            console.log(`[Main] Captured OCR reference: bookingCard=$${sharedOcrReference.bookingCardAmount}, breakdown=$${sharedOcrReference.breakdownTotalAmount}`);
+          }
         }
 
         providerResults.push(result);
-        console.log(`${provider}: ${result.status}, price: ${result.price || 'N/A'}`);
+        console.log(`${provider}: ${result.status}, price: ${result.price || 'N/A'}, OCR: ${result.ocr_validation?.status || 'none'}`);
 
-        // Persist debug bundle for this provider attempt
+        // Persist debug bundle for this provider attempt (including OCR fields)
         try {
+          const ocrRef = result.ocr_reference;
+          const ocrVal = result.ocr_validation;
+          
           await supabase.from('airbnb_baseline_debug').insert({
             run_id: runId,
             run_number: runNumber,
@@ -1056,8 +1356,19 @@ Deno.serve(async (req) => {
             check_in_date: checkIn,
             check_out_date: checkOut,
             nights_count: nights,
+            // OCR fields
+            ocr_booking_card_amount_value: ocrRef?.bookingCardAmount || null,
+            ocr_booking_card_nights: ocrRef?.bookingCardNights || null,
+            ocr_booking_card_snippet: ocrRef?.bookingCardSnippet || null,
+            ocr_breakdown_total_amount_value: ocrRef?.breakdownTotalAmount || null,
+            ocr_breakdown_total_snippet: ocrRef?.breakdownTotalSnippet || null,
+            ocr_breakdown_taxes_amount_value: ocrRef?.breakdownTaxesAmount || null,
+            breakdown_opened: ocrRef?.breakdownOpened || false,
+            ocr_validation_status: ocrVal?.status || null,
+            ocr_accepted_via: ocrVal?.acceptedVia || null,
+            ocr_mismatch_reason: ocrVal?.mismatchReason || null,
           });
-          console.log(`Persisted debug bundle for ${provider} run ${runNumber}`);
+          console.log(`Persisted debug bundle for ${provider} run ${runNumber} with OCR: ${ocrVal?.status || 'none'}`);
         } catch (persistErr) {
           console.error(`Failed to persist debug bundle:`, persistErr);
         }
