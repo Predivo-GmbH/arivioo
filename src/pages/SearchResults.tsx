@@ -260,6 +260,26 @@ export default function SearchResults() {
         return;
       }
 
+      // If search needs user confirmation, show the modal
+      if (searchData.status === "needs_user_confirmation") {
+        // Parse subtotal info from api_error JSON
+        try {
+          const errorData = JSON.parse(searchData.api_error || '{}');
+          if (errorData.subtotal_nights_only) {
+            setSubtotalInfo({
+              amount: errorData.subtotal_nights_only,
+              nights: errorData.subtotal_nights_count || null,
+              currency: errorData.subtotal_currency || searchData.airbnb_currency || 'USD',
+            });
+          }
+        } catch {}
+        setSearch(searchData as SearchData);
+        setSearchPhase("done");
+        setLoading(false);
+        setShowConfirmationModal(true);
+        return;
+      }
+
       // If search is already completed, fetch enriched results
       if (searchData.status === "completed") {
         const enrichedResults = await fetchEnrichedResults(searchId);
