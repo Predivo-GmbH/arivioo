@@ -330,27 +330,91 @@ async function runBrowserless(url: string): Promise<any> {
   try {
     const functionPayload = {
       code: `export default async function({ page }) {
-        // IMPORTANT: hard reset scroll + viewport BEFORE any measurements/capture
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        // Polyfill for older/newer runtimes that removed page.waitForTimeout
+        if (!page.waitForTimeout || typeof page.waitForTimeout !== 'function') {
+          page.waitForTimeout = (ms) => sleep(ms);
+        }
+
+        const requestedUrl = '${url}';
+        const targetRoomPath = '/rooms/903802242341279498';
+
+        // Realistic Chrome UA to reduce weird variants
+        await page.setUserAgent(
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        );
+
+        // Viewport first
         await page.setViewport({ width: 1280, height: 720, deviceScaleFactor: 2 });
-        await page.goto('${url}', { waitUntil: 'networkidle2', timeout: 45000 });
-        await page.waitForTimeout(1000);
+
+        // Capture redirect / navigation chain (best-effort)
+        const chain = [];
+        page.on('response', (res) => {
+          try {
+            const u = res.url();
+            chain.push(u);
+            if (chain.length > 25) chain.shift();
+          } catch {}
+        });
+
+        // Hard reset (best-effort) - clear cookies/cache
+        try {
+          const client = await page.target().createCDPSession();
+          await client.send('Network.enable');
+          await client.send('Network.clearBrowserCookies');
+          await client.send('Network.clearBrowserCache');
+        } catch {}
+
+        // Establish origin, then clear storage
+        await page.goto('https://www.airbnb.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await sleep(500);
+        try {
+          await page.evaluate(() => {
+            localStorage.clear();
+            sessionStorage.clear();
+            if ('caches' in window) {
+              // @ts-ignore
+              caches.keys().then((keys) => keys.forEach((k) => caches.delete(k)));
+            }
+          });
+        } catch {}
+
+        // Navigate to requested URL
+        await page.goto(requestedUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+        await sleep(1000);
+
+        // Reset scroll BEFORE capture
         await page.evaluate(() => window.scrollTo(0, 0));
-        await page.waitForTimeout(500);
+        await sleep(500);
+
+        const finalUrl = page.url();
+        const pageTitle = await page.title().catch(() => '');
+        const bodyText = await page.evaluate(() => (document.body?.innerText || '').slice(0, 500)).catch(() => '');
 
         const screenshotTopClip = { x: 0, y: 0, width: 1280, height: 900 };
         const scrollY = await page.evaluate(() => Math.round(window.scrollY || 0));
-
         const screenshotTopBase64 = await page
           .screenshot({ encoding: 'base64', clip: screenshotTopClip })
           .catch(() => null);
 
+        const finalPathOk = typeof finalUrl === 'string' && finalUrl.includes(targetRoomPath);
+        const bookingConfirmedContamination = /BOOKING\s+CONFIRMED|Your\s+trip\s+to/i.test(bodyText);
+
+        let wrongReason = null;
+        if (!finalPathOk) wrongReason = 'final_url_not_target_room';
+        else if (bookingConfirmedContamination) wrongReason = 'booking_confirmed_contamination';
+
         return {
-          html: await page.content(),
-          title: await page.title(),
-          url: page.url(),
+          requestedUrl,
+          finalUrl,
+          pageTitle,
+          bodyTextSnippet: bodyText,
+          redirectChain: chain.slice(-5),
+          wrongPageContextReason: wrongReason,
           screenshotTopBase64,
           screenshotTopClip,
           scrollY,
+          html: await page.content(),
         };
       }`,
       context: {},
@@ -370,12 +434,37 @@ async function runBrowserless(url: string): Promise<any> {
 
     const result = await resp.json().catch(() => ({}));
     const html = result.html || '';
-    const pageTitle = result.title || 'unknown';
-    const finalUrl = result.url || url;
+    const pageTitle = result.pageTitle || result.title || 'unknown';
+    const finalUrl = result.finalUrl || result.url || url;
 
     const screenshot_top_base64 = result.screenshotTopBase64 || null;
     const screenshot_top_clip = result.screenshotTopClip || null;
     const scroll_y_at_capture = typeof result.scrollY === 'number' ? result.scrollY : null;
+
+    const navigation_phase = {
+      requested_url: result.requestedUrl || url,
+      final_url: finalUrl,
+      redirect_chain: Array.isArray(result.redirectChain) ? result.redirectChain : [],
+      page_title: pageTitle,
+      body_text_snippet: result.bodyTextSnippet || '',
+      wrong_page_context_reason: result.wrongPageContextReason || null,
+    };
+
+    // If Browserless isn't on the correct room (or is contaminated), FAIL EARLY.
+    if (navigation_phase.wrong_page_context_reason) {
+      return {
+        status: 'wrong_page_context',
+        durationMs,
+        evidence_snippet: navigation_phase.wrong_page_context_reason,
+        source: 'navigation_guard',
+        page_title: pageTitle,
+        final_url: finalUrl,
+        navigation_phase,
+        screenshot_top_base64,
+        screenshot_top_clip,
+        scroll_y_at_capture,
+      };
+    }
 
     // Reuse existing booking_card_* naming in provider results so downstream code doesn't change.
     const booking_card_screenshot_base64 = screenshot_top_base64;
@@ -556,6 +645,28 @@ Deno.serve(async (req) => {
           run_id: runId,
           url,
           final_status: 'screenshot_top_missing',
+          navigation_phase: browserless?.navigation_phase ?? null,
+          results: providerResults,
+        },
+        null,
+        2
+      ),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
+  // If navigation guard failed, return immediately with evidence; do NOT run OCR.
+  if (browserless?.status === 'wrong_page_context') {
+    return new Response(
+      JSON.stringify(
+        {
+          run_id: runId,
+          url,
+          final_status: 'wrong_page_context',
+          navigation_phase: browserless?.navigation_phase ?? null,
+          screenshot_top_base64: screenshotTopBase64,
+          screenshot_top_clip: browserless?.screenshot_top_clip ?? null,
+          scroll_y_at_capture: browserless?.scroll_y_at_capture ?? null,
           results: providerResults,
         },
         null,
@@ -573,9 +684,10 @@ Deno.serve(async (req) => {
           run_id: runId,
           url,
           final_status: 'scroll_not_reset',
+          navigation_phase: browserless?.navigation_phase ?? null,
           scroll_y_at_capture: scrollYAtCapture,
+          screenshot_top_base64: screenshotTopBase64,
           screenshot_top_clip: screenshotTopClip,
-          screenshot_top_sha256: null,
           results: providerResults,
         },
         null,
