@@ -1487,6 +1487,124 @@ Deno.serve(async (req) => {
       );
     }
 
+    // DEBUG BUNDLES - Get persisted Airbnb baseline debug data
+    if (action === 'debug-bundles' && req.method === 'GET') {
+      const params = url.searchParams;
+      const searchId = params.get('searchId');
+      const runId = params.get('runId');
+      const limit = parseInt(params.get('limit') || '100');
+
+      let query = supabase
+        .from('airbnb_baseline_debug')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (searchId) {
+        query = query.eq('search_id', searchId);
+      }
+
+      if (runId) {
+        query = query.eq('run_id', runId);
+      }
+
+      const { data: debugBundles, error: debugError } = await query;
+
+      if (debugError) {
+        console.error('[Admin Dashboard] Debug bundles error:', debugError);
+        return new Response(
+          JSON.stringify({ error: debugError.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Group by run_id
+      const byRunId: Record<string, any[]> = {};
+      debugBundles?.forEach((bundle: any) => {
+        if (!byRunId[bundle.run_id]) {
+          byRunId[bundle.run_id] = [];
+        }
+        byRunId[bundle.run_id].push({
+          id: bundle.id,
+          runNumber: bundle.run_number,
+          provider: bundle.provider,
+          providerOrder: bundle.provider_order,
+          status: bundle.status,
+          durationMs: bundle.duration_ms,
+          extractedPrice: bundle.status?.startsWith('total_price_') ? bundle.extracted_price : null,
+          currency: bundle.currency,
+          includesTaxesFees: bundle.includes_taxes_fees,
+          evidenceSnippet: bundle.evidence_snippet,
+          candidatesSummary: bundle.candidates_summary,
+          rejectedReason: bundle.rejected_reason,
+          airbnbUrl: bundle.airbnb_url,
+          checkInDate: bundle.check_in_date,
+          checkOutDate: bundle.check_out_date,
+          nightsCount: bundle.nights_count,
+          createdAt: bundle.created_at,
+        });
+      });
+
+      // Sort each run's bundles by provider_order
+      Object.keys(byRunId).forEach(runId => {
+        byRunId[runId].sort((a, b) => a.providerOrder - b.providerOrder);
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          debugBundles: byRunId,
+          totalBundles: debugBundles?.length || 0,
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // DEBUG BUNDLES HISTORY - Get recent run IDs
+    if (action === 'debug-history' && req.method === 'GET') {
+      const params = url.searchParams;
+      const limit = parseInt(params.get('limit') || '20');
+
+      // Get distinct run_ids with their first bundle's metadata
+      const { data: recentBundles, error: historyError } = await supabase
+        .from('airbnb_baseline_debug')
+        .select('run_id, airbnb_url, check_in_date, check_out_date, nights_count, created_at')
+        .order('created_at', { ascending: false })
+        .limit(limit * 3); // Fetch more to dedupe
+
+      if (historyError) {
+        return new Response(
+          JSON.stringify({ error: historyError.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Dedupe by run_id, keep first occurrence
+      const seen = new Set<string>();
+      const uniqueRuns: any[] = [];
+      recentBundles?.forEach((bundle: any) => {
+        if (!seen.has(bundle.run_id)) {
+          seen.add(bundle.run_id);
+          uniqueRuns.push({
+            runId: bundle.run_id,
+            airbnbUrl: bundle.airbnb_url,
+            checkInDate: bundle.check_in_date,
+            checkOutDate: bundle.check_out_date,
+            nightsCount: bundle.nights_count,
+            createdAt: bundle.created_at,
+          });
+        }
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          history: uniqueRuns.slice(0, limit),
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
