@@ -1033,35 +1033,10 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
     }
   }
 
-  // Priority 2: Look for "$X,XXX for Y nights" headline - Airbnb's booking widget display
-  // This appears prominently and SHOULD include fees for the total
-  const forNightsPatterns: { pattern: RegExp; currency: string }[] = [
-    // Standard formats: "$2,214 for 4 nights"
-    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'USD' },
-    { pattern: /€\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'EUR' },
-    { pattern: /£\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'GBP' },
-    { pattern: /CHF\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'CHF' },
-    { pattern: /A\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'AUD' },
-    { pattern: /C\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s*nights?/gi, currency: 'CAD' },
-    
-    // aria-label="$2,214 for 4 nights" - Airbnb accessibility
-    { pattern: /aria-label=["']?\$\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'USD' },
-    { pattern: /aria-label=["']?€\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'EUR' },
-    { pattern: /aria-label=["']?£\s*([\d,]+(?:\.\d{2})?)\s+(?:for\s+)?(\d+)\s*nights?["']?/gi, currency: 'GBP' },
-  ];
-  
-  for (const { pattern, currency } of forNightsPatterns) {
-    const matches = [...content.matchAll(pattern)];
-    for (const match of matches) {
-      const totalPrice = parseFloat((match[1] || "").replace(/,/g, ''));
-      const detectedNights = parseInt(match[2], 10);
-      if (totalPrice >= 30 && totalPrice <= 500000 && detectedNights > 0 && Math.abs(detectedNights - nights) <= 1) {
-        console.log(`[P2-FOR-NIGHTS] Found: ${currency} ${totalPrice} for ${detectedNights} nights from "${match[0].slice(0, 80)}"`);
-        potentialTotals.push({ price: totalPrice, currency, priority: 2, source: 'for_nights' });
-      }
-    }
-  }
-  
+  // Priority 2: "$X for Y nights" headline is treated as SUBTOTAL ONLY.
+  // It is not a proven trip total (taxes/fees may be missing or revealed only in the breakdown).
+  // We intentionally do NOT accept it here; the caller will fall back to needs_user_confirmation.
+  // (Subtotal extraction is handled separately.)
   // Priority 1: General "Total" patterns (may include subtotals, less reliable)
   const generalTotalPatterns: { pattern: RegExp; currency: string }[] = [
     // "Total $2,214" or "Total: $2,214" (word boundary to avoid "Subtotal")
@@ -1395,13 +1370,15 @@ function validatePriceExtraction(
     return { ok: false, reason: 'raw_match_not_found_verbatim', evidence: snippet };
   }
 
-  const s = snippet.toLowerCase();
-  const hasContext =
-    /\b(trip total|grand total|total before taxes|total|for\s+\d+\s+nights?)\b/i.test(snippet) ||
+  // IMPORTANT: "$X for N nights" is treated as a subtotal signal, not a proven trip total.
+  // We only accept totals when the snippet contains an explicit total label OR an explicit taxes/fees label.
+  const hasExplicitTotalLabel =
+    /\b(trip total|grand total|total before taxes|total\s*USD|you pay|you will pay)\b/i.test(snippet);
+  const hasTaxesFeesLabel =
     /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(snippet);
 
-  if (!hasContext) {
-    return { ok: false, reason: 'missing_total_or_nights_context', evidence: snippet };
+  if (!hasExplicitTotalLabel && !hasTaxesFeesLabel) {
+    return { ok: false, reason: 'missing_explicit_total_or_taxes_context', evidence: snippet };
   }
 
   // Currency is "present" if rawMatch includes the symbol/prefix already.
