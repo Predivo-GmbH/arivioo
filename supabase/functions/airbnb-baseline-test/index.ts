@@ -557,6 +557,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${apiKey}`;
 
+    // Updated Playwright script that properly expands price breakdown
     const functionPayload = {
       code: `
         export default async function({ page, context }) {
@@ -564,67 +565,88 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
           await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-          await sleep(6000);
+          await sleep(5000);
 
-          // STEP 1: Try to expand price breakdown by clicking on the price summary
-          // Airbnb shows "$X for Y nights" as a button that expands to show taxes/total
-          const priceBreakdownSelectors = [
-            // Data-testid based selectors
-            "button[data-testid='price-breakdown-trigger']",
-            "[data-testid='book-it-default-bookitnow-button'] ~ button",
-            
-            // Aria-label based selectors for the price display
-            "button[aria-label*='for'][aria-label*='nights']",
-            "[aria-label*='for'][aria-label*='nights']",
-            
-            // Text content based - click on price area
-            "button:has-text('for') :has-text('nights')",
-            
-            // Structure-based selectors for Airbnb price breakdown
-            "._1ld6sh3 button", // Common price container class
-            "._ymq6as button",  // Another price container
-            
-            // Generic underlined price (Airbnb uses underline to indicate expandable)
-            "[style*='text-decoration: underline']",
-            "span[style*='underline']",
-          ];
+          let clickedBreakdown = false;
+          let clickLog = [];
 
-          let clicked = false;
-          for (const sel of priceBreakdownSelectors) {
-            try {
-              const el = await page.$(sel);
-              if (el) {
-                const box = await el.boundingBox();
-                if (box && box.width > 0 && box.height > 0) {
-                  await el.click({ delay: 50 });
-                  await sleep(1500);
-                  clicked = true;
-                  break;
-                }
+          // STRATEGY 1: Click on the underlined price text that shows "$X,XXX for N nights"
+          // This is the primary trigger for the price breakdown modal on Airbnb
+          try {
+            // Find all elements with aria-label containing price and nights
+            const ariaElements = await page.$$('[aria-label*="for"][aria-label*="night"]');
+            for (const el of ariaElements) {
+              const ariaLabel = await el.getAttribute('aria-label');
+              if (ariaLabel && /\\$[\\d,]+.*for.*\\d+.*night/i.test(ariaLabel)) {
+                clickLog.push('Found aria-label price element: ' + ariaLabel);
+                await el.click({ delay: 100 });
+                await sleep(2000);
+                clickedBreakdown = true;
+                break;
               }
-            } catch (e) {}
+            }
+          } catch (e) {
+            clickLog.push('Aria strategy failed: ' + e.message);
           }
 
-          // STEP 2: If no explicit button found, try clicking on any "$X,XXX for N nights" text
-          if (!clicked) {
+          // STRATEGY 2: Click on span/button that contains the price breakdown text
+          if (!clickedBreakdown) {
             try {
-              const priceElements = await page.$$('span, button, div');
-              for (const el of priceElements) {
+              const allClickables = await page.$$('button, span, div[role="button"]');
+              for (const el of allClickables) {
                 const text = await el.textContent().catch(() => '');
-                if (text && /\\$[\\d,]+\\s+for\\s+\\d+\\s+nights?/i.test(text)) {
-                  await el.click({ delay: 50 });
-                  await sleep(1500);
-                  clicked = true;
+                // Match patterns like "$1,977 for 4 nights" or "Show price details"
+                if (text && (/\\$[\\d,]+\\s+(for|×)\\s+\\d+\\s+night/i.test(text) || /show.*price.*detail/i.test(text))) {
+                  clickLog.push('Clicking text element: ' + text.slice(0, 50));
+                  await el.click({ delay: 100 });
+                  await sleep(2000);
+                  clickedBreakdown = true;
                   break;
                 }
               }
-            } catch (e) {}
+            } catch (e) {
+              clickLog.push('Text strategy failed: ' + e.message);
+            }
           }
 
-          await sleep(2000);
-          const html = await page.content();
+          // STRATEGY 3: Look for underlined text that indicates expandable price
+          if (!clickedBreakdown) {
+            try {
+              const underlinedElements = await page.$$('span[style*="underline"], span._14tkmhr, button._14tkmhr');
+              for (const el of underlinedElements) {
+                const text = await el.textContent().catch(() => '');
+                if (text && /\\$[\\d,]+/i.test(text)) {
+                  clickLog.push('Clicking underlined price: ' + text.slice(0, 30));
+                  await el.click({ delay: 100 });
+                  await sleep(2000);
+                  clickedBreakdown = true;
+                  break;
+                }
+              }
+            } catch (e) {
+              clickLog.push('Underline strategy failed: ' + e.message);
+            }
+          }
 
-          return { html, priceBreakdownClicked: clicked };
+          // Wait for modal to load if clicked
+          if (clickedBreakdown) {
+            await sleep(1500);
+          }
+
+          const html = await page.content();
+          
+          // Check if price breakdown is now visible in the HTML
+          const hasTotalUSD = /Total\\s*(USD|\\(USD\\)|EUR|GBP)?\\s*\\$[\\d,]+/i.test(html);
+          const hasTripTotal = /trip\\s+total/i.test(html);
+          
+          clickLog.push('hasTotalUSD: ' + hasTotalUSD);
+          clickLog.push('hasTripTotal: ' + hasTripTotal);
+
+          return { 
+            html, 
+            priceBreakdownClicked: clickedBreakdown,
+            clickLog: clickLog.join('; ')
+          };
         }
       `,
       context: { url },
@@ -662,6 +684,10 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     const fnJson = await resp.json().catch(() => null);
     const html = fnJson?.html || '';
+    const clickLog = fnJson?.clickLog || 'no click log';
+
+    console.log(`[Browserless] Click log: ${clickLog}`);
+    console.log(`[Browserless] HTML length: ${html.length}`);
 
     if (html.length < 500) {
       return {
@@ -670,7 +696,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         price: null,
         currency: null,
         includes_taxes_fees: false,
-        evidence_snippet: 'Insufficient content returned',
+        evidence_snippet: `Insufficient content. Click log: ${clickLog}`,
         duration_ms: durationMs,
         candidates_summary: [],
       };
@@ -698,8 +724,15 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     const candidates = extractPriceCandidates(html, nights);
     
+    console.log(`[Browserless] Found ${candidates.length} candidates`);
+    candidates.slice(0, 5).forEach((c, i) => {
+      console.log(`  Candidate ${i+1}: $${c.amount} type=${c.candidateType} rejected=${c.rejectedReason || 'no'}`);
+    });
+    
     // STRICT SELECTION: Only accept total_final candidates
     const totalFinalCandidates = candidates.filter(c => c.candidateType === 'total_final' && !c.rejectedReason);
+    
+    console.log(`[Browserless] total_final candidates: ${totalFinalCandidates.length}`);
     
     // Sort by: includes_taxes_fees first (prefer totals with taxes), then by amount (highest)
     const sorted = totalFinalCandidates.sort((a, b) => {
@@ -712,13 +745,18 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     const selected = sorted[0];
 
+    // Include click log in evidence for debugging
+    const evidenceWithLog = selected?.context 
+      ? `${selected.context} | Click: ${clickLog.slice(0, 100)}`
+      : `No total found. Click: ${clickLog} | Content sample: ${safeSnippet(html, 200)}`;
+
     return {
       provider,
       status: selected ? selected.kind : 'price_not_available_in_content',
       price: selected?.amount || null,
       currency: selected?.currency || null,
       includes_taxes_fees: selected?.includesTaxesFees || false,
-      evidence_snippet: selected?.context || safeSnippet(html, 300),
+      evidence_snippet: evidenceWithLog,
       duration_ms: durationMs,
       candidates_summary: candidates.slice(0, 10).map(c => ({
         amount: c.amount,
