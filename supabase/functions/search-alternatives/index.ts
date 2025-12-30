@@ -3881,10 +3881,10 @@ async function runSearchWithStreaming(
         },
       });
 
-      // Only accept a baseline price when it is a *total* (incl or excl taxes) and grounded.
+      // Only accept a baseline price when it is a *final* total INCLUDING taxes/fees.
+      // If we only have a total-excluding-taxes (or a subtotal-for-nights), we require user confirmation.
       if (
-        (r.baseline.status === 'total_price_including_taxes_and_fees' ||
-          r.baseline.status === 'total_price_excluding_taxes_and_fees') &&
+        r.baseline.status === 'total_price_including_taxes_and_fees' &&
         typeof r.baseline.price === 'number' &&
         r.baseline.currency
       ) {
@@ -3925,12 +3925,22 @@ async function runSearchWithStreaming(
     }
 
     // Track subtotal info from any provider that found needs_user_confirmation
+    // OR a total that excludes taxes/fees (still requires user confirmation).
     let subtotalInfo: { amount: number; nights: number | null; currency: string } | null = null;
     for (const r of providerResults) {
       if (r.baseline.status === 'needs_user_confirmation' && r.baseline.subtotal_nights_only) {
         subtotalInfo = {
           amount: r.baseline.subtotal_nights_only,
           nights: r.baseline.subtotal_nights_count ?? null,
+          currency: r.baseline.currency || 'USD',
+        };
+        break;
+      }
+
+      if (r.baseline.status === 'total_price_excluding_taxes_and_fees' && typeof r.baseline.price === 'number') {
+        subtotalInfo = {
+          amount: r.baseline.price,
+          nights: nights,
           currency: r.baseline.currency || 'USD',
         };
         break;
