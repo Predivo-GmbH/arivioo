@@ -1149,7 +1149,6 @@ function extractTotalPriceWithRegex(content: string, nights: number): { price: n
 type AirbnbBaselineStatus =
   | 'total_price_including_taxes_and_fees'
   | 'total_price_excluding_taxes_and_fees'
-  | 'per_night_price_only'
   | 'price_not_available_in_content';
 
 type PriceCandidate = {
@@ -1288,9 +1287,22 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
       let includesTaxesFees = false;
       let score = 0;
 
+      // Nightly-only prices are NOT acceptable - treat as failure
       if (hasNightOnly) {
-        kind = 'per_night_price_only';
-        score = 1;
+        candidates.push({
+          rawMatch,
+          amountRaw,
+          amount,
+          currency,
+          index,
+          context: safeSnippet(context, 240),
+          labelHint: safeSnippet(context, 120),
+          kind: 'price_not_available_in_content',
+          includesTaxesFees: false,
+          score: -10,
+          rejectedReason: `nightly_price_only:${safeSnippet(context, 60)}`,
+        });
+        continue;
       }
 
       if (hasTotalLabel) {
@@ -1408,8 +1420,9 @@ function extractAirbnbBaselineGrounded(
   const sorted = [...accepted].sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     if (Number(b.includesTaxesFees) !== Number(a.includesTaxesFees)) return Number(b.includesTaxesFees) - Number(a.includesTaxesFees);
+    // Only total prices are valid; price_not_available_in_content should never be in accepted list
     const kindRank = (k: AirbnbBaselineStatus) =>
-      k === 'total_price_including_taxes_and_fees' ? 3 : k === 'total_price_excluding_taxes_and_fees' ? 2 : k === 'per_night_price_only' ? 1 : 0;
+      k === 'total_price_including_taxes_and_fees' ? 3 : k === 'total_price_excluding_taxes_and_fees' ? 2 : 0;
     if (kindRank(b.kind) !== kindRank(a.kind)) return kindRank(b.kind) - kindRank(a.kind);
     return b.amount - a.amount;
   });
@@ -3853,14 +3866,8 @@ async function runSearchWithStreaming(
         break;
       }
 
-      // If we only found per-night pricing, treat as terminal for baseline (no guessing).
-      if (r.baseline.status === 'per_night_price_only') {
-        sendProgress(controller, "Airbnb baseline not usable", "Only per-night pricing visible; refusing to derive totals.", {
-          provider: r.provider,
-          evidence_snippet: r.baseline.evidence_snippet,
-          debug: r.baseline.debug,
-        });
-      }
+      // Nightly-only prices are now classified as price_not_available_in_content
+      // with rejectedReason containing "nightly_price_only" - no special handling needed
 
       if (r.error) {
         sendProgress(controller, `${label} failed`, r.error, { provider: r.provider, error: r.error });
