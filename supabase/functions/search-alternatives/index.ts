@@ -322,6 +322,45 @@ async function scrapeAirbnbWithZyte(url: string, zyteApiKey: string): Promise<Ai
 // Tier 3: Browserless Scraper for Airbnb
 // ============================================================================
 
+// Build book/stays URL from rooms URL
+function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
+  book_stays_url: string;
+  room_id: string;
+  check_in: string;
+  check_out: string;
+} | null {
+  try {
+    const parsed = new URL(roomsUrl);
+    const pathMatch = parsed.pathname.match(/\/rooms\/(\d+)/);
+    if (!pathMatch) return null;
+    const roomId = pathMatch[1];
+    
+    const checkIn = parsed.searchParams.get('check_in') || '';
+    const checkOut = parsed.searchParams.get('check_out') || '';
+    if (!checkIn || !checkOut) return null;
+    
+    const adultsParam = parsed.searchParams.get('adults');
+    const guestsParam = parsed.searchParams.get('guests');
+    const adults = adultsParam ? parseInt(adultsParam, 10) : (guestsParam ? parseInt(guestsParam, 10) : 1);
+    
+    const bookStaysUrl = new URL(`https://www.airbnb.com/book/stays/${roomId}`);
+    bookStaysUrl.searchParams.set('checkin', checkIn);
+    bookStaysUrl.searchParams.set('checkout', checkOut);
+    bookStaysUrl.searchParams.set('numberOfGuests', String(adults));
+    bookStaysUrl.searchParams.set('numberOfAdults', String(adults));
+    bookStaysUrl.searchParams.set('numberOfChildren', '0');
+    bookStaysUrl.searchParams.set('numberOfInfants', '0');
+    bookStaysUrl.searchParams.set('numberOfPets', '0');
+    bookStaysUrl.searchParams.set('isWorkTrip', 'false');
+    bookStaysUrl.searchParams.set('guestCurrency', guestCurrency);
+    bookStaysUrl.searchParams.set('productId', roomId);
+    
+    return { book_stays_url: bookStaysUrl.toString(), room_id: roomId, check_in: checkIn, check_out: checkOut };
+  } catch {
+    return null;
+  }
+}
+
 async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: string, nights: number = 1): Promise<AirbnbScrapeResult> {
   const startTime = Date.now();
   const result: AirbnbScrapeResult = {
@@ -336,81 +375,95 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
   };
   
   try {
-    console.log("Scraping Airbnb with Browserless (with OCR):", url.slice(0, 100));
+    // Build book/stays URL from rooms URL
+    const bookStaysParams = buildBookStaysUrl(url);
+    const bookStaysUrl = bookStaysParams?.book_stays_url || null;
+    const roomId = bookStaysParams?.room_id || '';
+    
+    console.log("Scraping Airbnb with Browserless (book/stays primary):", url.slice(0, 100));
+    console.log("Generated book/stays URL:", bookStaysUrl?.slice(0, 120) || 'none');
 
-    // Use Browserless /function endpoint so we can interact with the page (expand price breakdown)
-    // This is necessary because the headline "$X for Y nights" can sometimes reflect a partial amount.
+    // Use Browserless /function endpoint - PRIMARY: book/stays page
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${browserlessApiKey}`;
 
     const functionPayload = {
       code: `
         export default async function({ page, context }) {
-          const url = context.url;
+          const bookStaysUrl = context.bookStaysUrl;
+          const roomsUrl = context.roomsUrl;
+          const roomId = context.roomId;
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-          await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-          // Let dynamic pricing hydrate
-          await sleep(9000);
+          // Session setup
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+          await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+          await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 2 });
+          
+          try {
+            const client = await page.target().createCDPSession();
+            await client.send('Emulation.setTimezoneOverride', { timezoneId: 'America/New_York' });
+            await client.send('Network.enable');
+            await client.send('Network.clearBrowserCookies');
+            await client.send('Network.clearBrowserCache');
+          } catch (e) {}
 
-          // Capture screenshot BEFORE opening breakdown (booking card view)
-          const bookingCardScreenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
+          // Clear storage
+          await page.goto('https://www.airbnb.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await sleep(500);
+          try { await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); }); } catch {}
 
-          // Attempt to expand the price breakdown (needed to reveal final total incl. taxes)
-          // Try multiple strategies: known selectors + text-based click.
-          const clickSelectors = [
-            "button[data-testid='price-breakdown-trigger']",
-            "button[aria-label*='Show price breakdown']",
-            "button[aria-label*='Price breakdown']",
-            "a[aria-label*='Price breakdown']",
-          ];
-
+          let usedFallback = false;
           let breakdownOpened = false;
 
-          for (const sel of clickSelectors) {
+          // ========== PRIMARY: Navigate to book/stays ==========
+          if (bookStaysUrl) {
+            await page.goto(bookStaysUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+            await sleep(2000);
+            
+            const finalUrl = page.url();
+            const isBookStaysPage = finalUrl.includes('/book/stays/' + roomId);
+            const isLoginRedirect = finalUrl.includes('/login') || finalUrl.includes('/signin');
+            
+            if (!isBookStaysPage || isLoginRedirect) {
+              usedFallback = true;
+            } else {
+              breakdownOpened = true; // book/stays page already shows full breakdown
+            }
+          } else {
+            usedFallback = true;
+          }
+
+          // ========== FALLBACK: rooms page with breakdown click ==========
+          if (usedFallback) {
+            await page.goto(roomsUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+            await sleep(4000);
+            
+            // Try to open price breakdown
             try {
-              const el = await page.$(sel);
-              if (el) {
-                await el.click({ delay: 30 });
+              const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+              const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+              if (target) {
+                target.click();
                 breakdownOpened = true;
-                await sleep(1200);
-                break;
+                await sleep(2500);
               }
-            } catch (e) {}
+            } catch {}
           }
 
-          if (!breakdownOpened) {
-            try {
-              breakdownOpened = await page.evaluate(() => {
-                const candidates = Array.from(document.querySelectorAll('button,a,[role="button"],[role="link"]'));
-                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
-                if (target) {
-                  target.click();
-                  return true;
-                }
-                return false;
-              });
-              if (breakdownOpened) await sleep(1200);
-            } catch (e) {}
-          }
+          // Capture screenshot
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await sleep(300);
+          const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
 
-          // Extra wait for modal content to render/hydrate
-          await sleep(2500);
-
-          // Capture screenshot AFTER opening breakdown (if opened)
-          let breakdownScreenshot = null;
-          if (breakdownOpened) {
-            breakdownScreenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
-          }
-
-          // Return full HTML content
           const html = await page.content();
 
-          // Debug: return a snippet around "total" to see if final total is present
+          // Debug: return a snippet around "total" or "Pay"
           const totalSnippet = await page.evaluate(() => {
             const text = document.body?.innerText || '';
             const lower = text.toLowerCase();
-            const idx = lower.indexOf('total');
-            if (idx === -1) return '';
+            let idx = lower.indexOf('total');
+            if (idx === -1) idx = lower.indexOf('pay ');
+            if (idx === -1) return text.slice(0, 800);
             const start = Math.max(0, idx - 200);
             const end = Math.min(text.length, idx + 600);
             return text.slice(start, end);
@@ -419,13 +472,14 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
           return {
             html,
             breakdownOpened,
+            usedFallback,
             totalSnippet: (totalSnippet || '').slice(0, 1200),
-            bookingCardScreenshot,
-            breakdownScreenshot,
+            bookingCardScreenshot: screenshot,
+            breakdownScreenshot: breakdownOpened ? screenshot : null,
           };
         }
       `,
-      context: { url },
+      context: { bookStaysUrl, roomsUrl: url, roomId },
     };
 
     const response = await fetchWithTimeout(
@@ -435,7 +489,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(functionPayload),
       },
-      60_000
+      90_000
     );
 
     result.statusCode = response.status;
@@ -455,14 +509,13 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       return result;
     }
 
-    // Debug preview: confirm we actually got text hydrated (and whether breakdown opened)
+    // Debug preview
     if (fnJson?.totalSnippet) {
       console.log("Browserless total snippet:", String(fnJson.totalSnippet).replace(/\s+/g, ' ').slice(0, 300));
     }
     const breakdownOpened = typeof fnJson?.breakdownOpened === 'boolean' ? fnJson.breakdownOpened : false;
-    if (typeof fnJson?.breakdownOpened === 'boolean') {
-      console.log("Browserless breakdownOpened:", fnJson.breakdownOpened);
-    }
+    const usedFallback = typeof fnJson?.usedFallback === 'boolean' ? fnJson.usedFallback : false;
+    console.log("Browserless: usedFallback:", usedFallback, "breakdownOpened:", breakdownOpened);
 
     // Check for bot indicators
     result.botIndicators = detectBotIndicators(html);
@@ -478,7 +531,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     result.ok = true;
     result.html = html;
 
-    // Store screenshot for OCR (prefer breakdown screenshot if available)
+    // Store screenshot for OCR
     const screenshotForOcr = fnJson?.breakdownScreenshot || fnJson?.bookingCardScreenshot || null;
     result.screenshot = screenshotForOcr;
 
