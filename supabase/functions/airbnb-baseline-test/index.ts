@@ -395,49 +395,109 @@ CRITICAL RULES:
 
 function extractOcrFromHtml(html: string, nights: number): OcrVisualReference | null {
   try {
-    // Pattern 1: "$X,XXX for Y nights" - booking card subtotal
-    const forNightsPattern = /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s+nights?/gi;
-    let bookingCardMatch = forNightsPattern.exec(html);
-    
-    let bookingCardAmount: number | null = null;
-    let bookingCardNights: number | null = null;
-    let bookingCardSnippet: string | null = null;
-    
-    if (bookingCardMatch) {
-      const rawAmount = bookingCardMatch[1].replace(/,/g, '');
-      bookingCardAmount = parseFloat(rawAmount);
-      bookingCardNights = parseInt(bookingCardMatch[2]);
-      bookingCardSnippet = bookingCardMatch[0];
-      console.log(`[OCR-DOM] Found booking card: $${bookingCardAmount} for ${bookingCardNights} nights`);
+    const text = html || '';
+
+    // --------------------
+    // Booking card baseline
+    // --------------------
+    // Capture patterns like:
+    // "$2,214 for 4 nights", "€1.234 for 3 nights", "CHF 950 for 2 nights"
+    const bookingCardCandidates: Array<{ amount: number; nights: number; snippet: string }> = [];
+
+    const bookingCardPatterns: RegExp[] = [
+      // Symbol before amount
+      /(?:US\$|\$|€|£)\s*([\d][\d.,]*)\s+for\s+(\d+)\s+nights?/gi,
+      // CHF before amount
+      /\bCHF\s*([\d][\d.,]*)\s+for\s+(\d+)\s+nights?/gi,
+      // Amount then currency code (rare)
+      /([\d][\d.,]*)\s*(?:USD|EUR|GBP|CHF)\s+for\s+(\d+)\s+nights?/gi,
+    ];
+
+    for (const re of bookingCardPatterns) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const amount = normalizeAmount(m[1]);
+        const n = Number.parseInt(m[2], 10);
+        if (!amount || !Number.isFinite(n)) continue;
+        if (amount < 10 || amount > 500000) continue;
+
+        bookingCardCandidates.push({
+          amount,
+          nights: n,
+          snippet: safeSnippet(m[0], 140),
+        });
+      }
     }
-    
-    // Pattern 2: "Total (USD) $X,XXX" or "Total USD $X,XXX" - breakdown total
-    const totalPattern = /Total\s*(?:\(?\s*USD\s*\)?|USD)?\s*\$?\s*([\d,]+(?:\.\d{2})?)/gi;
+
+    // Choose best booking card candidate:
+    // 1) nights match expected nights
+    // 2) otherwise closest nights
+    // 3) if tie, highest amount (tends to be the stay subtotal, not a small fee)
+    let bookingCardBest: { amount: number; nights: number; snippet: string } | null = null;
+    if (bookingCardCandidates.length > 0) {
+      const exact = bookingCardCandidates.filter((c) => c.nights === nights);
+      const pool = exact.length > 0 ? exact : bookingCardCandidates;
+      pool.sort((a, b) => {
+        const aDelta = Math.abs(a.nights - nights);
+        const bDelta = Math.abs(b.nights - nights);
+        if (aDelta !== bDelta) return aDelta - bDelta;
+        return b.amount - a.amount;
+      });
+      bookingCardBest = pool[0] ?? null;
+    }
+
+    const bookingCardAmount = bookingCardBest?.amount ?? null;
+    const bookingCardNights = bookingCardBest?.nights ?? null;
+    const bookingCardSnippet = bookingCardBest?.snippet ?? null;
+
+    if (bookingCardBest) {
+      console.log(`[OCR-DOM] Found booking card baseline: ${bookingCardAmount} for ${bookingCardNights} nights`);
+    }
+
+    // --------------------
+    // Breakdown total
+    // --------------------
+    // Capture patterns like:
+    // "Total (USD) $2,213.34", "Total €1.234", "Total CHF 950"
+    const totalPatterns: RegExp[] = [
+      /\bTotal\s*\(\s*(USD|EUR|GBP|CHF)\s*\)\s*(?:US\$|\$|€|£)?\s*([\d][\d.,]*)/gi,
+      /\bTotal\s*(?:USD|EUR|GBP|CHF)?\s*(?:US\$|\$|€|£)?\s*([\d][\d.,]*)/gi,
+      /\bTotal\s*CHF\s*([\d][\d.,]*)/gi,
+    ];
+
     let breakdownTotalAmount: number | null = null;
     let breakdownTotalSnippet: string | null = null;
-    
-    let totalMatch: RegExpExecArray | null;
-    while ((totalMatch = totalPattern.exec(html)) !== null) {
-      const snippet = html.slice(Math.max(0, totalMatch.index - 20), totalMatch.index + totalMatch[0].length + 20);
-      // Skip if it's "Total before taxes" or in a subtotal context
-      if (/before\s+taxes/i.test(snippet) || /for\s+\d+\s+nights/i.test(snippet)) {
-        continue;
-      }
-      const rawAmount = totalMatch[1].replace(/,/g, '');
-      const amount = parseFloat(rawAmount);
-      if (amount > 100 && amount < 100000) {
+
+    for (const re of totalPatterns) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const raw = (m.length >= 3 ? m[2] : m[1]) ?? '';
+        const amount = normalizeAmount(raw);
+        if (!amount) continue;
+
+        const snippetWindow = text.slice(Math.max(0, m.index - 40), Math.min(text.length, m.index + m[0].length + 40));
+
+        // Skip "Total before taxes" and any "for X nights" contexts
+        if (/before\s+taxes/i.test(snippetWindow) || /for\s+\d+\s+nights?/i.test(snippetWindow)) continue;
+
+        // Very small "totals" are usually line items (fees) — prefer realistic stay totals.
+        if (amount < 50) continue;
+
         breakdownTotalAmount = amount;
-        breakdownTotalSnippet = totalMatch[0];
-        console.log(`[OCR-DOM] Found breakdown total: $${breakdownTotalAmount}`);
+        breakdownTotalSnippet = safeSnippet(m[0], 160);
+        console.log(`[OCR-DOM] Found breakdown total: ${breakdownTotalAmount}`);
         break;
       }
+      if (breakdownTotalAmount) break;
     }
-    
+
     if (!bookingCardAmount && !breakdownTotalAmount) {
-      console.log('[OCR-DOM] No booking card or breakdown total found in HTML');
+      console.log('[OCR-DOM] No booking card baseline or breakdown total found in content');
       return null;
     }
-    
+
     return {
       bookingCardAmount,
       bookingCardNights,
