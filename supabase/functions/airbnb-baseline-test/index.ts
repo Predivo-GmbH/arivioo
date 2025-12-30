@@ -455,42 +455,70 @@ function extractOcrFromHtml(html: string, nights: number): OcrVisualReference | 
       console.log(`[OCR-DOM] Found booking card baseline: ${bookingCardAmount} for ${bookingCardNights} nights`);
     }
 
-    // --------------------
+// --------------------
     // Breakdown total
     // --------------------
-    // Capture patterns like:
-    // "Total (USD) $2,213.34", "Total €1.234", "Total CHF 950"
-    const totalPatterns: RegExp[] = [
-      /\bTotal\s*\(\s*(USD|EUR|GBP|CHF)\s*\)\s*(?:US\$|\$|€|£)?\s*([\d][\d.,]*)/gi,
-      /\bTotal\s*(?:USD|EUR|GBP|CHF)?\s*(?:US\$|\$|€|£)?\s*([\d][\d.,]*)/gi,
-      /\bTotal\s*CHF\s*([\d][\d.,]*)/gi,
-    ];
+    // STRICT PATTERNS: Only match explicit Airbnb breakdown totals
+    // These patterns MUST include currency code/symbol + "Total" in close proximity
+    // Examples: "Total (USD) $2,213.34", "Total USD $2,213", "Total €1.234,00"
+    const breakdownTotalCandidates: Array<{ amount: number; snippet: string; priority: number }> = [];
 
+    // Priority 1: "Total (USD) $X" - the gold standard Airbnb pattern
+    const pattern1 = /\bTotal\s*\(\s*(USD|EUR|GBP|CHF)\s*\)\s*(?:US\$|\$|€|£|CHF)?\s*([\d][\d.,]+)/gi;
+    let m: RegExpExecArray | null;
+    pattern1.lastIndex = 0;
+    while ((m = pattern1.exec(text)) !== null) {
+      const amount = normalizeAmount(m[2]);
+      if (!amount || amount < 100 || amount > 500000) continue;
+      const snippetWindow = text.slice(Math.max(0, m.index - 30), Math.min(text.length, m.index + m[0].length + 30));
+      // Reject if it's "Total before taxes" or has "for X nights"
+      if (/before\s+taxes/i.test(snippetWindow) || /for\s+\d+\s+nights?/i.test(snippetWindow)) continue;
+      breakdownTotalCandidates.push({ amount, snippet: safeSnippet(m[0], 160), priority: 1 });
+    }
+
+    // Priority 2: "Total USD $X" or "Total $X" near currency context
+    const pattern2 = /\bTotal\s+(?:USD|EUR|GBP)\s*(?:US\$|\$|€|£)\s*([\d][\d.,]+)/gi;
+    pattern2.lastIndex = 0;
+    while ((m = pattern2.exec(text)) !== null) {
+      const amount = normalizeAmount(m[1]);
+      if (!amount || amount < 100 || amount > 500000) continue;
+      const snippetWindow = text.slice(Math.max(0, m.index - 30), Math.min(text.length, m.index + m[0].length + 30));
+      if (/before\s+taxes/i.test(snippetWindow) || /for\s+\d+\s+nights?/i.test(snippetWindow)) continue;
+      breakdownTotalCandidates.push({ amount, snippet: safeSnippet(m[0], 160), priority: 2 });
+    }
+
+    // Priority 3: "Total CHF X" (Swiss Franc specific)
+    const pattern3 = /\bTotal\s+CHF\s*([\d][\d.,]+)/gi;
+    pattern3.lastIndex = 0;
+    while ((m = pattern3.exec(text)) !== null) {
+      const amount = normalizeAmount(m[1]);
+      if (!amount || amount < 100 || amount > 500000) continue;
+      const snippetWindow = text.slice(Math.max(0, m.index - 30), Math.min(text.length, m.index + m[0].length + 30));
+      if (/before\s+taxes/i.test(snippetWindow) || /for\s+\d+\s+nights?/i.test(snippetWindow)) continue;
+      breakdownTotalCandidates.push({ amount, snippet: safeSnippet(m[0], 160), priority: 3 });
+    }
+
+    // Select best candidate (highest priority, then highest amount to avoid fees)
     let breakdownTotalAmount: number | null = null;
     let breakdownTotalSnippet: string | null = null;
 
-    for (const re of totalPatterns) {
-      re.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(text)) !== null) {
-        const raw = (m.length >= 3 ? m[2] : m[1]) ?? '';
-        const amount = normalizeAmount(raw);
-        if (!amount) continue;
-
-        const snippetWindow = text.slice(Math.max(0, m.index - 40), Math.min(text.length, m.index + m[0].length + 40));
-
-        // Skip "Total before taxes" and any "for X nights" contexts
-        if (/before\s+taxes/i.test(snippetWindow) || /for\s+\d+\s+nights?/i.test(snippetWindow)) continue;
-
-        // Very small "totals" are usually line items (fees) — prefer realistic stay totals.
-        if (amount < 50) continue;
-
-        breakdownTotalAmount = amount;
-        breakdownTotalSnippet = safeSnippet(m[0], 160);
-        console.log(`[OCR-DOM] Found breakdown total: ${breakdownTotalAmount}`);
-        break;
+    if (breakdownTotalCandidates.length > 0) {
+      breakdownTotalCandidates.sort((a, b) => {
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        return b.amount - a.amount; // Higher amount wins (stay total > fees)
+      });
+      
+      const best = breakdownTotalCandidates[0];
+      
+      // CRITICAL: The breakdown total must be >= booking card amount
+      // If booking card shows "$2,214 for 4 nights", breakdown total cannot be $300
+      if (bookingCardAmount && best.amount < bookingCardAmount * 0.8) {
+        console.log(`[OCR-DOM] Rejecting breakdown total ${best.amount} - below 80% of booking card ${bookingCardAmount}`);
+      } else {
+        breakdownTotalAmount = best.amount;
+        breakdownTotalSnippet = best.snippet;
+        console.log(`[OCR-DOM] Found breakdown total: ${breakdownTotalAmount} (priority ${best.priority})`);
       }
-      if (breakdownTotalAmount) break;
     }
 
     if (!bookingCardAmount && !breakdownTotalAmount) {
