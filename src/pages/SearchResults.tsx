@@ -862,17 +862,42 @@ export default function SearchResults() {
     const fetchConfirmation = async () => {
       const { data } = await supabase
         .from('airbnb_confirmed_totals')
-        .select('confirmed_total_amount, confirmed_currency, confirmation_source, confirmed_at')
+        .select('confirmed_total_amount, confirmed_currency, confirmation_source, confirmed_at, subtotal_nights_only, subtotal_nights_count')
         .eq('search_id', searchId)
         .maybeSingle();
       
       if (data) {
         setConfirmedTotal(data);
+        // If we have subtotal info from the confirmation, set it
+        if (data.subtotal_nights_only) {
+          setSubtotalInfo({
+            amount: data.subtotal_nights_only,
+            nights: data.subtotal_nights_count,
+            currency: data.confirmed_currency || 'USD',
+          });
+        }
       }
     };
     
     fetchConfirmation();
   }, [searchId]);
+
+  // Also try to get subtotal from api_error if status suggests subtotal only
+  useEffect(() => {
+    if (!search || subtotalInfo) return;
+    
+    // Parse subtotal from api_error if it contains subtotal info
+    if (search.api_error && search.api_error.includes('Subtotal')) {
+      const match = search.api_error.match(/\$?([\d,]+(?:\.\d+)?)\s*for\s*(\d+)\s*nights?/i);
+      if (match) {
+        setSubtotalInfo({
+          amount: parseFloat(match[1].replace(/,/g, '')),
+          nights: parseInt(match[2], 10),
+          currency: search.airbnb_currency || 'USD',
+        });
+      }
+    }
+  }, [search, subtotalInfo]);
 
   // Handle confirmation callbacks
   const handleTotalConfirmed = (amount: number, currency: string) => {
@@ -906,8 +931,15 @@ export default function SearchResults() {
 
   // airbnb_price is TOTAL price for the entire stay (not per-night)
   // result.price from alternatives is also TOTAL price
-  const airbnbTotal = search?.airbnb_price || (results.length > 0 ? results[0].original_price : null);
-  const currencySymbol = getCurrencySymbol(search?.airbnb_currency);
+  // Use confirmed total if available, otherwise use extracted price
+  const airbnbTotal = confirmedTotal?.confirmed_total_amount || search?.airbnb_price || (results.length > 0 ? results[0].original_price : null);
+  const currencySymbol = getCurrencySymbol(confirmedTotal?.confirmed_currency || search?.airbnb_currency);
+  
+  // Check if we only have a subtotal (needs confirmation)
+  const hasSubtotalOnly = search?.status === 'needs_user_confirmation' || 
+    (search?.status === 'completed' && !search?.airbnb_price && !confirmedTotal);
+  // Use nights count as subtotal context when we don't have the actual subtotal stored
+  const displaySubtotal = subtotalInfo?.amount || null;
 
   // CRITICAL: Filter out Tier C (blocked) platforms from price comparisons
   // They should NEVER show prices or be marked as "Best Deal"
@@ -1249,11 +1281,24 @@ export default function SearchResults() {
                                 Baseline
                               </span>
                             </td>
-                            <td className="py-4 px-4 text-right font-semibold text-foreground text-lg">
-                              {currencySymbol}{airbnbTotal ? Math.round(airbnbTotal) : "—"}
+                            <td className="py-4 px-4 text-right">
+                              {airbnbTotal ? (
+                                <span className="font-semibold text-foreground text-lg">{currencySymbol}{Math.round(airbnbTotal)}</span>
+                              ) : hasSubtotalOnly && displaySubtotal ? (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span className="font-semibold text-amber-600 text-lg">{currencySymbol}{Math.round(displaySubtotal)}*</span>
+                                  <span className="text-[10px] text-amber-500">+ taxes/fees</span>
+                                </div>
+                              ) : (
+                                <span className="font-semibold text-foreground text-lg">—</span>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
-                              <span className="text-xs">AirCover protection, service fee, cleaning fee may apply</span>
+                              {hasSubtotalOnly && !confirmedTotal ? (
+                                <span className="text-xs text-amber-600">*Subtotal only – taxes/fees not included</span>
+                              ) : (
+                                <span className="text-xs">AirCover protection, service fee, cleaning fee may apply</span>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-center">
                               <Button size="sm" asChild>
@@ -1322,11 +1367,24 @@ export default function SearchResults() {
                                 Baseline
                               </span>
                             </td>
-                            <td className="py-4 px-4 text-right font-semibold text-success text-lg">
-                              {currencySymbol}{airbnbTotal ? Math.round(airbnbTotal) : "—"}
+                            <td className="py-4 px-4 text-right">
+                              {airbnbTotal ? (
+                                <span className="font-semibold text-success text-lg">{currencySymbol}{Math.round(airbnbTotal)}</span>
+                              ) : hasSubtotalOnly && displaySubtotal ? (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span className="font-semibold text-amber-600 text-lg">{currencySymbol}{Math.round(displaySubtotal)}*</span>
+                                  <span className="text-[10px] text-amber-500">+ taxes/fees</span>
+                                </div>
+                              ) : (
+                                <span className="font-semibold text-success text-lg">—</span>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
-                              <span className="text-xs">Baseline price from Airbnb for these dates</span>
+                              {hasSubtotalOnly && !confirmedTotal ? (
+                                <span className="text-xs text-amber-600">*Subtotal only – confirm below</span>
+                              ) : (
+                                <span className="text-xs">Baseline price from Airbnb for these dates</span>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-center">
                               <Button size="sm" asChild>
@@ -1559,9 +1617,14 @@ export default function SearchResults() {
                                 Baseline
                               </span>
                             </td>
-                            <td className="py-4 px-4 text-right font-semibold text-foreground">
+                            <td className="py-4 px-4 text-right">
                               {airbnbTotal ? (
-                                `${currencySymbol}${Math.round(airbnbTotal)}`
+                                <span className="font-semibold text-foreground">{currencySymbol}{Math.round(airbnbTotal)}</span>
+                              ) : hasSubtotalOnly && displaySubtotal ? (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span className="font-semibold text-amber-600">{currencySymbol}{Math.round(displaySubtotal)}*</span>
+                                  <span className="text-[10px] text-amber-500">+ taxes/fees</span>
+                                </div>
                               ) : (
                                 <div className="flex justify-end">
                                   <div className="h-5 w-16 bg-muted animate-pulse rounded" />
@@ -1569,7 +1632,11 @@ export default function SearchResults() {
                               )}
                             </td>
                             <td className="py-4 px-4 text-muted-foreground hidden lg:table-cell">
-                              <span className="text-xs">Baseline price from Airbnb for these dates</span>
+                              {hasSubtotalOnly && !confirmedTotal ? (
+                                <span className="text-xs text-amber-600">*Subtotal only – confirm total below</span>
+                              ) : (
+                                <span className="text-xs">Baseline price from Airbnb for these dates</span>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-center">
                               <Button variant="outline" size="sm" asChild>
@@ -1747,6 +1814,21 @@ export default function SearchResults() {
                         );
                       })}
                     </div>
+
+                    {/* Airbnb Total Confirmation - Show when we only have subtotal */}
+                    {hasSubtotalOnly && !confirmedTotal && (
+                      <div className="mb-8">
+                        <AirbnbTotalConfirmation
+                          searchId={searchId!}
+                          subtotalAmount={displaySubtotal}
+                          subtotalNights={nights}
+                          subtotalCurrency={search?.airbnb_currency || 'USD'}
+                          existingConfirmation={confirmedTotal}
+                          onConfirmed={handleTotalConfirmed}
+                          onCleared={handleTotalCleared}
+                        />
+                      </div>
+                    )}
 
                     {/* Savings Summary - Matching design reference */}
                     {cheapestResult && cheapestResult.price && (
