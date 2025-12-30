@@ -83,3 +83,6 @@ verify_jwt = false
 
 [functions.airbnb-baseline-test]
 verify_jwt = false
+
+[functions.airbnb-selftest]
+verify_jwt = false

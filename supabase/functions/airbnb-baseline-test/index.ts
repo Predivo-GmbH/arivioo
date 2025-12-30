@@ -571,7 +571,7 @@ async function testZyte(url: string, nights: number, supabase: any): Promise<Pro
   }
 }
 
-// Test with Browserless
+// Test with Browserless - Deterministic 2-step flow with breakdown container extraction
 async function testBrowserless(url: string, nights: number, supabase: any): Promise<ProviderAttemptResult> {
   const start = Date.now();
   const provider: ProviderName = 'browserless';
@@ -594,95 +594,167 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${apiKey}`;
 
-    // Updated Playwright script that properly expands price breakdown
+    // DETERMINISTIC 2-STEP PLAYWRIGHT SCRIPT
     const functionPayload = {
       code: `
         export default async function({ page, context }) {
           const url = context.url;
           const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const clickLog = [];
 
+          // ========== STEP 1: Load listing and wait for booking card ==========
+          clickLog.push('STEP1: Loading page');
           await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-          await sleep(5000);
-
-          let clickedBreakdown = false;
-          let clickLog = [];
-
-          // STRATEGY 1: Click on the underlined price text that shows "$X,XXX for N nights"
-          // This is the primary trigger for the price breakdown modal on Airbnb
+          await sleep(4000);
+          
+          // Verify booking card is present
+          const hasBookingCard = await page.$('[data-section-id="BOOK_IT_SIDEBAR"]') || 
+                                  await page.$('[data-testid="book-it-default"]') ||
+                                  await page.$('div[class*="book"]');
+          clickLog.push('Booking card found: ' + !!hasBookingCard);
+          
+          // ========== STEP 2: Open price breakdown ==========
+          let breakdownOpened = false;
+          let totalRowFound = false;
+          
+          // STRATEGY A: Click explicit "Price breakdown" or "Show price details" link
+          clickLog.push('STEP2A: Looking for Price breakdown link');
           try {
-            // Find all elements with aria-label containing price and nights
-            const ariaElements = await page.$$('[aria-label*="for"][aria-label*="night"]');
-            for (const el of ariaElements) {
-              const ariaLabel = await el.getAttribute('aria-label');
-              if (ariaLabel && /\\$[\\d,]+.*for.*\\d+.*night/i.test(ariaLabel)) {
-                clickLog.push('Found aria-label price element: ' + ariaLabel);
+            const allLinks = await page.$$('a, button, span, div[role="button"]');
+            for (const el of allLinks) {
+              const text = await el.textContent().catch(() => '');
+              const textLower = (text || '').toLowerCase().trim();
+              if (textLower.includes('price breakdown') || 
+                  textLower.includes('show price details') ||
+                  textLower.includes('price details')) {
+                clickLog.push('Found breakdown link: ' + textLower.slice(0, 40));
                 await el.click({ delay: 100 });
-                await sleep(2000);
-                clickedBreakdown = true;
+                await sleep(2500);
+                breakdownOpened = true;
                 break;
               }
             }
           } catch (e) {
-            clickLog.push('Aria strategy failed: ' + e.message);
+            clickLog.push('Strategy A error: ' + e.message);
           }
-
-          // STRATEGY 2: Click on span/button that contains the price breakdown text
-          if (!clickedBreakdown) {
+          
+          // Check if Total row appeared after Strategy A
+          if (breakdownOpened) {
+            const htmlAfterA = await page.content();
+            totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(htmlAfterA) ||
+                            /trip\\s+total/i.test(htmlAfterA);
+            clickLog.push('Strategy A Total found: ' + totalRowFound);
+          }
+          
+          // STRATEGY B: Click the "$X for Y nights" price line if Strategy A didn't work
+          if (!totalRowFound) {
+            clickLog.push('STEP2B: Looking for price line to click');
             try {
-              const allClickables = await page.$$('button, span, div[role="button"]');
-              for (const el of allClickables) {
-                const text = await el.textContent().catch(() => '');
-                // Match patterns like "$1,977 for 4 nights" or "Show price details"
-                if (text && (/\\$[\\d,]+\\s+(for|×)\\s+\\d+\\s+night/i.test(text) || /show.*price.*detail/i.test(text))) {
-                  clickLog.push('Clicking text element: ' + text.slice(0, 50));
+              // First try aria-label
+              const ariaElements = await page.$$('[aria-label]');
+              for (const el of ariaElements) {
+                const aria = await el.getAttribute('aria-label');
+                if (aria && /\\$[\\d,]+.*for.*\\d+.*night/i.test(aria)) {
+                  clickLog.push('Clicking aria-label: ' + aria.slice(0, 50));
                   await el.click({ delay: 100 });
-                  await sleep(2000);
-                  clickedBreakdown = true;
+                  await sleep(2500);
+                  breakdownOpened = true;
                   break;
                 }
               }
-            } catch (e) {
-              clickLog.push('Text strategy failed: ' + e.message);
-            }
-          }
-
-          // STRATEGY 3: Look for underlined text that indicates expandable price
-          if (!clickedBreakdown) {
-            try {
-              const underlinedElements = await page.$$('span[style*="underline"], span._14tkmhr, button._14tkmhr');
-              for (const el of underlinedElements) {
-                const text = await el.textContent().catch(() => '');
-                if (text && /\\$[\\d,]+/i.test(text)) {
-                  clickLog.push('Clicking underlined price: ' + text.slice(0, 30));
-                  await el.click({ delay: 100 });
-                  await sleep(2000);
-                  clickedBreakdown = true;
-                  break;
+              
+              // If still not found, try text content
+              if (!breakdownOpened) {
+                const priceElements = await page.$$('span, button, div');
+                for (const el of priceElements) {
+                  const text = await el.textContent().catch(() => '');
+                  if (text && /\\$[\\d,]+\\s+(for|×)\\s+\\d+\\s+night/i.test(text)) {
+                    clickLog.push('Clicking price text: ' + text.slice(0, 50));
+                    await el.click({ delay: 100 });
+                    await sleep(2500);
+                    breakdownOpened = true;
+                    break;
+                  }
                 }
               }
             } catch (e) {
-              clickLog.push('Underline strategy failed: ' + e.message);
+              clickLog.push('Strategy B error: ' + e.message);
+            }
+            
+            // Check if Total row appeared after Strategy B
+            if (breakdownOpened) {
+              const htmlAfterB = await page.content();
+              totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(htmlAfterB) ||
+                              /trip\\s+total/i.test(htmlAfterB);
+              clickLog.push('Strategy B Total found: ' + totalRowFound);
             }
           }
 
-          // Wait for modal to load if clicked
-          if (clickedBreakdown) {
-            await sleep(1500);
+          await sleep(1000);
+          
+          // ========== STEP 3: Extract breakdown container content ==========
+          let breakdownContainerHtml = '';
+          let fullHtml = await page.content();
+          
+          if (totalRowFound) {
+            // Try to extract just the breakdown modal/container
+            clickLog.push('STEP3: Extracting breakdown container');
+            try {
+              // Common Airbnb breakdown container selectors
+              const containerSelectors = [
+                '[data-testid="price-item-breakdown"]',
+                '[aria-label*="Price breakdown"]',
+                '[class*="price-breakdown"]',
+                '[class*="_1s2krtok"]', // Common Airbnb modal class
+                'div[role="dialog"]',
+                'section[aria-label*="price"]',
+              ];
+              
+              for (const sel of containerSelectors) {
+                try {
+                  const container = await page.$(sel);
+                  if (container) {
+                    breakdownContainerHtml = await container.innerHTML();
+                    if (breakdownContainerHtml && breakdownContainerHtml.length > 100) {
+                      clickLog.push('Found container: ' + sel + ' (len=' + breakdownContainerHtml.length + ')');
+                      break;
+                    }
+                  }
+                } catch (e) {}
+              }
+              
+              // If no container found, try to find a section with both "nights" and "Total"
+              if (!breakdownContainerHtml) {
+                const allSections = await page.$$('div, section');
+                for (const section of allSections) {
+                  const html = await section.innerHTML().catch(() => '');
+                  if (html && 
+                      /\\d+\\s*nights?/i.test(html) && 
+                      /Total\\s*(USD|EUR|GBP)?/i.test(html) &&
+                      html.length < 10000) {
+                    breakdownContainerHtml = html;
+                    clickLog.push('Found breakdown section by content (len=' + html.length + ')');
+                    break;
+                  }
+                }
+              }
+            } catch (e) {
+              clickLog.push('Container extraction error: ' + e.message);
+            }
           }
-
-          const html = await page.content();
           
-          // Check if price breakdown is now visible in the HTML
-          const hasTotalUSD = /Total\\s*(USD|\\(USD\\)|EUR|GBP)?\\s*\\$[\\d,]+/i.test(html);
-          const hasTripTotal = /trip\\s+total/i.test(html);
+          // Return breakdown container if found, otherwise full HTML
+          const contentToReturn = breakdownContainerHtml || fullHtml;
           
-          clickLog.push('hasTotalUSD: ' + hasTotalUSD);
-          clickLog.push('hasTripTotal: ' + hasTripTotal);
+          clickLog.push('Final: breakdownOpened=' + breakdownOpened + ', totalRowFound=' + totalRowFound + ', containerLen=' + breakdownContainerHtml.length);
 
           return { 
-            html, 
-            priceBreakdownClicked: clickedBreakdown,
-            clickLog: clickLog.join('; ')
+            html: contentToReturn,
+            fullHtml: fullHtml,
+            breakdownContainerHtml: breakdownContainerHtml,
+            breakdownOpened: breakdownOpened,
+            totalRowFound: totalRowFound,
+            clickLog: clickLog.join(' | ')
           };
         }
       `,
@@ -696,7 +768,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(functionPayload),
       },
-      60000
+      70000
     );
 
     const durationMs = Date.now() - start;
@@ -714,6 +786,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         error: `HTTP ${resp.status}`,
         duration_ms: durationMs,
         candidates_summary: [],
+        click_log: 'Request failed before script ran',
       };
     }
 
@@ -721,10 +794,13 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     const fnJson = await resp.json().catch(() => null);
     const html = fnJson?.html || '';
+    const breakdownContainerHtml = fnJson?.breakdownContainerHtml || '';
+    const totalRowFound = fnJson?.totalRowFound || false;
     const clickLog = fnJson?.clickLog || 'no click log';
 
     console.log(`[Browserless] Click log: ${clickLog}`);
-    console.log(`[Browserless] HTML length: ${html.length}`);
+    console.log(`[Browserless] HTML length: ${html.length}, breakdown container: ${breakdownContainerHtml.length}`);
+    console.log(`[Browserless] Total row found: ${totalRowFound}`);
 
     if (html.length < 500) {
       return {
@@ -736,6 +812,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         evidence_snippet: `Insufficient content. Click log: ${clickLog}`,
         duration_ms: durationMs,
         candidates_summary: [],
+        click_log: clickLog,
       };
     }
 
@@ -756,13 +833,31 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         evidence_snippet: safeSnippet(html, 300),
         duration_ms: durationMs,
         candidates_summary: [],
+        click_log: clickLog,
       };
     }
 
-    const candidates = extractPriceCandidates(html, nights);
+    // If Total row was not found, fail immediately
+    if (!totalRowFound) {
+      return {
+        provider,
+        status: 'price_not_available_in_content',
+        price: null,
+        currency: null,
+        includes_taxes_fees: false,
+        evidence_snippet: `Total row not found after both strategies. Click log: ${clickLog}`,
+        duration_ms: durationMs,
+        candidates_summary: [],
+        click_log: clickLog,
+      };
+    }
+
+    // Extract candidates from breakdown container (or full HTML if no container)
+    const extractionContent = breakdownContainerHtml.length > 100 ? breakdownContainerHtml : html;
+    const candidates = extractPriceCandidates(extractionContent, nights);
     
     console.log(`[Browserless] Found ${candidates.length} candidates`);
-    candidates.slice(0, 5).forEach((c, i) => {
+    candidates.slice(0, 8).forEach((c, i) => {
       console.log(`  Candidate ${i+1}: $${c.amount} type=${c.candidateType} rejected=${c.rejectedReason || 'no'}`);
     });
     
@@ -773,19 +868,55 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     
     // Sort by: includes_taxes_fees first (prefer totals with taxes), then by amount (highest)
     const sorted = totalFinalCandidates.sort((a, b) => {
-      // Prefer including taxes/fees
       if (a.includesTaxesFees && !b.includesTaxesFees) return -1;
       if (!a.includesTaxesFees && b.includesTaxesFees) return 1;
-      // Then prefer higher amount (likely includes fees)
       return b.amount - a.amount;
     });
 
     const selected = sorted[0];
 
-    // Include click log in evidence for debugging
+    // ========== FINAL GUARDRAIL OVERRIDE ==========
+    // If evidence contains subtotal patterns, FORCE failure even if we think we found a total
+    if (selected) {
+      const evidenceContext = selected.context || '';
+      const subtotalPatterns = [
+        /for\s+\d+\s+nights?/i,
+        /\d+\s+nights?\s*[×x]/i,
+        /nights?\s*[×x]\s*\$/i,
+        /per\s+night/i,
+      ];
+      
+      const hasSubtotalPattern = subtotalPatterns.some(p => p.test(evidenceContext));
+      
+      if (hasSubtotalPattern) {
+        console.log(`[Browserless] GUARDRAIL: Evidence contains subtotal pattern, rejecting: ${evidenceContext.slice(0, 100)}`);
+        return {
+          provider,
+          status: 'price_not_available_in_content',
+          price: null,
+          currency: null,
+          includes_taxes_fees: false,
+          evidence_snippet: `GUARDRAIL: Evidence contains subtotal pattern. Context: ${evidenceContext.slice(0, 200)} | Click: ${clickLog.slice(0, 100)}`,
+          duration_ms: durationMs,
+          candidates_summary: candidates.slice(0, 10).map(c => ({
+            amount: c.amount,
+            currency: c.currency,
+            kind: c.kind,
+            label_hint: c.labelHint,
+            rejected_reason: c.rejectedReason || 'guardrail_subtotal_in_evidence',
+            candidate_type: c.candidateType,
+            raw_matched_string: c.rawMatchedString,
+          })),
+          click_log: clickLog,
+          raw_matched_string: selected.rawMatchedString,
+        };
+      }
+    }
+
+    // Build final evidence snippet
     const evidenceWithLog = selected?.context 
-      ? `${selected.context} | Click: ${clickLog.slice(0, 100)}`
-      : `No total found. Click: ${clickLog} | Content sample: ${safeSnippet(html, 200)}`;
+      ? `${selected.context}`
+      : `No total_final candidate found. Click: ${clickLog}`;
 
     return {
       provider,
@@ -802,7 +933,10 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
         label_hint: c.labelHint,
         rejected_reason: c.rejectedReason,
         candidate_type: c.candidateType,
+        raw_matched_string: c.rawMatchedString,
       })),
+      click_log: clickLog,
+      raw_matched_string: selected?.rawMatchedString || undefined,
     };
   } catch (e) {
     const durationMs = Date.now() - start;
@@ -817,6 +951,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
       error: String(e),
       duration_ms: durationMs,
       candidates_summary: [],
+      click_log: 'Exception: ' + String(e),
     };
   }
 }
