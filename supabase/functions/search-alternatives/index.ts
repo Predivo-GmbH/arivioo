@@ -4520,6 +4520,9 @@ async function runSearchWithStreaming(
         } : null,
       });
 
+      // Log detailed selection check
+      console.log(`[Selection Check] Provider=${r.provider}, status=${r.baseline.status}, price=${r.baseline.price}, currency=${r.baseline.currency}, currencyTruthy=${!!r.baseline.currency}`);
+
       // Only accept a baseline price when it is a *final* total INCLUDING taxes/fees.
       // If we only have a total-excluding-taxes (or a subtotal-for-nights), we require user confirmation.
       if (
@@ -4565,28 +4568,29 @@ async function runSearchWithStreaming(
 
     // Track subtotal info from any provider that found needs_user_confirmation
     // OR a total that excludes taxes/fees (still requires user confirmation).
+    // ONLY populate subtotalInfo if we DON'T have a valid airbnbPrice
     let subtotalInfo: { amount: number; nights: number | null; currency: string } | null = null;
-    for (const r of providerResults) {
-      if (r.baseline.status === 'needs_user_confirmation' && r.baseline.subtotal_nights_only) {
-        subtotalInfo = {
-          amount: r.baseline.subtotal_nights_only,
-          nights: r.baseline.subtotal_nights_count ?? null,
-          currency: r.baseline.currency || 'USD',
-        };
-        break;
-      }
-
-      if (r.baseline.status === 'total_price_excluding_taxes_and_fees' && typeof r.baseline.price === 'number') {
-        subtotalInfo = {
-          amount: r.baseline.price,
-          nights: nights,
-          currency: r.baseline.currency || 'USD',
-        };
-        break;
-      }
-    }
-
     if (!airbnbPrice) {
+      for (const r of providerResults) {
+        if (r.baseline.status === 'needs_user_confirmation' && r.baseline.subtotal_nights_only) {
+          subtotalInfo = {
+            amount: r.baseline.subtotal_nights_only,
+            nights: r.baseline.subtotal_nights_count ?? null,
+            currency: r.baseline.currency || 'USD',
+          };
+          break;
+        }
+
+        if (r.baseline.status === 'total_price_excluding_taxes_and_fees' && typeof r.baseline.price === 'number') {
+          subtotalInfo = {
+            amount: r.baseline.price,
+            nights: nights,
+            currency: r.baseline.currency || 'USD',
+          };
+          break;
+        }
+      }
+
       if (subtotalInfo) {
         sendProgress(controller, "Subtotal found", `$${subtotalInfo.amount} for ${subtotalInfo.nights || '?'} nights (needs user confirmation for total)`, {
           subtotal_nights_only: subtotalInfo.amount,
