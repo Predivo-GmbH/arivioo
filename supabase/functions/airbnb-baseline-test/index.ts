@@ -252,6 +252,19 @@ function extractPriceCandidates(content: string, nights: number): Array<{
       }
 
       // ============================================================
+      // STEP 3B: Reject pet fees, cleaning fees, deposits - CRITICAL
+      // ============================================================
+      const hasPetFeePattern = /\bpet\b.*\bfee\b|\bfee\b.*\bpet\b|\bpet\s+friendly\b.*\$|\$[\d,.]+\s*fee\s*charged\s*to\s*card/i.test(context);
+      const hasCleaningFeePattern = /\bcleaning\s+fee\b/i.test(context);
+      const hasDepositPattern = /\bdeposit\b|\bsecurity\b.*\bfee\b/i.test(context);
+      const hasDamageFeePattern = /\bdamage\b.*\bfee\b|\bprotection\b.*\bfee\b/i.test(context);
+      
+      if (!rejectedReason && (hasPetFeePattern || hasCleaningFeePattern || hasDepositPattern || hasDamageFeePattern)) {
+        candidateType = 'unknown';
+        rejectedReason = 'fee_or_deposit_not_total';
+      }
+
+      // ============================================================
       // STEP 4: Final classification and kind assignment
       // ============================================================
       let kind: AirbnbBaselineStatus = 'price_not_available_in_content';
@@ -357,48 +370,85 @@ CRITICAL RULES:
 
     messages.push({ role: 'user', content });
 
-    const response = await fetch('https://ai.lovable.dev/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages,
-        temperature: 0.1,
-        max_tokens: 500,
-      }),
-    });
-
-    if (!response.ok) {
-      console.error('[OCR] Lovable AI error:', response.status);
-      return null;
-    }
-
-    const data = await response.json();
-    const responseText = data.choices?.[0]?.message?.content || '';
+    // OCR via AI is not available from edge functions (network restrictions)
+    // Instead, extract booking card amount from DOM content using regex
+    console.log('[OCR] Using DOM-based extraction fallback');
     
-    // Parse JSON from response
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error('[OCR] No JSON found in response');
-      return null;
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    
+    // Return empty reference - the booking card amount will be extracted from HTML
     return {
-      bookingCardAmount: parsed.bookingCardAmount || null,
-      bookingCardNights: parsed.bookingCardNights || null,
-      bookingCardSnippet: parsed.bookingCardSnippet || null,
-      breakdownTotalAmount: parsed.breakdownTotalAmount || null,
-      breakdownTotalSnippet: parsed.breakdownTotalSnippet || null,
-      breakdownTaxesAmount: parsed.breakdownTaxesAmount || null,
+      bookingCardAmount: null,
+      bookingCardNights: null,
+      bookingCardSnippet: null,
+      breakdownTotalAmount: null,
+      breakdownTotalSnippet: null,
+      breakdownTaxesAmount: null,
       breakdownOpened,
     };
   } catch (error) {
     console.error('[OCR] Extraction error:', error);
+    return null;
+  }
+}
+
+// ========== DOM-BASED OCR EXTRACTION ==========
+// Extracts booking card amount from HTML content using regex patterns
+
+function extractOcrFromHtml(html: string, nights: number): OcrVisualReference | null {
+  try {
+    // Pattern 1: "$X,XXX for Y nights" - booking card subtotal
+    const forNightsPattern = /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s+nights?/gi;
+    let bookingCardMatch = forNightsPattern.exec(html);
+    
+    let bookingCardAmount: number | null = null;
+    let bookingCardNights: number | null = null;
+    let bookingCardSnippet: string | null = null;
+    
+    if (bookingCardMatch) {
+      const rawAmount = bookingCardMatch[1].replace(/,/g, '');
+      bookingCardAmount = parseFloat(rawAmount);
+      bookingCardNights = parseInt(bookingCardMatch[2]);
+      bookingCardSnippet = bookingCardMatch[0];
+      console.log(`[OCR-DOM] Found booking card: $${bookingCardAmount} for ${bookingCardNights} nights`);
+    }
+    
+    // Pattern 2: "Total (USD) $X,XXX" or "Total USD $X,XXX" - breakdown total
+    const totalPattern = /Total\s*(?:\(?\s*USD\s*\)?|USD)?\s*\$?\s*([\d,]+(?:\.\d{2})?)/gi;
+    let breakdownTotalAmount: number | null = null;
+    let breakdownTotalSnippet: string | null = null;
+    
+    let totalMatch: RegExpExecArray | null;
+    while ((totalMatch = totalPattern.exec(html)) !== null) {
+      const snippet = html.slice(Math.max(0, totalMatch.index - 20), totalMatch.index + totalMatch[0].length + 20);
+      // Skip if it's "Total before taxes" or in a subtotal context
+      if (/before\s+taxes/i.test(snippet) || /for\s+\d+\s+nights/i.test(snippet)) {
+        continue;
+      }
+      const rawAmount = totalMatch[1].replace(/,/g, '');
+      const amount = parseFloat(rawAmount);
+      if (amount > 100 && amount < 100000) {
+        breakdownTotalAmount = amount;
+        breakdownTotalSnippet = totalMatch[0];
+        console.log(`[OCR-DOM] Found breakdown total: $${breakdownTotalAmount}`);
+        break;
+      }
+    }
+    
+    if (!bookingCardAmount && !breakdownTotalAmount) {
+      console.log('[OCR-DOM] No booking card or breakdown total found in HTML');
+      return null;
+    }
+    
+    return {
+      bookingCardAmount,
+      bookingCardNights,
+      bookingCardSnippet,
+      breakdownTotalAmount,
+      breakdownTotalSnippet,
+      breakdownTaxesAmount: null,
+      breakdownOpened: !!breakdownTotalAmount,
+    };
+  } catch (error) {
+    console.error('[OCR-DOM] Extraction error:', error);
     return null;
   }
 }
@@ -1043,13 +1093,21 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     console.log(`[Browserless] Total row found: ${totalRowFound}`);
     console.log(`[Browserless] Screenshots: bookingCard=${!!bookingCardScreenshot}, breakdown=${!!breakdownScreenshot}`);
 
-    // ========== OCR EXTRACTION ==========
+    // ========== OCR EXTRACTION (DOM-based, fallback to screenshot if available) ==========
     let ocrReference: OcrVisualReference | null = null;
-    if (bookingCardScreenshot || breakdownScreenshot) {
-      console.log('[Browserless] Running OCR extraction on screenshots...');
+    
+    // First try DOM-based extraction from the full HTML
+    const fullHtml = fnJson?.fullHtml || html;
+    ocrReference = extractOcrFromHtml(fullHtml, nights);
+    
+    if (ocrReference) {
+      console.log(`[Browserless] OCR-DOM result: bookingCard=$${ocrReference.bookingCardAmount}, breakdown=$${ocrReference.breakdownTotalAmount}`);
+    } else if (bookingCardScreenshot || breakdownScreenshot) {
+      // Fallback to screenshot-based extraction (currently returns null)
+      console.log('[Browserless] DOM extraction failed, trying screenshot-based OCR...');
       ocrReference = await extractOcrVisualReference(bookingCardScreenshot, breakdownScreenshot, breakdownOpened);
       if (ocrReference) {
-        console.log(`[Browserless] OCR result: bookingCard=$${ocrReference.bookingCardAmount}, breakdown=$${ocrReference.breakdownTotalAmount}`);
+        console.log(`[Browserless] OCR-Screenshot result: bookingCard=$${ocrReference.bookingCardAmount}, breakdown=$${ocrReference.breakdownTotalAmount}`);
       }
     }
 
