@@ -2123,11 +2123,8 @@ export default function SearchResults() {
         onConfirmed={(amount, currency) => {
           handleTotalConfirmed(amount, currency);
           setShowConfirmationModal(false);
-          // Continue the pipeline now that baseline is confirmed
-          searchTriggeredRef.current = false;
-          setLoading(true);
-          setSearchPhase("thinking");
-          setRunSeq((s) => s + 1);
+          // Don't restart search - pipeline is already running in background
+          // Just refresh the UI state when search completes
         }}
       />
     </div>
