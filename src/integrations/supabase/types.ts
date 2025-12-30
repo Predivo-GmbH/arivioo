@@ -1270,6 +1270,12 @@ export type Database = {
           id: string
           last_progress_at: string | null
           nights_count: number | null
+          ocr_accepted_via: string | null
+          ocr_booking_card_amount: number | null
+          ocr_booking_card_nights: number | null
+          ocr_breakdown_total_amount: number | null
+          ocr_mismatch_reason: string | null
+          ocr_validation_status: string | null
           public_demo_ok: boolean
           skip_requested: boolean
           status: string
@@ -1291,6 +1297,12 @@ export type Database = {
           id?: string
           last_progress_at?: string | null
           nights_count?: number | null
+          ocr_accepted_via?: string | null
+          ocr_booking_card_amount?: number | null
+          ocr_booking_card_nights?: number | null
+          ocr_breakdown_total_amount?: number | null
+          ocr_mismatch_reason?: string | null
+          ocr_validation_status?: string | null
           public_demo_ok?: boolean
           skip_requested?: boolean
           status?: string
@@ -1312,6 +1324,12 @@ export type Database = {
           id?: string
           last_progress_at?: string | null
           nights_count?: number | null
+          ocr_accepted_via?: string | null
+          ocr_booking_card_amount?: number | null
+          ocr_booking_card_nights?: number | null
+          ocr_breakdown_total_amount?: number | null
+          ocr_mismatch_reason?: string | null
+          ocr_validation_status?: string | null
           public_demo_ok?: boolean
           skip_requested?: boolean
           status?: string

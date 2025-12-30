@@ -4506,7 +4506,14 @@ async function runSearchWithStreaming(
       sendProgress(controller, "Price comparison", summary, { comparison: providerResults });
     }
 
-    // Update the database
+    // Get OCR validation data from the accepted provider result
+    const acceptedProviderResult = providerResults.find(r => 
+      r.baseline.status === 'total_price_including_taxes_and_fees' && r.baseline.price === airbnbPrice
+    );
+    const finalOcrRef = acceptedProviderResult?.ocrReference || sharedOcrReference;
+    const finalOcrVal = acceptedProviderResult?.ocrValidation;
+
+    // Update the database including OCR fields
     await supabase
       .from("searches")
       .update({
@@ -4520,6 +4527,13 @@ async function runSearchWithStreaming(
         check_in_date: checkIn,
         check_out_date: checkOut,
         nights_count: nights,
+        // OCR validation fields
+        ocr_booking_card_amount: finalOcrRef?.bookingCardAmountValue || null,
+        ocr_booking_card_nights: finalOcrRef?.bookingCardNights || null,
+        ocr_breakdown_total_amount: finalOcrRef?.breakdownTotalAmountValue || null,
+        ocr_validation_status: finalOcrVal?.accepted ? 'accepted' : (finalOcrVal?.mismatchReason ? 'rejected' : null),
+        ocr_accepted_via: finalOcrVal?.acceptedVia || null,
+        ocr_mismatch_reason: finalOcrVal?.mismatchReason || null,
       })
       .eq("id", searchId);
     

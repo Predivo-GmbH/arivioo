@@ -86,6 +86,13 @@ interface SearchData {
   nights_count?: number | null;
   api_error?: string | null;
   api_error_code?: string | null;
+  // OCR validation fields
+  ocr_booking_card_amount?: number | null;
+  ocr_booking_card_nights?: number | null;
+  ocr_breakdown_total_amount?: number | null;
+  ocr_validation_status?: string | null;
+  ocr_accepted_via?: string | null;
+  ocr_mismatch_reason?: string | null;
 }
 
 // Helper to get currency symbol
@@ -1212,6 +1219,39 @@ export default function SearchResults() {
                   <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
                     <Calendar className="w-4 h-4" />
                     <span>Comparing prices for {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})</span>
+                  </div>
+                )}
+
+                {/* OCR Validation Status Indicator */}
+                {search?.ocr_validation_status && (
+                  <div className={`mb-4 flex items-center gap-2 text-sm px-3 py-2 rounded-lg border ${
+                    search.ocr_validation_status === 'accepted' 
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700' 
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-700'
+                  }`}>
+                    {search.ocr_validation_status === 'accepted' ? (
+                      <>
+                        <CheckCircle className="w-4 h-4" />
+                        <span>
+                          Price verified via visual OCR
+                          {search.ocr_accepted_via && (
+                            <span className="text-xs opacity-75 ml-1">
+                              ({search.ocr_accepted_via === 'breakdown_match' ? 'matches breakdown total' : 
+                                search.ocr_accepted_via === 'equal_baseline' ? 'matches booking card' :
+                                search.ocr_accepted_via === 'higher_than_baseline' ? 'includes taxes/fees' :
+                                search.ocr_accepted_via.replace(/_/g, ' ')})
+                            </span>
+                          )}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle className="w-4 h-4" />
+                        <span>
+                          OCR validation: {search.ocr_mismatch_reason?.replace(/_/g, ' ') || 'mismatch detected'}
+                        </span>
+                      </>
+                    )}
                   </div>
                 )}
 
