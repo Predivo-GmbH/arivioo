@@ -1,21 +1,9 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-// ============================================================================
-// CANONICAL IMPORTS - Single Source of Truth
-// DO NOT duplicate any of this logic locally. Import from _shared/ instead.
-// ============================================================================
-import {
-  corsHeaders,
-  handleCorsPreFlight,
-  fetchWithTimeout,
-  buildBookStaysUrl as sharedBuildBookStaysUrl,
-  detectBotIndicators,
-  calculateNights,
-  SHARED_MODULES_VERSION,
-} from "../_shared/mod.ts";
-
-// Log shared module version for debugging
-console.log(`[airbnb-selftest] Using _shared modules version: ${SHARED_MODULES_VERSION}`);
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
 
 function safeSnippet(s: string, max = 300): string {
   return (s || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -44,9 +32,8 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
     .join('');
 }
 
-// Wrapper over sharedBuildBookStaysUrl that adds nights_count (selftest-specific)
-// Named differently to avoid lint false positive on shared function name
-function buildBookStaysUrlWithNights(roomsUrl: string, guestCurrency = 'USD'): {
+// Part 1: Build the "book/stays" URL from a rooms URL
+function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
   book_stays_url: string;
   room_id: string;
   check_in: string;
@@ -57,23 +44,56 @@ function buildBookStaysUrlWithNights(roomsUrl: string, guestCurrency = 'USD'): {
   pets: number;
   nights_count: number;
 } | null {
-  const result = sharedBuildBookStaysUrl(roomsUrl, guestCurrency);
-  if (!result) return null;
-  
-  // Calculate nights
-  const nights = calculateNights(result.check_in, result.check_out);
-  
-  return {
-    book_stays_url: result.book_stays_url,
-    room_id: result.room_id,
-    check_in: result.check_in,
-    check_out: result.check_out,
-    adults: result.adults,
-    children: result.children,
-    infants: 0,
-    pets: 0,
-    nights_count: nights,
-  };
+  try {
+    const parsed = new URL(roomsUrl);
+    
+    // Extract roomId from path: /rooms/<id>
+    const pathMatch = parsed.pathname.match(/\/rooms\/(\d+)/);
+    if (!pathMatch) return null;
+    const roomId = pathMatch[1];
+    
+    // Extract dates from query params
+    const checkIn = parsed.searchParams.get('check_in') || '';
+    const checkOut = parsed.searchParams.get('check_out') || '';
+    if (!checkIn || !checkOut) return null;
+    
+    // Parse guests - prefer adults if present, else use guests
+    const adultsParam = parsed.searchParams.get('adults');
+    const guestsParam = parsed.searchParams.get('guests');
+    const adults = adultsParam ? parseInt(adultsParam, 10) : (guestsParam ? parseInt(guestsParam, 10) : 1);
+    
+    // Calculate nights
+    const checkInDate = new Date(checkIn);
+    const checkOutDate = new Date(checkOut);
+    const nightsCount = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
+    
+    // Build book/stays URL with all required params
+    const bookStaysUrl = new URL(`https://www.airbnb.com/book/stays/${roomId}`);
+    bookStaysUrl.searchParams.set('checkin', checkIn);
+    bookStaysUrl.searchParams.set('checkout', checkOut);
+    bookStaysUrl.searchParams.set('numberOfGuests', String(adults));
+    bookStaysUrl.searchParams.set('numberOfAdults', String(adults));
+    bookStaysUrl.searchParams.set('numberOfChildren', '0');
+    bookStaysUrl.searchParams.set('numberOfInfants', '0');
+    bookStaysUrl.searchParams.set('numberOfPets', '0');
+    bookStaysUrl.searchParams.set('isWorkTrip', 'false');
+    bookStaysUrl.searchParams.set('guestCurrency', guestCurrency);
+    bookStaysUrl.searchParams.set('productId', roomId);
+    
+    return {
+      book_stays_url: bookStaysUrl.toString(),
+      room_id: roomId,
+      check_in: checkIn,
+      check_out: checkOut,
+      adults,
+      children: 0,
+      infants: 0,
+      pets: 0,
+      nights_count: nightsCount,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // Part 2: Region mapping for Accept-Language and timezone
@@ -268,7 +288,12 @@ function extractBookingCardFromRoomsOcr(ocrTextRaw: string, nightsExpected: numb
   return { booking_card_amount_value: null, currency: 'USD', evidence_snippet: null };
 }
 
-// fetchWithTimeout is imported from _shared/http/fetch-utils.ts
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 60000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try { return await fetch(input, { ...init, signal: controller.signal }); }
+  finally { clearTimeout(timeoutId); }
+}
 
 // Run Browserless on book/stays page (primary) with fallback to rooms page
 async function runBrowserlessBookStays(
@@ -475,7 +500,7 @@ Deno.serve(async (req) => {
   const runId = crypto.randomUUID();
   
   // Part 1: Build book/stays URL from rooms URL
-  const bookStaysParams = buildBookStaysUrlWithNights(url, guestCurrency);
+  const bookStaysParams = buildBookStaysUrl(url, guestCurrency);
   if (!bookStaysParams) {
     return new Response(JSON.stringify({
       error: 'Could not parse rooms URL. Ensure it contains /rooms/<id> and check_in/check_out params.',
@@ -636,7 +661,6 @@ Deno.serve(async (req) => {
   
   // Build response
   const response = {
-    shared_modules_version: SHARED_MODULES_VERSION,
     run_id: runId,
     requested_rooms_url: url,
     generated_book_stays_url: book_stays_url,

@@ -1,5 +1,0 @@
-{
-  "tasks": {
-    "lint:shared": "deno run --allow-read _shared/lint-shared.ts"
-  }
-}
