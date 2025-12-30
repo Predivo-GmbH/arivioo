@@ -257,6 +257,68 @@ export type Database = {
           },
         ]
       }
+      airbnb_confirmed_totals: {
+        Row: {
+          confirmation_attachment_url: string | null
+          confirmation_note: string | null
+          confirmation_source: string
+          confirmation_text: string | null
+          confirmed_at: string
+          confirmed_by: string | null
+          confirmed_currency: string
+          confirmed_total_amount: number
+          created_at: string
+          id: string
+          run_id: string | null
+          search_id: string | null
+          subtotal_nights_count: number | null
+          subtotal_nights_only: number | null
+          updated_at: string
+        }
+        Insert: {
+          confirmation_attachment_url?: string | null
+          confirmation_note?: string | null
+          confirmation_source?: string
+          confirmation_text?: string | null
+          confirmed_at?: string
+          confirmed_by?: string | null
+          confirmed_currency?: string
+          confirmed_total_amount: number
+          created_at?: string
+          id?: string
+          run_id?: string | null
+          search_id?: string | null
+          subtotal_nights_count?: number | null
+          subtotal_nights_only?: number | null
+          updated_at?: string
+        }
+        Update: {
+          confirmation_attachment_url?: string | null
+          confirmation_note?: string | null
+          confirmation_source?: string
+          confirmation_text?: string | null
+          confirmed_at?: string
+          confirmed_by?: string | null
+          confirmed_currency?: string
+          confirmed_total_amount?: number
+          created_at?: string
+          id?: string
+          run_id?: string | null
+          search_id?: string | null
+          subtotal_nights_count?: number | null
+          subtotal_nights_only?: number | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "airbnb_confirmed_totals_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: true
+            referencedRelation: "searches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       api_providers: {
         Row: {
           auth_secret_name: string

@@ -1605,6 +1605,144 @@ Deno.serve(async (req) => {
       );
     }
 
+    // CONFIRM DIAGNOSTIC TOTAL - Manual confirmation for testing
+    if (action === 'confirm-diagnostic-total' && req.method === 'POST') {
+      const ip = req.headers.get('x-forwarded-for') || 'unknown';
+      const userAgent = req.headers.get('user-agent') || 'unknown';
+      const body = await req.json();
+      const {
+        run_id,
+        confirmed_total_amount,
+        confirmed_currency,
+        subtotal_nights_only,
+        subtotal_nights_count,
+        confirmation_note,
+      } = body;
+
+      if (!run_id || typeof confirmed_total_amount !== 'number') {
+        return new Response(
+          JSON.stringify({ error: 'run_id and confirmed_total_amount are required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Upsert the diagnostic confirmation
+      const { data, error } = await supabase
+        .from('airbnb_confirmed_totals')
+        .upsert({
+          run_id,
+          confirmed_total_amount,
+          confirmed_currency: confirmed_currency || 'USD',
+          subtotal_nights_only,
+          subtotal_nights_count,
+          confirmation_source: 'diagnostic_test',
+          confirmation_note,
+          confirmed_at: new Date().toISOString(),
+        }, {
+          onConflict: 'run_id',
+        })
+        .select()
+        .single();
+
+      if (error) {
+        return new Response(
+          JSON.stringify({ error: error.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Log audit entry
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin.id,
+        admin_email: authResult.admin.email,
+        action: 'confirm_diagnostic_total',
+        resource_type: 'airbnb_confirmed_totals',
+        resource_id: run_id,
+        new_values: { confirmed_total_amount, confirmed_currency },
+        ip_address: ip,
+        user_agent: userAgent,
+      });
+
+      return new Response(
+        JSON.stringify({ success: true, data }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // CLEAR DIAGNOSTIC TOTAL
+    if (action === 'clear-diagnostic-total' && req.method === 'POST') {
+      const ip = req.headers.get('x-forwarded-for') || 'unknown';
+      const userAgent = req.headers.get('user-agent') || 'unknown';
+      const body = await req.json();
+      const { run_id } = body;
+
+      if (!run_id) {
+        return new Response(
+          JSON.stringify({ error: 'run_id is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const { error } = await supabase
+        .from('airbnb_confirmed_totals')
+        .delete()
+        .eq('run_id', run_id);
+
+      if (error) {
+        return new Response(
+          JSON.stringify({ error: error.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Log audit entry
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin.id,
+        admin_email: authResult.admin.email,
+        action: 'clear_diagnostic_total',
+        resource_type: 'airbnb_confirmed_totals',
+        resource_id: run_id,
+        ip_address: ip,
+        user_agent: userAgent,
+      });
+
+      return new Response(
+        JSON.stringify({ success: true }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // GET DIAGNOSTIC CONFIRMATION
+    if (action === 'get-diagnostic-confirmation' && req.method === 'GET') {
+      const params = url.searchParams;
+      const runId = params.get('runId');
+
+      if (!runId) {
+        return new Response(
+          JSON.stringify({ error: 'runId is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const { data, error } = await supabase
+        .from('airbnb_confirmed_totals')
+        .select('*')
+        .eq('run_id', runId)
+        .maybeSingle();
+
+      if (error) {
+        return new Response(
+          JSON.stringify({ error: error.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({ confirmation: data }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
