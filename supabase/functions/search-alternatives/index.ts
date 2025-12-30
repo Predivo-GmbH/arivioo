@@ -3885,7 +3885,16 @@ async function runSearchWithStreaming(
     error?: string;
     contentLength?: number;
     durationMs?: number;
+    // OCR validation fields
+    ocrReference?: OcrVisualReference | null;
+    ocrValidation?: OcrValidationResult | null;
   }
+
+  // Shared OCR reference - captured from Browserless (first provider with screenshots)
+  let sharedOcrReference: OcrVisualReference | null = null;
+  
+  // Generate a unique run ID for debug persistence
+  const debugRunId = crypto.randomUUID();
 
   const providerResults: ProviderPriceResult[] = [];
 
@@ -4033,7 +4042,45 @@ async function runSearchWithStreaming(
         }
 
         const baseline = extractBaselineFromContent(html, markdown, 'Firecrawl');
-        return { provider, baseline, contentLength: html.length, durationMs };
+        
+        // Apply OCR validation using shared reference (if available from Browserless)
+        const ocrValidation = validateProviderPriceWithOcr(
+          baseline.price,
+          baseline.currency,
+          baseline.evidence_snippet,
+          sharedOcrReference
+        );
+        
+        console.log(`Firecrawl OCR validation: accepted=${ocrValidation.accepted}, status=${ocrValidation.status}, acceptedVia=${ocrValidation.acceptedVia}`);
+        
+        // If OCR validation rejects the price, update baseline
+        let finalBaseline = baseline;
+        if (!ocrValidation.accepted && baseline.price !== null) {
+          console.log(`OCR rejected Firecrawl price ${baseline.price}: ${ocrValidation.mismatchReason}`);
+          finalBaseline = {
+            ...baseline,
+            status: ocrValidation.status,
+            price: ocrValidation.validatedPrice,
+            includes_taxes_fees: ocrValidation.includesTaxesFees,
+            evidence_snippet: ocrValidation.evidenceSnippet,
+          };
+        } else if (ocrValidation.accepted && ocrValidation.acceptedVia) {
+          finalBaseline = {
+            ...baseline,
+            status: ocrValidation.status,
+            includes_taxes_fees: ocrValidation.includesTaxesFees,
+            evidence_snippet: ocrValidation.evidenceSnippet,
+          };
+        }
+        
+        return { 
+          provider, 
+          baseline: finalBaseline, 
+          contentLength: html.length, 
+          durationMs,
+          ocrReference: sharedOcrReference,
+          ocrValidation,
+        };
       } catch (e) {
         const durationMs = Date.now() - start;
         const errorMsg = String(e);
@@ -4111,7 +4158,45 @@ async function runSearchWithStreaming(
         }
 
         const baseline = extractBaselineFromContent(zyteResult.html, zyteResult.markdown, 'Zyte');
-        return { provider, baseline, contentLength: zyteResult.html.length, durationMs };
+        
+        // Apply OCR validation using shared reference (if available from Browserless)
+        const ocrValidation = validateProviderPriceWithOcr(
+          baseline.price,
+          baseline.currency,
+          baseline.evidence_snippet,
+          sharedOcrReference
+        );
+        
+        console.log(`Zyte OCR validation: accepted=${ocrValidation.accepted}, status=${ocrValidation.status}, acceptedVia=${ocrValidation.acceptedVia}`);
+        
+        // If OCR validation rejects the price, update baseline
+        let finalBaseline = baseline;
+        if (!ocrValidation.accepted && baseline.price !== null) {
+          console.log(`OCR rejected Zyte price ${baseline.price}: ${ocrValidation.mismatchReason}`);
+          finalBaseline = {
+            ...baseline,
+            status: ocrValidation.status,
+            price: ocrValidation.validatedPrice,
+            includes_taxes_fees: ocrValidation.includesTaxesFees,
+            evidence_snippet: ocrValidation.evidenceSnippet,
+          };
+        } else if (ocrValidation.accepted && ocrValidation.acceptedVia) {
+          finalBaseline = {
+            ...baseline,
+            status: ocrValidation.status,
+            includes_taxes_fees: ocrValidation.includesTaxesFees,
+            evidence_snippet: ocrValidation.evidenceSnippet,
+          };
+        }
+        
+        return { 
+          provider, 
+          baseline: finalBaseline, 
+          contentLength: zyteResult.html.length, 
+          durationMs,
+          ocrReference: sharedOcrReference,
+          ocrValidation,
+        };
       } catch (e) {
         const durationMs = Date.now() - start;
         const errorMsg = String(e);
@@ -4188,8 +4273,58 @@ async function runSearchWithStreaming(
           airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
         }
 
+        // Capture OCR reference for validation (store for other providers too)
+        const ocrRef = browserlessResult.ocrReference || null;
+        if (ocrRef && !sharedOcrReference) {
+          sharedOcrReference = ocrRef;
+          console.log('Captured shared OCR reference from Browserless:', JSON.stringify({
+            bookingCardAmountValue: ocrRef.bookingCardAmountValue,
+            breakdownTotalAmountValue: ocrRef.breakdownTotalAmountValue,
+            breakdownOpened: ocrRef.breakdownOpened,
+          }));
+        }
+
         const baseline = extractBaselineFromContent(browserlessResult.html, browserlessResult.markdown, 'Browserless');
-        return { provider, baseline, contentLength: browserlessResult.html.length, durationMs };
+        
+        // Apply OCR validation to provider price
+        const ocrValidation = validateProviderPriceWithOcr(
+          baseline.price,
+          baseline.currency,
+          baseline.evidence_snippet,
+          ocrRef
+        );
+        
+        console.log(`Browserless OCR validation: accepted=${ocrValidation.accepted}, status=${ocrValidation.status}, acceptedVia=${ocrValidation.acceptedVia}`);
+        
+        // If OCR validation rejects the price, update baseline
+        let finalBaseline = baseline;
+        if (!ocrValidation.accepted && baseline.price !== null) {
+          console.log(`OCR rejected Browserless price ${baseline.price}: ${ocrValidation.mismatchReason}`);
+          finalBaseline = {
+            ...baseline,
+            status: ocrValidation.status,
+            price: ocrValidation.validatedPrice,
+            includes_taxes_fees: ocrValidation.includesTaxesFees,
+            evidence_snippet: ocrValidation.evidenceSnippet,
+          };
+        } else if (ocrValidation.accepted && ocrValidation.acceptedVia) {
+          // OCR accepted - update status based on acceptance reason
+          finalBaseline = {
+            ...baseline,
+            status: ocrValidation.status,
+            includes_taxes_fees: ocrValidation.includesTaxesFees,
+            evidence_snippet: ocrValidation.evidenceSnippet,
+          };
+        }
+        
+        return { 
+          provider, 
+          baseline: finalBaseline, 
+          contentLength: browserlessResult.html.length, 
+          durationMs,
+          ocrReference: ocrRef,
+          ocrValidation,
+        };
       } catch (e) {
         const durationMs = Date.now() - start;
         const errorMsg = String(e);
@@ -4224,6 +4359,49 @@ async function runSearchWithStreaming(
       const r = await step.run();
       providerResults.push(r);
 
+      // Persist debug bundle with OCR fields to airbnb_baseline_debug table
+      try {
+        const ocrRef = r.ocrReference || sharedOcrReference;
+        const ocrVal = r.ocrValidation;
+        
+        await supabase.from('airbnb_baseline_debug').insert({
+          run_id: debugRunId,
+          search_id: searchId,
+          run_number: 1,
+          provider: r.provider,
+          provider_order: fallbackChain.findIndex(s => s.provider === r.provider) + 1,
+          status: r.baseline.status,
+          duration_ms: r.durationMs || 0,
+          extracted_price: r.baseline.price,
+          currency: r.baseline.currency,
+          includes_taxes_fees: r.baseline.includes_taxes_fees,
+          evidence_snippet: r.baseline.evidence_snippet?.slice(0, 2000),
+          candidates_summary: r.baseline.debug?.candidates || [],
+          rejected_reason: ocrVal?.mismatchReason || r.baseline.debug?.candidates?.find(c => c.rejectedReason)?.rejectedReason || null,
+          content_hash: r.baseline.debug?.content_hash || null,
+          airbnb_url: search.airbnb_url,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          nights_count: nights,
+          // OCR fields
+          ocr_booking_card_amount_raw: ocrRef?.bookingCardAmountRaw || null,
+          ocr_booking_card_amount_value: ocrRef?.bookingCardAmountValue || null,
+          ocr_booking_card_nights: ocrRef?.bookingCardNights || null,
+          ocr_booking_card_snippet: ocrRef?.bookingCardSnippet?.slice(0, 500) || null,
+          ocr_breakdown_total_amount_raw: ocrRef?.breakdownTotalAmountRaw || null,
+          ocr_breakdown_total_amount_value: ocrRef?.breakdownTotalAmountValue || null,
+          ocr_breakdown_total_snippet: ocrRef?.breakdownTotalSnippet?.slice(0, 500) || null,
+          ocr_breakdown_taxes_amount_value: ocrRef?.breakdownTaxesAmountValue || null,
+          breakdown_opened: ocrRef?.breakdownOpened || false,
+          ocr_validation_status: ocrVal?.accepted ? 'accepted' : (ocrVal?.mismatchReason ? 'rejected' : 'not_validated'),
+          ocr_accepted_via: ocrVal?.acceptedVia || null,
+          ocr_mismatch_reason: ocrVal?.mismatchReason || null,
+        });
+        console.log(`Persisted debug bundle for ${r.provider} with OCR fields`);
+      } catch (persistErr) {
+        console.error(`Failed to persist debug bundle for ${r.provider}:`, persistErr);
+      }
+
       // Always emit grounded debug bundle for this provider attempt
       sendProgress(controller, `${label} debug`, `Baseline status: ${r.baseline.status}`, {
         provider: r.provider,
@@ -4235,6 +4413,11 @@ async function runSearchWithStreaming(
           evidence_snippet: r.baseline.evidence_snippet,
           debug: r.baseline.debug,
         },
+        ocrValidation: r.ocrValidation ? {
+          accepted: r.ocrValidation.accepted,
+          acceptedVia: r.ocrValidation.acceptedVia,
+          mismatchReason: r.ocrValidation.mismatchReason,
+        } : null,
       });
 
       // Only accept a baseline price when it is a *final* total INCLUDING taxes/fees.
