@@ -196,6 +196,7 @@ export default function SearchResults() {
     currency: string;
   } | null>(null);
   const [showConfirmationModal, setShowConfirmationModal] = useState(false);
+  const [runSeq, setRunSeq] = useState(0);
 
   const searchTriggeredRef = useRef(false);
   const searchStartTimeRef = useRef<number>(0);
@@ -630,7 +631,7 @@ export default function SearchResults() {
     };
 
     fetchAndSearch();
-  }, [searchId, user, navigate, toast]);
+  }, [searchId, user, navigate, toast, runSeq, fetchEnrichedResults]);
 
   // Thinking phase timer (improves UX + makes "stuck" feel less scary)
   useEffect(() => {
@@ -804,12 +805,12 @@ export default function SearchResults() {
     return () => window.clearInterval(id);
   }, [loading, searchPhase]);
 
-  // Reconnect function to re-attach to a running search
+  // Reconnect / re-run the search pipeline for this searchId
   const reconnectToSearch = async () => {
     if (!searchId || !user) return;
 
     toast({ title: "Reconnecting...", description: "Re-attaching to your search" });
-    
+
     // Reset state
     searchTriggeredRef.current = false;
     setStreamDisconnected(false);
@@ -817,10 +818,11 @@ export default function SearchResults() {
     skipInFlightRef.current = false;
     lastProgressAtRef.current = Date.now();
     seenActivityKeysRef.current.clear();
-    
-    // Trigger re-fetch which will reconnect to SSE
+
+    // Trigger the fetch+SSE effect again
     setLoading(true);
     setSearchPhase("thinking");
+    setRunSeq((s) => s + 1);
   };
 
   // Helper to get activity message for the feed (used by SSE handler)
@@ -2121,6 +2123,11 @@ export default function SearchResults() {
         onConfirmed={(amount, currency) => {
           handleTotalConfirmed(amount, currency);
           setShowConfirmationModal(false);
+          // Continue the pipeline now that baseline is confirmed
+          searchTriggeredRef.current = false;
+          setLoading(true);
+          setSearchPhase("thinking");
+          setRunSeq((s) => s + 1);
         }}
       />
     </div>
