@@ -1358,12 +1358,12 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </div>
-                ) : ((search?.status === "needs_user_confirmation" && !confirmedTotal) || (search?.status === "completed" && !confirmedTotal && !!search?.airbnb_price)) ? (
-                  // User needs to confirm (or correct) the Airbnb trip total
+                ) : (search?.status === "needs_user_confirmation" && !confirmedTotal && search?.airbnb_price == null) ? (
+                  // User needs to confirm the Airbnb trip total (only when we do NOT have a verified total)
                   <div className="py-8">
                     <AirbnbTotalConfirmation
                       searchId={searchId!}
-                      subtotalAmount={subtotalInfo?.amount ?? search?.airbnb_price ?? null}
+                      subtotalAmount={subtotalInfo?.amount ?? null}
                       subtotalNights={subtotalInfo?.nights || nights}
                       subtotalCurrency={subtotalInfo?.currency || search?.airbnb_currency || 'USD'}
                       existingConfirmation={confirmedTotal}
