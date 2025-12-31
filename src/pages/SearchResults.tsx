@@ -386,7 +386,26 @@ export default function SearchResults() {
 
                       // Update search status in real-time if backend sends it
                       if (data.status) {
-                        setSearch((prev) => prev ? { ...prev, status: data.status } : prev);
+                        setSearch((prev) => (prev ? { ...prev, status: data.status } : prev));
+                      }
+
+                      // If backend confirms a proven Airbnb total, ensure the confirmation modal is closed.
+                      if (
+                        typeof data.airbnbPrice === "number" &&
+                        data.baseline_status &&
+                        data.baseline_status !== "needs_user_confirmation"
+                      ) {
+                        setSearch((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                airbnb_price: data.airbnbPrice,
+                                airbnb_currency: data.airbnbCurrency ?? prev.airbnb_currency,
+                              }
+                            : prev
+                        );
+                        setSubtotalInfo(null);
+                        setShowConfirmationModal(false);
                       }
 
                       // Add to activity feed with dedup
@@ -445,11 +464,13 @@ export default function SearchResults() {
                       setExtractingPrices(false);
                       setPriceExtractionCompleted(data.totalExtracted || priceExtractionTotal);
                     } else if (eventType === "needs_confirmation") {
-                      // Subtotal found but no proven total - show modal for user to confirm
+                      // Subtotal found but no proven total - show modal for user to confirm.
+                      // NOTE: Some providers may emit this event before a later successful baseline;
+                      // we will auto-close the modal as soon as we receive a proven total.
                       setSubtotalInfo({
                         amount: data.subtotal_nights_only || null,
                         nights: data.subtotal_nights_count || null,
-                        currency: data.subtotal_currency || 'USD',
+                        currency: data.subtotal_currency || "USD",
                       });
                       setShowConfirmationModal(true);
                       // Continue to complete event which will set the status
@@ -480,6 +501,10 @@ export default function SearchResults() {
                       if (data.success === false) {
                         throw new Error(data.error || "Search failed");
                       }
+
+                      // Success path: ensure the confirmation modal is closed
+                      setSubtotalInfo(null);
+                      setShowConfirmationModal(false);
 
                       // Refresh search and results from DB
                       const { data: updatedSearch } = await supabase
