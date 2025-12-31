@@ -476,11 +476,13 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
 
                // Try to open price breakdown
                try {
-                 await page.evaluate(() => {
-                   const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-                   const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
-                   if (target) (target as any).click();
-                 });
+                  await page.evaluate(() => {
+                    const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                    const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+                    if (target) {
+                      target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    }
+                  });
                  breakdownOpened = true;
                  await sleep(2000);
                } catch {}
@@ -497,11 +499,13 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
              usedFallback = true;
              // Stay on rooms page, try to open breakdown
              try {
-               await page.evaluate(() => {
-                 const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-                 const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
-                 if (target) (target as any).click();
-               });
+                await page.evaluate(() => {
+                  const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                  const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+                  if (target) {
+                    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                  }
+                });
                breakdownOpened = true;
                await sleep(2000);
              } catch {}
