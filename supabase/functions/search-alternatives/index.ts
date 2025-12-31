@@ -419,59 +419,96 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
           let roomsTitle = '';
           let roomsHtml = '';
 
-          // ========== STEP 1: Visit rooms page first to get title and images ==========
-          await page.goto(roomsUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-          await sleep(2000);
-          
-          // Extract title from rooms page
-          roomsTitle = await page.title();
-          roomsHtml = await page.content();
+           // ========== STEP 1: Visit rooms page first to get title and images ==========
+           const safeContent = async () => {
+             try {
+               return await page.content();
+             } catch {
+               return '';
+             }
+           };
 
-          // ========== STEP 2: Navigate to book/stays for price ==========
-          let checkoutHtml = '';
-          if (bookStaysUrl) {
-            await page.goto(bookStaysUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-            await sleep(2000);
-            
-            const finalUrl = page.url();
-            const isBookStaysPage = finalUrl.includes('/book/stays/' + roomId);
-            const isLoginRedirect = finalUrl.includes('/login') || finalUrl.includes('/signin');
-            
-            if (!isBookStaysPage || isLoginRedirect) {
-              usedFallback = true;
-              // Go back to rooms page for price fallback
-              await page.goto(roomsUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-              await sleep(4000);
-              
-              // Try to open price breakdown
-              try {
-                await page.evaluate(() => {
-                  const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-                  const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
-                  if (target) target.click();
-                });
-                breakdownOpened = true;
-                await sleep(2500);
-              } catch {}
-              checkoutHtml = await page.content();
-            } else {
-              breakdownOpened = true; // book/stays page already shows full breakdown
-              checkoutHtml = await page.content();
-            }
-          } else {
-            usedFallback = true;
-            // Stay on rooms page, try to open breakdown
-            try {
-              await page.evaluate(() => {
-                const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
-                const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
-                if (target) target.click();
-              });
-              breakdownOpened = true;
-              await sleep(2500);
-            } catch {}
-            checkoutHtml = await page.content();
-          }
+           const safeGoto = async (targetUrl, timeoutMs) => {
+             try {
+               await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+               return true;
+             } catch (e) {
+               return false;
+             }
+           };
+
+           const waitForMeaningfulText = async (timeoutMs) => {
+             const start = Date.now();
+             while (Date.now() - start < timeoutMs) {
+               try {
+                 const len = await page.evaluate(() => (document.body?.innerText || '').length);
+                 if (len > 1500) return true;
+               } catch {}
+               await sleep(750);
+             }
+             return false;
+           };
+
+           const roomsOk = await safeGoto(roomsUrl, 60000);
+           await sleep(1500);
+           if (roomsOk) {
+             await waitForMeaningfulText(12000);
+             roomsTitle = await page.title();
+             roomsHtml = await safeContent();
+           }
+
+           // ========== STEP 2: Navigate to book/stays for price ==========
+           let checkoutHtml = '';
+           if (bookStaysUrl) {
+             const checkoutOk = await safeGoto(bookStaysUrl, 75000);
+             await sleep(1500);
+
+             const finalUrl = page.url();
+             const isBookStaysPage = finalUrl.includes('/book/stays/' + roomId);
+             const isLoginRedirect = finalUrl.includes('/login') || finalUrl.includes('/signin');
+
+             if (!checkoutOk || !isBookStaysPage || isLoginRedirect) {
+               usedFallback = true;
+
+               // Go back to rooms page for price fallback
+               await safeGoto(roomsUrl, 60000);
+               await sleep(2500);
+
+               // Try to open price breakdown
+               try {
+                 await page.evaluate(() => {
+                   const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                   const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+                   if (target) (target as any).click();
+                 });
+                 breakdownOpened = true;
+                 await sleep(2000);
+               } catch {}
+
+               await waitForMeaningfulText(12000);
+               checkoutHtml = await safeContent();
+             } else {
+               // book/stays page already shows full breakdown
+               breakdownOpened = true;
+               await waitForMeaningfulText(20000);
+               checkoutHtml = await safeContent();
+             }
+           } else {
+             usedFallback = true;
+             // Stay on rooms page, try to open breakdown
+             try {
+               await page.evaluate(() => {
+                 const candidates = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                 const target = candidates.find((el) => (el.textContent || '').toLowerCase().includes('price breakdown'));
+                 if (target) (target as any).click();
+               });
+               breakdownOpened = true;
+               await sleep(2000);
+             } catch {}
+
+             await waitForMeaningfulText(12000);
+             checkoutHtml = await safeContent();
+           }
 
           // Capture screenshot from checkout/price page
           await page.evaluate(() => window.scrollTo(0, 0));
@@ -530,7 +567,17 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     const html = fnJson?.html || "";
 
     if (!html || html.length < 500) {
-      result.error = "Browserless returned insufficient content";
+      const serverMsg =
+        (typeof fnJson?.error === "string" && fnJson.error) ||
+        (typeof fnJson?.message === "string" && fnJson.message) ||
+        (typeof fnJson?.name === "string" && fnJson.name) ||
+        null;
+
+      result.error = serverMsg
+        ? `Browserless returned insufficient content: ${serverMsg}`
+        : "Browserless returned insufficient content";
+
+      console.error("Browserless insufficient content. Keys:", fnJson ? Object.keys(fnJson) : null);
       return result;
     }
 
