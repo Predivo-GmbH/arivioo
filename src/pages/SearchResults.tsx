@@ -1017,20 +1017,24 @@ export default function SearchResults() {
     }
   }, [search, subtotalInfo]);
 
-  // Show confirmation modal for existing searches that need confirmation
+  // Show confirmation modal ONLY when we truly have subtotal-only state
   useEffect(() => {
-    if (!search || confirmedTotal) return;
-    
-    // If search completed with a price but we don't have a confirmed total, show modal
-    if (search.status === 'completed' && search.airbnb_price && !confirmedTotal) {
+    if (!search) return;
+
+    const shouldShow =
+      search.status === "needs_user_confirmation" &&
+      !confirmedTotal &&
+      search.airbnb_price == null;
+
+    if (shouldShow) {
       setShowConfirmationModal(true);
+      return;
     }
-    
-    // If status is needs_user_confirmation, show modal
-    if (search.status === 'needs_user_confirmation') {
-      setShowConfirmationModal(true);
-    }
-  }, [search, confirmedTotal]);
+
+    // Otherwise, never keep this modal open
+    if (showConfirmationModal) setShowConfirmationModal(false);
+    if (subtotalInfo) setSubtotalInfo(null);
+  }, [search, confirmedTotal, showConfirmationModal, subtotalInfo]);
 
   // Handle confirmation callbacks
   const handleTotalConfirmed = (amount: number, currency: string) => {
