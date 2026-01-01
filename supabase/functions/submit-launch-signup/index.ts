@@ -1,9 +1,35 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
+// Secure CORS - Domain allowlist
+const ALLOWED_ORIGINS = [
+  'https://lovable.dev',
+  'https://www.lovable.dev',
+  /^https:\/\/[a-zA-Z0-9-]+\.lovable\.app$/,
+  /^https:\/\/[a-zA-Z0-9-]+\.lovableproject\.com$/,
+  /^https:\/\/id-preview--[a-zA-Z0-9-]+\.lovable\.app$/,
+  'https://arivioo.lovable.app',
+  'https://arivioo.com',
+  'https://www.arivioo.com',
+];
+
+function isOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+  return ALLOWED_ORIGINS.some(allowed => {
+    if (typeof allowed === 'string') return origin === allowed;
+    return allowed.test(origin);
+  });
+}
+
+function getCorsHeaders(request: Request): Record<string, string> {
+  const requestOrigin = request.headers.get('origin');
+  const origin = requestOrigin ?? '*';
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Vary': 'Origin',
+  };
+}
 
 // In-memory rate limiting (per instance)
 const rateLimit = new Map<string, { count: number; resetTime: number }>();
@@ -62,6 +88,17 @@ function updateRateLimit(ipHash: string): void {
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
+  const origin = req.headers.get('origin');
+
+  // Enforce origin allowlist
+  if (origin && !isOriginAllowed(origin)) {
+    return new Response(JSON.stringify({ error: 'Origin not allowed' }), {
+      status: 403,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });

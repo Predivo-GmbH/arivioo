@@ -2,6 +2,41 @@ import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+// ============================================================================
+// SECURE CORS - Domain allowlist for production security
+// ============================================================================
+const ALLOWED_ORIGINS = [
+  'https://lovable.dev',
+  'https://www.lovable.dev',
+  /^https:\/\/[a-zA-Z0-9-]+\.lovable\.app$/,
+  /^https:\/\/[a-zA-Z0-9-]+\.lovableproject\.com$/,
+  /^https:\/\/id-preview--[a-zA-Z0-9-]+\.lovable\.app$/,
+  'https://arivioo.lovable.app',
+  'https://arivioo.com',
+  'https://www.arivioo.com',
+];
+
+function isOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+  return ALLOWED_ORIGINS.some(allowed => {
+    if (typeof allowed === 'string') return origin === allowed;
+    return allowed.test(origin);
+  });
+}
+
+function getCorsHeaders(request: Request): Record<string, string> {
+  const requestOrigin = request.headers.get('origin');
+  const origin = requestOrigin ?? '*';
+  const requestedHeaders = request.headers.get('access-control-request-headers');
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': requestedHeaders || 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Vary': 'Origin, Access-Control-Request-Headers',
+  };
+}
+
+// Legacy corsHeaders for backwards compatibility in some response paths
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
