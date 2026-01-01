@@ -1495,6 +1495,68 @@ export default function SearchResults() {
                       </Button>
                     </div>
                   </div>
+                ) : resolveSearchErrorCode(search) === "airbnb_total_not_visible" ? (
+                  <div className="py-12 text-center">
+                    <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-amber-500/10 flex items-center justify-center">
+                      <AlertCircle className="w-10 h-10 text-amber-500" />
+                    </div>
+                    <h3 className="text-2xl font-bold text-foreground mb-3">
+                      Price Can't Be Confirmed
+                    </h3>
+                    <p className="text-muted-foreground mb-2 max-w-lg mx-auto text-base">
+                      Airbnb currently shows only <span className="font-semibold text-foreground">partial pricing</span> for this stay (per-night rate), but not a complete total including all fees.
+                    </p>
+                    {hasValidDates && (
+                      <p className="text-sm text-muted-foreground mb-6">
+                        {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})
+                      </p>
+                    )}
+                    <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-5 max-w-md mx-auto mb-6">
+                      <h4 className="font-semibold text-foreground mb-2 flex items-center justify-center gap-2">
+                        <Info className="w-4 h-4 text-amber-500" />
+                        What you can do
+                      </h4>
+                      <ul className="text-sm text-muted-foreground text-left space-y-2">
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                          <span>Open the listing on Airbnb where the full total may be visible</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                          <span>Try different dates — pricing may vary by availability</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                          <span>Check back later — Airbnb sometimes updates pricing display</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div className="flex items-center justify-center gap-3 flex-wrap">
+                      {search?.airbnb_url && (
+                        <Button variant="outline" asChild>
+                          <a href={search.airbnb_url} target="_blank" rel="noopener noreferrer">
+                            View on Airbnb <ExternalLink className="w-4 h-4 ml-2" />
+                          </a>
+                        </Button>
+                      )}
+                      <Button asChild>
+                        <Link to="/dashboard">
+                          <Search className="w-4 h-4 mr-2" />
+                          Try Different Dates
+                        </Link>
+                      </Button>
+                    </div>
+                    {/* Technical details hidden by default */}
+                    <details className="mt-6 text-left max-w-md mx-auto">
+                      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+                        Show technical details
+                      </summary>
+                      <div className="mt-2 p-3 bg-muted/50 rounded-lg text-xs text-muted-foreground font-mono">
+                        Error code: {search?.api_error_code || 'airbnb_total_not_visible'}
+                        {search?.api_error && <div className="mt-1">Message: {search.api_error}</div>}
+                      </div>
+                    </details>
+                  </div>
                 ) : search?.status === "error" ? (
                   /* Handle failed/error searches */
                   <div className="py-12 text-center">
