@@ -690,10 +690,10 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       return result;
     }
     
-    // Check if error is retryable (insufficient content, not bot detection or HTTP errors)
-    const isRetryable = result.error?.includes('insufficient content') && 
-                        result.botIndicators.length === 0 &&
-                        (!result.statusCode || result.statusCode >= 500 || result.statusCode === 0);
+    // Check if error is retryable (insufficient content without bot detection)
+    // Note: Browserless can return 200 with empty HTML, so we don't check status code for insufficient content
+    const isInsufficientContent = result.error?.includes('insufficient content');
+    const isRetryable = isInsufficientContent && result.botIndicators.length === 0;
     
     if (!isRetryable || attempt >= MAX_ATTEMPTS) {
       console.log(`Browserless not retrying: retryable=${isRetryable}, attempt=${attempt}/${MAX_ATTEMPTS}`);
