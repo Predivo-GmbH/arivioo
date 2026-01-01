@@ -17,6 +17,7 @@ import {
   PlayCircle,
   History,
   Loader2,
+  Info,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -37,6 +38,8 @@ import {
 } from '@/components/ui/collapsible';
 import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
+import { HealthIndicator, SystemHealthBanner } from '@/components/admin/HealthIndicator';
+import { useSystemHealth } from '@/hooks/useSystemHealth';
 
 interface PlatformAdapter {
   id: string;
@@ -344,6 +347,7 @@ export default function PlatformCoverage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isStartingPromotion, setIsStartingPromotion] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { health: systemHealth, hasAlerts } = useSystemHealth();
 
   const fetchData = async () => {
     setIsLoading(true);
@@ -354,7 +358,7 @@ export default function PlatformCoverage() {
       const { data: adaptersData, error: adaptersError } = await supabase
         .from('platform_adapters')
         .select('*')
-        .order('coverage_status', { ascending: true })
+        .order('coverage_tier', { ascending: true })
         .order('platform_name', { ascending: true });
       
       if (adaptersError) throw adaptersError;
@@ -575,12 +579,26 @@ export default function PlatformCoverage() {
 
   return (
     <div className="space-y-6">
+      {/* System Health Alerts */}
+      {hasAlerts && systemHealth && (
+        <SystemHealthBanner alerts={systemHealth.alerts} />
+      )}
+
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Platform Coverage</h1>
-          <p className="text-muted-foreground">
-            Monitor supported platforms and pipeline progress
-          </p>
+        <div className="flex items-center gap-4">
+          <div>
+            <h1 className="text-3xl font-bold">Platform Coverage</h1>
+            <p className="text-muted-foreground">
+              Monitor supported platforms and pipeline progress
+            </p>
+          </div>
+          {systemHealth?.sections.platforms && (
+            <HealthIndicator 
+              status={systemHealth.sections.platforms.status} 
+              lastActivity={systemHealth.sections.platforms.lastActivity}
+              label="Platforms"
+            />
+          )}
         </div>
         <Button variant="outline" onClick={fetchData} disabled={isLoading}>
           <RefreshCw className={`mr-2 h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />

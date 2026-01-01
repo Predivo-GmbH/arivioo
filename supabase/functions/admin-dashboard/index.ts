@@ -217,44 +217,179 @@ Deno.serve(async (req) => {
       );
     }
 
-    // PIPELINE STATUS
+    // SYSTEM HEALTH - returns health indicators for all dashboard sections
+    if (action === 'system-health' && req.method === 'GET') {
+      const now = new Date();
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+      const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000);
+      
+      // Check pipeline health (search_stage_runs)
+      const { data: recentStageRuns } = await supabase
+        .from('search_stage_runs')
+        .select('finished_at')
+        .order('finished_at', { ascending: false })
+        .limit(1);
+      
+      const lastPipelineActivity = recentStageRuns?.[0]?.finished_at;
+      const pipelineLastUpdate = lastPipelineActivity ? new Date(lastPipelineActivity) : null;
+      const pipelineHealthy = pipelineLastUpdate && pipelineLastUpdate > oneHourAgo;
+      const pipelineStale = pipelineLastUpdate && pipelineLastUpdate <= oneHourAgo && pipelineLastUpdate > fourHoursAgo;
+      
+      // Check extractions health
+      const { data: recentExtractions } = await supabase
+        .from('price_extractions')
+        .select('updated_at')
+        .order('updated_at', { ascending: false })
+        .limit(1);
+      
+      const lastExtractionActivity = recentExtractions?.[0]?.updated_at;
+      const extractionLastUpdate = lastExtractionActivity ? new Date(lastExtractionActivity) : null;
+      const extractionHealthy = extractionLastUpdate && extractionLastUpdate > oneHourAgo;
+      const extractionStale = extractionLastUpdate && extractionLastUpdate <= oneHourAgo && extractionLastUpdate > fourHoursAgo;
+      
+      // Check platform adapters health
+      const { data: recentAdapterUpdates } = await supabase
+        .from('platform_adapters')
+        .select('updated_at')
+        .order('updated_at', { ascending: false })
+        .limit(1);
+      
+      const lastAdapterUpdate = recentAdapterUpdates?.[0]?.updated_at;
+      const adapterLastUpdate = lastAdapterUpdate ? new Date(lastAdapterUpdate) : null;
+      
+      // Check searches health
+      const { data: recentSearches } = await supabase
+        .from('searches')
+        .select('created_at')
+        .order('created_at', { ascending: false })
+        .limit(1);
+      
+      const lastSearchActivity = recentSearches?.[0]?.created_at;
+      const searchLastUpdate = lastSearchActivity ? new Date(lastSearchActivity) : null;
+      const searchHealthy = searchLastUpdate && searchLastUpdate > oneHourAgo;
+      
+      return new Response(
+        JSON.stringify({
+          timestamp: now.toISOString(),
+          sections: {
+            pipeline: {
+              status: pipelineHealthy ? 'healthy' : (pipelineStale ? 'stale' : 'not_updating'),
+              lastActivity: lastPipelineActivity,
+              staleSince: !pipelineHealthy && pipelineLastUpdate ? pipelineLastUpdate.toISOString() : null,
+            },
+            extractions: {
+              status: extractionHealthy ? 'healthy' : (extractionStale ? 'stale' : 'not_updating'),
+              lastActivity: lastExtractionActivity,
+              staleSince: !extractionHealthy && extractionLastUpdate ? extractionLastUpdate.toISOString() : null,
+            },
+            platforms: {
+              status: 'healthy', // Platforms don't need frequent updates
+              lastActivity: lastAdapterUpdate,
+            },
+            searches: {
+              status: searchHealthy ? 'healthy' : 'stale',
+              lastActivity: lastSearchActivity,
+            },
+          },
+          alerts: [
+            ...((!pipelineHealthy) ? [{
+              section: 'pipeline',
+              severity: pipelineStale ? 'warning' : 'critical',
+              message: `Pipeline data has not updated since ${pipelineLastUpdate?.toISOString() || 'unknown'}`,
+              staleDuration: pipelineLastUpdate ? Math.round((now.getTime() - pipelineLastUpdate.getTime()) / 60000) : null,
+            }] : []),
+            ...((!extractionHealthy) ? [{
+              section: 'extractions',
+              severity: extractionStale ? 'warning' : 'critical',
+              message: `Extraction data has not updated since ${extractionLastUpdate?.toISOString() || 'unknown'}`,
+              staleDuration: extractionLastUpdate ? Math.round((now.getTime() - extractionLastUpdate.getTime()) / 60000) : null,
+            }] : []),
+          ],
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // PIPELINE STATUS - Now uses search_stage_runs as primary source
     if (action === 'pipeline' && req.method === 'GET') {
-      const { data: jobs } = await supabase
-        .from('pipeline_jobs')
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      // Get recent stage runs (canonical telemetry source)
+      const { data: stageRuns } = await supabase
+        .from('search_stage_runs')
         .select('*')
+        .gte('started_at', today.toISOString())
+        .order('started_at', { ascending: false })
+        .limit(500);
+      
+      // Get recent searches for additional context
+      const { data: searches } = await supabase
+        .from('searches')
+        .select('id, status, created_at, updated_at')
+        .gte('created_at', today.toISOString())
         .order('created_at', { ascending: false })
         .limit(100);
-
+      
+      // Count by outcome status
       const statusCounts: Record<string, number> = {
         queued: 0,
         running: 0,
         completed: 0,
         failed: 0
       };
-
-      jobs?.forEach(job => {
-        if (statusCounts[job.status] !== undefined) {
-          statusCounts[job.status]++;
+      
+      // Map stage run outcomes to pipeline statuses
+      stageRuns?.forEach(run => {
+        if (!run.finished_at) {
+          statusCounts.running++;
+        } else if (run.outcome_status === 'success' || run.outcome_status === 'partial') {
+          statusCounts.completed++;
+        } else if (run.outcome_status === 'failed' || run.outcome_status === 'timeout') {
+          statusCounts.failed++;
         }
       });
-
-      const recentErrors = jobs
-        ?.filter(j => j.status === 'failed')
+      
+      // Add queued from searches that are still 'searching'
+      const searchingCount = searches?.filter(s => s.status === 'searching').length || 0;
+      statusCounts.queued = searchingCount;
+      
+      // Get recent errors from stage runs
+      const recentErrors = stageRuns
+        ?.filter(r => r.outcome_status === 'failed' || r.outcome_status === 'timeout')
         .slice(0, 50)
-        .map(j => ({
-          id: j.id,
-          jobType: j.job_type,
-          error: j.error_message,
-          errorCategory: j.error_category,
-          searchId: j.search_id,
-          createdAt: j.created_at
+        .map(r => ({
+          id: r.id,
+          jobType: r.stage_name,
+          error: r.outcome_status === 'timeout' ? 'Stage timed out' : 'Stage failed',
+          errorCategory: r.outcome_status,
+          searchId: r.search_id,
+          createdAt: r.started_at,
+          stageName: r.stage_name,
+          durationMs: r.duration_ms,
         }));
+      
+      // Health indicator
+      const lastActivity = stageRuns?.[0]?.started_at;
+      const now = new Date();
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+      const isHealthy = lastActivity && new Date(lastActivity) > oneHourAgo;
 
       return new Response(
         JSON.stringify({
           counts: statusCounts,
-          totalRetries: jobs?.reduce((sum, j) => sum + j.retry_count, 0) || 0,
-          recentErrors
+          totalRetries: 0, // Stage runs don't track retries the same way
+          recentErrors,
+          health: {
+            status: isHealthy ? 'healthy' : 'stale',
+            lastActivity,
+            message: isHealthy ? 'Pipeline is active' : `No activity since ${lastActivity || 'unknown'}`,
+          },
+          meta: {
+            source: 'search_stage_runs',
+            todaySearches: searches?.length || 0,
+            todayStageRuns: stageRuns?.length || 0,
+          }
         }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );

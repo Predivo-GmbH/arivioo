@@ -21,6 +21,8 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
+import { HealthIndicator, SystemHealthBanner } from '@/components/admin/HealthIndicator';
+import { useSystemHealth } from '@/hooks/useSystemHealth';
 
 interface Extraction {
   id: string;
@@ -183,6 +185,7 @@ export default function Extractions() {
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { health: systemHealth, hasAlerts } = useSystemHealth();
 
   // Filters
   const [platform, setPlatform] = useState<string>('');
@@ -258,10 +261,24 @@ export default function Extractions() {
 
   return (
     <div className="space-y-6">
+      {/* System Health Alerts */}
+      {hasAlerts && systemHealth && (
+        <SystemHealthBanner alerts={systemHealth.alerts} />
+      )}
+
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Price Extractions</h1>
-          <p className="text-muted-foreground">{total} total extractions</p>
+        <div className="flex items-center gap-4">
+          <div>
+            <h1 className="text-3xl font-bold">Price Extractions</h1>
+            <p className="text-muted-foreground">{total} total extractions</p>
+          </div>
+          {systemHealth?.sections.extractions && (
+            <HealthIndicator 
+              status={systemHealth.sections.extractions.status} 
+              lastActivity={systemHealth.sections.extractions.lastActivity}
+              label="Extractions"
+            />
+          )}
         </div>
         <Button variant="outline" onClick={exportCSV}>
           <Download className="mr-2 h-4 w-4" />
@@ -269,7 +286,6 @@ export default function Extractions() {
         </Button>
       </div>
 
-      {/* Filters */}
       <Card>
         <CardHeader className="pb-4">
           <CardTitle className="text-base flex items-center gap-2">
