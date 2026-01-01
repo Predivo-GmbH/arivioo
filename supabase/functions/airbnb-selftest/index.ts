@@ -391,7 +391,20 @@ async function runBrowserlessBookStays(
         const isConsentWall = /consent|agree|accept.*cookies/i.test(bodyTextSnippet);
         const isErrorPage = /error|not found|unavailable/i.test(pageTitle);
         
-        if (!bookStaysPathOk || isLoginRedirect || isConsentWall || isErrorPage) {
+        // Check for unavailable dates (listing not bookable for these dates)
+        const isUnavailable = /no longer available|dates are no longer available|unavailable for your dates|not available for these dates|someone else just requested/i.test(bodyTextSnippet);
+        
+        // Detect page type for structured reporting
+        let pageType = 'unknown';
+        if (isUnavailable) {
+          pageType = 'dates_unavailable';
+        } else if (pageTitle.toLowerCase().includes('confirm and pay')) {
+          pageType = 'checkout_with_pricing';
+        } else if (pageTitle.toLowerCase().includes('request to book')) {
+          pageType = 'request_to_book';
+        }
+        
+        if (!bookStaysPathOk || isLoginRedirect || isConsentWall || (isErrorPage && !isUnavailable)) {
           console.log('book/stays blocked, trying rooms fallback...');
           usedFallback = true;
           wrongPageReason = isLoginRedirect ? 'login_redirect' : 
@@ -440,6 +453,8 @@ async function runBrowserlessBookStays(
           redirectChain: redirectChain.slice(-10),
           usedFallback,
           wrongPageReason,
+          pageType,
+          isUnavailable,
           screenshotBase64,
           scrollY,
           html,
@@ -618,9 +633,13 @@ Deno.serve(async (req) => {
     };
   }
   
-  // Determine final status
+  // Determine final status - use structured failure types
   let finalStatus = 'extraction_complete';
-  if (!extractionResult.all_in_total_amount_value) {
+  
+  // Check for dates unavailable (valid terminal state - not an extraction bug)
+  if (browserResult.isUnavailable) {
+    finalStatus = 'dates_unavailable';
+  } else if (!extractionResult.all_in_total_amount_value) {
     finalStatus = 'price_not_available_in_content';
   }
   
@@ -676,6 +695,8 @@ Deno.serve(async (req) => {
       final_url: browserResult.finalUrl,
       redirect_chain: browserResult.redirectChain || [],
       page_title: browserResult.pageTitle,
+      page_type: browserResult.pageType,
+      is_unavailable: browserResult.isUnavailable,
       used_fallback: browserResult.usedFallback,
       wrong_page_reason: browserResult.wrongPageReason,
       body_text_snippet: browserResult.bodyTextSnippet?.slice(0, 500),
