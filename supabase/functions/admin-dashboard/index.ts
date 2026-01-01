@@ -1960,6 +1960,115 @@ Deno.serve(async (req) => {
       );
     }
 
+    // PLATFORM COVERAGE - Golden path endpoint for platform adapters
+    // This is the authoritative source for platform coverage data
+    if (action === 'platform-coverage' && req.method === 'GET') {
+      console.log('[Admin Dashboard] Platform Coverage: Fetching platform adapters via service role');
+      
+      // Fetch all platform adapters using service role (bypasses RLS)
+      const { data: adaptersData, error: adaptersError, count } = await supabase
+        .from('platform_adapters')
+        .select('*', { count: 'exact' })
+        .order('coverage_tier', { ascending: true })
+        .order('platform_name', { ascending: true });
+      
+      if (adaptersError) {
+        console.error('[Admin Dashboard] Platform Coverage: Query error', adaptersError);
+        return new Response(
+          JSON.stringify({ 
+            error: adaptersError.message,
+            errorCode: adaptersError.code,
+            source: 'admin-dashboard/platform-coverage',
+            queryFailed: true,
+          }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      // Count tiers for verification
+      const tierA = adaptersData?.filter(p => p.coverage_tier === 'A').length || 0;
+      const tierB = adaptersData?.filter(p => p.coverage_tier === 'B').length || 0;
+      const tierC = adaptersData?.filter(p => p.coverage_tier === 'C').length || 0;
+      
+      console.log('[Admin Dashboard] Platform Coverage: Retrieved', {
+        total: adaptersData?.length || 0,
+        tierA,
+        tierB,
+        tierC,
+      });
+      
+      // Fetch recent pipeline runs from price_extractions for context
+      const { data: extractionsData, error: extractionsError } = await supabase
+        .from('price_extractions')
+        .select(`
+          id,
+          search_id,
+          platform_name,
+          extraction_status,
+          extracted_price,
+          dates_validated,
+          extraction_error,
+          updated_at,
+          searches!inner(airbnb_url)
+        `)
+        .order('updated_at', { ascending: false })
+        .limit(100);
+      
+      // Group by search_id to form pipeline runs
+      const runsMap = new Map<string, any>();
+      for (const ext of extractionsData || []) {
+        const searchId = ext.search_id;
+        if (!searchId) continue;
+        
+        if (!runsMap.has(searchId)) {
+          runsMap.set(searchId, {
+            search_id: searchId,
+            airbnb_url: (ext.searches as any)?.airbnb_url || 'Unknown',
+            run_timestamp: ext.updated_at,
+            platforms: [],
+            summary: { successes: 0, failures: 0, unsupported: 0 },
+          });
+        }
+        
+        const run = runsMap.get(searchId)!;
+        const isSuccess = ext.extraction_status === 'success';
+        const isUnsupported = ['blocked_captcha_or_bot', 'render_failed', 'listing_unavailable'].includes(ext.extraction_status || '');
+        
+        run.platforms.push({
+          platform_name: ext.platform_name || 'Unknown',
+          status: ext.extraction_status || 'unknown',
+          extracted_price: ext.extracted_price,
+          dates_validated: ext.dates_validated || false,
+          error: ext.extraction_error,
+        });
+        
+        if (isSuccess) run.summary.successes++;
+        else if (isUnsupported) run.summary.unsupported++;
+        else run.summary.failures++;
+      }
+      
+      const pipelineRuns = Array.from(runsMap.values())
+        .sort((a, b) => new Date(b.run_timestamp).getTime() - new Date(a.run_timestamp).getTime())
+        .slice(0, 20);
+      
+      return new Response(
+        JSON.stringify({
+          success: true,
+          platforms: adaptersData || [],
+          pipelineRuns,
+          meta: {
+            source: 'admin-dashboard/platform-coverage',
+            supabaseProjectRef: Deno.env.get('SUPABASE_URL')?.match(/https:\/\/([^.]+)\./)?.[1] || 'unknown',
+            queryMethod: 'service_role',
+            totalCount: count,
+            tierCounts: { A: tierA, B: tierB, C: tierC },
+            fetchedAt: new Date().toISOString(),
+          },
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

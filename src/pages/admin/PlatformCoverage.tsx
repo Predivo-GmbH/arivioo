@@ -340,6 +340,18 @@ function PipelineRunCard({ run }: { run: PipelineRun }) {
   );
 }
 
+// Debug info state for admin visibility
+interface DebugInfo {
+  source: string;
+  supabaseProjectRef: string;
+  queryMethod: string;
+  totalCount: number | null;
+  tierCounts: { A: number; B: number; C: number };
+  fetchedAt: string;
+  error?: string;
+  errorCode?: string;
+}
+
 export default function PlatformCoverage() {
   const { getToken } = useAdminAuth();
   const [platforms, setPlatforms] = useState<PlatformAdapter[]>([]);
@@ -347,83 +359,98 @@ export default function PlatformCoverage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isStartingPromotion, setIsStartingPromotion] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
   const { health: systemHealth, hasAlerts } = useSystemHealth();
 
+  // GOLDEN PATH: Fetch via admin-dashboard edge function with service role
+  // This bypasses RLS and uses the authoritative data source
   const fetchData = async () => {
     setIsLoading(true);
     setError(null);
+    setDebugInfo(null);
     
     try {
-      // Fetch platform adapters directly
-      const { data: adaptersData, error: adaptersError } = await supabase
-        .from('platform_adapters')
-        .select('*')
-        .order('coverage_tier', { ascending: true })
-        .order('platform_name', { ascending: true });
-      
-      if (adaptersError) throw adaptersError;
-      setPlatforms(adaptersData || []);
-      
-      // Fetch recent pipeline runs from price_extractions
-      const { data: extractionsData, error: extractionsError } = await supabase
-        .from('price_extractions')
-        .select(`
-          id,
-          search_id,
-          platform_name,
-          extraction_status,
-          extracted_price,
-          dates_validated,
-          extraction_error,
-          updated_at,
-          searches!inner(airbnb_url)
-        `)
-        .order('updated_at', { ascending: false })
-        .limit(100);
-      
-      if (extractionsError) throw extractionsError;
-      
-      // Group by search_id to form pipeline runs
-      const runsMap = new Map<string, PipelineRun>();
-      for (const ext of extractionsData || []) {
-        const searchId = ext.search_id;
-        if (!searchId) continue;
-        
-        if (!runsMap.has(searchId)) {
-          runsMap.set(searchId, {
-            search_id: searchId,
-            airbnb_url: (ext.searches as any)?.airbnb_url || 'Unknown',
-            run_timestamp: ext.updated_at,
-            platforms: [],
-            summary: { successes: 0, failures: 0, unsupported: 0 },
-          });
-        }
-        
-        const run = runsMap.get(searchId)!;
-        const isSuccess = ext.extraction_status === 'success';
-        const isUnsupported = ['blocked_captcha_or_bot', 'render_failed', 'listing_unavailable'].includes(ext.extraction_status || '');
-        
-        run.platforms.push({
-          platform_name: ext.platform_name || 'Unknown',
-          status: ext.extraction_status || 'unknown',
-          extracted_price: ext.extracted_price,
-          dates_validated: ext.dates_validated || false,
-          error: ext.extraction_error,
+      const token = getToken();
+      if (!token) {
+        setError('Not authenticated. Please log in to the admin panel.');
+        setDebugInfo({
+          source: 'none',
+          supabaseProjectRef: 'unknown',
+          queryMethod: 'none',
+          totalCount: null,
+          tierCounts: { A: 0, B: 0, C: 0 },
+          fetchedAt: new Date().toISOString(),
+          error: 'No admin token available',
         });
-        
-        if (isSuccess) run.summary.successes++;
-        else if (isUnsupported) run.summary.unsupported++;
-        else run.summary.failures++;
+        setIsLoading(false);
+        return;
       }
+
+      // Use the golden path endpoint - admin-dashboard/platform-coverage
+      const { data, error: invokeError } = await supabase.functions.invoke('admin-dashboard/platform-coverage', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (invokeError) {
+        console.error('[PlatformCoverage] Edge function error:', invokeError);
+        setError(`Data source error: ${invokeError.message}`);
+        setDebugInfo({
+          source: 'admin-dashboard/platform-coverage',
+          supabaseProjectRef: 'unknown',
+          queryMethod: 'edge_function_failed',
+          totalCount: null,
+          tierCounts: { A: 0, B: 0, C: 0 },
+          fetchedAt: new Date().toISOString(),
+          error: invokeError.message,
+        });
+        setIsLoading(false);
+        return;
+      }
+
+      // Check for error in response body
+      if (data?.error) {
+        console.error('[PlatformCoverage] API error:', data);
+        setError(`Query failed: ${data.error}`);
+        setDebugInfo({
+          source: data.source || 'admin-dashboard/platform-coverage',
+          supabaseProjectRef: 'unknown',
+          queryMethod: data.queryMethod || 'service_role',
+          totalCount: null,
+          tierCounts: { A: 0, B: 0, C: 0 },
+          fetchedAt: new Date().toISOString(),
+          error: data.error,
+          errorCode: data.errorCode,
+        });
+        setIsLoading(false);
+        return;
+      }
+
+      // Success - set platforms and debug info
+      setPlatforms(data.platforms || []);
+      setPipelineRuns(data.pipelineRuns || []);
+      setDebugInfo({
+        source: data.meta?.source || 'admin-dashboard/platform-coverage',
+        supabaseProjectRef: data.meta?.supabaseProjectRef || 'unknown',
+        queryMethod: data.meta?.queryMethod || 'service_role',
+        totalCount: data.meta?.totalCount ?? (data.platforms?.length || 0),
+        tierCounts: data.meta?.tierCounts || { A: 0, B: 0, C: 0 },
+        fetchedAt: data.meta?.fetchedAt || new Date().toISOString(),
+      });
       
-      // Convert to array and sort by timestamp
-      const runsArray = Array.from(runsMap.values())
-        .sort((a, b) => new Date(b.run_timestamp).getTime() - new Date(a.run_timestamp).getTime())
-        .slice(0, 20);
-      
-      setPipelineRuns(runsArray);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load data');
+      console.error('[PlatformCoverage] Unexpected error:', err);
+      setError(`Unexpected error: ${err?.message || 'Unknown error'}`);
+      setDebugInfo({
+        source: 'admin-dashboard/platform-coverage',
+        supabaseProjectRef: 'unknown',
+        queryMethod: 'failed',
+        totalCount: null,
+        tierCounts: { A: 0, B: 0, C: 0 },
+        fetchedAt: new Date().toISOString(),
+        error: err?.message || 'Unknown error',
+      });
     } finally {
       setIsLoading(false);
     }
@@ -570,8 +597,35 @@ export default function PlatformCoverage() {
           <CardContent className="pt-6">
             <div className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-5 w-5" />
-              <span>{error}</span>
+              <span className="font-medium">Data Source Error</span>
             </div>
+            <p className="text-sm text-muted-foreground mt-2">{error}</p>
+            
+            {/* Debug Info Accordion */}
+            {debugInfo && (
+              <Collapsible open={showDebug} onOpenChange={setShowDebug} className="mt-4">
+                <CollapsibleTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-2">
+                    <Info className="h-4 w-4" />
+                    {showDebug ? 'Hide' : 'Show'} Debug Info
+                    {showDebug ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  </Button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className="mt-3 p-3 bg-muted rounded-md text-xs font-mono space-y-1">
+                    <div><span className="text-muted-foreground">Source:</span> {debugInfo.source}</div>
+                    <div><span className="text-muted-foreground">Project Ref:</span> {debugInfo.supabaseProjectRef}</div>
+                    <div><span className="text-muted-foreground">Query Method:</span> {debugInfo.queryMethod}</div>
+                    <div><span className="text-muted-foreground">Total Count:</span> {debugInfo.totalCount ?? 'null'}</div>
+                    <div><span className="text-muted-foreground">Tier Counts:</span> A={debugInfo.tierCounts.A}, B={debugInfo.tierCounts.B}, C={debugInfo.tierCounts.C}</div>
+                    <div><span className="text-muted-foreground">Fetched At:</span> {debugInfo.fetchedAt}</div>
+                    {debugInfo.error && <div className="text-destructive"><span className="text-muted-foreground">Error:</span> {debugInfo.error}</div>}
+                    {debugInfo.errorCode && <div className="text-destructive"><span className="text-muted-foreground">Error Code:</span> {debugInfo.errorCode}</div>}
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            )}
+            
             <Button onClick={fetchData} className="mt-4">
               <RefreshCw className="mr-2 h-4 w-4" /> Retry
             </Button>
@@ -588,8 +642,26 @@ export default function PlatformCoverage() {
         <SystemHealthBanner alerts={systemHealth.alerts} />
       )}
       
-      {/* Empty Platform Coverage Alert */}
-      {noPlatformsAtAll && !isLoading && (
+      {/* Data Source Mismatch Alert - Detects contradictions between debug info and visible data */}
+      {debugInfo && debugInfo.totalCount !== null && debugInfo.totalCount > 0 && platforms.length === 0 && !isLoading && (
+        <Card className="border-destructive bg-destructive/10">
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-6 w-6 text-destructive shrink-0" />
+              <div>
+                <h3 className="font-semibold text-destructive">Data Access Mismatch Detected</h3>
+                <p className="text-sm text-muted-foreground mt-1">
+                  The backend reports {debugInfo.totalCount} platforms exist, but the UI received 0.
+                  This indicates a data access or permission issue.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      
+      {/* Empty Platform Coverage Alert - Only when truly empty */}
+      {noPlatformsAtAll && !isLoading && (!debugInfo || debugInfo.totalCount === 0) && (
         <Card className="border-destructive bg-destructive/10">
           <CardContent className="pt-6">
             <div className="flex items-start gap-3">
@@ -640,11 +712,49 @@ export default function PlatformCoverage() {
             />
           )}
         </div>
-        <Button variant="outline" onClick={fetchData} disabled={isLoading}>
-          <RefreshCw className={`mr-2 h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Debug toggle button */}
+          <Collapsible open={showDebug} onOpenChange={setShowDebug}>
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="sm" className="gap-2 text-muted-foreground">
+                <Info className="h-4 w-4" />
+                Debug
+              </Button>
+            </CollapsibleTrigger>
+          </Collapsible>
+          
+          <Button variant="outline" onClick={fetchData} disabled={isLoading}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
+      
+      {/* Debug Info Panel */}
+      {showDebug && debugInfo && (
+        <Card className="bg-muted/50">
+          <CardHeader className="py-3">
+            <CardTitle className="text-sm font-medium flex items-center gap-2">
+              <Info className="h-4 w-4" />
+              Data Source Debug Info
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="py-2">
+            <div className="grid gap-2 md:grid-cols-3 text-xs font-mono">
+              <div><span className="text-muted-foreground">Source:</span> {debugInfo.source}</div>
+              <div><span className="text-muted-foreground">Project Ref:</span> {debugInfo.supabaseProjectRef}</div>
+              <div><span className="text-muted-foreground">Query Method:</span> {debugInfo.queryMethod}</div>
+              <div><span className="text-muted-foreground">Total Count:</span> {debugInfo.totalCount ?? 'null'}</div>
+              <div><span className="text-muted-foreground">Tier Counts:</span> A={debugInfo.tierCounts.A}, B={debugInfo.tierCounts.B}, C={debugInfo.tierCounts.C}</div>
+              <div><span className="text-muted-foreground">Fetched At:</span> {new Date(debugInfo.fetchedAt).toLocaleTimeString()}</div>
+              <div><span className="text-muted-foreground">UI Platforms:</span> {platforms.length}</div>
+              {debugInfo.error && (
+                <div className="col-span-3 text-destructive"><span className="text-muted-foreground">Error:</span> {debugInfo.error}</div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Summary Cards */}
       <div className="grid gap-4 md:grid-cols-4">
