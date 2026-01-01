@@ -3,7 +3,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { Rocket, Mail, Lock, Eye, EyeOff, Sparkles, CheckCircle } from "lucide-react";
+import { Rocket, Mail, Lock, Eye, EyeOff, CheckCircle } from "lucide-react";
+import { AriviooLogo } from "@/components/AriviooLogo";
 
 interface UnderConstructionModalProps {
   onAccessGranted: () => void;
@@ -187,14 +188,7 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
       <div className="relative w-full max-w-md mx-4 p-8 bg-card/80 backdrop-blur-xl border border-border/50 rounded-3xl shadow-2xl">
         {/* Logo/Brand */}
         <div className="flex items-center justify-center mb-6">
-          <div className="flex items-center gap-2">
-            <div className="w-10 h-10 bg-gradient-to-br from-primary to-primary/80 rounded-xl flex items-center justify-center">
-              <Sparkles className="w-5 h-5 text-primary-foreground" />
-            </div>
-            <span className="text-2xl font-bold bg-gradient-to-r from-foreground to-foreground/80 bg-clip-text">
-              Arivioo
-            </span>
-          </div>
+          <AriviooLogo size="lg" />
         </div>
 
         {/* Rocket Icon */}
