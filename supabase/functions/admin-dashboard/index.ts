@@ -268,6 +268,63 @@ Deno.serve(async (req) => {
       const searchLastUpdate = lastSearchActivity ? new Date(lastSearchActivity) : null;
       const searchHealthy = searchLastUpdate && searchLastUpdate > oneHourAgo;
       
+      // Check tier coverage - count platforms per tier
+      const { data: tierCounts } = await supabase
+        .from('platform_adapters')
+        .select('coverage_tier');
+      
+      const tierA = tierCounts?.filter(p => p.coverage_tier === 'A').length || 0;
+      const tierB = tierCounts?.filter(p => p.coverage_tier === 'B').length || 0;
+      const tierC = tierCounts?.filter(p => p.coverage_tier === 'C').length || 0;
+      const totalPlatforms = tierCounts?.length || 0;
+      
+      // Determine platform health based on tier coverage
+      // Healthy: at least 1 Tier A platform
+      // Stale: no Tier A platforms but some Tier B
+      // Not updating: no platforms at all
+      const platformHealthy = tierA > 0;
+      const platformStale = tierA === 0 && tierB > 0;
+      const platformCritical = totalPlatforms === 0;
+      
+      const alerts: any[] = [];
+      
+      // Pipeline alerts
+      if (!pipelineHealthy) {
+        alerts.push({
+          section: 'pipeline',
+          severity: pipelineStale ? 'warning' : 'critical',
+          message: `Pipeline data has not updated since ${pipelineLastUpdate?.toISOString() || 'unknown'}`,
+          staleDuration: pipelineLastUpdate ? Math.round((now.getTime() - pipelineLastUpdate.getTime()) / 60000) : null,
+        });
+      }
+      
+      // Extraction alerts
+      if (!extractionHealthy) {
+        alerts.push({
+          section: 'extractions',
+          severity: extractionStale ? 'warning' : 'critical',
+          message: `Extraction data has not updated since ${extractionLastUpdate?.toISOString() || 'unknown'}`,
+          staleDuration: extractionLastUpdate ? Math.round((now.getTime() - extractionLastUpdate.getTime()) / 60000) : null,
+        });
+      }
+      
+      // Platform tier alerts
+      if (platformCritical) {
+        alerts.push({
+          section: 'platforms',
+          severity: 'critical',
+          message: 'No platforms configured in any tier. Platform coverage is completely empty.',
+          staleDuration: null,
+        });
+      } else if (tierA === 0) {
+        alerts.push({
+          section: 'platforms',
+          severity: 'warning',
+          message: `No Tier A platforms available. All ${tierB} platforms are in Tier B (best effort only).`,
+          staleDuration: null,
+        });
+      }
+      
       return new Response(
         JSON.stringify({
           timestamp: now.toISOString(),
@@ -283,28 +340,16 @@ Deno.serve(async (req) => {
               staleSince: !extractionHealthy && extractionLastUpdate ? extractionLastUpdate.toISOString() : null,
             },
             platforms: {
-              status: 'healthy', // Platforms don't need frequent updates
+              status: platformCritical ? 'not_updating' : (platformHealthy ? 'healthy' : 'stale'),
               lastActivity: lastAdapterUpdate,
+              tierCounts: { A: tierA, B: tierB, C: tierC, total: totalPlatforms },
             },
             searches: {
               status: searchHealthy ? 'healthy' : 'stale',
               lastActivity: lastSearchActivity,
             },
           },
-          alerts: [
-            ...((!pipelineHealthy) ? [{
-              section: 'pipeline',
-              severity: pipelineStale ? 'warning' : 'critical',
-              message: `Pipeline data has not updated since ${pipelineLastUpdate?.toISOString() || 'unknown'}`,
-              staleDuration: pipelineLastUpdate ? Math.round((now.getTime() - pipelineLastUpdate.getTime()) / 60000) : null,
-            }] : []),
-            ...((!extractionHealthy) ? [{
-              section: 'extractions',
-              severity: extractionStale ? 'warning' : 'critical',
-              message: `Extraction data has not updated since ${extractionLastUpdate?.toISOString() || 'unknown'}`,
-              staleDuration: extractionLastUpdate ? Math.round((now.getTime() - extractionLastUpdate.getTime()) / 60000) : null,
-            }] : []),
-          ],
+          alerts,
         }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );

@@ -537,6 +537,10 @@ export default function PlatformCoverage() {
   const promotionCandidate = platforms.find(p => p.promotion_candidate === true && p.coverage_tier === 'B');
   const promotionInProgress = platforms.find(p => p.promotion_in_progress === true);
   const promotionHistory = platforms.filter(p => p.promotion_status === 'promoted' || p.promotion_status === 'rejected');
+  
+  // Detect empty tier states
+  const noTierAWarning = platforms.length > 0 && tierACount === 0;
+  const noPlatformsAtAll = platforms.length === 0;
 
   if (isLoading) {
     return (
@@ -582,6 +586,42 @@ export default function PlatformCoverage() {
       {/* System Health Alerts */}
       {hasAlerts && systemHealth && (
         <SystemHealthBanner alerts={systemHealth.alerts} />
+      )}
+      
+      {/* Empty Platform Coverage Alert */}
+      {noPlatformsAtAll && !isLoading && (
+        <Card className="border-destructive bg-destructive/10">
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-6 w-6 text-destructive shrink-0" />
+              <div>
+                <h3 className="font-semibold text-destructive">No Platforms Configured</h3>
+                <p className="text-sm text-muted-foreground mt-1">
+                  The platform_adapters table is empty. No platforms are available in any tier (A, B, or C).
+                  This indicates a data source failure or migration issue.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      
+      {/* No Tier A Warning */}
+      {noTierAWarning && !isLoading && (
+        <Card className="border-yellow-400 bg-yellow-50/50">
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-6 w-6 text-yellow-600 shrink-0" />
+              <div>
+                <h3 className="font-semibold text-yellow-700">No Tier A Platforms</h3>
+                <p className="text-sm text-muted-foreground mt-1">
+                  There are {tierBCount} Tier B and {tierCCount} Tier C platforms, but no production-supported Tier A platforms.
+                  All extractions will be best-effort with no SLA.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       <div className="flex items-center justify-between">

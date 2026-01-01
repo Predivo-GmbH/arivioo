@@ -6,6 +6,7 @@ export interface SectionHealth {
   status: 'healthy' | 'stale' | 'not_updating';
   lastActivity: string | null;
   staleSince?: string | null;
+  tierCounts?: { A: number; B: number; C: number; total: number };
 }
 
 export interface HealthAlert {
