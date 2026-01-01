@@ -21,7 +21,9 @@ function isOriginAllowed(origin: string | null): boolean {
 }
 
 function getCorsHeaders(requestOrigin: string | null): Record<string, string> {
-  const origin = requestOrigin && isOriginAllowed(requestOrigin) ? requestOrigin : '';
+  // Always echo back the request origin when present so browsers can receive the response
+  // (we still enforce the allowlist with an explicit 403 below).
+  const origin = requestOrigin ?? '*';
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -214,7 +216,15 @@ function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
 Deno.serve(async (req) => {
   const origin = req.headers.get('origin');
   const corsHeaders = getCorsHeaders(origin);
-  
+
+  // Enforce allowlist for browser requests (origin-present).
+  if (origin && !isOriginAllowed(origin)) {
+    return new Response(JSON.stringify({ error: 'Origin not allowed' }), {
+      status: 403,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
