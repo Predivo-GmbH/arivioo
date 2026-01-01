@@ -421,11 +421,15 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
 
            // ========== STEP 1: Visit rooms page first to get title and images ==========
            const safeContent = async () => {
+             // page.content() can intermittently throw on Browserless; fall back to DOM serialization.
              try {
-               return await page.content();
-             } catch {
-               return '';
-             }
+               const c = await page.content();
+               if (c && c.length > 0) return c;
+             } catch {}
+             try {
+               return await page.evaluate(() => document.documentElement?.outerHTML || '');
+             } catch {}
+             return '';
            };
 
            const safeGoto = async (targetUrl, timeoutMs) => {
