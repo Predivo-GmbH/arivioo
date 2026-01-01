@@ -113,6 +113,7 @@ interface AirbnbScrapeResult {
   statusCode?: number;
   evidenceSnippet?: string;
   isRateLimited?: boolean; // True if 429 rate limit detected
+  isDatesUnavailable?: boolean; // True if Airbnb shows "dates unavailable" interstitial
   // OCR reference data (captured via screenshot + AI OCR)
   ocrReference?: OcrVisualReference | null;
 }
@@ -376,6 +377,7 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
     error: null,
     ocrReference: null,
     isRateLimited: false,
+    isDatesUnavailable: false,
   };
   
   try {
@@ -652,6 +654,37 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
       result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
       result.html = html;
       result.evidenceSnippet = extractEvidenceSnippet(html);
+      return result;
+    }
+
+    // Check for dates unavailable patterns - terminal state, not retryable
+    const htmlLower = html.toLowerCase();
+    const totalSnippetLower = (fnJson?.totalSnippet || '').toLowerCase();
+    const datesUnavailablePatterns = [
+      'no longer available',
+      'dates are no longer available',
+      'unavailable for your dates',
+      'not available for these dates',
+      'someone else just requested',
+      'this listing is no longer',
+      'this home isn\'t available',
+      'these dates are no longer available',
+    ];
+    
+    const isDatesUnavailable = datesUnavailablePatterns.some(p => 
+      htmlLower.includes(p) || totalSnippetLower.includes(p)
+    );
+    
+    if (isDatesUnavailable) {
+      console.log(`Browserless attempt ${attemptNum}: DATES_UNAVAILABLE detected in content`);
+      result.ok = true; // Mark as successful scrape, but dates unavailable
+      result.isDatesUnavailable = true;
+      result.html = html;
+      result.error = 'dates_unavailable';
+      result.evidenceSnippet = (fnJson?.totalSnippet || '').slice(0, 300);
+      // Still capture rooms data for display
+      result.roomsHtml = fnJson?.roomsHtml || '';
+      result.roomsTitle = fnJson?.roomsTitle || '';
       return result;
     }
 
@@ -1415,7 +1448,9 @@ type AirbnbBaselineStatus =
   | 'total_price_including_taxes_and_fees'
   | 'total_price_excluding_taxes_and_fees'
   | 'needs_user_confirmation'
-  | 'price_not_available_in_content';
+  | 'price_not_available_in_content'
+  | 'dates_unavailable'
+  | 'rate_limited';
 
 type PriceCandidate = {
   rawMatch: string; // verbatim matched string (includes currency symbol/label when possible)
@@ -4149,6 +4184,7 @@ async function runSearchWithStreaming(
     contentLength?: number;
     durationMs?: number;
     isRateLimited?: boolean; // True if 429 rate limit detected
+    isDatesUnavailable?: boolean; // True if Airbnb shows "dates unavailable" interstitial
     // OCR validation fields
     ocrReference?: OcrVisualReference | null;
     ocrValidation?: OcrValidationResult | null;
@@ -4512,6 +4548,23 @@ async function runSearchWithStreaming(
             error: browserlessResult.error || 'Failed',
             durationMs,
             isRateLimited: browserlessResult.isRateLimited || false,
+            isDatesUnavailable: browserlessResult.isDatesUnavailable || false,
+          };
+        }
+
+        // Check for dates unavailable (terminal state - don't continue pipeline)
+        if (browserlessResult.isDatesUnavailable) {
+          console.log('Browserless detected dates unavailable - returning terminal state');
+          const datesUnavailableBaseline = emptyBaseline('Browserless');
+          datesUnavailableBaseline.status = 'dates_unavailable';
+          datesUnavailableBaseline.evidence_snippet = browserlessResult.evidenceSnippet || 'Dates not available for this property';
+          return {
+            provider,
+            baseline: datesUnavailableBaseline,
+            error: 'dates_unavailable',
+            durationMs,
+            isRateLimited: false,
+            isDatesUnavailable: true,
           };
         }
 
@@ -4989,49 +5042,58 @@ async function runSearchWithStreaming(
         let failureMessage = "We couldn't find the total price on the Airbnb listing.";
         let userMessage = "Airbnb didn't show a total price for your selected dates. This can happen when dates are unavailable or the listing requires interaction to show pricing.";
         
-        // Check if any provider got rate limited (takes priority)
-        const wasRateLimited = providerResults.some(r => r.isRateLimited);
-        if (wasRateLimited) {
-          failureCode = 'rate_limited';
-          failureMessage = "Airbnb is temporarily rate limiting requests (HTTP 429).";
-          userMessage = "We can't retrieve the price from Airbnb right now due to temporary rate limiting. Please try again in a few minutes.";
-        } else {
-          // Check what content we got to determine failure reason
-          const hasContent = lastScrapedContent.markdown.length > 100 || lastScrapedContent.html.length > 100;
-          const hasScreenshot = lastScrapedContent.hasScreenshot;
-          
-          if (!hasContent && !hasScreenshot) {
-            failureCode = 'airbnb_blocked_or_captcha';
-            failureMessage = "Airbnb blocked the page request (captcha or bot detection).";
-            userMessage = "Airbnb is blocking automated requests. Please try again in a few minutes.";
-          } else if (hasContent) {
-            // Content available - analyze for specific issues
-            const content = lastScrapedContent.markdown || lastScrapedContent.html;
-            const contentLower = content.toLowerCase();
+        // Check if any provider detected dates unavailable (highest priority - terminal state)
+        const wasDatesUnavailable = providerResults.some(r => r.isDatesUnavailable);
+        if (wasDatesUnavailable) {
+          failureCode = 'dates_unavailable';
+          failureMessage = "This property is no longer available for your selected dates.";
+          userMessage = "The dates you selected are not available for this property. Please try different dates or a different listing.";
+        }
+        // Check if any provider got rate limited (second priority)
+        else {
+          const wasRateLimited = providerResults.some(r => r.isRateLimited);
+          if (wasRateLimited) {
+            failureCode = 'rate_limited';
+            failureMessage = "Airbnb is temporarily rate limiting requests (HTTP 429).";
+            userMessage = "We can't retrieve the price from Airbnb right now due to temporary rate limiting. Please try again in a few minutes.";
+          } else {
+            // Check what content we got to determine failure reason
+            const hasContent = lastScrapedContent.markdown.length > 100 || lastScrapedContent.html.length > 100;
+            const hasScreenshot = lastScrapedContent.hasScreenshot;
             
-            // Check for dates unavailable FIRST - this is a valid terminal state, not an error
-            if (contentLower.includes('no longer available') || 
-                contentLower.includes('dates are no longer available') || 
-                contentLower.includes('unavailable for your dates') || 
-                contentLower.includes('not available for these dates') ||
-                contentLower.includes('someone else just requested') ||
-                contentLower.includes('this listing is no longer') ||
-                contentLower.includes('this home isn\'t available')) {
-              failureCode = 'dates_unavailable';
-              failureMessage = "This property is no longer available for your selected dates.";
-              userMessage = "The dates you selected are not available for this property. Please try different dates or a different listing.";
-            } else if (contentLower.includes('captcha') || contentLower.includes('robot') || contentLower.includes('verify you')) {
+            if (!hasContent && !hasScreenshot) {
               failureCode = 'airbnb_blocked_or_captcha';
-              failureMessage = "Airbnb requested human verification.";
-              userMessage = "Airbnb is requiring verification. Please try again in a few minutes.";
-            } else if (content.includes('Enter dates') || content.includes('Add dates') || content.includes('Check availability')) {
-              failureCode = 'airbnb_dates_not_applied';
-              failureMessage = "The dates from your URL weren't applied to the listing.";
-              userMessage = "The dates in your Airbnb link weren't applied. Make sure check_in and check_out parameters are in the URL.";
-            } else if ((content.includes('night') || content.includes('/night')) && !contentLower.includes('total')) {
-              failureCode = 'airbnb_total_not_visible';
-              failureMessage = "Airbnb shows per-night pricing but no total for your dates.";
-              userMessage = "Airbnb isn't showing the total price for your dates. The property may require interaction to reveal pricing.";
+              failureMessage = "Airbnb blocked the page request (captcha or bot detection).";
+              userMessage = "Airbnb is blocking automated requests. Please try again in a few minutes.";
+            } else if (hasContent) {
+              // Content available - analyze for specific issues
+              const content = lastScrapedContent.markdown || lastScrapedContent.html;
+              const contentLower = content.toLowerCase();
+              
+              // Check for dates unavailable FIRST - this is a valid terminal state, not an error
+              if (contentLower.includes('no longer available') || 
+                  contentLower.includes('dates are no longer available') || 
+                  contentLower.includes('unavailable for your dates') || 
+                  contentLower.includes('not available for these dates') ||
+                  contentLower.includes('someone else just requested') ||
+                  contentLower.includes('this listing is no longer') ||
+                  contentLower.includes('this home isn\'t available')) {
+                failureCode = 'dates_unavailable';
+                failureMessage = "This property is no longer available for your selected dates.";
+                userMessage = "The dates you selected are not available for this property. Please try different dates or a different listing.";
+              } else if (contentLower.includes('captcha') || contentLower.includes('robot') || contentLower.includes('verify you')) {
+                failureCode = 'airbnb_blocked_or_captcha';
+                failureMessage = "Airbnb requested human verification.";
+                userMessage = "Airbnb is requiring verification. Please try again in a few minutes.";
+              } else if (content.includes('Enter dates') || content.includes('Add dates') || content.includes('Check availability')) {
+                failureCode = 'airbnb_dates_not_applied';
+                failureMessage = "The dates from your URL weren't applied to the listing.";
+                userMessage = "The dates in your Airbnb link weren't applied. Make sure check_in and check_out parameters are in the URL.";
+              } else if ((content.includes('night') || content.includes('/night')) && !contentLower.includes('total')) {
+                failureCode = 'airbnb_total_not_visible';
+                failureMessage = "Airbnb shows per-night pricing but no total for your dates.";
+                userMessage = "Airbnb isn't showing the total price for your dates. The property may require interaction to reveal pricing.";
+              }
             }
           }
         }
