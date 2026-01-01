@@ -87,3 +87,6 @@ verify_jwt = false
 
 [functions.airbnb-selftest]
 verify_jwt = false
+
+[functions.airbnb-url-normalizer]
+verify_jwt = false
