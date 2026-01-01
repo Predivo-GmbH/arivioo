@@ -6,6 +6,8 @@ const ALLOWED_ORIGINS = [
   'https://www.lovable.dev',
   /^https:\/\/[a-zA-Z0-9-]+\.lovable\.app$/,  // Any Lovable app subdomain
   /^https:\/\/[a-zA-Z0-9-]+\.lovableproject\.com$/,  // Any Lovable project subdomain
+  /^https:\/\/id-preview--[a-zA-Z0-9-]+\.lovable\.app$/,  // Preview domains
+  'https://arivioo.lovable.app',  // Production domain
 ];
 
 function isOriginAllowed(origin: string | null): boolean {
