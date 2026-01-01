@@ -4,8 +4,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const ALLOWED_ORIGINS = [
   'https://lovable.dev',
   'https://www.lovable.dev',
+  'https://arivioo.com',
+  'https://www.arivioo.com',
   /^https:\/\/[a-zA-Z0-9-]+\.lovable\.app$/,  // Any Lovable app subdomain
   /^https:\/\/[a-zA-Z0-9-]+\.lovableproject\.com$/,  // Any Lovable project subdomain
+  /^https:\/\/id-preview--[a-zA-Z0-9-]+\.lovable\.app$/,  // Lovable preview domains
 ];
 
 function isOriginAllowed(origin: string | null): boolean {
