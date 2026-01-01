@@ -588,6 +588,19 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
     }
 
     const fnJson = await response.json().catch(() => null);
+    
+    // Debug: log all returned lengths
+    console.log(`Browserless attempt ${attemptNum} response:`, {
+      htmlLen: fnJson?.html?.length || 0,
+      roomsHtmlLen: fnJson?.roomsHtml?.length || 0,
+      roomsTextLen: fnJson?.roomsTextLen || 0,
+      checkoutTextLen: fnJson?.checkoutTextLen || 0,
+      checkoutFinalUrl: fnJson?.checkoutFinalUrl?.slice(0, 100) || 'none',
+      usedFallback: fnJson?.usedFallback,
+      breakdownOpened: fnJson?.breakdownOpened,
+      hasScreenshot: !!fnJson?.bookingCardScreenshot,
+    });
+    
     const html = (fnJson?.html || fnJson?.roomsHtml || "");
 
     if (!html || html.length < 500) {
