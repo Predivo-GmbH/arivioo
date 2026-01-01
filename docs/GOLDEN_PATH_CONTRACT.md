@@ -1,8 +1,86 @@
 # Golden Path Contract
 
-**Version**: 2.0  
-**Last Updated**: 2025-12-28  
+**Version**: 2.1  
+**Last Updated**: 2026-01-01  
 **Status**: ENFORCED
+
+---
+
+## Airbnb URL Normalization (Verified Working: 2026-01-01)
+
+> **If Airbnb price extraction fails, reference this section first.**
+
+### Core Principle
+
+Airbnb `/rooms/<id>` pages often hide the total price. The `/book/stays/<id>` checkout page **always** shows the complete breakdown including taxes and fees.
+
+**Solution:** Transform all room URLs to book/stays URLs before extraction.
+
+### Canonical URL Transformation
+
+**Input (Room URL):**
+```
+https://www.airbnb.com/rooms/903802242341279498?check_in=2026-01-04&check_out=2026-01-08&adults=2
+```
+
+**Output (Book/Stays URL):**
+```
+https://www.airbnb.com/book/stays/903802242341279498?numberOfGuests=2&numberOfAdults=2&checkin=2026-01-04&checkout=2026-01-08&guestCurrency=USD&productId=903802242341279498&isWorkTrip=false&numberOfChildren=0&numberOfInfants=0&numberOfPets=0
+```
+
+### Parameter Mapping Rules
+
+| Room URL Param | Book/Stays Param | Default |
+|----------------|------------------|---------|
+| `check_in` | `checkin` | **REQUIRED** |
+| `check_out` | `checkout` | **REQUIRED** |
+| `adults` | `numberOfAdults` | `1` |
+| `children` | `numberOfChildren` | `0` |
+| `infants` | `numberOfInfants` | `0` |
+| `pets` | `numberOfPets` | `0` |
+| (computed) | `numberOfGuests` | `adults + children + infants` |
+| (listing_id) | `productId` | From path |
+| - | `guestCurrency` | `USD` |
+| - | `isWorkTrip` | `false` |
+
+**Guest Calculation:** `numberOfGuests = numberOfAdults + numberOfChildren + numberOfInfants` (pets do NOT count)
+
+### Fixed Parameter Order (Critical for Caching)
+
+1. `numberOfGuests`
+2. `numberOfAdults`
+3. `checkin`
+4. `checkout`
+5. `guestCurrency`
+6. `productId`
+7. `isWorkTrip`
+8. `numberOfChildren`
+9. `numberOfInfants`
+10. `numberOfPets`
+
+### Implementation Files (Single Source of Truth)
+
+| Location | Purpose |
+|----------|---------|
+| `src/lib/airbnbUrlNormalizer.ts` | Frontend shared module |
+| `supabase/functions/airbnb-url-normalizer/index.ts` | Edge function API |
+
+**Consumers:** `search-alternatives`, `airbnb-baseline-test`, `airbnb-selftest`
+
+### Rate Limit Handling
+
+If Airbnb returns **HTTP 429**: ABORT IMMEDIATELY, return `rate_limited` status, do NOT try other providers.
+
+### Error Codes
+
+| Code | Meaning |
+|------|---------|
+| `INVALID_URL` | URL parsing failed |
+| `MISSING_ROOM_ID` | No listing ID in path |
+| `MISSING_DATES` | checkin/checkout not provided |
+| `INVALID_DATES` | Date format wrong or checkout <= checkin |
+
+---
 
 ## Core Requirement
 
