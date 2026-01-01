@@ -1448,6 +1448,53 @@ export default function SearchResults() {
                       </Button>
                     </div>
                   </div>
+                ) : resolveSearchErrorCode(search) === "rate_limited" ? (
+                  <div className="py-12 text-center">
+                    <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-orange-500/10 flex items-center justify-center">
+                      <AlertCircle className="w-10 h-10 text-orange-500" />
+                    </div>
+                    <h3 className="text-2xl font-bold text-foreground mb-3">
+                      Temporarily Unavailable
+                    </h3>
+                    <p className="text-muted-foreground mb-2 max-w-lg mx-auto text-base">
+                      We can't retrieve the price from Airbnb right now due to <span className="font-semibold text-foreground">temporary rate limiting</span>.
+                    </p>
+                    <div className="bg-orange-500/5 border border-orange-500/20 rounded-xl p-5 max-w-md mx-auto mb-6">
+                      <h4 className="font-semibold text-foreground mb-2 flex items-center justify-center gap-2">
+                        <Info className="w-4 h-4 text-orange-500" />
+                        What you can do
+                      </h4>
+                      <ul className="text-sm text-muted-foreground text-left space-y-2">
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-orange-500 mt-0.5 flex-shrink-0" />
+                          <span>Wait a few minutes and try again</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-orange-500 mt-0.5 flex-shrink-0" />
+                          <span>Airbnb limits how often we can check prices</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-orange-500 mt-0.5 flex-shrink-0" />
+                          <span>This is temporary — pricing data will be available again soon</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div className="flex items-center justify-center gap-3 flex-wrap">
+                      {search?.airbnb_url && (
+                        <Button variant="outline" asChild>
+                          <a href={search.airbnb_url} target="_blank" rel="noopener noreferrer">
+                            View Listing on Airbnb <ExternalLink className="w-4 h-4 ml-2" />
+                          </a>
+                        </Button>
+                      )}
+                      <Button asChild>
+                        <Link to="/dashboard">
+                          <Search className="w-4 h-4 mr-2" />
+                          Try Again Later
+                        </Link>
+                      </Button>
+                    </div>
+                  </div>
                 ) : search?.status === "error" ? (
                   /* Handle failed/error searches */
                   <div className="py-12 text-center">
