@@ -16,6 +16,7 @@ import {
   Lock,
   Unlock
 } from "lucide-react";
+import { AriviooLogo, AriviooLogoStatic } from "@/components/AriviooLogo";
 
 const pricingFaqs = [
   {
@@ -84,11 +85,8 @@ export default function Pricing() {
       {/* Header */}
       <header className="border-b border-border bg-card">
         <div className="container px-4 h-16 flex items-center justify-between">
-          <Link to="/" className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-primary rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold">A</span>
-            </div>
-            <span className="font-bold text-xl text-foreground">Arivioo</span>
+          <Link to="/" className="flex items-center">
+            <AriviooLogo size="md" />
           </Link>
           <Button asChild className="bg-gradient-primary hover:opacity-90">
             <Link to="/auth">Get Started</Link>
@@ -402,10 +400,7 @@ export default function Pricing() {
       <footer className="py-8 bg-card border-t border-border">
         <div className="container px-4 text-center">
           <Link to="/" className="flex items-center gap-2 justify-center mb-4">
-            <div className="w-6 h-6 bg-gradient-primary rounded flex items-center justify-center">
-              <span className="text-white font-bold text-sm">A</span>
-            </div>
-            <span className="font-bold text-foreground">Arivioo</span>
+            <AriviooLogoStatic size="sm" />
           </Link>
           <p className="text-sm text-muted-foreground">
             © {new Date().getFullYear()} Arivioo. All rights reserved.

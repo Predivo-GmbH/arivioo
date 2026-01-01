@@ -1839,34 +1839,40 @@ export default function SearchResults() {
                                                 View <ExternalLink className="w-3 h-3 ml-1" />
                                               </a>
                                             </Button>
-                                            {resultImages.length > 0 && airbnbImages.length > 0 && (
-                                              <button
-                                                onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                                className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
-                                                  isExpanded 
-                                                    ? 'bg-primary/10 text-primary' 
-                                                    : 'text-muted-foreground hover:text-primary'
-                                                }`}
-                                              >
-                                                <ArrowLeftRight className="w-3 h-3" />
-                                                {isExpanded ? 'Hide' : 'Photos'}
-                                              </button>
-                                            )}
+                                            {/* Always show photo comparison button */}
+                                            <button
+                                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                              className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                                                isExpanded 
+                                                  ? 'bg-primary/10 text-primary' 
+                                                  : 'text-muted-foreground hover:text-primary'
+                                              }`}
+                                            >
+                                              <ArrowLeftRight className="w-3 h-3" />
+                                              {isExpanded ? 'Hide' : 'Photos'}
+                                            </button>
                                           </div>
                                         </td>
                                       </tr>
                                       {/* Inline Photo Comparison for additional results */}
-                                      {isExpanded && resultImages.length > 0 && (
+                                      {isExpanded && (
                                         <tr className="border-b border-border/50">
                                           <td colSpan={4} className="p-4 bg-muted/30">
-                                            <ImageComparison
-                                              airbnbImages={airbnbImages}
-                                              alternativeImages={resultImages}
-                                              airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                              alternativeTitle={result.listing_title || "Alternative Listing"}
-                                              platformName={result.platform_name}
-                                              sourceAirbnbImage={result.source_airbnb_image}
-                                            />
+                                            {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                              <ImageComparison
+                                                airbnbImages={airbnbImages}
+                                                alternativeImages={resultImages}
+                                                airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                                alternativeTitle={result.listing_title || "Alternative Listing"}
+                                                platformName={result.platform_name}
+                                                sourceAirbnbImage={result.source_airbnb_image}
+                                              />
+                                            ) : (
+                                              <div className="text-center py-6 text-muted-foreground">
+                                                <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                <p className="text-sm">No photos available for comparison</p>
+                                              </div>
+                                            )}
                                           </td>
                                         </tr>
                                       )}
@@ -2030,34 +2036,41 @@ export default function SearchResults() {
                                           <a href={result.listing_url} target="_blank" rel="noopener noreferrer">View Free</a>
                                         </Button>
                                       )}
-                                      {resultImages.length > 0 && airbnbImages.length > 0 && (
-                                        <button
-                                          onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                          className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
-                                            isExpanded 
-                                              ? 'bg-primary/10 text-primary' 
-                                              : 'text-muted-foreground hover:text-primary'
-                                          }`}
-                                        >
-                                          <ArrowLeftRight className="w-3 h-3" />
-                                          {isExpanded ? 'Hide' : 'Photos'}
-                                        </button>
-                                      )}
+                                      {/* Always show photo comparison button */}
+                                      <button
+                                        onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                        className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                                          isExpanded 
+                                            ? 'bg-primary/10 text-primary' 
+                                            : 'text-muted-foreground hover:text-primary'
+                                        }`}
+                                      >
+                                        <ArrowLeftRight className="w-3 h-3" />
+                                        {isExpanded ? 'Hide' : 'Photos'}
+                                      </button>
                                     </div>
                                   </td>
                                 </tr>
                                 {/* Inline Photo Comparison - appears directly below the row */}
-                                {isExpanded && resultImages.length > 0 && (
+                                {isExpanded && (
                                   <tr className="border-b border-border">
                                     <td colSpan={6} className="p-4 bg-muted/30">
-                                      <ImageComparison
-                                        airbnbImages={airbnbImages}
-                                        alternativeImages={resultImages}
-                                        airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                        alternativeTitle={result.listing_title || "Alternative Listing"}
-                                        platformName={result.platform_name}
-                                        sourceAirbnbImage={result.source_airbnb_image}
-                                      />
+                                      {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                        <ImageComparison
+                                          airbnbImages={airbnbImages}
+                                          alternativeImages={resultImages}
+                                          airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                          alternativeTitle={result.listing_title || "Alternative Listing"}
+                                          platformName={result.platform_name}
+                                          sourceAirbnbImage={result.source_airbnb_image}
+                                        />
+                                      ) : (
+                                        <div className="text-center py-6 text-muted-foreground">
+                                          <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                          <p className="text-sm">No photos available for comparison</p>
+                                          <p className="text-xs mt-1">Photos could not be captured for this listing</p>
+                                        </div>
+                                      )}
                                     </td>
                                   </tr>
                                 )}
@@ -2149,14 +2162,14 @@ export default function SearchResults() {
                             </div>
                           ) : potentialSavings && potentialSavings > 0 ? (
                             <>
-                              <p className="text-5xl font-bold text-success">{currencySymbol}{Math.round(potentialSavings)}</p>
+                              <p className="text-5xl font-bold text-success">{currencySymbol}{potentialSavings.toFixed(2)}</p>
                               <span className="text-success text-xl font-semibold">
                                 ({airbnbTotal ? Math.round((potentialSavings / airbnbTotal) * 100) : '~'}% off)
                               </span>
                             </>
                           ) : (
                             <p className="text-3xl font-bold text-success">
-                              Best price: {currencySymbol}{cheapestResult.price}/total
+                              Best price: {currencySymbol}{cheapestResult.price?.toFixed(2)}/total
                             </p>
                           )}
                         </div>
@@ -2258,34 +2271,40 @@ export default function SearchResults() {
                                                 View <ExternalLink className="w-3 h-3 ml-1" />
                                               </a>
                                             </Button>
-                                            {resultImages.length > 0 && airbnbImages.length > 0 && (
-                                              <button
-                                                onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                                className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
-                                                  isExpanded 
-                                                    ? 'bg-primary/10 text-primary' 
-                                                    : 'text-muted-foreground hover:text-primary'
-                                                }`}
-                                              >
-                                                <ArrowLeftRight className="w-3 h-3" />
-                                                {isExpanded ? 'Hide' : 'Photos'}
-                                              </button>
-                                            )}
+                                            {/* Always show photo comparison button */}
+                                            <button
+                                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                              className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                                                isExpanded 
+                                                  ? 'bg-primary/10 text-primary' 
+                                                  : 'text-muted-foreground hover:text-primary'
+                                              }`}
+                                            >
+                                              <ArrowLeftRight className="w-3 h-3" />
+                                              {isExpanded ? 'Hide' : 'Photos'}
+                                            </button>
                                           </div>
                                         </td>
                                       </tr>
                                       {/* Inline Photo Comparison for additional results */}
-                                      {isExpanded && resultImages.length > 0 && (
+                                      {isExpanded && (
                                         <tr className="border-b border-border/50">
                                           <td colSpan={4} className="p-4 bg-muted/30">
-                                            <ImageComparison
-                                              airbnbImages={airbnbImages}
-                                              alternativeImages={resultImages}
-                                              airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                              alternativeTitle={result.listing_title || "Alternative Listing"}
-                                              platformName={result.platform_name}
-                                              sourceAirbnbImage={result.source_airbnb_image}
-                                            />
+                                            {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                              <ImageComparison
+                                                airbnbImages={airbnbImages}
+                                                alternativeImages={resultImages}
+                                                airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                                alternativeTitle={result.listing_title || "Alternative Listing"}
+                                                platformName={result.platform_name}
+                                                sourceAirbnbImage={result.source_airbnb_image}
+                                              />
+                                            ) : (
+                                              <div className="text-center py-6 text-muted-foreground">
+                                                <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                <p className="text-sm">No photos available for comparison</p>
+                                              </div>
+                                            )}
                                           </td>
                                         </tr>
                                       )}

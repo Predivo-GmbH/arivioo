@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { AriviooLogoStatic } from "@/components/AriviooLogo";
 
 export function Footer() {
   return (
@@ -6,12 +7,7 @@ export function Footer() {
       <div className="container px-4">
         <div className="flex flex-col md:flex-row items-center justify-between gap-6">
           {/* Logo */}
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center">
-              <span className="text-foreground font-bold text-lg">A</span>
-            </div>
-            <span className="font-bold text-xl">Arivioo</span>
-          </div>
+          <AriviooLogoStatic size="md" variant="dark" />
 
           {/* Links */}
           <div className="flex items-center gap-6 text-sm text-background/70">
