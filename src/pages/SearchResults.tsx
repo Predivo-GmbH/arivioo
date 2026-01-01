@@ -1264,6 +1264,44 @@ export default function SearchResults() {
   const cheapestTotal = cheapestResult?.price || null;
   const potentialSavings = airbnbTotal && cheapestTotal ? airbnbTotal - cheapestTotal : null;
 
+  // ========================================
+  // CANONICAL RESULT STATE COMPUTATION
+  // ========================================
+  // Define mutually exclusive outcome states for consistent messaging
+  type ResultState = 
+    | 'no_platforms_found'           // No other platforms found at all
+    | 'cheaper_found'                // Found cheaper alternatives
+    | 'no_cheaper_found'             // Found platforms but none cheaper (with prices)
+    | 'prices_unavailable';          // Found platforms but prices unavailable
+
+  const computeResultState = (): ResultState => {
+    // Total valid matches (with photos)
+    const totalMatchesWithPhotos = resultsWithPhotos.length;
+    
+    if (totalMatchesWithPhotos === 0) {
+      return 'no_platforms_found';
+    }
+    
+    // Cheaper results exist
+    if (cheaperResults.length > 0) {
+      return 'cheaper_found';
+    }
+    
+    // Have platforms with actual prices (just not cheaper)
+    if (moreExpensiveResults.length > 0) {
+      return 'no_cheaper_found';
+    }
+    
+    // Have platforms but no prices available
+    return 'prices_unavailable';
+  };
+
+  const resultState = computeResultState();
+
+  // Get the count of platforms we actually compared prices with
+  const comparedPlatformsCount = resultsWithPrices.length;
+  const platformsWithoutPricesCount = resultsWithoutPrices.length;
+
 
   // Helper to generate key differences based on platform
   const getKeyDifferences = (result: SearchResult): string[] => {
@@ -1666,20 +1704,44 @@ export default function SearchResults() {
                 )}
 
                 {/* Alternatives exist but none are cheaper than Airbnb */}
-                {(search?.status === "completed" && displayResults.length === 0 && (moreExpensiveResults.length > 0 || results.length > 0) && (search?.airbnb_price || confirmedTotal)) && (
+                {(search?.status === "completed" && displayResults.length === 0 && (resultState === 'no_cheaper_found' || resultState === 'prices_unavailable') && (search?.airbnb_price || confirmedTotal)) && (
                   /* Alternatives exist but none are cheaper than Airbnb - use same table layout */
                   <>
-                    {/* Success banner */}
-                    <div className="mb-6 p-4 rounded-xl bg-green-500/10 border border-green-500/20 flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
-                        <CheckCircle className="w-5 h-5 text-green-500" />
+                    {/* Success/Info banner - varies by result state */}
+                    <div className={`mb-6 p-4 rounded-xl flex items-center gap-3 ${
+                      resultState === 'no_cheaper_found' 
+                        ? 'bg-green-500/10 border border-green-500/20' 
+                        : 'bg-muted/40 border border-border'
+                    }`}>
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
+                        resultState === 'no_cheaper_found' 
+                          ? 'bg-green-500/20' 
+                          : 'bg-muted'
+                      }`}>
+                        {resultState === 'no_cheaper_found' ? (
+                          <CheckCircle className="w-5 h-5 text-green-500" />
+                        ) : (
+                          <Info className="w-5 h-5 text-muted-foreground" />
+                        )}
                       </div>
                       <div>
-                        <h3 className="font-semibold text-foreground">Airbnb Has the Best Price</h3>
-                        <p className="text-sm text-muted-foreground">
-                          We found this property on {moreExpensiveResults.length} other platform{moreExpensiveResults.length !== 1 ? "s" : ""}, 
-                          but none offered a lower price. You're already getting the best deal!
-                        </p>
+                        {resultState === 'no_cheaper_found' ? (
+                          <>
+                            <h3 className="font-semibold text-foreground">Airbnb Has the Best Price</h3>
+                            <p className="text-sm text-muted-foreground">
+                              We compared {comparedPlatformsCount} other platform{comparedPlatformsCount !== 1 ? "s" : ""}, 
+                              but none offered a lower price. You're already getting the best deal!
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <h3 className="font-semibold text-foreground">Property Found on Other Platforms</h3>
+                            <p className="text-sm text-muted-foreground">
+                              We found this property on {platformsWithoutPricesCount} other platform{platformsWithoutPricesCount !== 1 ? "s" : ""}, 
+                              but prices were not available for comparison.
+                            </p>
+                          </>
+                        )}
                       </div>
                     </div>
 
