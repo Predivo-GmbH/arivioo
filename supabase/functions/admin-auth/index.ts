@@ -20,15 +20,22 @@ function isOriginAllowed(origin: string | null): boolean {
   });
 }
 
-function getCorsHeaders(requestOrigin: string | null): Record<string, string> {
-  // Always echo back the request origin when present so browsers can receive the response
-  // (we still enforce the allowlist with an explicit 403 below).
+function getCorsHeaders(request: Request): Record<string, string> {
+  const requestOrigin = request.headers.get('origin');
+  // Always echo request origin so browsers can actually receive the response.
+  // We still enforce the allowlist with an explicit 403 for disallowed origins.
   const origin = requestOrigin ?? '*';
+
+  // Reflect requested headers for preflight when provided.
+  // This avoids subtle mismatches where the browser requests (apikey, x-client-info, etc.).
+  const requestedHeaders = request.headers.get('access-control-request-headers');
+
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Headers': requestedHeaders || 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Credentials': 'true',
-    'Vary': 'Origin',
+    'Vary': 'Origin, Access-Control-Request-Headers',
   };
 }
 
@@ -214,27 +221,44 @@ function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
 }
 
 Deno.serve(async (req) => {
+  const requestId = crypto.randomUUID();
   const origin = req.headers.get('origin');
-  const corsHeaders = getCorsHeaders(origin);
+  const host = req.headers.get('host');
+  const corsHeaders = getCorsHeaders(req);
+  // Ensure every response includes an ID we can correlate in logs
+  corsHeaders['X-Request-Id'] = requestId;
+
+  const url = new URL(req.url);
+  const path = url.pathname;
+
+  console.log(JSON.stringify({
+    request_id: requestId,
+    ts: new Date().toISOString(),
+    method: req.method,
+    origin,
+    host,
+    path,
+    is_preflight: req.method === 'OPTIONS',
+  }));
 
   // Enforce allowlist for browser requests (origin-present).
   if (origin && !isOriginAllowed(origin)) {
-    return new Response(JSON.stringify({ error: 'Origin not allowed' }), {
+    console.log(JSON.stringify({ request_id: requestId, msg: 'Origin not allowed', origin }));
+    return new Response(JSON.stringify({ error: 'Origin not allowed', requestId }), {
       status: 403,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json', 'X-Request-Id': requestId },
     });
   }
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { status: 204, headers: { ...corsHeaders, 'X-Request-Id': requestId } });
   }
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-  const url = new URL(req.url);
-  const action = url.pathname.split('/').pop();
+  const action = path.split('/').pop();
   const ip = req.headers.get('x-forwarded-for') || req.headers.get('cf-connecting-ip') || 'unknown';
   const userAgent = req.headers.get('user-agent') || 'unknown';
 
