@@ -1396,9 +1396,9 @@ export default function SearchResults() {
                     <div className="max-w-lg mx-auto mb-6">
                       <AirbnbTotalConfirmation
                         searchId={searchId!}
-                        subtotalAmount={null}
-                        subtotalNights={nights}
-                        subtotalCurrency={search?.airbnb_currency || 'USD'}
+                        subtotalAmount={subtotalInfo?.amount ?? null}
+                        subtotalNights={subtotalInfo?.nights ?? nights}
+                        subtotalCurrency={subtotalInfo?.currency || search?.airbnb_currency || 'USD'}
                         existingConfirmation={confirmedTotal}
                         onConfirmed={handleTotalConfirmed}
                         onCleared={handleTotalCleared}
