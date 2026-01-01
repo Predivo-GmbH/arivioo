@@ -186,6 +186,14 @@ export default function Extractions() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { health: systemHealth, hasAlerts } = useSystemHealth();
+  
+  // Endpoint health tracking
+  const [endpointHealth, setEndpointHealth] = useState<{
+    status: 'healthy' | 'stale' | 'not_updating' | 'empty' | 'error';
+    lastRecordAt: string | null;
+    message: string;
+    queriedAt: string | null;
+  } | null>(null);
 
   // Filters
   const [platform, setPlatform] = useState<string>('');
@@ -207,16 +215,29 @@ export default function Extractions() {
       if (status) params.set('status', status);
       if (provider) params.set('provider', provider);
 
-      const { data, error } = await supabase.functions.invoke(`admin-dashboard/extractions?${params.toString()}`, {
+      const { data, error: invokeError } = await supabase.functions.invoke(`admin-dashboard/extractions?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
         method: 'GET',
       });
 
-      if (error) throw error;
+      if (invokeError) throw invokeError;
+      
+      // Check for endpoint-level errors
+      if (data?.error) {
+        setError(`Data source error: ${data.message || data.error}`);
+        setEndpointHealth(data.health || { status: 'error', lastRecordAt: null, message: data.message, queriedAt: null });
+        setExtractions([]);
+        setTotal(0);
+        return;
+      }
+      
       setExtractions(data.extractions || []);
       setTotal(data.total || 0);
+      setEndpointHealth(data.health || null);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load extractions');
+      const errorMessage = err?.message || 'Failed to load extractions';
+      setError(errorMessage);
+      setEndpointHealth({ status: 'error', lastRecordAt: null, message: errorMessage, queriedAt: new Date().toISOString() });
     } finally {
       setIsLoading(false);
     }
@@ -266,24 +287,63 @@ export default function Extractions() {
         <SystemHealthBanner alerts={systemHealth.alerts} />
       )}
 
+      {/* Endpoint-specific stale/error alert */}
+      {endpointHealth && (endpointHealth.status === 'stale' || endpointHealth.status === 'not_updating' || endpointHealth.status === 'error') && (
+        <Card className={`border-l-4 ${endpointHealth.status === 'error' ? 'border-l-destructive bg-destructive/5' : endpointHealth.status === 'not_updating' ? 'border-l-destructive bg-destructive/5' : 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-950/20'}`}>
+          <CardContent className="py-3">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className={`h-5 w-5 ${endpointHealth.status === 'error' || endpointHealth.status === 'not_updating' ? 'text-destructive' : 'text-yellow-600'}`} />
+              <div>
+                <p className="font-medium">
+                  {endpointHealth.status === 'error' ? 'Data Source Error' : 
+                   endpointHealth.status === 'not_updating' ? 'Extractions Pipeline Stopped' : 
+                   'Extractions Data is Stale'}
+                </p>
+                <p className="text-sm text-muted-foreground">{endpointHealth.message}</p>
+                {endpointHealth.lastRecordAt && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Last record: {format(new Date(endpointHealth.lastRecordAt), 'MMM d, yyyy HH:mm:ss')}
+                  </p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <div>
             <h1 className="text-3xl font-bold">Price Extractions</h1>
-            <p className="text-muted-foreground">{total} total extractions</p>
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <span>{total} total extractions</span>
+              {endpointHealth?.lastRecordAt && (
+                <>
+                  <span>•</span>
+                  <span className="text-xs">
+                    Last: {format(new Date(endpointHealth.lastRecordAt), 'MMM d, HH:mm')}
+                  </span>
+                </>
+              )}
+            </div>
           </div>
-          {systemHealth?.sections.extractions && (
+          {endpointHealth && (
             <HealthIndicator 
-              status={systemHealth.sections.extractions.status} 
-              lastActivity={systemHealth.sections.extractions.lastActivity}
-              label="Extractions"
+              status={endpointHealth.status === 'error' || endpointHealth.status === 'empty' ? 'not_updating' : endpointHealth.status} 
+              lastActivity={endpointHealth.lastRecordAt}
+              label="Data Source"
             />
           )}
         </div>
-        <Button variant="outline" onClick={exportCSV}>
-          <Download className="mr-2 h-4 w-4" />
-          Export CSV
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={fetchExtractions} disabled={isLoading}>
+            <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+          </Button>
+          <Button variant="outline" onClick={exportCSV}>
+            <Download className="mr-2 h-4 w-4" />
+            Export CSV
+          </Button>
+        </div>
       </div>
 
       <Card>

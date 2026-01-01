@@ -451,6 +451,7 @@ Deno.serve(async (req) => {
       const page = parseInt(params.get('page') || '1');
       const limit = parseInt(params.get('limit') || '50');
 
+      // Build query
       let query = supabase
         .from('price_extractions')
         .select('*, searches(airbnb_url, airbnb_title)', { count: 'exact' });
@@ -461,9 +462,62 @@ Deno.serve(async (req) => {
       if (startDate) query = query.gte('created_at', startDate);
       if (endDate) query = query.lte('created_at', endDate);
 
-      const { data: extractions, count } = await query
+      const { data: extractions, count, error: queryError } = await query
         .order('created_at', { ascending: false })
         .range((page - 1) * limit, page * limit - 1);
+
+      // Check for query errors explicitly
+      if (queryError) {
+        console.error('[Admin Dashboard] Extractions query error:', queryError);
+        return new Response(
+          JSON.stringify({
+            error: 'query_failed',
+            message: queryError.message,
+            extractions: [],
+            total: 0,
+            health: {
+              status: 'error',
+              lastRecordAt: null,
+              message: `Database query failed: ${queryError.message}`,
+            }
+          }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Get the most recent extraction timestamp for health check
+      const { data: latestExtraction } = await supabase
+        .from('price_extractions')
+        .select('created_at, updated_at')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      const now = new Date();
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+      const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000);
+      
+      const lastRecordAt = latestExtraction?.[0]?.created_at || null;
+      const lastRecordDate = lastRecordAt ? new Date(lastRecordAt) : null;
+      
+      let healthStatus: 'healthy' | 'stale' | 'not_updating' | 'empty' = 'empty';
+      let healthMessage = 'No extraction records found';
+      
+      if (lastRecordDate) {
+        if (lastRecordDate > oneHourAgo) {
+          healthStatus = 'healthy';
+          healthMessage = 'Extractions are updating normally';
+        } else if (lastRecordDate > fourHoursAgo) {
+          healthStatus = 'stale';
+          const minutesAgo = Math.round((now.getTime() - lastRecordDate.getTime()) / 60000);
+          healthMessage = `No new extractions for ${minutesAgo} minutes`;
+        } else {
+          healthStatus = 'not_updating';
+          const hoursAgo = Math.round((now.getTime() - lastRecordDate.getTime()) / 3600000);
+          healthMessage = `Extractions stopped ${hoursAgo} hours ago - investigate generate-deep-links and price extraction pipeline`;
+        }
+      }
+
+      console.log(`[Admin Dashboard] Extractions: ${count} total, health=${healthStatus}, lastRecord=${lastRecordAt}`);
 
       return new Response(
         JSON.stringify({
@@ -494,7 +548,13 @@ Deno.serve(async (req) => {
           total: count,
           page,
           limit,
-          totalPages: Math.ceil((count || 0) / limit)
+          totalPages: Math.ceil((count || 0) / limit),
+          health: {
+            status: healthStatus,
+            lastRecordAt,
+            message: healthMessage,
+            queriedAt: now.toISOString(),
+          }
         }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
