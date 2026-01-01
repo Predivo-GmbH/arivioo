@@ -10,13 +10,23 @@ import { useAdminAuth } from '@/hooks/useAdminAuth';
 
 export default function AdminLogin() {
   const navigate = useNavigate();
-  const { login, isAuthenticated, isLoading } = useAdminAuth();
+  const { login, isAuthenticated, isLoading, ping } = useAdminAuth();
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [pingResult, setPingResult] = useState<null | {
+    ok: boolean;
+    error?: string;
+    requestId?: string;
+    originSeen?: string | null;
+    ts?: string;
+    url?: string;
+  }>(null);
 
   useEffect(() => {
     if (!isLoading && isAuthenticated) {
@@ -29,14 +39,34 @@ export default function AdminLogin() {
     setError('');
     setIsSubmitting(true);
 
+    // Proof-mode: ping first so we can surface URL + requestId and avoid the generic “Failed to send…”
+    const pingInfo = await ping();
+    setPingResult({
+      ok: pingInfo.ok,
+      error: pingInfo.error,
+      requestId: pingInfo.requestId,
+      originSeen: pingInfo.originSeen,
+      ts: pingInfo.ts,
+      url: pingInfo.debug?.url,
+    });
+
+    if (!pingInfo.ok) {
+      setDebugOpen(true);
+      setError(pingInfo.error || 'Admin auth ping failed (no HTTP response or blocked)');
+      setIsSubmitting(false);
+      return;
+    }
+
     const result = await login(email, password);
-    
+
     if (result.success) {
       navigate('/admin');
     } else {
       setError(result.error || 'Invalid credentials');
+      // If login failed, keep debug visible so you can capture requestId/url from ping.
+      setDebugOpen(true);
     }
-    
+
     setIsSubmitting(false);
   };
 
@@ -121,6 +151,62 @@ export default function AdminLogin() {
               )}
             </Button>
           </form>
+
+          <div className="mt-6">
+            <button
+              type="button"
+              className="w-full text-xs text-muted-foreground hover:text-foreground underline underline-offset-4"
+              onClick={() => setDebugOpen((v) => !v)}
+            >
+              {debugOpen ? 'Hide connection debug' : 'Show connection debug'}
+            </button>
+
+            {debugOpen && (
+              <div className="mt-3 rounded-md border bg-background/60 p-3 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">Admin auth diagnostics</span>
+                  <span className="text-muted-foreground">(safe to screenshot)</span>
+                </div>
+
+                <div className="mt-2 space-y-2">
+                  <div>
+                    <div className="text-muted-foreground">Expected ping URL</div>
+                    <code className="break-all">{pingResult?.url || `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-auth/ping`}</code>
+                  </div>
+
+                  <div>
+                    <div className="text-muted-foreground">Ping status</div>
+                    <div>{pingResult ? (pingResult.ok ? 'OK (HTTP response received)' : 'FAILED (no response or blocked)') : 'Not run yet'}</div>
+                  </div>
+
+                  {pingResult?.requestId && (
+                    <div>
+                      <div className="text-muted-foreground">Ping request_id</div>
+                      <code>{pingResult.requestId}</code>
+                    </div>
+                  )}
+
+                  {pingResult?.originSeen !== undefined && (
+                    <div>
+                      <div className="text-muted-foreground">Origin seen by backend</div>
+                      <code className="break-all">{String(pingResult.originSeen)}</code>
+                    </div>
+                  )}
+
+                  {pingResult?.error && (
+                    <div>
+                      <div className="text-muted-foreground">Ping error</div>
+                      <code className="break-all">{pingResult.error}</code>
+                    </div>
+                  )}
+
+                  <p className="text-muted-foreground">
+                    If ping is OK but login still fails, grab your DevTools Network entry for <code>/admin-auth/login</code> and the ping request_id above.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
 
           <p className="text-xs text-muted-foreground text-center mt-6">
             Protected area. Unauthorized access is prohibited.
