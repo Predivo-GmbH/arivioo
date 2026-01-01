@@ -1198,9 +1198,18 @@ export default function SearchResults() {
   const supportedResults = results.filter((r) => !r.is_tier_c_blocked);
   const tierCResults = results.filter((r) => r.is_tier_c_blocked);
 
-  // Separate results with and without valid prices (only from supported platforms)
-  const resultsWithPrices = supportedResults.filter((r) => !!r.price && r.price >= 10);
-  const resultsWithoutPrices = supportedResults.filter((r) => !r.price || r.price < 10);
+  // CRITICAL: A match MUST have comparison photos to be considered valid
+  // Results without photos cannot be verified and must not be shown as "matches"
+  const hasComparisonPhotos = (result: SearchResult): boolean => {
+    const resultImages = toStringArray(result.images);
+    // Must have at least one alternative image AND at least one Airbnb image for comparison
+    return resultImages.length > 0 && airbnbImages.length > 0;
+  };
+
+  // Separate results with and without valid prices (only from supported platforms WITH photos)
+  const resultsWithPhotos = supportedResults.filter(hasComparisonPhotos);
+  const resultsWithPrices = resultsWithPhotos.filter((r) => !!r.price && r.price >= 10);
+  const resultsWithoutPrices = resultsWithPhotos.filter((r) => !r.price || r.price < 10);
 
   // Sort by price descending (for results with prices)
   const sortedByPrice = [...resultsWithPrices].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
