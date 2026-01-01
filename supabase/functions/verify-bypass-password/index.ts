@@ -1,6 +1,26 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+// Secure CORS - Domain allowlist
+const ALLOWED_ORIGINS = [
+  'https://lovable.dev',
+  'https://www.lovable.dev',
+  /^https:\/\/[a-zA-Z0-9-]+\.lovable\.app$/,
+  /^https:\/\/[a-zA-Z0-9-]+\.lovableproject\.com$/,
+  /^https:\/\/id-preview--[a-zA-Z0-9-]+\.lovable\.app$/,
+  'https://arivioo.lovable.app',
+  'https://arivioo.com',
+  'https://www.arivioo.com',
+];
+
+function isOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+  return ALLOWED_ORIGINS.some(allowed => {
+    if (typeof allowed === 'string') return origin === allowed;
+    return allowed.test(origin);
+  });
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
