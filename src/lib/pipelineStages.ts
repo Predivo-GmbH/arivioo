@@ -81,20 +81,22 @@ export const PIPELINE_STAGES: readonly PipelineStage[] = [
   {
     id: 'find_matches',
     title: 'Finding Matches',
-    description: 'Searching Booking.com, Vrbo, TripAdvisor, and more...',
+    description: 'Searching platforms and verifying property matches...',
     icon: 'Globe',
     fallbackTypicalSeconds: [15, 35],
-    backendStatuses: ['searching_platforms', 'reverse_image_search_backup'],
-    statusPattern: '^searching_platforms_lens_|^text_search_',
+    // AI verification is part of finding matches, not a separate stage
+    // This prevents oscillation between find_matches and validate_dates
+    backendStatuses: ['searching_platforms', 'reverse_image_search_backup', 'validating_dates', 'phase_a'],
+    statusPattern: '^searching_platforms_lens_|^text_search_|^ai_verifying_',
   },
   {
     id: 'validate_dates',
-    title: 'Verifying Matches',
-    description: 'AI is confirming these are the same property...',
+    title: 'Applying Dates',
+    description: 'Setting your check-in/check-out dates on each platform...',
     icon: 'Calendar',
     fallbackTypicalSeconds: [8, 20],
-    backendStatuses: ['validating_dates', 'phase_a'],
-    statusPattern: '^ai_verifying_',
+    // Only explicit date validation statuses, not AI verification
+    backendStatuses: ['applying_dates', 'date_validation'],
   },
   {
     id: 'collect_prices',

@@ -47,6 +47,8 @@ export interface PipelineProgressProps {
   priceExtractionPlatforms?: PlatformExtractionStatus[];
   priceExtractionTotal?: number;
   priceExtractionCompleted?: number;
+  /** Optional stabilized stage index (monotonic) from parent - if provided, takes precedence */
+  stableStageIndex?: number;
   /** Callbacks */
   onCancel?: () => void;
   onSkip?: () => void;
@@ -68,11 +70,16 @@ export function PipelineProgress({
   priceExtractionPlatforms = [],
   priceExtractionTotal = 0,
   priceExtractionCompleted = 0,
+  stableStageIndex,
   onCancel,
   onSkip,
 }: PipelineProgressProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const { timings, getTimingForStage } = useStageTimings({ refreshIntervalMs: 60000 });
+  
+  // Internal monotonic stage tracking
+  const [highestStageIndex, setHighestStageIndex] = useState(-1);
+  const prevIsCompleteRef = React.useRef(isComplete);
 
   // Update elapsed time every 250ms
   useEffect(() => {
@@ -84,17 +91,42 @@ export function PipelineProgress({
     
     return () => clearInterval(interval);
   }, [startTime, isComplete]);
+  
+  // Reset highest stage index when a new search starts (isComplete goes from true to false)
+  useEffect(() => {
+    if (prevIsCompleteRef.current && !isComplete) {
+      // New search started, reset monotonic tracker
+      setHighestStageIndex(-1);
+    }
+    prevIsCompleteRef.current = isComplete;
+  }, [isComplete]);
 
   // Determine current stage from backend status
-  const currentStage = useMemo(() => {
-    if (isComplete) return null;
-    return getStageFromStatus(status);
+  const rawStageIndex = useMemo(() => {
+    if (isComplete) return -1;
+    const stage = getStageFromStatus(status);
+    if (!stage) return 0;
+    return PIPELINE_STAGES.findIndex(s => s.id === stage.id);
   }, [status, isComplete]);
+  
+  // Apply monotonic guard: use the higher of rawStageIndex, highestStageIndex, or stableStageIndex
+  useEffect(() => {
+    if (isComplete) return;
+    
+    const candidateIndex = stableStageIndex !== undefined ? Math.max(rawStageIndex, stableStageIndex) : rawStageIndex;
+    
+    if (candidateIndex > highestStageIndex) {
+      setHighestStageIndex(candidateIndex);
+    }
+  }, [rawStageIndex, stableStageIndex, highestStageIndex, isComplete]);
 
-  const currentStageIndex = useMemo(() => {
-    if (!currentStage) return -1;
-    return PIPELINE_STAGES.findIndex(s => s.id === currentStage.id);
-  }, [currentStage]);
+  // The final stage index used for rendering (monotonic, never decreases)
+  const currentStageIndex = isComplete ? -1 : Math.max(highestStageIndex, 0);
+  
+  const currentStage = useMemo(() => {
+    if (isComplete || currentStageIndex < 0) return null;
+    return PIPELINE_STAGES[currentStageIndex] || PIPELINE_STAGES[0];
+  }, [currentStageIndex, isComplete]);
 
   // Calculate total estimated time from telemetry
   const totalEstimatedTime = useMemo(() => {

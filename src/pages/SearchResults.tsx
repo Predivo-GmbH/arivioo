@@ -245,6 +245,9 @@ export default function SearchResults() {
   const [priceExtractionTotal, setPriceExtractionTotal] = useState(0);
   const [priceExtractionCompleted, setPriceExtractionCompleted] = useState(0);
   
+  // Monotonic stage tracking - prevents UI from jumping backwards
+  const [highestStageIndex, setHighestStageIndex] = useState(-1);
+  
   // User confirmation state for Airbnb total
   const [confirmedTotal, setConfirmedTotal] = useState<{
     confirmed_total_amount: number;
@@ -273,6 +276,7 @@ export default function SearchResults() {
   const tickerScrollRef = useRef<HTMLDivElement | null>(null);
   const activityIdCounterRef = useRef(0);
   const heartbeatIntervalRef = useRef<number | null>(null);
+  const highestStageIndexRef = useRef(-1); // Ref for use in SSE handler
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -390,6 +394,9 @@ export default function SearchResults() {
           lastProgressAtRef.current = Date.now();
           autoSkipRequestedRef.current = false;
           skipInFlightRef.current = false;
+          // Reset monotonic stage tracking for new search
+          setHighestStageIndex(-1);
+          highestStageIndexRef.current = -1;
 
           // Start timer + allow cancel/skip
           searchStartTimeRef.current = Date.now();
@@ -463,9 +470,18 @@ export default function SearchResults() {
                       lastProgressAtRef.current = Date.now();
                       autoSkipRequestedRef.current = false;
 
-                      // Update search status in real-time if backend sends it
+                      // Update search status in real-time if backend sends it (with monotonic guard)
                       if (data.status) {
-                        setSearch((prev) => (prev ? { ...prev, status: data.status } : prev));
+                        const newStageIndex = getStageIndexFromStatus(data.status);
+                        const currentHighest = highestStageIndexRef.current;
+                        
+                        // Only accept status updates that move forward (or stay same)
+                        if (newStageIndex >= currentHighest) {
+                          highestStageIndexRef.current = newStageIndex;
+                          setHighestStageIndex(newStageIndex);
+                          setSearch((prev) => (prev ? { ...prev, status: data.status } : prev));
+                        }
+                        // Silently ignore regressions from progress events
                       }
 
                       // If backend confirms a proven Airbnb total, ensure the confirmation modal is closed.
@@ -501,9 +517,26 @@ export default function SearchResults() {
                         setActivityFeed((prev) => [...prev, newItem].slice(-12));
                       }
                     } else if (eventType === "status_update") {
-                      // Dedicated status update event
+                      // Dedicated status update event with monotonic stage guard
                       if (data.status) {
-                        setSearch((prev) => prev ? { ...prev, status: data.status } : prev);
+                        const newStageIndex = getStageIndexFromStatus(data.status);
+                        const currentHighest = highestStageIndexRef.current;
+                        
+                        // Only accept status updates that move forward (or stay same)
+                        if (newStageIndex >= currentHighest) {
+                          highestStageIndexRef.current = newStageIndex;
+                          setHighestStageIndex(newStageIndex);
+                          setSearch((prev) => prev ? { ...prev, status: data.status } : prev);
+                        } else {
+                          // Log ignored regression for debugging
+                          console.log('[MonotonicGuard] Ignored stage regression:', {
+                            currentStatus: data.status,
+                            newStageIndex,
+                            currentHighest,
+                            rejectedStage: PIPELINE_STAGES[newStageIndex]?.title,
+                            activeStage: PIPELINE_STAGES[currentHighest]?.title,
+                          });
+                        }
                       }
                     } else if (eventType === "price_extraction_start") {
                       // Starting price extraction phase
@@ -1299,6 +1332,7 @@ export default function SearchResults() {
             priceExtractionPlatforms={priceExtractionPlatforms}
             priceExtractionTotal={priceExtractionTotal}
             priceExtractionCompleted={priceExtractionCompleted}
+            stableStageIndex={highestStageIndex}
             onCancel={requestCancelSearch}
             onSkip={() => requestSkipCurrentStep("manual")}
           />
