@@ -890,6 +890,11 @@ function sendProgress(controller: SSEController, step: string, detail?: string, 
   return sendSSE(controller, "progress", { step, detail, timestamp: Date.now(), ...meta });
 }
 
+// Send a dedicated status update event to sync frontend stage tracking
+function sendStatusUpdate(controller: SSEController, status: string): boolean {
+  return sendSSE(controller, "status_update", { status, timestamp: Date.now() });
+}
+
 function markControllerValid(controller: SSEController) {
   controllerValid.add(controller);
 }
@@ -4309,8 +4314,9 @@ async function runSearchWithStreaming(
 
   try {
     // Step 1: Extract Airbnb baseline using classic fallback order (Firecrawl -> Zyte -> Browserless)
-    sendProgress(controller, "Airbnb baseline", "Extracting Airbnb total (Firecrawl → Zyte → Browserless)");
-    await supabase.from("searches").update({ status: "extracting_photos", last_progress_at: new Date().toISOString() }).eq("id", searchId);
+    sendProgress(controller, "Analyzing listing", "Extracting property details and Airbnb price");
+    sendStatusUpdate(controller, "scraping_airbnb_page");
+    await supabase.from("searches").update({ status: "scraping_airbnb_page", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
     const zyteApiKey = Deno.env.get("ZYTE_API_KEY");
     const browserlessApiKey = Deno.env.get("BROWSERLESS_API_KEY");
@@ -5231,7 +5237,8 @@ async function runSearchWithStreaming(
     }
 
     // Step 2: Google Lens visual search
-    sendProgress(controller, "Starting visual search", `Searching ${imageUrls.length} images across booking platforms`);
+    sendProgress(controller, "Finding matches", `Searching ${imageUrls.length} images across booking platforms`);
+    sendStatusUpdate(controller, "searching_platforms");
     await supabase.from("searches").update({ status: "searching_platforms", last_progress_at: new Date().toISOString() }).eq("id", searchId);
   } catch (e) {
     stage1Outcome = 'failed';
@@ -5358,6 +5365,7 @@ async function runSearchWithStreaming(
       }
 
       sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
+      sendStatusUpdate(controller, `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`);
       await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
       await heartbeat();
 
@@ -5440,6 +5448,7 @@ async function runSearchWithStreaming(
 
   // Step 3: Scrape prices
   sendProgress(controller, "Collecting prices", `Getting prices from ${alternatives.length} platforms for dates ${checkIn} to ${checkOut}`);
+  sendStatusUpdate(controller, "comparing_prices");
   await supabase.from("searches").update({ status: "comparing_prices", last_progress_at: new Date().toISOString() }).eq("id", searchId);
 
   // Keep it bounded: price scraping is the slowest + most rate-limited step.
@@ -5680,6 +5689,10 @@ async function runSearchWithStreaming(
       }
     }
   }
+
+  // Step 4: Finalize results
+  sendProgress(controller, "Finalizing results", "Computing savings and preparing your results");
+  sendStatusUpdate(controller, "finalizing");
 
   await supabase.from("searches").update({
     status: "completed",

@@ -80,7 +80,7 @@ export const PIPELINE_STAGES: readonly PipelineStage[] = [
   },
   {
     id: 'find_matches',
-    title: 'Finding Comparable Listings',
+    title: 'Finding Matches',
     description: 'Searching Booking.com, Vrbo, TripAdvisor, and more...',
     icon: 'Globe',
     fallbackTypicalSeconds: [15, 35],
@@ -107,11 +107,11 @@ export const PIPELINE_STAGES: readonly PipelineStage[] = [
   },
   {
     id: 'finalize_results',
-    title: 'Comparing & Finalizing',
+    title: 'Finalizing Results',
     description: 'Computing savings and preparing your results...',
     icon: 'CheckCircle',
     fallbackTypicalSeconds: [2, 5],
-    backendStatuses: ['finalizing', 'computing_savings'],
+    backendStatuses: ['finalizing', 'computing_savings', 'completed'],
   },
 ] as const;
 
