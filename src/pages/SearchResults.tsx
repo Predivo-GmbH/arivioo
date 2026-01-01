@@ -113,24 +113,56 @@ const getCurrencySymbol = (currency: string | null | undefined): string => {
 
 // Resolve the effective error code used for UX branching.
 // IMPORTANT: dates_unavailable is terminal and must override any "needs confirmation" UX.
+// Maps backend error codes to terminal UX types for consistent friendly messaging.
 const resolveSearchErrorCode = (s: SearchData | null): string | null => {
   if (!s) return null;
 
+  // Get the raw error code from preferred fields
+  let rawCode: string | null = null;
+  
   // Preferred explicit field
-  if (s.api_error_code) return s.api_error_code;
+  if (s.api_error_code) {
+    rawCode = s.api_error_code;
+  }
 
   // Sometimes we store structured JSON in api_error
-  if (s.api_error) {
+  if (!rawCode && s.api_error) {
     try {
       const parsed = JSON.parse(s.api_error);
       const code = parsed?.code || parsed?.error_code || parsed?.api_error_code;
-      if (typeof code === 'string' && code.length > 0) return code;
+      if (typeof code === 'string' && code.length > 0) rawCode = code;
     } catch {
-      // ignore
+      // Check if the error message itself contains hints for terminal states
+      const errLower = s.api_error.toLowerCase();
+      if (errLower.includes('timeout') || errLower.includes('timed out')) {
+        rawCode = 'provider_timeout';
+      } else if (errLower.includes('429') || errLower.includes('rate limit')) {
+        rawCode = 'rate_limited';
+      } else if (errLower.includes('blocked') || errLower.includes('captcha') || errLower.includes('bot')) {
+        rawCode = 'bot_detected';
+      }
     }
   }
 
-  return null;
+  if (!rawCode) return null;
+  
+  // Normalize common error codes to terminal UX types
+  const codeMap: Record<string, string> = {
+    // Explicit terminal states
+    'dates_unavailable': 'dates_unavailable',
+    'rate_limited': 'rate_limited',
+    'airbnb_total_not_visible': 'airbnb_total_not_visible',
+    'provider_timeout': 'provider_timeout',
+    'bot_detected': 'bot_detected',
+    // Map common variants
+    'airbnb_blocked': 'bot_detected',
+    'airbnb_blocked_or_captcha': 'bot_detected',
+    'airbnb_timeout': 'provider_timeout',
+    'airbnb_dates_not_applied': 'airbnb_total_not_visible',
+    'airbnb_price_element_missing': 'airbnb_total_not_visible',
+  };
+  
+  return codeMap[rawCode] || rawCode;
 };
 
 // Helper to convert Json to string array
@@ -1397,58 +1429,62 @@ export default function SearchResults() {
                   return null;
                 })()}
 
-                {resolveSearchErrorCode(search) === "dates_unavailable" ? (
-                  <TerminalErrorPanel
-                    type="dates_unavailable"
-                    airbnbUrl={search?.airbnb_url}
-                    checkIn={checkIn}
-                    checkOut={checkOut}
-                    nights={nights}
-                  />
-                ) : resolveSearchErrorCode(search) === "rate_limited" ? (
-                  <TerminalErrorPanel
-                    type="rate_limited"
-                    airbnbUrl={search?.airbnb_url}
-                    checkIn={checkIn}
-                    checkOut={checkOut}
-                    nights={nights}
-                  />
-                ) : resolveSearchErrorCode(search) === "airbnb_total_not_visible" ? (
-                  <TerminalErrorPanel
-                    type="airbnb_total_not_visible"
-                    airbnbUrl={search?.airbnb_url}
-                    checkIn={checkIn}
-                    checkOut={checkOut}
-                    nights={nights}
-                    apiErrorCode={search?.api_error_code}
-                    apiError={search?.api_error}
-                  />
-                ) : search?.status === "error" ? (
-                  /* Handle failed/error searches */
-                  <div className="py-12 text-center">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-destructive/10 flex items-center justify-center">
-                      <AlertCircle className="w-8 h-8 text-destructive" />
-                    </div>
-                    <h3 className="text-xl font-semibold text-foreground mb-2">
-                      Search Failed
-                    </h3>
-                    <p className="text-muted-foreground mb-2 max-w-md mx-auto">
-                      {search?.api_error || "We encountered an error while searching for alternatives."}
-                    </p>
-                    {search?.api_error_code && (
-                      <p className="text-xs text-muted-foreground mb-6">
-                        Error code: {search.api_error_code}
-                      </p>
-                    )}
-                    <Button asChild>
-                      <Link to="/dashboard">
-                        <Search className="w-4 h-4 mr-2" />
-                        Try Another Search
-                      </Link>
-                    </Button>
-                  </div>
-                ) : (search?.status === "needs_user_confirmation" && !confirmedTotal && search?.airbnb_price == null) ? (
-                  // User needs to confirm the Airbnb trip total (only when we do NOT have a verified total)
+                {/* Handle all terminal error states with unified TerminalErrorPanel */}
+                {(() => {
+                  const errorCode = resolveSearchErrorCode(search);
+                  const terminalTypes = ["dates_unavailable", "rate_limited", "airbnb_total_not_visible", "provider_timeout", "bot_detected"];
+                  
+                  if (errorCode && terminalTypes.includes(errorCode)) {
+                    return (
+                      <TerminalErrorPanel
+                        type={errorCode as "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected"}
+                        airbnbUrl={search?.airbnb_url}
+                        checkIn={checkIn}
+                        checkOut={checkOut}
+                        nights={nights}
+                        apiErrorCode={search?.api_error_code}
+                        apiError={search?.api_error}
+                      />
+                    );
+                  }
+                  
+                  // Generic error state (for truly unknown errors)
+                  if (search?.status === "error") {
+                    return (
+                      <div className="py-12 text-center">
+                        <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-destructive/10 flex items-center justify-center">
+                          <AlertCircle className="w-8 h-8 text-destructive" />
+                        </div>
+                        <h3 className="text-xl font-semibold text-foreground mb-2">
+                          Something Went Wrong
+                        </h3>
+                        <p className="text-muted-foreground mb-4 max-w-md mx-auto">
+                          We encountered an unexpected error while searching for alternatives. Please try again.
+                        </p>
+                        <details className="mb-6 text-left max-w-md mx-auto">
+                          <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+                            Show technical details
+                          </summary>
+                          <div className="mt-2 p-3 bg-muted/50 rounded-lg text-xs text-muted-foreground font-mono">
+                            {search?.api_error_code && <div>Error code: {search.api_error_code}</div>}
+                            {search?.api_error && <div className="mt-1">Message: {search.api_error}</div>}
+                          </div>
+                        </details>
+                        <Button asChild>
+                          <Link to="/dashboard">
+                            <Search className="w-4 h-4 mr-2" />
+                            Try Another Search
+                          </Link>
+                        </Button>
+                      </div>
+                    );
+                  }
+                  
+                  return null;
+                })()}
+                
+                {/* User needs to confirm the Airbnb trip total (only when we do NOT have a verified total) */}
+                {(search?.status === "needs_user_confirmation" && !confirmedTotal && search?.airbnb_price == null && !resolveSearchErrorCode(search)) && (
                   <div className="py-8">
                     <AirbnbTotalConfirmation
                       searchId={searchId!}
@@ -1460,7 +1496,10 @@ export default function SearchResults() {
                       onCleared={handleTotalCleared}
                     />
                   </div>
-                ) : (search?.status === "price_unavailable") || (search?.status === "completed" && !search?.airbnb_price && !confirmedTotal) ? (
+                )}
+
+                {/* Price comparison unavailable - no terminal error, but no price either */}
+                {((search?.status === "price_unavailable") || (search?.status === "completed" && !search?.airbnb_price && !confirmedTotal)) && !resolveSearchErrorCode(search) && (
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-500/10 flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-amber-500" />
@@ -1501,7 +1540,10 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </div>
-) : (search?.status === "completed" && results.length === 0) ? (
+                )}
+
+                {/* No alternatives found */}
+                {(search?.status === "completed" && results.length === 0 && (search?.airbnb_price || confirmedTotal)) && (
                   <>
                     {/* No alternatives found, but still show Airbnb baseline */}
                     <div className="mb-6 p-4 rounded-xl bg-muted/40 border border-border">
@@ -1578,7 +1620,10 @@ export default function SearchResults() {
                       </Link>
                     </Button>
                   </>
-                ) : (search?.status === "completed" && displayResults.length === 0) ? (
+                )}
+
+                {/* Alternatives exist but none are cheaper than Airbnb */}
+                {(search?.status === "completed" && displayResults.length === 0 && (moreExpensiveResults.length > 0 || results.length > 0) && (search?.airbnb_price || confirmedTotal)) && (
                   /* Alternatives exist but none are cheaper than Airbnb - use same table layout */
                   <>
                     {/* Success banner */}
@@ -1845,7 +1890,10 @@ export default function SearchResults() {
                       </Button>
                     </div>
                   </>
-                ) : (
+                )}
+
+                {/* Main results with cheaper alternatives */}
+                {(search?.status === "completed" && displayResults.length > 0 && (search?.airbnb_price || confirmedTotal)) && (
                   <>
                     {/* Comparison Table - Matching ExampleResult layout */}
                     {/* Comparison Table - Matching ExampleResult layout */}

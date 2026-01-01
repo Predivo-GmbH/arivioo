@@ -1,8 +1,8 @@
 import { Link } from "react-router-dom";
-import { AlertCircle, Calendar, Info, Check, ExternalLink, Search } from "lucide-react";
+import { AlertCircle, Calendar, Info, Check, ExternalLink, Search, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible";
+type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected";
 
 interface TerminalErrorPanelProps {
   type: TerminalErrorType;
@@ -78,6 +78,42 @@ const config: Record<TerminalErrorType, {
     ],
     primaryAction: { label: "Try Different Dates", to: "/dashboard" },
   },
+  provider_timeout: {
+    icon: Clock,
+    iconColor: "text-purple-500",
+    bgColor: "bg-purple-500/10",
+    borderColor: "border-purple-500/20",
+    title: "Price Retrieval Timed Out",
+    description: (
+      <>
+        We couldn't retrieve the Airbnb pricing <span className="font-semibold text-foreground">in time</span>. The page took too long to load.
+      </>
+    ),
+    tips: [
+      "Try again in a moment — it may work on the next attempt",
+      "Open the listing on Airbnb to verify the price directly",
+      "If this persists, the listing may have complex pricing requirements",
+    ],
+    primaryAction: { label: "Try Again", to: "/dashboard" },
+  },
+  bot_detected: {
+    icon: AlertCircle,
+    iconColor: "text-red-500",
+    bgColor: "bg-red-500/10",
+    borderColor: "border-red-500/20",
+    title: "Access Temporarily Blocked",
+    description: (
+      <>
+        Airbnb is <span className="font-semibold text-foreground">blocking automated requests</span>. This is a temporary security measure.
+      </>
+    ),
+    tips: [
+      "Wait a few minutes and try again",
+      "Open the listing on Airbnb directly to see pricing",
+      "This usually resolves itself within 5-10 minutes",
+    ],
+    primaryAction: { label: "Try Again Later", to: "/dashboard" },
+  },
 };
 
 const formatDate = (dateStr: string): string => {
@@ -96,7 +132,8 @@ export function TerminalErrorPanel({
 }: TerminalErrorPanelProps) {
   const { icon: Icon, iconColor, bgColor, borderColor, title, description, tips, primaryAction } = config[type];
   const hasValidDates = checkIn && checkOut && nights && nights > 0;
-  const showTechnicalDetails = type === "airbnb_total_not_visible";
+  // Show technical details for non-obvious error types
+  const showTechnicalDetails = type === "airbnb_total_not_visible" || type === "provider_timeout" || type === "bot_detected";
 
   return (
     <div className="py-12 text-center">
