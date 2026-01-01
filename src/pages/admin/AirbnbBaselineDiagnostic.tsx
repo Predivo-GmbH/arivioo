@@ -486,11 +486,21 @@ export default function AirbnbBaselineDiagnostic() {
     return { amount: null, nights: results.nights, currency: 'USD' };
   };
 
+  // True terminal: dates unavailable → do NOT allow manual total confirmation
+  const isDatesUnavailable = (): boolean => {
+    if (!results) return false;
+    return results.results.some(r => r.final_status === 'dates_unavailable');
+  };
+
   // Check if any run needs confirmation (no proven total)
   const needsConfirmation = (): boolean => {
     if (!results) return false;
+
+    // Terminal precedence: if dates are unavailable, there is no price to confirm.
+    if (isDatesUnavailable()) return false;
+
     // If no run has a proven total, we need confirmation
-    const hasProvenTotal = results.results.some(r => 
+    const hasProvenTotal = results.results.some(r =>
       r.final_status.startsWith('total_price_') && r.final_price !== null
     );
     return !hasProvenTotal;
@@ -797,6 +807,31 @@ export default function AirbnbBaselineDiagnostic() {
                   </div>
                 </CardContent>
               </Card>
+
+              {/* Dates unavailable: terminal. Show guidance and never mount manual confirmation UI. */}
+              {results && isDatesUnavailable() && (
+                <Card className="border-primary/40">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Calendar className="h-5 w-5 text-primary" />
+                      Dates not available
+                    </CardTitle>
+                    <CardDescription>
+                      Airbnb indicates this listing is not available for the selected dates. To compare prices, change the dates and try again.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-wrap gap-2">
+                    <Button asChild>
+                      <a href={results.url} target="_blank" rel="noopener noreferrer">
+                        Open on Airbnb <ExternalLink className="h-4 w-4 ml-2" />
+                      </a>
+                    </Button>
+                    <Button variant="outline" onClick={() => setActiveTab('run')}>
+                      Change dates & re-run
+                    </Button>
+                  </CardContent>
+                </Card>
+              )}
 
               {/* Confirmation UI for when no proven total */}
               {needsConfirmation() && (
