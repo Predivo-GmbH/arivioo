@@ -361,9 +361,18 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
 
 function RunResultCard({ result }: { result: ValidationRunResult }) {
   const isSuccess = result.final_status.startsWith('total_price_');
+  const isDatesUnavailable = result.final_status === 'dates_unavailable';
+  
+  // PROOF LOG: Show exactly what status we're rendering
+  console.log('[AirbnbBaselineDiagnostic] RunResultCard:', { 
+    run_number: result.run_number,
+    final_status: result.final_status, 
+    isSuccess,
+    isDatesUnavailable 
+  });
   
   return (
-    <Card className={isSuccess ? 'border-green-500' : 'border-orange-400'}>
+    <Card className={isSuccess ? 'border-green-500' : isDatesUnavailable ? 'border-blue-500' : 'border-orange-400'}>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg">Run #{result.run_number}</CardTitle>
@@ -374,6 +383,17 @@ function RunResultCard({ result }: { result: ValidationRunResult }) {
             <StatusBadge status={result.final_status} />
           </div>
         </div>
+        {isDatesUnavailable && (
+          <div className="mt-3 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+            <div className="flex items-center gap-2 text-blue-700">
+              <Calendar className="w-5 h-5" />
+              <span className="font-semibold">Dates Not Available</span>
+            </div>
+            <p className="text-sm text-blue-600 mt-1">
+              This property is no longer available for the selected dates. Try different dates.
+            </p>
+          </div>
+        )}
         {isSuccess && result.final_price && (
           <div className="flex items-baseline gap-2 mt-2">
             <span className="text-2xl font-bold text-green-700">

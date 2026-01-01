@@ -26,13 +26,14 @@ async function verifyAdminSession(supabase: any, token: string): Promise<{ valid
 type AirbnbBaselineStatus =
   | 'total_price_including_taxes_and_fees'
   | 'total_price_excluding_taxes_and_fees'
-  | 'price_not_available_in_content';
+  | 'price_not_available_in_content'
+  | 'dates_unavailable';
 
 type ProviderName = 'firecrawl' | 'zyte' | 'browserless';
 
 interface ProviderAttemptResult {
   provider: ProviderName;
-  status: AirbnbBaselineStatus | 'provider_fetch_failed' | 'provider_not_supported' | 'airbnb_blocked_or_captcha';
+  status: AirbnbBaselineStatus | 'provider_fetch_failed' | 'provider_not_supported' | 'airbnb_blocked_or_captcha' | 'dates_unavailable';
   price: number | null;
   currency: string | null;
   includes_taxes_fees: boolean;
@@ -1068,6 +1069,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
           let bookingCardScreenshot = null;
 
           // ========== PRIMARY: Navigate to book/stays ==========
+          let isUnavailable = false;
           if (bookStaysUrl) {
             clickLog.push('PRIMARY: Navigating to book/stays');
             await page.goto(bookStaysUrl, { waitUntil: 'networkidle2', timeout: 60000 });
@@ -1079,12 +1081,17 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
             const isBookStaysPage = finalUrl.includes('/book/stays/' + roomId);
             const isLoginRedirect = finalUrl.includes('/login') || finalUrl.includes('/signin');
             
-            if (!isBookStaysPage || isLoginRedirect) {
+            // Check for unavailable dates (terminal state)
+            const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+            isUnavailable = /no longer available|dates are no longer available|unavailable for your dates|not available for these dates|someone else just requested|this listing is no longer|this home isn't available/i.test(bodyText);
+            
+            if (isUnavailable) {
+              clickLog.push('DATES_UNAVAILABLE detected');
+            } else if (!isBookStaysPage || isLoginRedirect) {
               clickLog.push('Book/stays failed: ' + (isLoginRedirect ? 'login_redirect' : 'wrong_path'));
               usedFallback = true;
             } else {
               // Check for Total on book/stays page
-              const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
               totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(bodyText) ||
                               /Pay\\s+\\$[\\d,]+/i.test(bodyText);
               clickLog.push('Book/stays Total found: ' + totalRowFound);
@@ -1142,7 +1149,8 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
             totalRowFound,
             clickLog: clickLog.join(' | '),
             bookingCardScreenshot,
-            breakdownOpened: !usedFallback
+            breakdownOpened: !usedFallback,
+            isUnavailable
           };
         }
       `,
@@ -1188,11 +1196,28 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     const bookingCardScreenshot = fnJson?.bookingCardScreenshot || null;
     const breakdownScreenshot = fnJson?.breakdownScreenshot || null;
     const breakdownOpened = fnJson?.breakdownOpened || false;
+    const isUnavailable = fnJson?.isUnavailable || false;
 
     console.log(`[Browserless] Click log: ${clickLog}`);
     console.log(`[Browserless] HTML length: ${html.length}, breakdown container: ${breakdownContainerHtml.length}`);
     console.log(`[Browserless] Total row found: ${totalRowFound}`);
+    console.log(`[Browserless] Is unavailable: ${isUnavailable}`);
     console.log(`[Browserless] Screenshots: bookingCard=${!!bookingCardScreenshot}, breakdown=${!!breakdownScreenshot}`);
+
+    // ========== CHECK FOR DATES UNAVAILABLE (terminal state) ==========
+    if (isUnavailable) {
+      return {
+        provider,
+        status: 'dates_unavailable',
+        price: null,
+        currency: null,
+        includes_taxes_fees: false,
+        evidence_snippet: `Property not available for selected dates. Click log: ${clickLog}`,
+        duration_ms: durationMs,
+        candidates_summary: [],
+        click_log: clickLog,
+      };
+    }
 
     // ========== OCR EXTRACTION (DOM-based, fallback to screenshot if available) ==========
     let ocrReference: OcrVisualReference | null = null;

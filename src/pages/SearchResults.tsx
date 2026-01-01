@@ -1335,6 +1335,15 @@ export default function SearchResults() {
                 )}
 
                 {/* Handle dates unavailable - listing not bookable for selected dates */}
+                {(() => {
+                  // PROOF LOG: Show exactly what fields we're checking
+                  console.log('[SearchResults] Checking dates_unavailable:', { 
+                    api_error_code: search?.api_error_code, 
+                    status: search?.status,
+                    api_error: search?.api_error 
+                  });
+                  return null;
+                })()}
                 {search?.api_error_code === "dates_unavailable" ? (
                   <div className="py-12 text-center">
                     <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-blue-500/10 flex items-center justify-center">
