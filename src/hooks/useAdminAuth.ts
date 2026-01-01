@@ -131,12 +131,33 @@ export function useAdminAuth() {
 
   const getToken = () => sessionStorage.getItem(ADMIN_TOKEN_KEY);
 
+  const ping = async (): Promise<{ ok: boolean; requestId?: string; originSeen?: string | null; ts?: string; error?: string; debug?: { url: string } }> => {
+    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-auth/ping`;
+
+    try {
+      const { data, error } = await supabase.functions.invoke('admin-auth/ping', {
+        method: 'GET',
+      });
+
+      if (error) {
+        console.error('[AdminAuth][ping] invoke error', { url, error });
+        return { ok: false, error: error.message, debug: { url } };
+      }
+
+      return { ok: Boolean(data?.ok), requestId: data?.requestId, originSeen: data?.originSeen ?? null, ts: data?.ts, debug: { url } };
+    } catch (err: any) {
+      console.error('[AdminAuth][ping] fetch failure', { url, name: err?.name, message: err?.message, err });
+      return { ok: false, error: err?.message || 'Ping failed', debug: { url } };
+    }
+  };
+
   return {
     ...state,
     login,
     logout,
     changePassword,
     getToken,
+    ping,
     refreshSession: verifySession,
   };
 }

@@ -7,7 +7,9 @@ const ALLOWED_ORIGINS = [
   /^https:\/\/[a-zA-Z0-9-]+\.lovable\.app$/,  // Any Lovable app subdomain
   /^https:\/\/[a-zA-Z0-9-]+\.lovableproject\.com$/,  // Any Lovable project subdomain
   /^https:\/\/id-preview--[a-zA-Z0-9-]+\.lovable\.app$/,  // Preview domains
-  'https://arivioo.lovable.app',  // Production domain
+  'https://arivioo.lovable.app',  // Production (Lovable-hosted)
+  'https://arivioo.com',          // Production custom domain
+  'https://www.arivioo.com',      // Production custom domain (www)
 ];
 
 function isOriginAllowed(origin: string | null): boolean {
@@ -33,7 +35,7 @@ function getCorsHeaders(request: Request): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Headers': requestedHeaders || 'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Credentials': 'true',
     'Vary': 'Origin, Access-Control-Request-Headers',
   };
@@ -261,6 +263,15 @@ Deno.serve(async (req) => {
   const action = path.split('/').pop();
   const ip = req.headers.get('x-forwarded-for') || req.headers.get('cf-connecting-ip') || 'unknown';
   const userAgent = req.headers.get('user-agent') || 'unknown';
+
+  // PING (proof-mode endpoint)
+  // GET /admin-auth/ping → 200 JSON with requestId for correlation
+  if (action === 'ping' && req.method === 'GET') {
+    return new Response(
+      JSON.stringify({ ok: true, ts: new Date().toISOString(), requestId, originSeen: origin ?? null }),
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
 
   try {
     // LOGIN
