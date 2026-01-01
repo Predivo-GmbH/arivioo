@@ -7,6 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
 import { useImageAlignment } from "@/hooks/useImageAlignment";
 import { getObjectPosition, getTransform } from "@/lib/imageAlignment";
+import { formatPrice } from "@/lib/utils";
 import cottageView1 from "@/assets/cottage-view-1.jpg";
 import cottageView2 from "@/assets/cottage-view-2.jpg";
 import type { Json } from "@/integrations/supabase/types";
@@ -243,7 +244,7 @@ export function Hero() {
                 <div className="mt-6 flex flex-col items-center gap-2">
                   <div className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-success text-success-foreground rounded-full font-bold text-lg">
                     <Sparkles className="w-5 h-5" />
-                    Save ${savings} per night!
+                    Save ${formatPrice(savings)} per night!
                   </div>
                   {savingsSimulated && (
                     <p className="text-xs text-muted-foreground">
