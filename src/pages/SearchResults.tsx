@@ -110,6 +110,28 @@ const getCurrencySymbol = (currency: string | null | undefined): string => {
 
 // Note: stageIcons are now in PipelineProgress component
 
+// Resolve the effective error code used for UX branching.
+// IMPORTANT: dates_unavailable is terminal and must override any "needs confirmation" UX.
+const resolveSearchErrorCode = (s: SearchData | null): string | null => {
+  if (!s) return null;
+
+  // Preferred explicit field
+  if (s.api_error_code) return s.api_error_code;
+
+  // Sometimes we store structured JSON in api_error
+  if (s.api_error) {
+    try {
+      const parsed = JSON.parse(s.api_error);
+      const code = parsed?.code || parsed?.error_code || parsed?.api_error_code;
+      if (typeof code === 'string' && code.length > 0) return code;
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+};
+
 // Helper to convert Json to string array
 const toStringArray = (json: Json | null | undefined): string[] => {
   if (!json) return [];
@@ -254,11 +276,21 @@ export default function SearchResults() {
         return;
       }
 
-      setSearch(searchData as SearchData);
-      setCurrentStep(getStageIndexFromStatus(searchData.status));
+      const searchRecord = searchData as SearchData;
+      const resolvedErrorCode = resolveSearchErrorCode(searchRecord);
+
+      // PROOF LOG: show what we will branch on
+      console.log('[SearchResults] resolvedErrorCode (initial load):', {
+        status: searchRecord.status,
+        api_error_code: searchRecord.api_error_code,
+        resolvedErrorCode,
+      });
+
+      setSearch(searchRecord);
+      setCurrentStep(getStageIndexFromStatus(searchRecord.status));
 
       // Handle dates_required status
-      if (searchData.status === "dates_required") {
+      if (searchRecord.status === "dates_required") {
         toast({
           title: "Dates Required",
           description: "Please include check-in and check-out dates in your Airbnb URL to compare prices.",
@@ -268,20 +300,34 @@ export default function SearchResults() {
         return;
       }
 
+      // Terminal UX: dates unavailable
+      if (resolvedErrorCode === 'dates_unavailable') {
+        setSearchPhase("done");
+        setLoading(false);
+        setShowConfirmationModal(false);
+        return;
+      }
+
+      // If the search has already failed, show the error state immediately.
+      if (searchRecord.status === 'error') {
+        setSearchPhase("done");
+        setLoading(false);
+        return;
+      }
+
       // If search needs user confirmation, show the modal
-      if (searchData.status === "needs_user_confirmation") {
+      if (searchRecord.status === "needs_user_confirmation") {
         // Parse subtotal info from api_error JSON
         try {
-          const errorData = JSON.parse(searchData.api_error || '{}');
+          const errorData = JSON.parse(searchRecord.api_error || '{}');
           if (errorData.subtotal_nights_only) {
             setSubtotalInfo({
               amount: errorData.subtotal_nights_only,
               nights: errorData.subtotal_nights_count || null,
-              currency: errorData.subtotal_currency || searchData.airbnb_currency || 'USD',
+              currency: errorData.subtotal_currency || searchRecord.airbnb_currency || 'USD',
             });
           }
         } catch {}
-        setSearch(searchData as SearchData);
         setSearchPhase("done");
         setLoading(false);
         setShowConfirmationModal(true);
@@ -289,7 +335,7 @@ export default function SearchResults() {
       }
 
       // If search is already completed, fetch enriched results
-      if (searchData.status === "completed") {
+      if (searchRecord.status === "completed") {
         const enrichedResults = await fetchEnrichedResults(searchId);
         setResults(enrichedResults as unknown as SearchResult[]);
         setSearchPhase("done");
@@ -298,7 +344,7 @@ export default function SearchResults() {
       }
 
       // If status is 'searching' or 'pending', trigger the search with SSE streaming
-      if (searchData.status === "searching" || searchData.status === "pending") {
+      if (searchRecord.status === "searching" || searchRecord.status === "pending") {
         try {
           // Reset to thinking phase
           setSearchPhase("thinking");
@@ -1021,7 +1067,10 @@ export default function SearchResults() {
   useEffect(() => {
     if (!search) return;
 
+    const resolvedErrorCode = resolveSearchErrorCode(search);
+
     const shouldShow =
+      resolvedErrorCode !== 'dates_unavailable' &&
       search.status === "needs_user_confirmation" &&
       !confirmedTotal &&
       search.airbnb_price == null;
@@ -1336,15 +1385,18 @@ export default function SearchResults() {
 
                 {/* Handle dates unavailable - listing not bookable for selected dates */}
                 {(() => {
+                  const resolvedErrorCode = resolveSearchErrorCode(search);
                   // PROOF LOG: Show exactly what fields we're checking
-                  console.log('[SearchResults] Checking dates_unavailable:', { 
-                    api_error_code: search?.api_error_code, 
+                  console.log('[SearchResults] resolvedErrorCode (render):', {
+                    resolvedErrorCode,
+                    api_error_code: search?.api_error_code,
                     status: search?.status,
-                    api_error: search?.api_error 
+                    api_error: search?.api_error,
                   });
                   return null;
                 })()}
-                {search?.api_error_code === "dates_unavailable" ? (
+
+                {resolveSearchErrorCode(search) === "dates_unavailable" ? (
                   <div className="py-12 text-center">
                     <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-blue-500/10 flex items-center justify-center">
                       <Calendar className="w-10 h-10 text-blue-500" />
