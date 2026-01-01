@@ -4983,7 +4983,20 @@ async function runSearchWithStreaming(
         } else if (hasContent) {
           // Content available - analyze for specific issues
           const content = lastScrapedContent.markdown || lastScrapedContent.html;
-          if (content.toLowerCase().includes('captcha') || content.toLowerCase().includes('robot') || content.toLowerCase().includes('verify you')) {
+          const contentLower = content.toLowerCase();
+          
+          // Check for dates unavailable FIRST - this is a valid terminal state, not an error
+          if (contentLower.includes('no longer available') || 
+              contentLower.includes('dates are no longer available') || 
+              contentLower.includes('unavailable for your dates') || 
+              contentLower.includes('not available for these dates') ||
+              contentLower.includes('someone else just requested') ||
+              contentLower.includes('this listing is no longer') ||
+              contentLower.includes('this home isn\'t available')) {
+            failureCode = 'dates_unavailable';
+            failureMessage = "This property is no longer available for your selected dates.";
+            userMessage = "The dates you selected are not available for this property. Please try different dates or a different listing.";
+          } else if (contentLower.includes('captcha') || contentLower.includes('robot') || contentLower.includes('verify you')) {
             failureCode = 'airbnb_blocked_or_captcha';
             failureMessage = "Airbnb requested human verification.";
             userMessage = "Airbnb is requiring verification. Please try again in a few minutes.";
@@ -4991,7 +5004,7 @@ async function runSearchWithStreaming(
             failureCode = 'airbnb_dates_not_applied';
             failureMessage = "The dates from your URL weren't applied to the listing.";
             userMessage = "The dates in your Airbnb link weren't applied. Make sure check_in and check_out parameters are in the URL.";
-          } else if ((content.includes('night') || content.includes('/night')) && !content.toLowerCase().includes('total')) {
+          } else if ((content.includes('night') || content.includes('/night')) && !contentLower.includes('total')) {
             failureCode = 'airbnb_total_not_visible';
             failureMessage = "Airbnb shows per-night pricing but no total for your dates.";
             userMessage = "Airbnb isn't showing the total price for your dates. The property may require interaction to reveal pricing.";

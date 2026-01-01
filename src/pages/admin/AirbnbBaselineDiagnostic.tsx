@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Play, RefreshCw, CheckCircle, XCircle, AlertCircle, Clock, Copy, History, ExternalLink, Beaker, AlertTriangle, Eye } from 'lucide-react';
+import { Play, RefreshCw, CheckCircle, XCircle, AlertCircle, Clock, Copy, History, ExternalLink, Beaker, AlertTriangle, Eye, Calendar } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -82,12 +82,22 @@ function StatusBadge({ status }: { status: string }) {
   const isBlocked = status.includes('blocked') || status.includes('captcha');
   const isNotSupported = status.includes('not_supported');
   const isNeedsConfirmation = status === 'needs_user_confirmation' || status === 'subtotal_nights_only';
+  const isDatesUnavailable = status === 'dates_unavailable';
   
   if (isSuccess) {
     return (
       <Badge className="bg-green-500/20 text-green-700 border-green-500/30">
         <CheckCircle className="w-3 h-3 mr-1" />
         {status.replace(/_/g, ' ')}
+      </Badge>
+    );
+  }
+
+  if (isDatesUnavailable) {
+    return (
+      <Badge className="bg-blue-500/20 text-blue-700 border-blue-500/30">
+        <Calendar className="w-3 h-3 mr-1" />
+        Dates Unavailable
       </Badge>
     );
   }
