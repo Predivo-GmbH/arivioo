@@ -1334,8 +1334,61 @@ export default function SearchResults() {
                   </div>
                 )}
 
-                {/* Handle failed/error searches */}
-                {search?.status === "error" ? (
+                {/* Handle dates unavailable - listing not bookable for selected dates */}
+                {search?.api_error_code === "dates_unavailable" ? (
+                  <div className="py-12 text-center">
+                    <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-blue-500/10 flex items-center justify-center">
+                      <Calendar className="w-10 h-10 text-blue-500" />
+                    </div>
+                    <h3 className="text-2xl font-bold text-foreground mb-3">
+                      Dates Not Available
+                    </h3>
+                    <p className="text-muted-foreground mb-2 max-w-lg mx-auto text-base">
+                      This property is <span className="font-semibold text-foreground">no longer available</span> for the dates you selected.
+                    </p>
+                    {hasValidDates && (
+                      <p className="text-sm text-muted-foreground mb-6">
+                        {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})
+                      </p>
+                    )}
+                    <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-5 max-w-md mx-auto mb-6">
+                      <h4 className="font-semibold text-foreground mb-2 flex items-center justify-center gap-2">
+                        <Info className="w-4 h-4 text-blue-500" />
+                        What you can do
+                      </h4>
+                      <ul className="text-sm text-muted-foreground text-left space-y-2">
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
+                          <span>Change the check-in and check-out dates in your Airbnb URL</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
+                          <span>Check the listing on Airbnb to see which dates are available</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <Check className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
+                          <span>Try a different property that has availability</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div className="flex items-center justify-center gap-3 flex-wrap">
+                      {search?.airbnb_url && (
+                        <Button variant="outline" asChild>
+                          <a href={search.airbnb_url} target="_blank" rel="noopener noreferrer">
+                            View Listing on Airbnb <ExternalLink className="w-4 h-4 ml-2" />
+                          </a>
+                        </Button>
+                      )}
+                      <Button asChild>
+                        <Link to="/dashboard">
+                          <Search className="w-4 h-4 mr-2" />
+                          Try Different Dates
+                        </Link>
+                      </Button>
+                    </div>
+                  </div>
+                ) : search?.status === "error" ? (
+                  /* Handle failed/error searches */
                   <div className="py-12 text-center">
                     <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-destructive/10 flex items-center justify-center">
                       <AlertCircle className="w-8 h-8 text-destructive" />
