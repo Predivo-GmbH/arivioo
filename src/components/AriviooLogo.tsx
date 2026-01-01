@@ -51,30 +51,6 @@ export function AriviooLogo({
           }}
         />
         
-        {/* Orbiting savings dot */}
-        <motion.div
-          className="absolute w-full h-full"
-          animate={{ rotate: 360 }}
-          transition={{ 
-            duration: 8,
-            repeat: Infinity,
-            ease: "linear"
-          }}
-        >
-          <motion.div 
-            className="absolute -top-0.5 left-1/2 -translate-x-1/2 w-2 h-2 bg-success rounded-full shadow-lg"
-            animate={{ 
-              scale: [1, 1.3, 1],
-              opacity: [0.8, 1, 0.8]
-            }}
-            transition={{ 
-              duration: 1.5,
-              repeat: Infinity,
-              ease: "easeInOut"
-            }}
-          />
-        </motion.div>
-        
         {/* Main compass/search icon */}
         <svg 
           width={iconSize[size]} 
