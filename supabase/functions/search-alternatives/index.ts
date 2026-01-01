@@ -420,6 +420,9 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
           let roomsHtml = '';
 
            // ========== STEP 1: Visit rooms page first to get title and images ==========
+           const MAX_HTML_CHARS = 350000;
+           const truncateHtml = (s) => (typeof s === 'string' ? s.slice(0, MAX_HTML_CHARS) : '');
+
            const safeContent = async () => {
              // page.content() can intermittently throw on Browserless; fall back to DOM serialization.
              try {
@@ -467,7 +470,7 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
               const w = await waitForMeaningfulText(25000);
               roomsTextLen = w.textLen || 0;
               roomsTitle = await page.title();
-              roomsHtml = await safeContent();
+              roomsHtml = truncateHtml(await safeContent());
             }
 
             // ========== STEP 2: Navigate to book/stays for price ==========
@@ -503,13 +506,13 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
 
                 const w = await waitForMeaningfulText(25000);
                 checkoutTextLen = w.textLen || 0;
-                checkoutHtml = await safeContent();
+                checkoutHtml = truncateHtml(await safeContent());
               } else {
                 // book/stays page already shows full breakdown
                 breakdownOpened = true;
                 const w = await waitForMeaningfulText(30000);
                 checkoutTextLen = w.textLen || 0;
-                checkoutHtml = await safeContent();
+                checkoutHtml = truncateHtml(await safeContent());
               }
             } else {
               usedFallback = true;
@@ -528,13 +531,13 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
 
               const w = await waitForMeaningfulText(25000);
               checkoutTextLen = w.textLen || 0;
-              checkoutHtml = await safeContent();
+              checkoutHtml = truncateHtml(await safeContent());
             }
 
-          // Capture screenshot from checkout/price page
-          await page.evaluate(() => window.scrollTo(0, 0));
-          await sleep(300);
-          const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
+           // Capture screenshot from checkout/price page
+           await page.evaluate(() => window.scrollTo(0, 0));
+           await sleep(300);
+           const screenshot = await page.screenshot({ encoding: 'base64', type: 'jpeg', quality: 70, fullPage: false });
 
            const html = (checkoutHtml && checkoutHtml.length > 200) ? checkoutHtml : roomsHtml;
 
