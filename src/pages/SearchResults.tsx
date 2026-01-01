@@ -1623,14 +1623,14 @@ export default function SearchResults() {
                   </div>
                 )}
 
-                {/* No alternatives found */}
-                {(search?.status === "completed" && results.length === 0 && (search?.airbnb_price || confirmedTotal)) && (
+                {/* No alternatives found (no valid photo-verified matches) */}
+                {(search?.status === "completed" && resultState === 'no_platforms_found' && (search?.airbnb_price || confirmedTotal)) && (
                   <>
                     {/* No alternatives found, but still show Airbnb baseline */}
                     <div className="mb-6 p-4 rounded-xl bg-muted/40 border border-border">
                       <h3 className="text-lg font-semibold text-foreground mb-1">No Alternative Listings Found</h3>
                       <p className="text-sm text-muted-foreground">
-                        We couldn’t find this property on other platforms using photo matching. Airbnb is likely your best option for this stay.
+                        We checked other booking platforms but did not find this property listed elsewhere with verifiable photos. This is currently the only available offer.
                       </p>
                     </div>
 
