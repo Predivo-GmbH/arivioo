@@ -1,9 +1,32 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
+// Allowed origins for CORS - restrict to Lovable app domains
+const ALLOWED_ORIGINS = [
+  'https://lovable.dev',
+  'https://www.lovable.dev',
+  /^https:\/\/[a-zA-Z0-9-]+\.lovable\.app$/,  // Any Lovable app subdomain
+  /^https:\/\/[a-zA-Z0-9-]+\.lovableproject\.com$/,  // Any Lovable project subdomain
+];
+
+function isOriginAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+  return ALLOWED_ORIGINS.some(allowed => {
+    if (typeof allowed === 'string') {
+      return origin === allowed;
+    }
+    return allowed.test(origin);
+  });
+}
+
+function getCorsHeaders(requestOrigin: string | null): Record<string, string> {
+  const origin = requestOrigin && isOriginAllowed(requestOrigin) ? requestOrigin : '';
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
+  };
+}
 
 async function verifyAdminSession(supabase: any, token: string): Promise<{ valid: boolean; admin?: any; error?: string }> {
   if (!token) {
@@ -135,6 +158,9 @@ async function getUsageTrend(supabase: any, providerNames: string[], days: numbe
 }
 
 Deno.serve(async (req) => {
+  const origin = req.headers.get('origin');
+  const corsHeaders = getCorsHeaders(origin);
+  
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
