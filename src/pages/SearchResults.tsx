@@ -12,6 +12,7 @@ import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS } from "@/hooks/useEn
 import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/lib/pipelineStages";
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
+import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -1397,166 +1398,31 @@ export default function SearchResults() {
                 })()}
 
                 {resolveSearchErrorCode(search) === "dates_unavailable" ? (
-                  <div className="py-12 text-center">
-                    <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-blue-500/10 flex items-center justify-center">
-                      <Calendar className="w-10 h-10 text-blue-500" />
-                    </div>
-                    <h3 className="text-2xl font-bold text-foreground mb-3">
-                      Dates Not Available
-                    </h3>
-                    <p className="text-muted-foreground mb-2 max-w-lg mx-auto text-base">
-                      This property is <span className="font-semibold text-foreground">no longer available</span> for the dates you selected.
-                    </p>
-                    {hasValidDates && (
-                      <p className="text-sm text-muted-foreground mb-6">
-                        {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})
-                      </p>
-                    )}
-                    <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-5 max-w-md mx-auto mb-6">
-                      <h4 className="font-semibold text-foreground mb-2 flex items-center justify-center gap-2">
-                        <Info className="w-4 h-4 text-blue-500" />
-                        What you can do
-                      </h4>
-                      <ul className="text-sm text-muted-foreground text-left space-y-2">
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-                          <span>Change the check-in and check-out dates in your Airbnb URL</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-                          <span>Check the listing on Airbnb to see which dates are available</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-                          <span>Try a different property that has availability</span>
-                        </li>
-                      </ul>
-                    </div>
-                    <div className="flex items-center justify-center gap-3 flex-wrap">
-                      {search?.airbnb_url && (
-                        <Button variant="outline" asChild>
-                          <a href={search.airbnb_url} target="_blank" rel="noopener noreferrer">
-                            View Listing on Airbnb <ExternalLink className="w-4 h-4 ml-2" />
-                          </a>
-                        </Button>
-                      )}
-                      <Button asChild>
-                        <Link to="/dashboard">
-                          <Search className="w-4 h-4 mr-2" />
-                          Try Different Dates
-                        </Link>
-                      </Button>
-                    </div>
-                  </div>
+                  <TerminalErrorPanel
+                    type="dates_unavailable"
+                    airbnbUrl={search?.airbnb_url}
+                    checkIn={checkIn}
+                    checkOut={checkOut}
+                    nights={nights}
+                  />
                 ) : resolveSearchErrorCode(search) === "rate_limited" ? (
-                  <div className="py-12 text-center">
-                    <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-orange-500/10 flex items-center justify-center">
-                      <AlertCircle className="w-10 h-10 text-orange-500" />
-                    </div>
-                    <h3 className="text-2xl font-bold text-foreground mb-3">
-                      Temporarily Unavailable
-                    </h3>
-                    <p className="text-muted-foreground mb-2 max-w-lg mx-auto text-base">
-                      We can't retrieve the price from Airbnb right now due to <span className="font-semibold text-foreground">temporary rate limiting</span>.
-                    </p>
-                    <div className="bg-orange-500/5 border border-orange-500/20 rounded-xl p-5 max-w-md mx-auto mb-6">
-                      <h4 className="font-semibold text-foreground mb-2 flex items-center justify-center gap-2">
-                        <Info className="w-4 h-4 text-orange-500" />
-                        What you can do
-                      </h4>
-                      <ul className="text-sm text-muted-foreground text-left space-y-2">
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-orange-500 mt-0.5 flex-shrink-0" />
-                          <span>Wait a few minutes and try again</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-orange-500 mt-0.5 flex-shrink-0" />
-                          <span>Airbnb limits how often we can check prices</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-orange-500 mt-0.5 flex-shrink-0" />
-                          <span>This is temporary — pricing data will be available again soon</span>
-                        </li>
-                      </ul>
-                    </div>
-                    <div className="flex items-center justify-center gap-3 flex-wrap">
-                      {search?.airbnb_url && (
-                        <Button variant="outline" asChild>
-                          <a href={search.airbnb_url} target="_blank" rel="noopener noreferrer">
-                            View Listing on Airbnb <ExternalLink className="w-4 h-4 ml-2" />
-                          </a>
-                        </Button>
-                      )}
-                      <Button asChild>
-                        <Link to="/dashboard">
-                          <Search className="w-4 h-4 mr-2" />
-                          Try Again Later
-                        </Link>
-                      </Button>
-                    </div>
-                  </div>
+                  <TerminalErrorPanel
+                    type="rate_limited"
+                    airbnbUrl={search?.airbnb_url}
+                    checkIn={checkIn}
+                    checkOut={checkOut}
+                    nights={nights}
+                  />
                 ) : resolveSearchErrorCode(search) === "airbnb_total_not_visible" ? (
-                  <div className="py-12 text-center">
-                    <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-amber-500/10 flex items-center justify-center">
-                      <AlertCircle className="w-10 h-10 text-amber-500" />
-                    </div>
-                    <h3 className="text-2xl font-bold text-foreground mb-3">
-                      Price Can't Be Confirmed
-                    </h3>
-                    <p className="text-muted-foreground mb-2 max-w-lg mx-auto text-base">
-                      Airbnb currently shows only <span className="font-semibold text-foreground">partial pricing</span> for this stay (per-night rate), but not a complete total including all fees.
-                    </p>
-                    {hasValidDates && (
-                      <p className="text-sm text-muted-foreground mb-6">
-                        {formatDate(checkIn!)} – {formatDate(checkOut!)} ({nights} {nights === 1 ? 'night' : 'nights'})
-                      </p>
-                    )}
-                    <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-5 max-w-md mx-auto mb-6">
-                      <h4 className="font-semibold text-foreground mb-2 flex items-center justify-center gap-2">
-                        <Info className="w-4 h-4 text-amber-500" />
-                        What you can do
-                      </h4>
-                      <ul className="text-sm text-muted-foreground text-left space-y-2">
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                          <span>Open the listing on Airbnb where the full total may be visible</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                          <span>Try different dates — pricing may vary by availability</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <Check className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                          <span>Check back later — Airbnb sometimes updates pricing display</span>
-                        </li>
-                      </ul>
-                    </div>
-                    <div className="flex items-center justify-center gap-3 flex-wrap">
-                      {search?.airbnb_url && (
-                        <Button variant="outline" asChild>
-                          <a href={search.airbnb_url} target="_blank" rel="noopener noreferrer">
-                            View on Airbnb <ExternalLink className="w-4 h-4 ml-2" />
-                          </a>
-                        </Button>
-                      )}
-                      <Button asChild>
-                        <Link to="/dashboard">
-                          <Search className="w-4 h-4 mr-2" />
-                          Try Different Dates
-                        </Link>
-                      </Button>
-                    </div>
-                    {/* Technical details hidden by default */}
-                    <details className="mt-6 text-left max-w-md mx-auto">
-                      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
-                        Show technical details
-                      </summary>
-                      <div className="mt-2 p-3 bg-muted/50 rounded-lg text-xs text-muted-foreground font-mono">
-                        Error code: {search?.api_error_code || 'airbnb_total_not_visible'}
-                        {search?.api_error && <div className="mt-1">Message: {search.api_error}</div>}
-                      </div>
-                    </details>
-                  </div>
+                  <TerminalErrorPanel
+                    type="airbnb_total_not_visible"
+                    airbnbUrl={search?.airbnb_url}
+                    checkIn={checkIn}
+                    checkOut={checkOut}
+                    nights={nights}
+                    apiErrorCode={search?.api_error_code}
+                    apiError={search?.api_error}
+                  />
                 ) : search?.status === "error" ? (
                   /* Handle failed/error searches */
                   <div className="py-12 text-center">
