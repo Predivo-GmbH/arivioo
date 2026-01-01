@@ -83,6 +83,7 @@ function StatusBadge({ status }: { status: string }) {
   const isNotSupported = status.includes('not_supported');
   const isNeedsConfirmation = status === 'needs_user_confirmation' || status === 'subtotal_nights_only';
   const isDatesUnavailable = status === 'dates_unavailable';
+  const isRateLimited = status === 'rate_limited';
   
   if (isSuccess) {
     return (
@@ -98,6 +99,15 @@ function StatusBadge({ status }: { status: string }) {
       <Badge className="bg-blue-500/20 text-blue-700 border-blue-500/30">
         <Calendar className="w-3 h-3 mr-1" />
         Dates Unavailable
+      </Badge>
+    );
+  }
+
+  if (isRateLimited) {
+    return (
+      <Badge className="bg-orange-500/20 text-orange-700 border-orange-500/30">
+        <AlertCircle className="w-3 h-3 mr-1" />
+        Rate Limited (429)
       </Badge>
     );
   }
@@ -362,17 +372,19 @@ function ProviderResultCard({ result }: { result: ProviderAttemptResult }) {
 function RunResultCard({ result }: { result: ValidationRunResult }) {
   const isSuccess = result.final_status.startsWith('total_price_');
   const isDatesUnavailable = result.final_status === 'dates_unavailable';
+  const isRateLimited = result.final_status === 'rate_limited';
   
   // PROOF LOG: Show exactly what status we're rendering
   console.log('[AirbnbBaselineDiagnostic] RunResultCard:', { 
     run_number: result.run_number,
     final_status: result.final_status, 
     isSuccess,
-    isDatesUnavailable 
+    isDatesUnavailable,
+    isRateLimited 
   });
   
   return (
-    <Card className={isSuccess ? 'border-green-500' : isDatesUnavailable ? 'border-blue-500' : 'border-orange-400'}>
+    <Card className={isSuccess ? 'border-green-500' : isDatesUnavailable ? 'border-blue-500' : isRateLimited ? 'border-orange-500' : 'border-orange-400'}>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg">Run #{result.run_number}</CardTitle>
@@ -391,6 +403,17 @@ function RunResultCard({ result }: { result: ValidationRunResult }) {
             </div>
             <p className="text-sm text-blue-600 mt-1">
               This property is no longer available for the selected dates. Try different dates.
+            </p>
+          </div>
+        )}
+        {isRateLimited && (
+          <div className="mt-3 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg">
+            <div className="flex items-center gap-2 text-orange-700">
+              <AlertCircle className="w-5 h-5" />
+              <span className="font-semibold">Rate Limited (HTTP 429)</span>
+            </div>
+            <p className="text-sm text-orange-600 mt-1">
+              Airbnb is temporarily rate limiting requests. Please try again in a few minutes.
             </p>
           </div>
         )}
@@ -496,14 +519,21 @@ export default function AirbnbBaselineDiagnostic() {
   const needsConfirmation = (): boolean => {
     if (!results) return false;
 
-    // Terminal precedence: if dates are unavailable, there is no price to confirm.
+    // Terminal precedence: if dates are unavailable or rate limited, there is no price to confirm.
     if (isDatesUnavailable()) return false;
+    if (isRateLimited()) return false;
 
     // If no run has a proven total, we need confirmation
     const hasProvenTotal = results.results.some(r =>
       r.final_status.startsWith('total_price_') && r.final_price !== null
     );
     return !hasProvenTotal;
+  };
+
+  // True terminal: rate limited → do NOT allow manual total confirmation
+  const isRateLimited = (): boolean => {
+    if (!results) return false;
+    return results.results.some(r => r.final_status === 'rate_limited');
   };
 
   const copyToClipboard = (text: string) => {

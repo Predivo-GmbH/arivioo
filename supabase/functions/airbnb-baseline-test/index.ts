@@ -27,13 +27,14 @@ type AirbnbBaselineStatus =
   | 'total_price_including_taxes_and_fees'
   | 'total_price_excluding_taxes_and_fees'
   | 'price_not_available_in_content'
-  | 'dates_unavailable';
+  | 'dates_unavailable'
+  | 'rate_limited';
 
 type ProviderName = 'firecrawl' | 'zyte' | 'browserless';
 
 interface ProviderAttemptResult {
   provider: ProviderName;
-  status: AirbnbBaselineStatus | 'provider_fetch_failed' | 'provider_not_supported' | 'airbnb_blocked_or_captcha' | 'dates_unavailable';
+  status: AirbnbBaselineStatus | 'provider_fetch_failed' | 'provider_not_supported' | 'airbnb_blocked_or_captcha' | 'dates_unavailable' | 'rate_limited';
   price: number | null;
   currency: string | null;
   includes_taxes_fees: boolean;
@@ -1172,6 +1173,28 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
       await logProviderRequest(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
+      
+      // Detect HTTP 429 rate limiting
+      const isRateLimited = resp.status === 429 || 
+        errText.includes('429 Too Many Requests') || 
+        (errText.includes('openresty') && errText.includes('Too Many Requests'));
+      
+      if (isRateLimited) {
+        console.log(`[Browserless] RATE LIMITED (429) - will be returned as rate_limited status`);
+        return {
+          provider,
+          status: 'rate_limited',
+          price: null,
+          currency: null,
+          includes_taxes_fees: false,
+          evidence_snippet: `Rate limited (HTTP 429): ${errText.slice(0, 200)}`,
+          error: 'HTTP 429 rate_limited',
+          duration_ms: durationMs,
+          candidates_summary: [],
+          click_log: 'Rate limited before script ran',
+        };
+      }
+      
       return {
         provider,
         status: 'provider_fetch_failed',
@@ -1576,13 +1599,35 @@ Deno.serve(async (req) => {
           selectedProvider = provider;
           break;
         }
+        
+        // Check for terminal states that should halt the chain
+        if (result.status === 'dates_unavailable' || result.status === 'rate_limited') {
+          finalStatus = result.status;
+          finalEvidenceSnippet = result.evidence_snippet;
+          console.log(`[Main] Terminal state reached: ${result.status} - stopping provider chain`);
+          break;
+        }
       }
 
-      // If no success, use last result's evidence
+      // If no success, use priority: rate_limited > dates_unavailable > last result
       if (!selectedProvider && providerResults.length > 0) {
-        const last = providerResults[providerResults.length - 1];
-        finalStatus = last.status;
-        finalEvidenceSnippet = last.evidence_snippet;
+        // Check if any provider hit rate_limited (takes priority)
+        const rateLimitedResult = providerResults.find(r => r.status === 'rate_limited');
+        const unavailableResult = providerResults.find(r => r.status === 'dates_unavailable');
+        
+        if (rateLimitedResult) {
+          finalStatus = 'rate_limited';
+          finalEvidenceSnippet = rateLimitedResult.evidence_snippet;
+          console.log(`[Main] Final status: rate_limited (from ${rateLimitedResult.provider})`);
+        } else if (unavailableResult) {
+          finalStatus = 'dates_unavailable';
+          finalEvidenceSnippet = unavailableResult.evidence_snippet;
+          console.log(`[Main] Final status: dates_unavailable (from ${unavailableResult.provider})`);
+        } else {
+          const last = providerResults[providerResults.length - 1];
+          finalStatus = last.status;
+          finalEvidenceSnippet = last.evidence_snippet;
+        }
       }
 
       results.push({
