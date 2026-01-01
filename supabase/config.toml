@@ -90,3 +90,42 @@ verify_jwt = false
 
 [functions.airbnb-url-normalizer]
 verify_jwt = false
+
+[functions.generate-deep-links]
+verify_jwt = false
+
+[functions.validate-dates]
+verify_jwt = false
+
+[functions.extract-prices]
+verify_jwt = false
+
+[functions.search-alternatives]
+verify_jwt = false
+
+[functions.cancel-search]
+verify_jwt = false
+
+[functions.request-skip-step]
+verify_jwt = false
+
+[functions.extract-expedia]
+verify_jwt = false
+
+[functions.extract-hotelscom]
+verify_jwt = false
+
+[functions.extract-agoda]
+verify_jwt = false
+
+[functions.process-platform-extraction]
+verify_jwt = false
+
+[functions.run-price-pipeline]
+verify_jwt = false
+
+[functions.analyze-image-alignment]
+verify_jwt = false
+
+[functions.generate-platform-adapter]
+verify_jwt = false
