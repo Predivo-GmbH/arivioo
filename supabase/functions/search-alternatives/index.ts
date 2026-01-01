@@ -363,7 +363,7 @@ function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
   }
 }
 
-async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: string, nights: number = 1): Promise<AirbnbScrapeResult> {
+async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey: string, nights: number = 1, attemptNum: number = 1): Promise<AirbnbScrapeResult> {
   const startTime = Date.now();
   const result: AirbnbScrapeResult = {
     ok: false,
@@ -382,7 +382,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     const bookStaysUrl = bookStaysParams?.book_stays_url || null;
     const roomId = bookStaysParams?.room_id || '';
     
-    console.log("Scraping Airbnb with Browserless (book/stays primary):", url.slice(0, 100));
+    console.log(`Browserless attempt ${attemptNum}: Scraping Airbnb (book/stays primary):`, url.slice(0, 100));
     console.log("Generated book/stays URL:", bookStaysUrl?.slice(0, 120) || 'none');
 
     // Use Browserless /function endpoint - PRIMARY: book/stays page for price, but capture title/images from rooms first
@@ -567,7 +567,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
       result.error = `Browserless HTTP ${response.status}: ${errText.slice(0, 200)}`;
-      console.error("Browserless function scrape failed:", result.error);
+      console.error(`Browserless attempt ${attemptNum} failed:`, result.error);
       return result;
     }
 
@@ -585,23 +585,23 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
         ? `Browserless returned insufficient content: ${serverMsg}`
         : "Browserless returned insufficient content";
 
-      console.error("Browserless insufficient content. Keys:", fnJson ? Object.keys(fnJson) : null);
+      console.error(`Browserless attempt ${attemptNum} insufficient content. Keys:`, fnJson ? Object.keys(fnJson) : null);
       return result;
     }
 
     // Debug preview
     if (fnJson?.totalSnippet) {
-      console.log("Browserless total snippet:", String(fnJson.totalSnippet).replace(/\s+/g, ' ').slice(0, 300));
+      console.log(`Browserless attempt ${attemptNum} total snippet:`, String(fnJson.totalSnippet).replace(/\s+/g, ' ').slice(0, 300));
     }
     const breakdownOpened = typeof fnJson?.breakdownOpened === 'boolean' ? fnJson.breakdownOpened : false;
     const usedFallback = typeof fnJson?.usedFallback === 'boolean' ? fnJson.usedFallback : false;
-    console.log("Browserless: usedFallback:", usedFallback, "breakdownOpened:", breakdownOpened);
+    console.log(`Browserless attempt ${attemptNum}: usedFallback:`, usedFallback, "breakdownOpened:", breakdownOpened);
 
     // Check for bot indicators
     result.botIndicators = detectBotIndicators(html);
 
     if (result.botIndicators.length > 0) {
-      console.log("Browserless: Bot indicators detected:", result.botIndicators.join(', '));
+      console.log(`Browserless attempt ${attemptNum}: Bot indicators detected:`, result.botIndicators.join(', '));
       result.error = `Bot detection: ${result.botIndicators.join(', ')}`;
       result.html = html;
       result.evidenceSnippet = extractEvidenceSnippet(html);
@@ -621,7 +621,7 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
 
     // Run OCR extraction on the screenshot
     if (screenshotForOcr) {
-      console.log("Running OCR extraction on Browserless screenshot...");
+      console.log(`Browserless attempt ${attemptNum}: Running OCR extraction...`);
       result.ocrReference = await extractOcrVisualReference(screenshotForOcr, nights, breakdownOpened);
     }
 
@@ -633,14 +633,80 @@ async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: strin
       .replace(/\s+/g, " ")
       .trim();
 
-    console.log("Browserless function scrape successful. HTML length:", html.length, "roomsHtml length:", result.roomsHtml?.length || 0, "Duration:", Date.now() - startTime, "ms", "Has OCR:", !!result.ocrReference);
+    console.log(`Browserless attempt ${attemptNum} successful. HTML length:`, html.length, "roomsHtml length:", result.roomsHtml?.length || 0, "Duration:", Date.now() - startTime, "ms", "Has OCR:", !!result.ocrReference);
 
     return result;
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
-    console.error("Browserless scrape error:", result.error);
+    console.error(`Browserless attempt ${attemptNum} error:`, result.error);
     return result;
   }
+}
+
+// Wrapper with single controlled retry and telemetry
+async function scrapeAirbnbWithBrowserless(url: string, browserlessApiKey: string, nights: number = 1, searchId?: string, supabase?: any): Promise<AirbnbScrapeResult> {
+  const MAX_ATTEMPTS = 2;
+  const BACKOFF_MS = 2000;
+  
+  let lastResult: AirbnbScrapeResult | null = null;
+  
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const attemptStart = Date.now();
+    
+    const result = await scrapeAirbnbWithBrowserlessAttempt(url, browserlessApiKey, nights, attempt);
+    const attemptDurationMs = Date.now() - attemptStart;
+    
+    // Record telemetry for each attempt
+    if (supabase && searchId) {
+      try {
+        await supabase.from('search_stage_runs').insert({
+          search_id: searchId,
+          stage_name: 'browserless_baseline_attempt',
+          started_at: new Date(attemptStart).toISOString(),
+          finished_at: new Date().toISOString(),
+          duration_ms: attemptDurationMs,
+          outcome_status: result.ok ? 'success' : 'failed',
+          error_message: result.ok ? null : (result.error || 'Unknown error').slice(0, 500),
+          metadata: {
+            attempt_number: attempt,
+            max_attempts: MAX_ATTEMPTS,
+            html_length: result.html?.length || 0,
+            has_ocr: !!result.ocrReference,
+            bot_indicators: result.botIndicators || [],
+            status_code: result.statusCode,
+            retry_triggered: !result.ok && attempt < MAX_ATTEMPTS,
+          },
+        });
+      } catch (telemetryErr) {
+        console.error('Failed to record browserless attempt telemetry:', telemetryErr);
+      }
+    }
+    
+    lastResult = result;
+    
+    // Success - return immediately
+    if (result.ok) {
+      console.log(`Browserless succeeded on attempt ${attempt}/${MAX_ATTEMPTS}`);
+      return result;
+    }
+    
+    // Check if error is retryable (insufficient content, not bot detection or HTTP errors)
+    const isRetryable = result.error?.includes('insufficient content') && 
+                        result.botIndicators.length === 0 &&
+                        (!result.statusCode || result.statusCode >= 500 || result.statusCode === 0);
+    
+    if (!isRetryable || attempt >= MAX_ATTEMPTS) {
+      console.log(`Browserless not retrying: retryable=${isRetryable}, attempt=${attempt}/${MAX_ATTEMPTS}`);
+      break;
+    }
+    
+    // Backoff before retry
+    const backoffTime = BACKOFF_MS * attempt;
+    console.log(`Browserless retry ${attempt + 1}/${MAX_ATTEMPTS} after ${backoffTime}ms backoff...`);
+    await sleep(backoffTime);
+  }
+  
+  return lastResult!;
 }
 
 // ScrapingBee removed - using Browserless only
@@ -4375,7 +4441,7 @@ async function runSearchWithStreaming(
           return { provider, baseline: emptyBaseline('Browserless'), error: 'No API key', durationMs: Date.now() - start };
         }
 
-        const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey, nights);
+        const browserlessResult = await scrapeAirbnbWithBrowserless(search.airbnb_url, browserlessApiKey, nights, searchId, supabase);
         const durationMs = Date.now() - start;
 
         // Log every Browserless request (success or failure)
