@@ -32,64 +32,118 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
     .join('');
 }
 
-// Part 1: Build the "book/stays" URL from a rooms URL
-function buildBookStaysUrl(roomsUrl: string, guestCurrency = 'USD'): {
+// ============================================================================
+// CANONICAL URL NORMALIZER - Shared Logic (Golden Path)
+// This is the SINGLE SOURCE OF TRUTH for Airbnb URL normalization.
+// Keep in sync with supabase/functions/airbnb-url-normalizer/index.ts
+// ============================================================================
+
+interface NormalizedAirbnbUrls {
   book_stays_url: string;
+  rooms_url: string;
   room_id: string;
   check_in: string;
   check_out: string;
+  nights_count: number;
   adults: number;
   children: number;
   infants: number;
   pets: number;
-  nights_count: number;
-} | null {
+}
+
+function buildBookStaysUrl(inputUrl: string, guestCurrency = 'USD'): NormalizedAirbnbUrls | null {
   try {
-    const parsed = new URL(roomsUrl);
+    const parsed = new URL(inputUrl);
     
-    // Extract roomId from path: /rooms/<id>
-    const pathMatch = parsed.pathname.match(/\/rooms\/(\d+)/);
-    if (!pathMatch) return null;
-    const roomId = pathMatch[1];
+    // Extract room ID from /rooms/<id> or /book/stays/<id>
+    let roomId: string | null = null;
+    const roomsMatch = parsed.pathname.match(/\/rooms\/(\d+)/);
+    if (roomsMatch) roomId = roomsMatch[1];
+    const bookStaysMatch = parsed.pathname.match(/\/book\/stays\/(\d+)/);
+    if (bookStaysMatch) roomId = bookStaysMatch[1];
+    if (!roomId) return null;
     
-    // Extract dates from query params
-    const checkIn = parsed.searchParams.get('check_in') || '';
-    const checkOut = parsed.searchParams.get('check_out') || '';
+    // Extract dates (handle both formats)
+    const checkIn = parsed.searchParams.get('checkin') || parsed.searchParams.get('check_in') || '';
+    const checkOut = parsed.searchParams.get('checkout') || parsed.searchParams.get('check_out') || '';
     if (!checkIn || !checkOut) return null;
     
-    // Parse guests - prefer adults if present, else use guests
-    const adultsParam = parsed.searchParams.get('adults');
-    const guestsParam = parsed.searchParams.get('guests');
-    const adults = adultsParam ? parseInt(adultsParam, 10) : (guestsParam ? parseInt(guestsParam, 10) : 1);
+    // Validate dates
+    const checkInDate = new Date(checkIn + 'T00:00:00Z');
+    const checkOutDate = new Date(checkOut + 'T00:00:00Z');
+    if (isNaN(checkInDate.getTime()) || isNaN(checkOutDate.getTime())) return null;
+    if (checkOutDate <= checkInDate) return null;
     
-    // Calculate nights
-    const checkInDate = new Date(checkIn);
-    const checkOutDate = new Date(checkOut);
     const nightsCount = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
     
-    // Build book/stays URL with all required params
+    // Extract guest parameters
+    const adults = parseInt(
+      parsed.searchParams.get('numberOfAdults') || 
+      parsed.searchParams.get('adults') || 
+      '1', 
+      10
+    ) || 1;
+    
+    const children = parseInt(
+      parsed.searchParams.get('numberOfChildren') || 
+      parsed.searchParams.get('children') || 
+      '0', 
+      10
+    ) || 0;
+    
+    const infants = parseInt(
+      parsed.searchParams.get('numberOfInfants') || 
+      parsed.searchParams.get('infants') || 
+      '0', 
+      10
+    ) || 0;
+    
+    const pets = parseInt(
+      parsed.searchParams.get('numberOfPets') || 
+      parsed.searchParams.get('pets') || 
+      '0', 
+      10
+    ) || 0;
+    
+    // Calculate numberOfGuests (pets don't count)
+    const existingGuests = parsed.searchParams.get('numberOfGuests') || parsed.searchParams.get('guests');
+    const numberOfGuests = existingGuests 
+      ? parseInt(existingGuests, 10) || (adults + children + infants)
+      : adults + children + infants;
+    
+    // Build canonical book/stays URL with FIXED PARAMETER ORDER
     const bookStaysUrl = new URL(`https://www.airbnb.com/book/stays/${roomId}`);
+    bookStaysUrl.searchParams.set('numberOfGuests', String(numberOfGuests));
+    bookStaysUrl.searchParams.set('numberOfAdults', String(adults));
     bookStaysUrl.searchParams.set('checkin', checkIn);
     bookStaysUrl.searchParams.set('checkout', checkOut);
-    bookStaysUrl.searchParams.set('numberOfGuests', String(adults));
-    bookStaysUrl.searchParams.set('numberOfAdults', String(adults));
-    bookStaysUrl.searchParams.set('numberOfChildren', '0');
-    bookStaysUrl.searchParams.set('numberOfInfants', '0');
-    bookStaysUrl.searchParams.set('numberOfPets', '0');
-    bookStaysUrl.searchParams.set('isWorkTrip', 'false');
     bookStaysUrl.searchParams.set('guestCurrency', guestCurrency);
     bookStaysUrl.searchParams.set('productId', roomId);
+    bookStaysUrl.searchParams.set('isWorkTrip', 'false');
+    bookStaysUrl.searchParams.set('numberOfChildren', String(children));
+    bookStaysUrl.searchParams.set('numberOfInfants', String(infants));
+    bookStaysUrl.searchParams.set('numberOfPets', String(pets));
+    
+    // Build canonical rooms URL
+    const roomsUrl = new URL(`https://www.airbnb.com/rooms/${roomId}`);
+    roomsUrl.searchParams.set('check_in', checkIn);
+    roomsUrl.searchParams.set('check_out', checkOut);
+    roomsUrl.searchParams.set('adults', String(adults));
+    if (children > 0) roomsUrl.searchParams.set('children', String(children));
+    if (infants > 0) roomsUrl.searchParams.set('infants', String(infants));
+    if (pets > 0) roomsUrl.searchParams.set('pets', String(pets));
     
     return {
       book_stays_url: bookStaysUrl.toString(),
+      rooms_url: roomsUrl.toString(),
       room_id: roomId,
       check_in: checkIn,
       check_out: checkOut,
-      adults,
-      children: 0,
-      infants: 0,
-      pets: 0,
       nights_count: nightsCount,
+      adults,
+      children,
+      infants,
+      pets,
     };
   } catch {
     return null;
