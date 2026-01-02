@@ -1,6 +1,13 @@
 import { useCallback } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import type { Json } from '@/integrations/supabase/types';
+import { 
+  verifyPrice, 
+  classifyScrapedPrice, 
+  type PriceStatus, 
+  type PriceSource,
+  type PriceVerificationResult 
+} from '@/lib/priceVerification';
 
 export interface EnrichedSearchResult {
   id: string;
@@ -27,6 +34,12 @@ export interface EnrichedSearchResult {
   failure_category: string | null;
   failure_reason: string | null;
   is_tier_c_blocked: boolean;
+  // NEW: Price verification metadata
+  price_status: PriceStatus;
+  price_source: PriceSource;
+  price_verified_at: string | null;
+  eligible_for_comparison: boolean;
+  verification_failures: string[];
 }
 
 // Maps extraction errors to human-readable failure categories
@@ -100,10 +113,10 @@ export function useEnrichedSearchResults() {
       return [];
     }
 
-    // Fetch price_extractions for this search
+    // Fetch price_extractions for this search - include verification fields
     const { data: extractionsData } = await supabase
       .from('price_extractions')
-      .select('id, search_result_id, platform_name, extraction_status, extraction_error, extracted_price, extraction_metadata')
+      .select('id, search_result_id, platform_name, extraction_status, extraction_error, extracted_price, extraction_metadata, includes_taxes_fees, dates_validated, confidence_score, updated_at')
       .eq('search_id', searchId);
 
     // Fetch platform_adapters for tier info
@@ -168,6 +181,43 @@ export function useEnrichedSearchResults() {
         effectivePrice = extraction.extracted_price;
       }
 
+      // === PRICE VERIFICATION ===
+      // Apply central verification logic to determine if price is trustworthy
+      let verification: PriceVerificationResult;
+      
+      if (isTierCBlocked) {
+        // Tier C platforms are always unavailable
+        verification = {
+          price_status: 'unavailable',
+          price_source: 'none',
+          price_verified_at: null,
+          eligible_for_comparison: false,
+          verification_failures: ['platform_blocked'],
+        };
+      } else if (extraction) {
+        // We have an extraction record - use verification logic
+        verification = verifyPrice({
+          extraction_status: extraction.extraction_status,
+          dates_validated: extraction.dates_validated,
+          includes_taxes_fees: extraction.includes_taxes_fees,
+          confidence_score: extraction.confidence_score,
+          extracted_price: extraction.extracted_price,
+          extraction_completed_at: extraction.updated_at,
+        });
+      } else if (result.price && result.price > 0) {
+        // Price exists but no extraction record - scraped price
+        verification = classifyScrapedPrice(result.price);
+      } else {
+        // No price at all
+        verification = {
+          price_status: 'unavailable',
+          price_source: 'none',
+          price_verified_at: null,
+          eligible_for_comparison: false,
+          verification_failures: ['no_price'],
+        };
+      }
+
       return {
         ...result,
         price: effectivePrice,
@@ -178,6 +228,12 @@ export function useEnrichedSearchResults() {
         failure_category: isTierCBlocked ? 'unsupported' : category,
         failure_reason: isTierCBlocked ? 'Platform blocked (Tier C)' : reason,
         is_tier_c_blocked: isTierCBlocked,
+        // Price verification metadata
+        price_status: verification.price_status,
+        price_source: verification.price_source,
+        price_verified_at: verification.price_verified_at,
+        eligible_for_comparison: verification.eligible_for_comparison,
+        verification_failures: verification.verification_failures,
       };
     });
 
