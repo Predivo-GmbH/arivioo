@@ -6815,6 +6815,23 @@ serve(async (req) => {
             dates_differ: false,
           }))
         );
+        
+        // Trigger deep link generation for price extraction
+        try {
+          const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+          const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+          await fetch(`${supabaseUrl}/functions/v1/generate-deep-links`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${supabaseServiceKey}`,
+            },
+            body: JSON.stringify({ searchId, checkIn, checkOut, adults: 2, children: 0, rooms: 1 }),
+          });
+          console.log("Triggered generate-deep-links for price extraction");
+        } catch (deepLinkError) {
+          console.error("Error triggering deep links:", deepLinkError);
+        }
       }
 
       await supabase.from("searches").update({
@@ -7133,6 +7150,23 @@ serve(async (req) => {
           dates_differ: r.dates_differ || false,
         }))
       );
+      
+      // Trigger deep link generation for price extraction
+      try {
+        const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+        const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+        await fetch(`${supabaseUrl}/functions/v1/generate-deep-links`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseServiceKey}`,
+          },
+          body: JSON.stringify({ searchId, checkIn, checkOut, adults: 2, children: 0, rooms: 1 }),
+        });
+        console.log("Triggered generate-deep-links for price extraction (legacy path)");
+      } catch (deepLinkError) {
+        console.error("Error triggering deep links:", deepLinkError);
+      }
     } else {
       console.log("No results with valid prices to store");
     }
