@@ -9,10 +9,12 @@ import { quickCelebration } from "@/lib/confetti";
 import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
 import { PipelineProgress, type ActivityItem } from "@/components/PipelineProgress";
 import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS } from "@/hooks/useEnrichedSearchResults";
+import { useSearchAccess } from "@/hooks/useSearchAccess";
 import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/lib/pipelineStages";
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
+import { LockedResultsView } from "@/components/LockedResultsView";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -224,6 +226,15 @@ export default function SearchResults() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { fetchEnrichedResults } = useEnrichedSearchResults();
+  const { 
+    fetchAccess, 
+    isLocked, 
+    isUnlocked, 
+    publicSummary, 
+    privateResults, 
+    lockedReason,
+    loading: accessLoading 
+  } = useSearchAccess();
   
   const [user, setUser] = useState<User | null>(null);
   const [search, setSearch] = useState<SearchData | null>(null);
@@ -244,6 +255,7 @@ export default function SearchResults() {
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
   const [priceExtractionTotal, setPriceExtractionTotal] = useState(0);
   const [priceExtractionCompleted, setPriceExtractionCompleted] = useState(0);
+  const [accessChecked, setAccessChecked] = useState(false);
   
   // Monotonic stage tracking - prevents UI from jumping backwards
   const [highestStageIndex, setHighestStageIndex] = useState(-1);
@@ -292,10 +304,35 @@ export default function SearchResults() {
     return () => subscription.unsubscribe();
   }, [navigate]);
 
-  // Fetch search data and trigger search
+  // Check access control before proceeding with search
+  useEffect(() => {
+    if (!searchId || !user || accessChecked) return;
+
+    const checkAccess = async () => {
+      console.log('[SearchResults] Checking access for search:', searchId);
+      const accessData = await fetchAccess(searchId);
+      setAccessChecked(true);
+      
+      if (accessData?.access === 'locked') {
+        console.log('[SearchResults] Access is LOCKED:', accessData.lockedReason);
+        setLoading(false);
+        setSearchPhase('done');
+        // Don't proceed with search - will render LockedResultsView
+        return;
+      }
+      
+      console.log('[SearchResults] Access is UNLOCKED - proceeding with search');
+    };
+
+    checkAccess();
+  }, [searchId, user, accessChecked, fetchAccess]);
+
+  // Fetch search data and trigger search (only when access is unlocked)
   useEffect(() => {
     if (!searchId || !user) return;
     if (searchTriggeredRef.current) return;
+    // Wait for access check to complete and confirm unlocked
+    if (!accessChecked || isLocked) return;
 
     const fetchAndSearch = async () => {
       searchTriggeredRef.current = true;
@@ -775,7 +812,7 @@ export default function SearchResults() {
     };
 
     fetchAndSearch();
-  }, [searchId, user, navigate, toast, runSeq, fetchEnrichedResults]);
+  }, [searchId, user, navigate, toast, runSeq, fetchEnrichedResults, accessChecked, isLocked]);
 
   // Thinking phase timer (improves UX + makes "stuck" feel less scary)
   useEffect(() => {
@@ -1168,6 +1205,30 @@ export default function SearchResults() {
   };
 
   if (!user) return null;
+
+  // Render locked view when access is restricted
+  if (accessChecked && isLocked && publicSummary) {
+    return (
+      <LockedResultsView
+        searchId={publicSummary.searchId}
+        status={publicSummary.status}
+        isComplete={publicSummary.isComplete}
+        resultCount={publicSummary.resultCount}
+        checkInDate={publicSummary.checkInDate}
+        checkOutDate={publicSummary.checkOutDate}
+        nightsCount={publicSummary.nightsCount}
+        lockedReason={lockedReason || 'email_verification_required'}
+        onUnlockRequest={() => {
+          // Placeholder for email unlock flow - will be implemented in next prompt
+          toast({
+            title: "Coming Soon",
+            description: "Email verification will be available soon.",
+          });
+        }}
+      />
+    );
+  }
+
   const airbnbImages = toStringArray(search?.airbnb_images);
 
   // Use dates from database first (these are the actual comparison dates used)
