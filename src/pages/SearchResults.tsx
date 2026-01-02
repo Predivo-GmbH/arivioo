@@ -485,11 +485,8 @@ export default function SearchResults() {
                       }
 
                       // If backend confirms a proven Airbnb total, ensure the confirmation modal is closed.
-                      if (
-                        typeof data.airbnbPrice === "number" &&
-                        data.baseline_status &&
-                        data.baseline_status !== "needs_user_confirmation"
-                      ) {
+                      // Check for airbnbPrice in any progress event payload (defensive guard)
+                      if (typeof data.airbnbPrice === "number" && data.airbnbPrice > 0) {
                         setSearch((prev) =>
                           prev
                             ? {
@@ -499,8 +496,11 @@ export default function SearchResults() {
                               }
                             : prev
                         );
-                        setSubtotalInfo(null);
-                        setShowConfirmationModal(false);
+                        // Auto-close modal when we have a valid price (unless explicitly needs_user_confirmation)
+                        if (!data.baseline_status || data.baseline_status !== "needs_user_confirmation") {
+                          setSubtotalInfo(null);
+                          setShowConfirmationModal(false);
+                        }
                       }
 
                       // Add to activity feed with dedup
@@ -590,8 +590,22 @@ export default function SearchResults() {
                       searchComplete = true;
                       actualDurationRef.current = Date.now() - startedAt;
 
+                      // DEFENSIVE: If complete payload contains a valid airbnb price, 
+                      // close any confirmation modal - the search succeeded with a price
+                      const completeAirbnbPrice = data.airbnb?.price;
+                      if (typeof completeAirbnbPrice === "number" && completeAirbnbPrice > 0) {
+                        setSearch((prev) =>
+                          prev
+                            ? { ...prev, airbnb_price: completeAirbnbPrice }
+                            : prev
+                        );
+                        setSubtotalInfo(null);
+                        setShowConfirmationModal(false);
+                      }
+
                       // Handle needs_user_confirmation - show modal for user input
-                      if (data.needs_user_confirmation) {
+                      // But only if we don't already have a valid price
+                      if (data.needs_user_confirmation && !completeAirbnbPrice) {
                         setSubtotalInfo({
                           amount: data.subtotal_nights_only || null,
                           nights: data.subtotal_nights_count || null,
