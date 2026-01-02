@@ -61,6 +61,12 @@ interface SearchResult {
   is_tier_c_blocked?: boolean;
   failure_category?: string | null;
   failure_reason?: string | null;
+  // Price verification metadata
+  price_status?: 'verified' | 'unverified' | 'unavailable';
+  price_source?: 'extracted' | 'scraped' | 'none';
+  price_verified_at?: string | null;
+  eligible_for_comparison?: boolean;
+  verification_failures?: string[];
 }
 
 interface PriceExtraction {
@@ -1258,35 +1264,54 @@ export default function SearchResults() {
     return resultImages.length > 0 && airbnbImages.length > 0;
   };
 
-  // Separate results with and without valid prices (only from supported platforms WITH photos)
+  // =========================================
+  // VERIFIED vs UNVERIFIED PRICE GROUPING
+  // =========================================
+  // CRITICAL: Only eligible_for_comparison === true can be used for numeric comparisons
+  // This prevents false savings claims from unverified/scraped prices
+  
   const resultsWithPhotos = supportedResults.filter(hasComparisonPhotos);
-  const resultsWithPrices = resultsWithPhotos.filter((r) => !!r.price && r.price >= 10);
-  const resultsWithoutPrices = resultsWithPhotos.filter((r) => !r.price || r.price < 10);
+  
+  // VERIFIED: Prices that passed all verification checks (extraction success, dates validated, taxes included)
+  const verifiedResults = resultsWithPhotos.filter((r) => 
+    r.eligible_for_comparison === true && r.price && r.price >= 10
+  );
+  
+  // UNVERIFIED: Platforms found but prices not verified (scraped, extraction failed, dates not applied, etc.)
+  // Still shown but NOT used for comparison logic
+  const unverifiedResults = resultsWithPhotos.filter((r) => 
+    r.eligible_for_comparison !== true
+  );
+  
+  // For backward compatibility: resultsWithPrices = verified only now
+  // This ensures all savings calculations use only trusted prices
+  const resultsWithPrices = verifiedResults;
+  const resultsWithoutPrices = unverifiedResults;
 
-  // Sort by price descending (for results with prices)
-  const sortedByPrice = [...resultsWithPrices].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
+  // Sort verified results by price descending
+  const sortedByPrice = [...verifiedResults].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
 
-  // Separate results into cheaper (savings) and more expensive (no savings)
-  // result.price is TOTAL price - compare directly to Airbnb TOTAL
+  // Separate verified results into cheaper (savings) and more expensive (no savings)
+  // ONLY verified prices are used for this comparison
   const cheaperResults = sortedByPrice.filter((r) => {
     if (!airbnbTotal) return true;
     return r.price! < airbnbTotal;
   });
 
-  // More expensive alternatives for collapsed section
+  // More expensive verified alternatives for collapsed section
   const moreExpensiveResults = sortedByPrice.filter((r) => {
     if (!airbnbTotal) return false;
     return r.price! >= airbnbTotal;
   });
 
-  // For backward compatibility, validResults = results with prices (excluding Tier C)
-  const validResults = resultsWithPrices;
+  // For backward compatibility, validResults = verified results with prices
+  const validResults = verifiedResults;
 
-  // Show up to 10 cheaper alternatives, while ensuring the cheapest is included
+  // Show up to 10 cheaper verified alternatives, while ensuring the cheapest is included
   const MAX_ALTERNATIVES = 10;
   let displayResults: SearchResult[] = cheaperResults.slice(0, MAX_ALTERNATIVES);
 
-  // Only consider valid prices (≥ €10) AND cheaper-than-Airbnb when finding cheapest
+  // Only consider verified prices when finding cheapest
   const resultsWithValidPrices = cheaperResults;
   const cheapestOverall = resultsWithValidPrices.length
     ? resultsWithValidPrices.reduce(
@@ -1304,7 +1329,7 @@ export default function SearchResults() {
     }
   }
 
-  // Find cheapest result for unlock button (only valid prices + cheaper than Airbnb)
+  // Find cheapest verified result for unlock button
   const cheapestResult = resultsWithValidPrices.length > 0
     ? resultsWithValidPrices.reduce(
         (min, r) => (r.price! < min.price! ? r : min),
@@ -1312,7 +1337,7 @@ export default function SearchResults() {
       )
     : null;
 
-  // Calculate potential savings - prices are TOTAL
+  // Calculate potential savings - ONLY from verified prices
   const cheapestTotal = cheapestResult?.price || null;
   const potentialSavings = airbnbTotal && cheapestTotal ? airbnbTotal - cheapestTotal : null;
 
@@ -1320,11 +1345,12 @@ export default function SearchResults() {
   // CANONICAL RESULT STATE COMPUTATION
   // ========================================
   // Define mutually exclusive outcome states for consistent messaging
+  // UPDATED: Now uses verified results for comparison states
   type ResultState = 
     | 'no_platforms_found'           // No other platforms found at all
-    | 'cheaper_found'                // Found cheaper alternatives
-    | 'no_cheaper_found'             // Found platforms but none cheaper (with prices)
-    | 'prices_unavailable';          // Found platforms but prices unavailable
+    | 'cheaper_found'                // Found cheaper verified alternatives
+    | 'no_cheaper_found'             // Found verified platforms but none cheaper
+    | 'prices_unavailable';          // Found platforms but no verified prices
 
   const computeResultState = (): ResultState => {
     // Total valid matches (with photos)
@@ -1334,25 +1360,25 @@ export default function SearchResults() {
       return 'no_platforms_found';
     }
     
-    // Cheaper results exist
+    // Cheaper verified results exist
     if (cheaperResults.length > 0) {
       return 'cheaper_found';
     }
     
-    // Have platforms with actual prices (just not cheaper)
+    // Have verified platforms with prices (just not cheaper)
     if (moreExpensiveResults.length > 0) {
       return 'no_cheaper_found';
     }
     
-    // Have platforms but no prices available
+    // Have platforms but no verified prices available
     return 'prices_unavailable';
   };
 
   const resultState = computeResultState();
 
-  // Get the count of platforms we actually compared prices with
-  const comparedPlatformsCount = resultsWithPrices.length;
-  const platformsWithoutPricesCount = resultsWithoutPrices.length;
+  // Get counts for display
+  const comparedPlatformsCount = verifiedResults.length;  // Only verified platforms count as "compared"
+  const platformsWithoutPricesCount = unverifiedResults.length;  // Unverified = manual check recommended
 
 
   // Helper to generate key differences based on platform
@@ -1384,23 +1410,44 @@ export default function SearchResults() {
   };
 
   // Get human-readable failure reason for display
-  const getFailureDisplay = (result: SearchResult): { text: string; isTierC: boolean; isTierA: boolean } => {
+  // Updated to include verification failure reasons
+  const getFailureDisplay = (result: SearchResult): { text: string; isTierC: boolean; isTierA: boolean; isUnverified: boolean } => {
     const isTierC = result.is_tier_c_blocked === true;
     const isTierA = result.coverage_tier === 'A';
+    const isUnverified = result.price_status === 'unverified';
     
     if (isTierC) {
-      return { text: 'Platform not supported', isTierC: true, isTierA: false };
+      return { text: 'Platform not supported', isTierC: true, isTierA: false, isUnverified: false };
+    }
+    
+    // If we have a price but it's unverified, show why
+    if (isUnverified && result.price && result.price > 0) {
+      const failures = result.verification_failures || [];
+      if (failures.includes('scraped_not_extracted')) {
+        return { text: 'Price not verified for dates', isTierC: false, isTierA, isUnverified: true };
+      }
+      if (failures.includes('dates_not_validated')) {
+        return { text: 'Dates could not be confirmed', isTierC: false, isTierA, isUnverified: true };
+      }
+      if (failures.includes('taxes_fees_not_included')) {
+        return { text: 'May not include all fees', isTierC: false, isTierA, isUnverified: true };
+      }
+      if (failures.includes('low_confidence')) {
+        return { text: 'Low extraction confidence', isTierC: false, isTierA, isUnverified: true };
+      }
+      return { text: 'Price not verified', isTierC: false, isTierA, isUnverified: true };
     }
     
     if (result.failure_reason) {
       return { 
         text: FAILURE_CATEGORY_LABELS[result.failure_category || ''] || result.failure_reason, 
         isTierC: false, 
-        isTierA 
+        isTierA,
+        isUnverified: false
       };
     }
     
-    return { text: 'Price unavailable', isTierC: false, isTierA };
+    return { text: 'Price unavailable', isTierC: false, isTierA, isUnverified: false };
   };
 
   return (
@@ -1922,15 +1969,24 @@ export default function SearchResults() {
                       </div>
                     )}
 
-                    {/* Additional matches without prices (in "Airbnb Best Price" view) */}
+                    {/* Found on other platforms – Manual check recommended */}
                     {resultsWithoutPrices.length > 0 && (
                       <div className="mt-6 pt-6 border-t border-border/50">
+                        <div className="flex items-center gap-2 mb-4">
+                          <Globe className="w-4 h-4 text-muted-foreground" />
+                          <span className="text-sm font-medium text-foreground">
+                            Found on {resultsWithoutPrices.length} other platform{resultsWithoutPrices.length !== 1 ? "s" : ""} – manual check recommended
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-4">
+                          Prices could not be automatically verified for your dates. Visit these platforms directly to check current pricing.
+                        </p>
                         <button
                           onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
                           className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
                         >
                           {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>View {resultsWithoutPrices.length} additional match{resultsWithoutPrices.length !== 1 ? "es" : ""} (price unavailable)</span>
+                          <span>{showNoPriceMatches ? 'Hide' : 'Show'} platforms</span>
                         </button>
                         
                         {showNoPriceMatches && (
@@ -2143,6 +2199,13 @@ export default function SearchResults() {
                                           Best Deal
                                         </span>
                                       )}
+                                      {/* Verified badge - shows for all verified prices */}
+                                      {result.eligible_for_comparison && (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-500/10 text-green-600 text-[10px] font-medium">
+                                          <CheckCircle className="w-2.5 h-2.5" />
+                                          Verified
+                                        </span>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="py-4 px-4 text-center">
@@ -2344,25 +2407,39 @@ export default function SearchResults() {
                       </div>
                     )}
 
-                    {/* Methodology note */}
+                    {/* Methodology note - Updated to reflect verified price system */}
                     <div className="flex items-start gap-3 p-5 bg-muted/30 rounded-2xl">
-                      <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
-                      <p className="text-sm text-muted-foreground">
-                        <strong>Fair comparison methodology:</strong> All prices shown include total costs with fees and taxes for identical dates. 
-                        Trust scores are based on image matching accuracy. We verify listings using photo matching and location data. 
-                        Always confirm details directly with the host before booking.
-                      </p>
+                      <Shield className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
+                      <div className="text-sm text-muted-foreground">
+                        <p>
+                          <strong>Verified price comparison:</strong> Only prices that have been automatically verified for your exact dates, including taxes and fees, are used for savings calculations.
+                        </p>
+                        {unverifiedResults.length > 0 && (
+                          <p className="mt-2 text-xs">
+                            Platforms where prices could not be verified are shown separately for manual checking.
+                          </p>
+                        )}
+                      </div>
                     </div>
 
-                    {/* Additional matches without prices */}
+                    {/* Found on other platforms – Manual check recommended */}
                     {resultsWithoutPrices.length > 0 && (
                       <div className="mt-6 pt-6 border-t border-border/50">
+                        <div className="flex items-center gap-2 mb-4">
+                          <Globe className="w-4 h-4 text-muted-foreground" />
+                          <span className="text-sm font-medium text-foreground">
+                            Found on {resultsWithoutPrices.length} other platform{resultsWithoutPrices.length !== 1 ? "s" : ""} – manual check recommended
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mb-4">
+                          Prices could not be automatically verified for your dates. Visit these platforms directly to check current pricing.
+                        </p>
                         <button
                           onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
                           className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
                         >
                           {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>View {resultsWithoutPrices.length} additional match{resultsWithoutPrices.length !== 1 ? "es" : ""} (price unavailable)</span>
+                          <span>{showNoPriceMatches ? 'Hide' : 'Show'} platforms</span>
                         </button>
                         
                         {showNoPriceMatches && (
