@@ -26,6 +26,7 @@ import PlatformCoverage from "./pages/admin/PlatformCoverage";
 import SearchDebug from "./pages/admin/SearchDebug";
 import AirbnbBaselineDiagnostic from "./pages/admin/AirbnbBaselineDiagnostic";
 import PlatformReliability from "./pages/admin/PlatformReliability";
+import ExtractionDiagnostics from "./pages/admin/ExtractionDiagnostics";
 
 const queryClient = new QueryClient();
 
@@ -53,6 +54,7 @@ const App = () => (
             <Route path="search-debug" element={<SearchDebug />} />
             <Route path="airbnb-diagnostic" element={<AirbnbBaselineDiagnostic />} />
             <Route path="reliability" element={<PlatformReliability />} />
+            <Route path="extraction-diagnostics" element={<ExtractionDiagnostics />} />
             <Route path="adapters" element={<Adapters />} />
             <Route path="blocked" element={<BlockedPlatforms />} />
             <Route path="quotas" element={<Quotas />} />
