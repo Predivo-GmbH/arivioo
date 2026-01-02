@@ -877,7 +877,33 @@ export default function SearchResults() {
         if (!data) return;
 
         // Keep local UI in sync with backend status so the stepper advances even if SSE is silent
-        setSearch((prev) => (prev ? ({ ...prev, ...data } as SearchData) : (data as SearchData)));
+        // IMPORTANT: Apply a monotonic guard so we never move backwards in the UI.
+        setSearch((prev) => {
+          const merged = prev ? ({ ...prev, ...data } as SearchData) : (data as SearchData);
+
+          if (!data.status) return merged;
+
+          const newStageIndex = getStageIndexFromStatus(data.status);
+          const currentHighest = highestStageIndexRef.current;
+
+          if (newStageIndex >= currentHighest) {
+            highestStageIndexRef.current = newStageIndex;
+            setHighestStageIndex(newStageIndex);
+            return merged;
+          }
+
+          // Preserve the previous status to prevent regressions like:
+          // Analyzing Listing -> Verifying Matches -> Analyzing Listing
+          console.log('[MonotonicGuard] Ignored stage regression (heartbeat):', {
+            incomingStatus: data.status,
+            newStageIndex,
+            currentHighest,
+            rejectedStage: PIPELINE_STAGES[newStageIndex]?.title,
+            activeStage: PIPELINE_STAGES[currentHighest]?.title,
+          });
+
+          return prev ? ({ ...merged, status: prev.status } as SearchData) : merged;
+        });
 
         // Handle terminal failure states
         if (data.status === "error") {
