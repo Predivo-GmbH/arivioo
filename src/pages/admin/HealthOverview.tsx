@@ -27,6 +27,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
 import { useSystemHealth, type HealthAlert } from '@/hooks/useSystemHealth';
 import { HealthIndicator, SystemHealthBanner, type HealthStatus } from '@/components/admin/HealthIndicator';
+import { BaselineInfoPanel } from '@/components/admin/BaselineInfoPanel';
 import {
   LineChart,
   Line,
@@ -332,8 +333,15 @@ export default function HealthOverview() {
         </Button>
       </div>
 
-      {/* System Status Panel */}
-      <SystemStatusPanel systemHealth={systemHealth} isLoading={healthLoading} />
+      {/* System Status Panel + Baseline Info */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <SystemStatusPanel systemHealth={systemHealth} isLoading={healthLoading} />
+        </div>
+        <div>
+          <BaselineInfoPanel />
+        </div>
+      </div>
 
       {/* Key Metrics */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

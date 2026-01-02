@@ -1383,6 +1383,51 @@ export type Database = {
         }
         Relationships: []
       }
+      system_baselines: {
+        Row: {
+          baseline_name: string
+          baseline_version: string
+          created_at: string
+          declared_at: string
+          declared_by: string | null
+          deployment_id: string | null
+          expectations: Json
+          git_commit_hash: string | null
+          id: string
+          is_active: boolean
+          notes: string | null
+          updated_at: string
+        }
+        Insert: {
+          baseline_name: string
+          baseline_version: string
+          created_at?: string
+          declared_at?: string
+          declared_by?: string | null
+          deployment_id?: string | null
+          expectations: Json
+          git_commit_hash?: string | null
+          id?: string
+          is_active?: boolean
+          notes?: string | null
+          updated_at?: string
+        }
+        Update: {
+          baseline_name?: string
+          baseline_version?: string
+          created_at?: string
+          declared_at?: string
+          declared_by?: string | null
+          deployment_id?: string | null
+          expectations?: Json
+          git_commit_hash?: string | null
+          id?: string
+          is_active?: boolean
+          notes?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
