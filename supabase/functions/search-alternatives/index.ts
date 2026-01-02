@@ -5291,16 +5291,19 @@ async function runSearchWithStreaming(
       last_progress_at: new Date().toISOString(),
     }).eq('id', searchId);
 
-    // Send needs_confirmation event so frontend shows the modal
-    sendSSE(controller, 'needs_confirmation', {
-      subtotal_nights_only: null,
-      subtotal_nights_count: nights,
-      subtotal_currency: 'USD',
-      reason: message,
-    });
-
-    // Set skipAirbnbPrice so pipeline continues
-    skipAirbnbPrice = true;
+    // ONLY send needs_confirmation if we don't already have a valid price
+    // This prevents the modal from appearing when price was successfully extracted
+    // but something else in the pipeline threw an error
+    if (!airbnbPrice) {
+      sendSSE(controller, 'needs_confirmation', {
+        subtotal_nights_only: null,
+        subtotal_nights_count: nights,
+        subtotal_currency: 'USD',
+        reason: message,
+      });
+      // Set skipAirbnbPrice so pipeline continues
+      skipAirbnbPrice = true;
+    }
     // DON'T return - continue to visual search
   } finally {
     await finishStageRun(supabase, searchId, 'analyze_listing', stage1Outcome, stage1Error);
