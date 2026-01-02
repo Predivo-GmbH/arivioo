@@ -706,6 +706,10 @@ export default function SearchResults() {
 
              const enrichedResults = await fetchEnrichedResults(searchId);
 
+             // Close any open modals since search is complete
+             setShowConfirmationModal(false);
+             setSubtotalInfo(null);
+             
              setSearch(updatedSearch as SearchData);
              setResults(enrichedResults as unknown as SearchResult[]);
              actualDurationRef.current = Date.now() - startedAt;
@@ -903,7 +907,15 @@ export default function SearchResults() {
           // Fetch final results
           const enrichedResults = await fetchEnrichedResults(searchId);
 
+          // CRITICAL: Update search state with latest data before transitioning
+          // This ensures the UI sees the correct status and closes any modals
+          setSearch(data as SearchData);
           setResults(enrichedResults as unknown as SearchResult[]);
+          
+          // Close any open modals since search is complete
+          setShowConfirmationModal(false);
+          setSubtotalInfo(null);
+          
           actualDurationRef.current = Date.now() - (searchStartTimeRef.current || Date.now());
           setSearchPhase("done");
           setLoading(false);
