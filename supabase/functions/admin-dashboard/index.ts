@@ -2129,6 +2129,28 @@ Deno.serve(async (req) => {
       );
     }
 
+    // BASELINE INFO - Get current active baseline
+    if (action === 'baseline' && req.method === 'GET') {
+      const { data: baseline, error: baselineError } = await supabase
+        .from('system_baselines')
+        .select('baseline_name, baseline_version, declared_at, declared_by, git_commit_hash, deployment_id, is_active, expectations, notes')
+        .eq('is_active', true)
+        .single();
+
+      if (baselineError && baselineError.code !== 'PGRST116') {
+        console.error('[Admin Dashboard] Baseline fetch error:', baselineError);
+        return new Response(
+          JSON.stringify({ error: 'Failed to fetch baseline' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify(baseline || null),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
