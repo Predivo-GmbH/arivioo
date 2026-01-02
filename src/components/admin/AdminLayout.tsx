@@ -13,6 +13,7 @@ import {
   ChevronRight,
   User,
   TestTube,
+  ShieldCheck,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -35,6 +36,7 @@ import { NavLink } from '@/components/NavLink';
 const navItems = [
   { title: 'Health Overview', url: '/admin', icon: LayoutDashboard },
   { title: 'Platform Coverage', url: '/admin/coverage', icon: Gauge },
+  { title: 'Platform Reliability', url: '/admin/reliability', icon: ShieldCheck },
   { title: 'Pipeline Status', url: '/admin/pipeline', icon: Activity },
   { title: 'Extractions', url: '/admin/extractions', icon: Database },
   { title: 'Search Debug', url: '/admin/search-debug', icon: Activity },
