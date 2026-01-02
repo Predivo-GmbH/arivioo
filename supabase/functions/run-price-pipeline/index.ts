@@ -151,7 +151,7 @@ async function triggerWorker(
   }
 }
 
-// Clean up stuck pending extractions
+// Clean up stuck pending extractions for a SPECIFIC search
 async function cleanupStuckExtractions(
   supabaseClient: any,
   searchId: string,
@@ -183,9 +183,47 @@ async function cleanupStuckExtractions(
     })
     .in('id', stuckIds);
   
-  console.log(`[DISPATCHER] Cleaned up ${stuckIds.length} stuck extractions`);
+  console.log(`[DISPATCHER] Cleaned up ${stuckIds.length} stuck extractions for search ${searchId}`);
   
   return { cleaned: stuckExtractions.length, ids: stuckIds };
+}
+
+// GLOBAL cleanup: Mark ALL stuck pending extractions across ALL searches as timeout
+// This prevents old searches from blocking new ones
+async function cleanupGlobalStuckExtractions(
+  supabaseClient: any,
+  stuckTimeoutMinutes: number
+): Promise<{ cleaned: number; searchIds: string[] }> {
+  const cutoffTime = new Date(Date.now() - stuckTimeoutMinutes * 60 * 1000).toISOString();
+  
+  // Find ALL extractions still pending past the timeout (across all searches)
+  const { data: stuckExtractions, error } = await supabaseClient
+    .from('price_extractions')
+    .select('id, search_id, platform_name')
+    .eq('extraction_status', 'pending')
+    .lt('updated_at', cutoffTime)
+    .limit(100); // Limit to prevent massive updates
+  
+  if (error || !stuckExtractions || stuckExtractions.length === 0) {
+    return { cleaned: 0, searchIds: [] };
+  }
+  
+  const stuckIds = stuckExtractions.map((e: any) => e.id);
+  const affectedSearchIds = [...new Set(stuckExtractions.map((e: any) => e.search_id))];
+  
+  // Mark all as timeout
+  await supabaseClient
+    .from('price_extractions')
+    .update({
+      extraction_status: 'timeout',
+      extraction_error: `Global cleanup: extraction stuck pending for over ${stuckTimeoutMinutes} minutes`,
+      updated_at: new Date().toISOString(),
+    })
+    .in('id', stuckIds);
+  
+  console.log(`[DISPATCHER] GLOBAL cleanup: marked ${stuckIds.length} stuck extractions as timeout across ${affectedSearchIds.length} searches`);
+  
+  return { cleaned: stuckExtractions.length, searchIds: affectedSearchIds as string[] };
 }
 
 Deno.serve(async (req) => {
@@ -218,6 +256,13 @@ Deno.serve(async (req) => {
     console.log(`[DISPATCHER] Starting pipeline for search ${searchId}`);
     console.log(`[DISPATCHER] Dates: ${requestedCheckIn} to ${requestedCheckOut}, occupancy: ${adults}a/${children}c/${rooms}r`);
     console.log(`[DISPATCHER] Mode: ${waitForCompletion ? 'synchronous' : 'fire-and-forget'}`);
+    
+    // Step 0: GLOBAL cleanup - mark all stuck pending extractions from ANY search as timeout
+    // This ensures old stuck searches don't block new ones
+    const globalCleanup = await cleanupGlobalStuckExtractions(supabaseClient, stuckTimeoutMinutes);
+    if (globalCleanup.cleaned > 0) {
+      console.log(`[DISPATCHER] Global cleanup freed ${globalCleanup.cleaned} stuck extractions from searches: ${globalCleanup.searchIds.join(', ')}`);
+    }
     
     // Step 1: Fetch all high-confidence search results (matched platforms)
     const { data: searchResults, error: fetchError } = await supabaseClient
@@ -387,11 +432,16 @@ Deno.serve(async (req) => {
       successCount: statusCounts['success'] || 0,
       cleanedUpStuck: cleanup.cleaned,
       cleanedUpIds: cleanup.ids,
+      globalCleanup: {
+        cleaned: globalCleanup.cleaned,
+        affectedSearches: globalCleanup.searchIds,
+      },
       elapsedMs,
     };
     
     console.log(`[DISPATCHER] Complete in ${elapsedMs}ms`);
-    console.log(`[DISPATCHER] Summary: ${summary.successCount} success, ${pendingCount} pending, ${cleanup.cleaned} cleaned`);
+    console.log(`[DISPATCHER] Summary: ${summary.successCount} success, ${pendingCount} pending, ${cleanup.cleaned} cleaned (current search), ${globalCleanup.cleaned} cleaned (global)`);
+    
     
     return new Response(
       JSON.stringify({
