@@ -1,5 +1,5 @@
 /**
- * Canonical Stable Baseline Expectations
+ * Canonical Stable Baseline Expectations - v2.0.0
  * 
  * This file defines the observable behaviours expected from the system
  * when operating at the declared stable baseline.
@@ -11,12 +11,12 @@
  * Do not auto-update on deploy.
  */
 
-export const BASELINE_NAME = 'search-results-stable-v1';
-export const BASELINE_VERSION = '1.0.0';
+export const BASELINE_NAME = 'search-results-stable-v2';
+export const BASELINE_VERSION = '2.0.0';
 
 export interface BaselineExpectation {
   id: string;
-  category: 'search' | 'results' | 'access_control' | 'admin';
+  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin';
   description: string;
   observable: string;
   critical: boolean;
@@ -50,10 +50,10 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     critical: false,
   },
   {
-    id: 'modal_auto_closes',
+    id: 'global_stuck_cleanup',
     category: 'search',
-    description: 'Confirmation modal auto-closes on valid price',
-    observable: 'If backend extracts valid Airbnb price, modal does not appear or closes automatically',
+    description: 'Old stuck extractions auto-cleaned',
+    observable: 'Pending extractions >5min old marked as timeout before new search starts',
     critical: true,
   },
 
@@ -62,7 +62,7 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     id: 'results_render',
     category: 'results',
     description: 'Search results render correctly',
-    observable: 'Result cards display platform, price, savings when available',
+    observable: 'Result cards display platform, price, verification status',
     critical: true,
   },
   {
@@ -70,6 +70,13 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     category: 'results',
     description: 'Photo comparison available for all results',
     observable: 'Evidence button renders for all result states (success, failure, no-match)',
+    critical: true,
+  },
+  {
+    id: 'verified_unverified_separation',
+    category: 'results',
+    description: 'Prices classified as verified or unverified',
+    observable: 'Verified prices in comparison group, unverified in "manual check" group',
     critical: true,
   },
   {
@@ -84,6 +91,36 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     category: 'results',
     description: 'Summary text is logically correct',
     observable: 'No contradictions (e.g., "no cheaper found" when zero platforms identified)',
+    critical: true,
+  },
+
+  // Pricing Integrity
+  {
+    id: 'verified_prices_only_for_comparison',
+    category: 'pricing',
+    description: 'Only verified prices used for comparison',
+    observable: 'Savings claims based only on verified prices meeting all criteria',
+    critical: true,
+  },
+  {
+    id: 'unverified_shown_as_manual_check',
+    category: 'pricing',
+    description: 'Unverified prices labeled appropriately',
+    observable: '"Manual check recommended" category for unverified platforms',
+    critical: true,
+  },
+  {
+    id: 'no_false_savings_claims',
+    category: 'pricing',
+    description: 'No false savings claims',
+    observable: 'Savings never shown for unverified or low-confidence platforms',
+    critical: true,
+  },
+  {
+    id: 'stuck_extractions_auto_timeout',
+    category: 'pricing',
+    description: 'No stuck pending extractions',
+    observable: 'Pending extractions >5min automatically marked as timeout',
     critical: true,
   },
 
@@ -132,6 +169,20 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     observable: 'Health indicators update based on data staleness thresholds',
     critical: true,
   },
+  {
+    id: 'platform_reliability_dashboard',
+    category: 'admin',
+    description: 'Platform reliability metrics visible',
+    observable: '/admin/reliability shows verification rates per platform over time',
+    critical: false,
+  },
+  {
+    id: 'baseline_info_panel',
+    category: 'admin',
+    description: 'Baseline info visible in dashboard',
+    observable: 'Health Overview shows active baseline name and version',
+    critical: false,
+  },
 ];
 
 /**
@@ -158,6 +209,7 @@ export function getCriticalExpectations(): BaselineExpectation[] {
 export const CATEGORY_LABELS: Record<string, string> = {
   search: 'Search Flow',
   results: 'Results Display',
+  pricing: 'Pricing Integrity',
   access_control: 'Access Control',
   admin: 'Admin Dashboard',
 };
