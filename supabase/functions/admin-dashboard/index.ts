@@ -2151,6 +2151,236 @@ Deno.serve(async (req) => {
       );
     }
 
+    // EXTRACTION DIAGNOSTICS - Per-search price extraction observability
+    if (action === 'extraction-diagnostics' && req.method === 'GET') {
+      const searchId = url.searchParams.get('searchId');
+      
+      // If searchId provided, get diagnostics for that search
+      if (searchId) {
+        // Get search details
+        const { data: search } = await supabase
+          .from('searches')
+          .select('id, airbnb_url, airbnb_title, airbnb_price, check_in_date, check_out_date, status, created_at')
+          .eq('id', searchId)
+          .single();
+
+        if (!search) {
+          return new Response(
+            JSON.stringify({ error: 'Search not found' }),
+            { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+
+        // Get all search results for this search
+        const { data: searchResults } = await supabase
+          .from('search_results')
+          .select('id, platform_name, listing_url, price, confidence_score, match_type, image_url')
+          .eq('search_id', searchId);
+
+        // Get all price extractions for this search
+        const { data: extractions } = await supabase
+          .from('price_extractions')
+          .select('*')
+          .eq('search_id', searchId);
+
+        // Get platform adapters for tier info
+        const platformNames = [...new Set((searchResults || []).map(r => r.platform_name))];
+        const { data: adapters } = await supabase
+          .from('platform_adapters')
+          .select('platform_name, platform_domain, coverage_tier, tier_reason, dedicated_extractor');
+
+        // Build diagnostics per platform
+        const diagnostics = (searchResults || []).map(result => {
+          const extraction = (extractions || []).find(e => e.search_result_id === result.id);
+          const adapter = (adapters || []).find(a => 
+            result.platform_name.toLowerCase().includes(a.platform_name?.toLowerCase() || '') ||
+            result.platform_name.toLowerCase().includes(a.platform_domain?.toLowerCase()?.replace(/\..+$/, '') || '')
+          );
+
+          // Derive extraction path from deep_link
+          let extraction_path_used = 'none';
+          if (extraction?.deep_link) {
+            const link = extraction.deep_link.toLowerCase();
+            if (link.includes('/book') || link.includes('/checkout') || link.includes('/reserve')) {
+              extraction_path_used = 'checkout';
+            } else if (link.includes('/rooms') || link.includes('/listing') || link.includes('/property')) {
+              extraction_path_used = 'listing';
+            } else {
+              extraction_path_used = 'deep_link';
+            }
+          }
+
+          // Derive provider used
+          let provider_used = 'none';
+          if (extraction?.provider_used) {
+            provider_used = extraction.provider_used;
+          } else if (extraction?.extraction_error) {
+            const err = extraction.extraction_error.toLowerCase();
+            if (err.includes('firecrawl')) provider_used = 'firecrawl';
+            else if (err.includes('zyte')) provider_used = 'zyte';
+            else if (err.includes('browserless')) provider_used = 'browserless';
+          }
+
+          // Map extraction status to canonical values
+          let extraction_status = 'not_attempted';
+          if (extraction) {
+            const status = extraction.extraction_status?.toLowerCase() || '';
+            if (status === 'success' || status === 'price_extracted') {
+              extraction_status = 'success';
+            } else if (status.includes('blocked') || status.includes('captcha') || status.includes('bot')) {
+              extraction_status = 'blocked';
+            } else if (status.includes('render') || status.includes('timeout')) {
+              extraction_status = status.includes('timeout') ? 'timeout' : 'render_failed';
+            } else if (status.includes('price_not_found') || status.includes('not_found')) {
+              extraction_status = 'price_not_found';
+            } else if (status === 'pending') {
+              extraction_status = 'pending';
+            } else {
+              extraction_status = 'internal_error';
+            }
+          }
+
+          // Determine verification failures
+          const verification_failures: string[] = [];
+          if (extraction) {
+            if (extraction.extraction_status !== 'success') {
+              verification_failures.push('extraction_not_successful');
+            }
+            if (!extraction.dates_validated) {
+              verification_failures.push('dates_not_validated');
+            }
+            if (!extraction.includes_taxes_fees) {
+              verification_failures.push('taxes_fees_not_included');
+            }
+            if (extraction.confidence_score === null || extraction.confidence_score < 0.5) {
+              verification_failures.push('low_confidence');
+            }
+          } else {
+            verification_failures.push('no_extraction_attempt');
+          }
+
+          // Determine price status
+          let price_status = 'unavailable';
+          if (extraction?.extracted_price && extraction.extraction_status === 'success') {
+            if (verification_failures.length === 0 || 
+                (verification_failures.length === 1 && verification_failures[0] === 'extraction_not_successful')) {
+              // Re-check: is it actually verified?
+              const isVerified = 
+                extraction.extraction_status === 'success' &&
+                extraction.dates_validated === true &&
+                extraction.includes_taxes_fees === true &&
+                (extraction.confidence_score ?? 0) >= 0.5;
+              price_status = isVerified ? 'verified' : 'unverified';
+            } else {
+              price_status = 'unverified';
+            }
+          } else if (extraction?.extracted_price) {
+            price_status = 'unverified';
+          }
+
+          return {
+            platform_name: result.platform_name,
+            search_result_id: result.id,
+            listing_url: result.listing_url,
+            scraped_price: result.price,
+            match_confidence: result.confidence_score,
+            match_type: result.match_type,
+            coverage_tier: adapter?.coverage_tier || 'unknown',
+            tier_reason: adapter?.tier_reason,
+            dedicated_extractor: adapter?.dedicated_extractor,
+            
+            // Extraction diagnostics
+            extraction_attempted: !!extraction,
+            extraction_id: extraction?.id,
+            extraction_path_used,
+            provider_used,
+            extraction_status,
+            failure_reason: extraction?.extraction_error || (extraction ? null : 'No extraction attempted'),
+            
+            // Validation
+            dates_applied: extraction?.dates_validated ?? null,
+            detected_checkin: extraction?.detected_checkin,
+            detected_checkout: extraction?.detected_checkout,
+            includes_taxes_fees: extraction?.includes_taxes_fees ?? null,
+            confidence_score: extraction?.confidence_score,
+            
+            // Price status
+            extracted_price: extraction?.extracted_price,
+            currency: extraction?.currency,
+            price_status,
+            verification_failures,
+            
+            // Timestamps
+            last_attempt_at: extraction?.updated_at || extraction?.created_at,
+          };
+        });
+
+        // Calculate systemic issues
+        const systemic_issues = {
+          never_attempted: diagnostics.filter(d => !d.extraction_attempted).length,
+          blocked: diagnostics.filter(d => d.extraction_status === 'blocked').length,
+          render_failed: diagnostics.filter(d => d.extraction_status === 'render_failed').length,
+          timeout: diagnostics.filter(d => d.extraction_status === 'timeout').length,
+          verified: diagnostics.filter(d => d.price_status === 'verified').length,
+          unverified: diagnostics.filter(d => d.price_status === 'unverified').length,
+          tier_a_failures: diagnostics.filter(d => d.coverage_tier === 'A' && d.extraction_status !== 'success').length,
+        };
+
+        return new Response(
+          JSON.stringify({
+            search,
+            diagnostics,
+            systemic_issues,
+            meta: {
+              total_platforms: diagnostics.length,
+              fetched_at: new Date().toISOString(),
+            },
+          }),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // No searchId - return recent searches for selection
+      const { data: recentSearches, count } = await supabase
+        .from('searches')
+        .select('id, airbnb_url, airbnb_title, status, created_at, check_in_date, check_out_date', { count: 'exact' })
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      // Get extraction stats per search
+      const searchIds = (recentSearches || []).map(s => s.id);
+      const { data: extractionStats } = await supabase
+        .from('price_extractions')
+        .select('search_id, extraction_status')
+        .in('search_id', searchIds);
+
+      const statsMap = new Map<string, { total: number; success: number; failed: number; pending: number }>();
+      (extractionStats || []).forEach(e => {
+        const stats = statsMap.get(e.search_id) || { total: 0, success: 0, failed: 0, pending: 0 };
+        stats.total++;
+        if (e.extraction_status === 'success') stats.success++;
+        else if (e.extraction_status === 'pending') stats.pending++;
+        else stats.failed++;
+        statsMap.set(e.search_id, stats);
+      });
+
+      const searchesWithStats = (recentSearches || []).map(s => ({
+        ...s,
+        extraction_stats: statsMap.get(s.id) || { total: 0, success: 0, failed: 0, pending: 0 },
+      }));
+
+      return new Response(
+        JSON.stringify({
+          searches: searchesWithStats,
+          meta: {
+            total_count: count,
+            fetched_at: new Date().toISOString(),
+          },
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
