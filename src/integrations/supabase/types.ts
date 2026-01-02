@@ -1103,7 +1103,7 @@ export type Database = {
           {
             foreignKeyName: "price_extractions_search_result_id_fkey"
             columns: ["search_result_id"]
-            isOneToOne: false
+            isOneToOne: true
             referencedRelation: "search_results"
             referencedColumns: ["id"]
           },
