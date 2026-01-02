@@ -61,9 +61,6 @@ verify_jwt = false
 [functions.get-stage-timings]
 verify_jwt = false
 
-[functions.get-search-access]
-verify_jwt = false
-
 [functions.firecrawl-diagnostic]
 verify_jwt = false
 
