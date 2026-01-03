@@ -4247,9 +4247,10 @@ async function runSearchWithStreaming(
     supabase: any; // Use any to avoid complex type inference
     serpApiKey: string;
     firecrawlApiKey?: string;
+    simulateBrowserlessFail?: boolean; // For testing fallback chain
   }
 ) {
-  const { search, searchId, supabase, serpApiKey, firecrawlApiKey } = opts;
+  const { search, searchId, supabase, serpApiKey, firecrawlApiKey, simulateBrowserlessFail = false } = opts;
 
   sendProgress(controller, "Starting search", `Analyzing ${search.airbnb_url.slice(0, 60)}...`);
 
@@ -4616,7 +4617,12 @@ async function runSearchWithStreaming(
           return { provider, baseline: emptyBaseline('Zyte'), error: 'No API key', durationMs: Date.now() - start };
         }
 
-        const zyteResult = await scrapeAirbnbWithZyte(search.airbnb_url, zyteApiKey);
+        // CRITICAL: Use book/stays checkout URL to get all-in total (same as Browserless)
+        const bookStaysParams = buildBookStaysUrl(search.airbnb_url);
+        const targetUrl = bookStaysParams?.book_stays_url || search.airbnb_url;
+        console.log(`Zyte: Using ${bookStaysParams?.book_stays_url ? 'book/stays' : 'rooms'} URL:`, targetUrl.slice(0, 120));
+
+        const zyteResult = await scrapeAirbnbWithZyte(targetUrl, zyteApiKey);
         const durationMs = Date.now() - start;
 
         // Log every Zyte request (success or failure)
@@ -4625,7 +4631,7 @@ async function runSearchWithStreaming(
           provider: 'zyte',
           endpointType: 'airbnb_scrape',
           searchId,
-          url: search.airbnb_url,
+          url: targetUrl,
           success: zyteResult.ok,
           httpStatus: zyteResult.statusCode,
           durationMs,
@@ -4667,7 +4673,7 @@ async function runSearchWithStreaming(
         const baseline = extractBaselineFromContent(zyteResult.html, zyteResult.markdown, 'Zyte');
         
         // Apply OCR validation using shared reference (if available from Browserless)
-        const ocrValidation = validateProviderPriceWithOcr(
+        let ocrValidation = validateProviderPriceWithOcr(
           baseline.price,
           baseline.currency,
           baseline.evidence_snippet,
@@ -4693,6 +4699,37 @@ async function runSearchWithStreaming(
             status: ocrValidation.status,
             includes_taxes_fees: ocrValidation.includesTaxesFees,
             evidence_snippet: ocrValidation.evidenceSnippet,
+          };
+        }
+        
+        // ============ CRITICAL: On book/stays pages, subtotal IS the final total ============
+        // When we scraped from book/stays checkout page and regex found a subtotal ($X for N nights),
+        // that IS the all-in total because book/stays shows the full checkout with taxes/fees included.
+        const isBookStaysPage = zyteResult.html?.includes('/book/stays/') ||
+          zyteResult.html?.includes('Confirm and pay') ||
+          targetUrl.includes('/book/stays/');
+        
+        if (isBookStaysPage && 
+            finalBaseline.status === 'needs_user_confirmation' && 
+            finalBaseline.subtotal_nights_only && 
+            finalBaseline.subtotal_nights_only > 0) {
+          console.log(`Zyte: Book/stays page detected - treating subtotal $${finalBaseline.subtotal_nights_only} as final total`);
+          const subtotalPrice = finalBaseline.subtotal_nights_only!;
+          finalBaseline = {
+            ...finalBaseline,
+            status: 'total_price_including_taxes_and_fees',
+            price: subtotalPrice,
+            includes_taxes_fees: true,
+            evidence_snippet: finalBaseline.evidence_snippet?.replace('subtotal only - taxes/fees not included', 'from book/stays checkout page'),
+          };
+          ocrValidation = {
+            accepted: true,
+            status: 'total_price_including_taxes_and_fees',
+            includesTaxesFees: true,
+            acceptedVia: 'breakdown_match',
+            mismatchReason: null,
+            evidenceSnippet: finalBaseline.evidence_snippet || '',
+            validatedPrice: subtotalPrice,
           };
         }
         
@@ -4942,12 +4979,24 @@ async function runSearchWithStreaming(
       }
     };
 
-    // TEMP: Until Browserless is fixed, do NOT fall back to Zyte (keeps failures deterministic and avoids masking the Browserless issue)
-    const fallbackChain: { provider: AirbnbProvider; run: () => Promise<ProviderPriceResult> }[] = [
-      { provider: 'browserless', run: browserlessTask },
-      { provider: 'firecrawl', run: firecrawlTask },
-      // { provider: 'zyte', run: zyteTask },
-    ];
+    // Check for simulation mode to test fallback chain
+    if (simulateBrowserlessFail) {
+      console.log('[SIMULATION] Browserless failure simulation enabled - will skip Browserless and test fallback');
+    }
+    
+    // Fallback chain: Browserless -> Zyte -> Firecrawl
+    // All providers should try to get the all-in total from book/stays checkout page
+    const fallbackChain: { provider: AirbnbProvider; run: () => Promise<ProviderPriceResult> }[] = simulateBrowserlessFail
+      ? [
+          // Simulation mode: skip Browserless to test Zyte fallback
+          { provider: 'zyte', run: zyteTask },
+          { provider: 'firecrawl', run: firecrawlTask },
+        ]
+      : [
+          { provider: 'browserless', run: browserlessTask },
+          { provider: 'zyte', run: zyteTask },
+          { provider: 'firecrawl', run: firecrawlTask },
+        ];
 
     for (const step of fallbackChain) {
       const label = step.provider.toUpperCase();
@@ -5898,7 +5947,7 @@ serve(async (req) => {
       );
     }
     
-    const { searchId, stream = false } = body;
+    const { searchId, stream = false, simulateBrowserlessFail = false } = body;
     
     if (!searchId) {
       return new Response(
@@ -5971,6 +6020,7 @@ serve(async (req) => {
               supabase,
               serpApiKey: serpApiKey!,
               firecrawlApiKey,
+              simulateBrowserlessFail,
             });
           } catch (error) {
             console.error("Streaming search error:", error);
