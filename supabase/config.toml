@@ -129,3 +129,6 @@ verify_jwt = false
 
 [functions.generate-platform-adapter]
 verify_jwt = false
+
+[functions.hotelscom-structural-test]
+verify_jwt = false
