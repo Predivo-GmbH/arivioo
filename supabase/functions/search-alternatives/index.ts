@@ -1725,6 +1725,14 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
       const hasBeforeTaxesLabel = /\btotal\s+before\s+taxes\b/i.test(context);
       const hasForNights = new RegExp(`\\bfor\\s+${nights}\\s+nights?\\b`, 'i').test(context) || /\bfor\s+\d+\s+nights?\b/i.test(context);
       const hasNightOnly = /\bper\s+night\b|\/night|\bnightly\b/i.test(context);
+      
+      // CRITICAL: Check for book/stays checkout page payment patterns (HIGHEST PRIORITY)
+      // These are the all-in totals including taxes and fees
+      const hasPayNowPattern = /\bpay\s*\$[\d,]+(?:\.\d{2})?\s*now\b/i.test(context);
+      const hasTotalUsdPattern = /\btotal\s*\(?\s*USD\s*\)?\s*\$[\d,]+(?:\.\d{2})?/i.test(context);
+      const hasDueToday = /\bdue\s+today\b/i.test(context);
+      const hasAmountDue = /\bamount\s+due\b/i.test(context);
+      const hasCheckoutTotal = hasPayNowPattern || hasTotalUsdPattern || hasDueToday || hasAmountDue;
 
       let kind: AirbnbBaselineStatus = 'price_not_available_in_content';
       let includesTaxesFees = false;
@@ -1748,12 +1756,18 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
         continue;
       }
 
-      if (hasTotalLabel) {
+      // HIGHEST PRIORITY: Checkout page payment totals (all-in with taxes/fees)
+      if (hasCheckoutTotal) {
+        includesTaxesFees = true;
+        kind = 'total_price_including_taxes_and_fees';
+        score = 20; // Higher than any other pattern
+        console.log(`Found checkout total: ${rawMatch} in context: ${safeSnippet(context, 80)}`);
+      } else if (hasTotalLabel) {
         kind = hasBeforeTaxesLabel ? 'total_price_excluding_taxes_and_fees' : 'total_price_excluding_taxes_and_fees';
         score = 10;
       }
 
-      if (hasForNights && !hasNightOnly) {
+      if (hasForNights && !hasNightOnly && !hasCheckoutTotal) {
         // This is the "$X for Y nights" widget headline; not necessarily taxes-inclusive.
         kind = 'total_price_excluding_taxes_and_fees';
         score = Math.max(score, 7);
@@ -1814,7 +1828,7 @@ function validatePriceExtraction(
     return { ok: false, reason: 'raw_match_not_found_verbatim', evidence: snippet };
   }
 
-  // Accept prices with explicit total labels, taxes/fees labels, OR "for N nights" aria-labels (Airbnb standard format)
+  // Accept prices with explicit total labels, taxes/fees labels, "for N nights" aria-labels, OR checkout patterns
   const hasExplicitTotalLabel =
     /\b(trip total|grand total|total before taxes|total\s*USD|you pay|you will pay)\b/i.test(snippet);
   const hasTaxesFeesLabel =
@@ -1822,8 +1836,14 @@ function validatePriceExtraction(
   // Airbnb uses aria-label="$X for N nights" as their standard stay total display
   const hasForNightsAriaLabel =
     /aria-label="[^"]*\$[\d,]+(?:\.\d+)?\s+for\s+\d+\s+nights?"/i.test(snippet);
+  // Book/stays checkout page patterns - these are the all-in totals
+  const hasCheckoutPayNow = /\bpay\s*\$[\d,]+(?:\.\d{2})?\s*now\b/i.test(snippet);
+  const hasCheckoutTotalUsd = /\btotal\s*\(?\s*USD\s*\)?\s*\$/i.test(snippet);
+  const hasDueToday = /\bdue\s+today\b/i.test(snippet);
+  const hasAmountDue = /\bamount\s+due\b/i.test(snippet);
+  const hasCheckoutPattern = hasCheckoutPayNow || hasCheckoutTotalUsd || hasDueToday || hasAmountDue;
 
-  if (!hasExplicitTotalLabel && !hasTaxesFeesLabel && !hasForNightsAriaLabel) {
+  if (!hasExplicitTotalLabel && !hasTaxesFeesLabel && !hasForNightsAriaLabel && !hasCheckoutPattern) {
     return { ok: false, reason: 'missing_explicit_total_or_taxes_context', evidence: snippet };
   }
 
