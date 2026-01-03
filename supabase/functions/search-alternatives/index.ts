@@ -5112,6 +5112,18 @@ async function runSearchWithStreaming(
           console.error('Failed to persist rate limit abort record:', e);
         }
         
+        // Telemetry for access-layer abort
+        await logProviderRequest({
+          supabase,
+          provider: r.provider as ProviderLogName,
+          endpointType: 'access_layer_abort',
+          searchId,
+          success: false,
+          httpStatus: 429,
+          durationMs: r.durationMs || 0,
+          errorMessage: `ACCESS_ABORT:RATE_LIMITED - aborted_before_fallbacks=true`,
+        });
+        
         sendProgress(controller, `${label} RATE LIMITED`, 'Access layer hard stop - no fallbacks', {
           provider: r.provider,
           failureClass: 'RATE_LIMITED',
@@ -5161,6 +5173,18 @@ async function runSearchWithStreaming(
         } catch (e) {
           console.error('Failed to persist bot block abort record:', e);
         }
+        
+        // Telemetry for access-layer abort
+        await logProviderRequest({
+          supabase,
+          provider: r.provider as ProviderLogName,
+          endpointType: 'access_layer_abort',
+          searchId,
+          success: false,
+          httpStatus: 403,
+          durationMs: r.durationMs || 0,
+          errorMessage: `ACCESS_ABORT:BOT_BLOCKED - ${r.error || 'blocked'} - aborted_before_fallbacks=true`,
+        });
         
         sendProgress(controller, `${label} BOT BLOCKED`, 'Access layer hard stop - no fallbacks', {
           provider: r.provider,

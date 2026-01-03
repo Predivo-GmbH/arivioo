@@ -4,10 +4,11 @@ import { cn } from "@/lib/utils";
 
 export interface PlatformExtractionStatus {
   platformName: string;
-  status: 'pending' | 'running' | 'success' | 'blocked_captcha' | 'blocked_rate_limit' | 'dates_not_applied' | 'price_not_found' | 'failed_unknown';
+  status: 'pending' | 'running' | 'success' | 'blocked_captcha' | 'blocked_rate_limit' | 'blocked_captcha_or_bot' | 'rate_limited_abort' | 'bot_blocked_abort' | 'dates_not_applied' | 'price_not_found' | 'failed_unknown';
   price: number | null;
   currency?: string;
   error?: string;
+  abortedBeforeFallbacks?: boolean;
 }
 
 interface PriceExtractionProgressProps {
@@ -33,7 +34,11 @@ export function PriceExtractionProgress({
         return <Check className="w-3.5 h-3.5 text-green-500" />;
       case 'blocked_captcha':
       case 'blocked_rate_limit':
+      case 'blocked_captcha_or_bot':
         return <Ban className="w-3.5 h-3.5 text-amber-500" />;
+      case 'rate_limited_abort':
+      case 'bot_blocked_abort':
+        return <Ban className="w-3.5 h-3.5 text-red-500" />;
       case 'dates_not_applied':
       case 'price_not_found':
       case 'failed_unknown':
@@ -52,9 +57,14 @@ export function PriceExtractionProgress({
       case 'success':
         return 'Done';
       case 'blocked_captcha':
-        return 'CAPTCHA';
+      case 'blocked_captcha_or_bot':
+        return 'Blocked';
       case 'blocked_rate_limit':
         return 'Rate limited';
+      case 'rate_limited_abort':
+        return 'Rate limit (stopped)';
+      case 'bot_blocked_abort':
+        return 'Blocked (stopped)';
       case 'dates_not_applied':
         return 'Dates failed';
       case 'price_not_found':
@@ -67,7 +77,8 @@ export function PriceExtractionProgress({
   };
 
   const successCount = platforms.filter(p => p.status === 'success').length;
-  const failedCount = platforms.filter(p => ['blocked_captcha', 'blocked_rate_limit', 'dates_not_applied', 'price_not_found', 'failed_unknown'].includes(p.status)).length;
+  const abortedCount = platforms.filter(p => ['rate_limited_abort', 'bot_blocked_abort'].includes(p.status)).length;
+  const failedCount = platforms.filter(p => ['blocked_captcha', 'blocked_rate_limit', 'blocked_captcha_or_bot', 'dates_not_applied', 'price_not_found', 'failed_unknown'].includes(p.status)).length;
   const pendingCount = platforms.filter(p => p.status === 'pending' || p.status === 'running').length;
 
   return (
@@ -82,6 +93,12 @@ export function PriceExtractionProgress({
             <span className="text-green-500 flex items-center gap-1">
               <Check className="w-3.5 h-3.5" />
               {successCount} collected
+            </span>
+          )}
+          {abortedCount > 0 && (
+            <span className="text-red-500 flex items-center gap-1">
+              <Ban className="w-3.5 h-3.5" />
+              {abortedCount} stopped
             </span>
           )}
           {failedCount > 0 && (
@@ -111,7 +128,8 @@ export function PriceExtractionProgress({
               platform.status === 'running' && "bg-primary/10 border border-primary/20",
               platform.status === 'success' && "bg-green-500/10 border border-green-500/20",
               platform.status === 'pending' && "bg-muted/50",
-              ['blocked_captcha', 'blocked_rate_limit', 'dates_not_applied', 'price_not_found', 'failed_unknown'].includes(platform.status) && "bg-red-500/10 border border-red-500/20"
+              ['rate_limited_abort', 'bot_blocked_abort'].includes(platform.status) && "bg-red-500/15 border-2 border-red-500/40",
+              ['blocked_captcha', 'blocked_rate_limit', 'blocked_captcha_or_bot', 'dates_not_applied', 'price_not_found', 'failed_unknown'].includes(platform.status) && "bg-red-500/10 border border-red-500/20"
             )}
           >
             {getStatusIcon(platform.status)}

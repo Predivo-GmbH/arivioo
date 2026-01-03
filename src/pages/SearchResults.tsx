@@ -160,6 +160,11 @@ const resolveSearchErrorCode = (s: SearchData | null): string | null => {
     'airbnb_total_not_visible': 'airbnb_total_not_visible',
     'provider_timeout': 'provider_timeout',
     'bot_detected': 'bot_detected',
+    // Access-layer hard-stop aborts (pipeline stopped before fallbacks)
+    'rate_limited_abort': 'rate_limited',
+    'bot_blocked_abort': 'bot_detected',
+    'blocked_rate_limit': 'rate_limited',
+    'blocked_captcha_or_bot': 'bot_detected',
     // Map common variants
     'airbnb_blocked': 'bot_detected',
     'airbnb_blocked_or_captcha': 'bot_detected',
