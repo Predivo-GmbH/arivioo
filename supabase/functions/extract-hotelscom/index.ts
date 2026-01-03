@@ -69,6 +69,24 @@ interface ExtractionRequest {
   rooms?: number;
 }
 
+/**
+ * Structural proof object - REQUIRED for Verified status
+ * 
+ * REFERENCE IMPLEMENTATION: This is the canonical format all extractors must emit.
+ * Verification can only succeed when ALL boolean fields are explicitly true.
+ */
+interface StructuralProof {
+  breakdown_found: boolean;
+  total_label_found: boolean;
+  rendered_dates_match: boolean;
+  extracted_from_breakdown_total: boolean;
+  proof_version: string;
+  // Optional debugging fields
+  breakdown_selector_used?: string;
+  total_value_raw?: string;
+  date_value_raw?: string;
+}
+
 interface ExtractionResult {
   success: boolean;
   status: TerminalStatus;
@@ -88,6 +106,8 @@ interface ExtractionResult {
     priceVerified: boolean;
     evidenceSnippet: string | null;
   };
+  // Structural proof for verification - REQUIRED for Verified status
+  structuralProof: StructuralProof;
   durationMs: number;
   error: string | null;
 }
@@ -159,65 +179,319 @@ function validatePhaseA(markdown: string): {
   };
 }
 
-// Phase B: Extract total price with verification
-function extractPrice(markdown: string): {
+/**
+ * STRUCTURAL BREAKDOWN DETECTION
+ * 
+ * Reference implementation: Detects price breakdown containers in Hotels.com pages.
+ * A breakdown is valid ONLY when it contains multiple price line items and a total row.
+ * 
+ * Hotels.com breakdown patterns:
+ * - "Price details" section with line items
+ * - "Your price summary" with taxes/fees breakdown
+ * - Room rate + taxes/fees + total structure
+ */
+function detectBreakdownStructure(markdown: string): {
+  breakdown_found: boolean;
+  total_label_found: boolean;
+  breakdown_selector_used: string | null;
+  total_value_raw: string | null;
+  breakdown_price: number | null;
+  has_fee_lines: boolean;
+} {
+  const result = {
+    breakdown_found: false,
+    total_label_found: false,
+    breakdown_selector_used: null as string | null,
+    total_value_raw: null as string | null,
+    breakdown_price: null as number | null,
+    has_fee_lines: false,
+  };
+  
+  const lowerMarkdown = markdown.toLowerCase();
+  
+  // Hotels.com breakdown container indicators
+  const breakdownIndicators = [
+    'price details',
+    'price breakdown',
+    'price summary',
+    'your price summary',
+    'payment summary',
+    'room price',
+    'taxes and fees',
+    'taxes & fees',
+    'service fee',
+    'cleaning fee',
+    'resort fee',
+  ];
+  
+  // Check for breakdown container presence
+  for (const indicator of breakdownIndicators) {
+    if (lowerMarkdown.includes(indicator)) {
+      result.breakdown_found = true;
+      result.breakdown_selector_used = indicator;
+      break;
+    }
+  }
+  
+  // Check for fee line items (indicates real breakdown, not just a total)
+  const feePatterns = [
+    /taxes\s*(?:and|&)?\s*fees/i,
+    /service\s*fee/i,
+    /cleaning\s*fee/i,
+    /resort\s*fee/i,
+    /occupancy\s*tax/i,
+    /lodging\s*tax/i,
+  ];
+  result.has_fee_lines = feePatterns.some(p => p.test(markdown));
+  
+  // Breakdown is valid only if we have fee lines (multiple line items)
+  if (!result.has_fee_lines) {
+    result.breakdown_found = false;
+  }
+  
+  // Look for explicit total row in breakdown context
+  // Hotels.com patterns: "The price is $XXX total", "$XXX total includes taxes and fees"
+  const totalPatterns = [
+    /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/i,
+    /\$?([\d,]+(?:\.\d{2})?)\s*total\s*(?:includes?\s+)?(?:taxes\s+(?:and|&)\s+fees)?/i,
+    /total\s*(?:price|cost)?[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
+  ];
+  
+  for (const pattern of totalPatterns) {
+    const match = markdown.match(pattern);
+    if (match) {
+      result.total_label_found = true;
+      result.total_value_raw = match[0];
+      const priceStr = match[1].replace(/,/g, '');
+      result.breakdown_price = parseFloat(priceStr);
+      break;
+    }
+  }
+  
+  return result;
+}
+
+/**
+ * RENDERED DATE DETECTION
+ * 
+ * Reference implementation: Extracts dates shown on the rendered page
+ * and validates they match the requested check-in/check-out dates.
+ */
+function validateRenderedDates(
+  markdown: string, 
+  requestedCheckIn: string, 
+  requestedCheckOut: string
+): {
+  rendered_dates_match: boolean;
+  date_value_raw: string | null;
+} {
+  const result = {
+    rendered_dates_match: false,
+    date_value_raw: null as string | null,
+  };
+  
+  // Parse requested dates
+  const reqCheckIn = new Date(requestedCheckIn);
+  const reqCheckOut = new Date(requestedCheckOut);
+  
+  if (isNaN(reqCheckIn.getTime()) || isNaN(reqCheckOut.getTime())) {
+    console.log('[HOTELS.COM] Invalid requested dates');
+    return result;
+  }
+  
+  // Hotels.com date display patterns
+  // Pattern 1: "Jan 15 - Jan 18" or "Jan 15 – Jan 18"
+  const dateRangePattern = /([A-Z][a-z]{2}\s+\d{1,2})\s*[-–]\s*([A-Z][a-z]{2}\s+\d{1,2})/i;
+  
+  // Pattern 2: "Check-in: Jan 15" / "Check-out: Jan 18"
+  const checkInPattern = /check-?in[:\s]+([A-Z][a-z]{2,8}\s+\d{1,2}(?:,?\s*\d{4})?)/i;
+  const checkOutPattern = /check-?out[:\s]+([A-Z][a-z]{2,8}\s+\d{1,2}(?:,?\s*\d{4})?)/i;
+  
+  // Pattern 3: "2025-01-15" ISO format
+  const isoDatePattern = /(\d{4}-\d{2}-\d{2})\s*(?:to|[-–])\s*(\d{4}-\d{2}-\d{2})/i;
+  
+  // Try date range pattern
+  const rangeMatch = markdown.match(dateRangePattern);
+  if (rangeMatch) {
+    result.date_value_raw = rangeMatch[0];
+    
+    // Parse and compare
+    const year = reqCheckIn.getFullYear();
+    const checkInStr = rangeMatch[1] + ', ' + year;
+    const checkOutStr = rangeMatch[2] + ', ' + year;
+    
+    const parsedCheckIn = new Date(checkInStr);
+    const parsedCheckOut = new Date(checkOutStr);
+    
+    // Handle year boundary (check-out in next year)
+    if (parsedCheckOut < parsedCheckIn) {
+      const nextYear = year + 1;
+      const checkOutStrNextYear = rangeMatch[2] + ', ' + nextYear;
+      const parsedCheckOutNextYear = new Date(checkOutStrNextYear);
+      if (
+        parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
+        parsedCheckIn.getDate() === reqCheckIn.getDate() &&
+        parsedCheckOutNextYear.getMonth() === reqCheckOut.getMonth() &&
+        parsedCheckOutNextYear.getDate() === reqCheckOut.getDate()
+      ) {
+        result.rendered_dates_match = true;
+        return result;
+      }
+    }
+    
+    if (
+      parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
+      parsedCheckIn.getDate() === reqCheckIn.getDate() &&
+      parsedCheckOut.getMonth() === reqCheckOut.getMonth() &&
+      parsedCheckOut.getDate() === reqCheckOut.getDate()
+    ) {
+      result.rendered_dates_match = true;
+      return result;
+    }
+  }
+  
+  // Try ISO date pattern
+  const isoMatch = markdown.match(isoDatePattern);
+  if (isoMatch) {
+    result.date_value_raw = isoMatch[0];
+    
+    const parsedCheckIn = new Date(isoMatch[1]);
+    const parsedCheckOut = new Date(isoMatch[2]);
+    
+    if (
+      parsedCheckIn.getTime() === reqCheckIn.getTime() &&
+      parsedCheckOut.getTime() === reqCheckOut.getTime()
+    ) {
+      result.rendered_dates_match = true;
+      return result;
+    }
+  }
+  
+  // Try separate check-in/check-out patterns
+  const checkInMatch = markdown.match(checkInPattern);
+  const checkOutMatch = markdown.match(checkOutPattern);
+  if (checkInMatch && checkOutMatch) {
+    result.date_value_raw = `${checkInMatch[0]} / ${checkOutMatch[0]}`;
+    
+    const year = reqCheckIn.getFullYear();
+    const parsedCheckIn = new Date(checkInMatch[1] + ', ' + year);
+    const parsedCheckOut = new Date(checkOutMatch[1] + ', ' + year);
+    
+    if (
+      parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
+      parsedCheckIn.getDate() === reqCheckIn.getDate() &&
+      parsedCheckOut.getMonth() === reqCheckOut.getMonth() &&
+      parsedCheckOut.getDate() === reqCheckOut.getDate()
+    ) {
+      result.rendered_dates_match = true;
+      return result;
+    }
+  }
+  
+  // Fallback: check if the exact requested dates appear in content
+  // This handles cases where Hotels.com shows dates in URL params on page
+  if (markdown.includes(requestedCheckIn) && markdown.includes(requestedCheckOut)) {
+    result.date_value_raw = `${requestedCheckIn} to ${requestedCheckOut}`;
+    result.rendered_dates_match = true;
+    return result;
+  }
+  
+  console.log('[HOTELS.COM] Could not match rendered dates to request');
+  return result;
+}
+
+// Phase B: Extract total price with verification AND structural proof
+function extractPrice(
+  markdown: string,
+  requestedCheckIn: string,
+  requestedCheckOut: string
+): {
   extractedPrice: number | null;
   currency: string | null;
   includesTaxesFees: boolean | null;
   priceVerified: boolean;
   evidenceSnippet: string | null;
+  structuralProof: StructuralProof;
 } {
-  // Pattern 1: "The price is $XXX total" (Hotels.com specific)
-  const thepricePattern = /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/i;
-  const thepriceMatch = markdown.match(thepricePattern);
+  // Initialize structural proof with explicit false values
+  const structuralProof: StructuralProof = {
+    breakdown_found: false,
+    total_label_found: false,
+    rendered_dates_match: false,
+    extracted_from_breakdown_total: false,
+    proof_version: '1.0',
+  };
   
-  // Pattern 2: "$XXX total" (general)
-  const totalPattern = /\$([\d,]+(?:\.\d{2})?)\s*total/gi;
-  const totalMatches = [...markdown.matchAll(totalPattern)];
+  // Step 1: Detect breakdown structure
+  const breakdown = detectBreakdownStructure(markdown);
+  structuralProof.breakdown_found = breakdown.breakdown_found;
+  structuralProof.total_label_found = breakdown.total_label_found;
+  structuralProof.breakdown_selector_used = breakdown.breakdown_selector_used || undefined;
+  structuralProof.total_value_raw = breakdown.total_value_raw || undefined;
   
-  // Pattern 3: "total with taxes and fees"
-  const taxesPattern = /\$([\d,]+(?:\.\d{2})?)\s*total\s*(?:with\s+taxes\s+(?:and|&)\s+fees)?/gi;
-  const taxesMatches = [...markdown.matchAll(taxesPattern)];
+  // Step 2: Validate rendered dates match request
+  const dateValidation = validateRenderedDates(markdown, requestedCheckIn, requestedCheckOut);
+  structuralProof.rendered_dates_match = dateValidation.rendered_dates_match;
+  structuralProof.date_value_raw = dateValidation.date_value_raw || undefined;
   
   let extractedPrice: number | null = null;
   let evidenceSnippet: string | null = null;
   let includesTaxesFees: boolean | null = null;
   
-  // Prefer "The price is $XXX total" pattern (most explicit)
-  if (thepriceMatch) {
-    const priceStr = thepriceMatch[1].replace(/,/g, '');
-    extractedPrice = parseFloat(priceStr);
+  // Step 3: Extract price ONLY from breakdown total if structural proof exists
+  if (breakdown.breakdown_found && breakdown.total_label_found && breakdown.breakdown_price) {
+    extractedPrice = breakdown.breakdown_price;
+    evidenceSnippet = breakdown.total_value_raw;
+    structuralProof.extracted_from_breakdown_total = true;
     
-    // Find surrounding context for evidence
-    const matchIndex = markdown.indexOf(thepriceMatch[0]);
-    const start = Math.max(0, matchIndex - 30);
-    const end = Math.min(markdown.length, matchIndex + thepriceMatch[0].length + 50);
-    evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
-    
-    // Check if taxes included
-    const context = markdown.slice(matchIndex, matchIndex + 100).toLowerCase();
-    if (context.includes('taxes') && context.includes('fees')) {
+    // Check if taxes are included (based on breakdown having fee lines)
+    if (breakdown.has_fee_lines) {
       includesTaxesFees = true;
     }
-  }
-  // Fallback to general "$XXX total" pattern
-  else if (totalMatches.length > 0) {
-    // Use the first (usually most prominent) total
-    const firstMatch = totalMatches[0];
-    const priceStr = firstMatch[1].replace(/,/g, '');
-    extractedPrice = parseFloat(priceStr);
     
-    // Find surrounding context for evidence
-    const matchIndex = markdown.indexOf(firstMatch[0]);
-    const start = Math.max(0, matchIndex - 30);
-    const end = Math.min(markdown.length, matchIndex + firstMatch[0].length + 50);
-    evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
+    console.log(`[HOTELS.COM] Structural extraction: $${extractedPrice} from breakdown`);
+  } else {
+    // Fallback: Try legacy extraction but mark as NOT from breakdown
+    // This allows extraction to succeed but verification will fail
+    const thepricePattern = /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/i;
+    const thepriceMatch = markdown.match(thepricePattern);
     
-    // Check if taxes included
-    const context = markdown.slice(matchIndex, matchIndex + 100).toLowerCase();
-    if (context.includes('taxes') && context.includes('fees')) {
-      includesTaxesFees = true;
+    const totalPattern = /\$([\d,]+(?:\.\d{2})?)\s*total/gi;
+    const totalMatches = [...markdown.matchAll(totalPattern)];
+    
+    if (thepriceMatch) {
+      const priceStr = thepriceMatch[1].replace(/,/g, '');
+      extractedPrice = parseFloat(priceStr);
+      const matchIndex = markdown.indexOf(thepriceMatch[0]);
+      const start = Math.max(0, matchIndex - 30);
+      const end = Math.min(markdown.length, matchIndex + thepriceMatch[0].length + 50);
+      evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
+      
+      const context = markdown.slice(matchIndex, matchIndex + 100).toLowerCase();
+      if (context.includes('taxes') && context.includes('fees')) {
+        includesTaxesFees = true;
+      }
+      
+      console.log(`[HOTELS.COM] Legacy extraction (no structural proof): $${extractedPrice}`);
+    } else if (totalMatches.length > 0) {
+      const firstMatch = totalMatches[0];
+      const priceStr = firstMatch[1].replace(/,/g, '');
+      extractedPrice = parseFloat(priceStr);
+      const matchIndex = markdown.indexOf(firstMatch[0]);
+      const start = Math.max(0, matchIndex - 30);
+      const end = Math.min(markdown.length, matchIndex + firstMatch[0].length + 50);
+      evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
+      
+      const context = markdown.slice(matchIndex, matchIndex + 100).toLowerCase();
+      if (context.includes('taxes') && context.includes('fees')) {
+        includesTaxesFees = true;
+      }
+      
+      console.log(`[HOTELS.COM] Legacy extraction (no structural proof): $${extractedPrice}`);
     }
+    
+    // Mark as NOT extracted from breakdown
+    structuralProof.extracted_from_breakdown_total = false;
   }
   
   // HALLUCINATION GUARD: Verify price appears verbatim in content
@@ -232,6 +506,7 @@ function extractPrice(markdown: string): {
     includesTaxesFees,
     priceVerified,
     evidenceSnippet,
+    structuralProof,
   };
 }
 
@@ -280,6 +555,14 @@ async function extractFromHotelsCom(
       includesTaxesFees: null,
       priceVerified: false,
       evidenceSnippet: null,
+    },
+    // Initialize structural proof with explicit false values
+    structuralProof: {
+      breakdown_found: false,
+      total_label_found: false,
+      rendered_dates_match: false,
+      extracted_from_breakdown_total: false,
+      proof_version: '1.0',
     },
     durationMs: 0,
     error: null,
@@ -373,12 +656,16 @@ async function extractFromHotelsCom(
     // ============= PHASE B: Extract price (only if Phase A passed) =============
     result.phaseB.ran = true;
     
-    const phaseBResult = extractPrice(markdown);
+    // Pass dates for structural validation
+    const phaseBResult = extractPrice(markdown, checkIn, checkOut);
     result.phaseB.extractedPrice = phaseBResult.extractedPrice;
     result.phaseB.currency = phaseBResult.currency;
     result.phaseB.includesTaxesFees = phaseBResult.includesTaxesFees;
     result.phaseB.priceVerified = phaseBResult.priceVerified;
     result.phaseB.evidenceSnippet = phaseBResult.evidenceSnippet;
+    
+    // Copy structural proof to result
+    result.structuralProof = phaseBResult.structuralProof;
     
     // HALLUCINATION GUARD: Price must be verified against content
     if (!phaseBResult.priceVerified) {
@@ -389,11 +676,17 @@ async function extractFromHotelsCom(
       return result;
     }
     
+    // Log structural proof status
+    const proof = result.structuralProof;
+    const structurallyVerified = proof.breakdown_found && proof.total_label_found && 
+                                  proof.rendered_dates_match && proof.extracted_from_breakdown_total;
+    console.log(`[HOTELS.COM] Structural proof: breakdown=${proof.breakdown_found}, total=${proof.total_label_found}, dates=${proof.rendered_dates_match}, fromBreakdown=${proof.extracted_from_breakdown_total}`);
+    
     // SUCCESS
     result.success = true;
     result.status = 'success';
     result.durationMs = Date.now() - startTime;
-    console.log(`[HOTELS.COM] Success: $${phaseBResult.extractedPrice} (verified)`);
+    console.log(`[HOTELS.COM] Success: $${phaseBResult.extractedPrice} (structurally_verified=${structurallyVerified})`);
     
     return result;
     
@@ -483,7 +776,10 @@ Deno.serve(async (req) => {
             phaseA: result.phaseA,
             phaseB: result.phaseB,
             durationMs: result.durationMs,
+            // STRUCTURAL PROOF - Required for Verified status
+            structural_proof: result.structuralProof,
           },
+          price_type: result.structuralProof.extracted_from_breakdown_total ? 'TOTAL_STAY' : 'unknown',
           updated_at: new Date().toISOString(),
         })
         .eq('id', dbExtractionId);
