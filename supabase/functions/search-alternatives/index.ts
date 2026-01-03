@@ -4984,17 +4984,17 @@ async function runSearchWithStreaming(
       console.log('[SIMULATION] Browserless failure simulation enabled - will skip Browserless and test fallback');
     }
     
-    // Fallback chain: Browserless -> Zyte -> Firecrawl
+    // Fallback chain: Zyte -> Browserless -> Firecrawl (testing order)
     // All providers should try to get the all-in total from book/stays checkout page
     const fallbackChain: { provider: AirbnbProvider; run: () => Promise<ProviderPriceResult> }[] = simulateBrowserlessFail
       ? [
-          // Simulation mode: skip Browserless to test Zyte fallback
-          { provider: 'zyte', run: zyteTask },
+          // Simulation mode: skip Zyte to test Browserless fallback
+          { provider: 'browserless', run: browserlessTask },
           { provider: 'firecrawl', run: firecrawlTask },
         ]
       : [
-          { provider: 'browserless', run: browserlessTask },
           { provider: 'zyte', run: zyteTask },
+          { provider: 'browserless', run: browserlessTask },
           { provider: 'firecrawl', run: firecrawlTask },
         ];
 
