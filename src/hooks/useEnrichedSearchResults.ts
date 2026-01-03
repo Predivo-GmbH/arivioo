@@ -193,10 +193,17 @@ export function useEnrichedSearchResults() {
           price_verified_at: null,
           eligible_for_comparison: false,
           verification_failures: ['platform_blocked'],
+          structural_total_verified: false,
           semantic_total_verified: false,
+          structural_proof: {
+            breakdown_found: null,
+            total_label_found: null,
+            rendered_dates_match: null,
+            extracted_from_breakdown_total: null,
+          },
         };
       } else if (extraction) {
-        // We have an extraction record - use verification logic with full semantic checks
+        // We have an extraction record - use verification logic with structural checks
         const evidenceSnippets = Array.isArray(extraction.evidence_snippets) 
           ? extraction.evidence_snippets 
           : [];
@@ -209,7 +216,7 @@ export function useEnrichedSearchResults() {
           confidence_score: extraction.confidence_score,
           extracted_price: extraction.extracted_price,
           extraction_completed_at: extraction.updated_at,
-          // New semantic verification params
+          // Verification params
           price_type: extraction.price_type || metadata?.price_type || null,
           extraction_stage: extraction.extraction_stage || metadata?.extraction_stage || null,
           extraction_path: metadata?.extraction_path || null,
@@ -227,7 +234,14 @@ export function useEnrichedSearchResults() {
           price_verified_at: null,
           eligible_for_comparison: false,
           verification_failures: ['no_price'],
+          structural_total_verified: false,
           semantic_total_verified: false,
+          structural_proof: {
+            breakdown_found: null,
+            total_label_found: null,
+            rendered_dates_match: null,
+            extracted_from_breakdown_total: null,
+          },
         };
       }
 
