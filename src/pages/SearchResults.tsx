@@ -13,7 +13,6 @@ import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/l
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
-import { ExtractionStatusSummary } from "@/components/ExtractionStatusSummary";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -252,6 +251,9 @@ export default function SearchResults() {
   const [activityFeed, setActivityFeed] = useState<Array<{ ts: number; message: string; detail?: string; id: string }>>([]);
   const [showMoreExpensive, setShowMoreExpensive] = useState(false);
   const [showNoPriceMatches, setShowNoPriceMatches] = useState(false);
+  const [showUnverifiedPrices, setShowUnverifiedPrices] = useState(false);
+  const [showBlockedPlatforms, setShowBlockedPlatforms] = useState(false);
+  const [showFailedExtractions, setShowFailedExtractions] = useState(false);
   const [streamDisconnected, setStreamDisconnected] = useState(false);
   const [extractingPrices, setExtractingPrices] = useState(false);
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
@@ -1296,6 +1298,25 @@ export default function SearchResults() {
     r.eligible_for_comparison !== true
   );
   
+  // Categorize unverified results by extraction outcome
+  const categorizeResult = (r: SearchResult): 'price_unverified' | 'blocked' | 'failed' => {
+    // Check if blocked by platform (Tier C or blocked status)
+    if (r.is_tier_c_blocked || r.failure_category === 'blocked_captcha_or_bot' || 
+        r.failure_category === 'rate_limited_abort' || r.failure_category === 'bot_blocked_abort') {
+      return 'blocked';
+    }
+    // Has a price but it's unverified
+    if (r.price && r.price > 0 && r.price_status === 'unverified') {
+      return 'price_unverified';
+    }
+    // Everything else is a failed extraction
+    return 'failed';
+  };
+  
+  const unverifiedWithPrice = unverifiedResults.filter(r => categorizeResult(r) === 'price_unverified');
+  const blockedResults = unverifiedResults.filter(r => categorizeResult(r) === 'blocked');
+  const failedResults = unverifiedResults.filter(r => categorizeResult(r) === 'failed');
+  
   // For backward compatibility: resultsWithPrices = verified only now
   // This ensures all savings calculations use only trusted prices
   const resultsWithPrices = verifiedResults;
@@ -1559,11 +1580,6 @@ export default function SearchResults() {
                   </div>
                 )}
 
-                {/* Price Extraction Status Summary */}
-                <ExtractionStatusSummary 
-                  extractions={priceExtractions}
-                  isExtracting={extractingPrices}
-                />
 
                 {/* Handle dates unavailable - listing not bookable for selected dates */}
                 {(() => {
@@ -1938,133 +1954,304 @@ export default function SearchResults() {
                       </div>
                     )}
 
-                    {/* Found on other platforms – Manual check recommended */}
+                    {/* Categorized Platform Results */}
                     {resultsWithoutPrices.length > 0 && (
-                      <div className="mt-6 pt-6 border-t border-border/50">
-                        <div className="flex items-center gap-2 mb-4">
-                          <Globe className="w-4 h-4 text-muted-foreground" />
-                          <span className="text-sm font-medium text-foreground">
-                            Found on {resultsWithoutPrices.length} other platform{resultsWithoutPrices.length !== 1 ? "s" : ""} – manual check recommended
-                          </span>
-                        </div>
-                        <p className="text-xs text-muted-foreground mb-4">
-                          Prices could not be automatically verified for your dates. Visit these platforms directly to check current pricing.
-                        </p>
-                        <button
-                          onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
-                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
-                        >
-                          {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>{showNoPriceMatches ? 'Hide' : 'Show'} platforms</span>
-                        </button>
+                      <div className="mt-6 pt-6 border-t border-border/50 space-y-6">
                         
-                        {showNoPriceMatches && (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <tbody>
-                                {resultsWithoutPrices.map((result) => {
-                                  const resultImages = toStringArray(result.images);
-                                  const isExpanded = expandedComparison === result.id;
-                                  
-                                  const failureDisplay = getFailureDisplay(result);
-                                  
-                                  return (
-                                    <React.Fragment key={result.id}>
-                                      <tr className="border-b border-border/50 hover:bg-muted/30">
-                                        <td className="py-4 px-4">
-                                          <div className="flex items-center gap-2">
-                                            <span className={`w-2 h-2 rounded-full ${failureDisplay.isTierC ? 'bg-red-400' : failureDisplay.isTierA ? 'bg-amber-500' : 'bg-muted-foreground'}`} />
-                                            <span className="font-medium text-foreground">{result.platform_name}</span>
-                                            {failureDisplay.isTierA && (
-                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 text-[10px] font-medium">
-                                                Tier A
-                                              </span>
-                                            )}
-                                            {failureDisplay.isTierC && (
-                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
-                                                <Ban className="w-2.5 h-2.5" />
-                                                Blocked
-                                              </span>
-                                            )}
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-4 text-center">
-                                          {result.match_type === "visual" && result.confidence_score ? (
-                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                              <Shield className="w-3 h-3" />
-                                              {Math.round(result.confidence_score * 100)}%
-                                            </span>
-                                          ) : (
-                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                              <Info className="w-3 h-3" />
-                                              Text
-                                            </span>
-                                          )}
-                                        </td>
-                                        <td className="py-4 px-4 text-right text-muted-foreground">
-                                          <div className="flex flex-col items-end gap-0.5">
-                                            <span className={`text-sm ${failureDisplay.isTierC ? 'text-red-500' : failureDisplay.isTierA ? 'text-amber-600' : ''}`}>
-                                              {failureDisplay.text}
-                                            </span>
-                                            {failureDisplay.isTierA && result.failure_category && (
-                                              <span className="inline-flex items-center gap-1 text-[10px] text-amber-500">
-                                                <AlertTriangle className="w-2.5 h-2.5" />
-                                                {result.failure_category}
-                                              </span>
-                                            )}
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-4 text-center">
-                                          <div className="flex flex-col gap-1.5 items-center">
-                                            <Button variant="outline" size="sm" asChild>
-                                              <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                                View <ExternalLink className="w-3 h-3 ml-1" />
-                                              </a>
-                                            </Button>
-                                            {/* Always show photo comparison button */}
-                                            <button
-                                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                              className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
-                                                isExpanded 
-                                                  ? 'bg-primary/10 text-primary' 
-                                                  : 'text-muted-foreground hover:text-primary'
-                                              }`}
-                                            >
-                                              <ArrowLeftRight className="w-3 h-3" />
-                                              {isExpanded ? 'Hide' : 'Photos'}
-                                            </button>
-                                          </div>
-                                        </td>
-                                      </tr>
-                                      {/* Inline Photo Comparison for additional results */}
-                                      {isExpanded && (
-                                        <tr className="border-b border-border/50">
-                                          <td colSpan={4} className="p-4 bg-muted/30">
-                                            {resultImages.length > 0 || airbnbImages.length > 0 ? (
-                                              <ImageComparison
-                                                airbnbImages={airbnbImages}
-                                                alternativeImages={resultImages}
-                                                airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                                alternativeTitle={result.listing_title || "Alternative Listing"}
-                                                platformName={result.platform_name}
-                                                sourceAirbnbImage={result.source_airbnb_image}
-                                              />
-                                            ) : (
-                                              <div className="text-center py-6 text-muted-foreground">
-                                                <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                <p className="text-sm">No photos available for comparison</p>
+                        {/* Category 1: Price fetched but unverified */}
+                        {unverifiedWithPrice.length > 0 && (
+                          <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 overflow-hidden">
+                            <button
+                              onClick={() => setShowUnverifiedPrices(!showUnverifiedPrices)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-amber-500/10 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                <AlertCircle className="w-4 h-4 text-amber-500" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {unverifiedWithPrice.length} price{unverifiedWithPrice.length !== 1 ? 's' : ''} fetched (unverified)
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Manual check recommended</span>
+                                {showUnverifiedPrices ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showUnverifiedPrices && (
+                              <div className="border-t border-amber-500/20">
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {unverifiedWithPrice.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const failureDisplay = getFailureDisplay(result);
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
                                               </div>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      )}
-                                    </React.Fragment>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              {result.match_type === "visual" && result.confidence_score ? (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                                  <Shield className="w-3 h-3" />
+                                                  {Math.round(result.confidence_score * 100)}%
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                                  <Info className="w-3 h-3" />
+                                                  Text
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-4 px-4 text-right">
+                                              <div className="flex flex-col items-end gap-0.5">
+                                                <span className="text-sm font-medium text-foreground">
+                                                  ${result.price?.toLocaleString()}
+                                                </span>
+                                                <span className="text-xs text-amber-600">{failureDisplay.text}</span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
                           </div>
                         )}
+                        
+                        {/* Category 2: Blocked by platform */}
+                        {blockedResults.length > 0 && (
+                          <div className="rounded-xl border border-red-500/20 bg-red-500/5 overflow-hidden">
+                            <button
+                              onClick={() => setShowBlockedPlatforms(!showBlockedPlatforms)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-red-500/10 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-red-500" />
+                                <Ban className="w-4 h-4 text-red-500" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {blockedResults.length} platform{blockedResults.length !== 1 ? 's' : ''} blocked access
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Bot detection or rate limit</span>
+                                {showBlockedPlatforms ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showBlockedPlatforms && (
+                              <div className="border-t border-red-500/20">
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {blockedResults.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const failureDisplay = getFailureDisplay(result);
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-red-500" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
+                                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
+                                                  <Ban className="w-2.5 h-2.5" />
+                                                  Blocked
+                                                </span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              {result.match_type === "visual" && result.confidence_score ? (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                                  <Shield className="w-3 h-3" />
+                                                  {Math.round(result.confidence_score * 100)}%
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                                  <Info className="w-3 h-3" />
+                                                  Text
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-4 px-4 text-right text-muted-foreground">
+                                              <span className="text-sm text-red-500">{failureDisplay.text}</span>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Category 3: Extraction failed */}
+                        {failedResults.length > 0 && (
+                          <div className="rounded-xl border border-border bg-muted/30 overflow-hidden">
+                            <button
+                              onClick={() => setShowFailedExtractions(!showFailedExtractions)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/50 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                <AlertCircle className="w-4 h-4 text-muted-foreground" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {failedResults.length} extraction{failedResults.length !== 1 ? 's' : ''} failed
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Page load or price not found</span>
+                                {showFailedExtractions ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showFailedExtractions && (
+                              <div className="border-t border-border">
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {failedResults.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const failureDisplay = getFailureDisplay(result);
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              {result.match_type === "visual" && result.confidence_score ? (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                                  <Shield className="w-3 h-3" />
+                                                  {Math.round(result.confidence_score * 100)}%
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                                  <Info className="w-3 h-3" />
+                                                  Text
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-4 px-4 text-right text-muted-foreground">
+                                              <span className="text-sm">{failureDisplay.text}</span>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
                       </div>
                     )}
 
@@ -2391,133 +2578,304 @@ export default function SearchResults() {
                       </div>
                     </div>
 
-                    {/* Found on other platforms – Manual check recommended */}
+                    {/* Categorized Platform Results */}
                     {resultsWithoutPrices.length > 0 && (
-                      <div className="mt-6 pt-6 border-t border-border/50">
-                        <div className="flex items-center gap-2 mb-4">
-                          <Globe className="w-4 h-4 text-muted-foreground" />
-                          <span className="text-sm font-medium text-foreground">
-                            Found on {resultsWithoutPrices.length} other platform{resultsWithoutPrices.length !== 1 ? "s" : ""} – manual check recommended
-                          </span>
-                        </div>
-                        <p className="text-xs text-muted-foreground mb-4">
-                          Prices could not be automatically verified for your dates. Visit these platforms directly to check current pricing.
-                        </p>
-                        <button
-                          onClick={() => setShowNoPriceMatches(!showNoPriceMatches)}
-                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
-                        >
-                          {showNoPriceMatches ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>{showNoPriceMatches ? 'Hide' : 'Show'} platforms</span>
-                        </button>
+                      <div className="mt-6 pt-6 border-t border-border/50 space-y-6">
                         
-                        {showNoPriceMatches && (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <tbody>
-                                {resultsWithoutPrices.map((result) => {
-                                  const resultImages = toStringArray(result.images);
-                                  const isExpanded = expandedComparison === result.id;
-                                  
-                                  const failureDisplay = getFailureDisplay(result);
-                                  
-                                  return (
-                                    <React.Fragment key={result.id}>
-                                      <tr className="border-b border-border/50 hover:bg-muted/30">
-                                        <td className="py-4 px-4">
-                                          <div className="flex items-center gap-2">
-                                            <span className={`w-2 h-2 rounded-full ${failureDisplay.isTierC ? 'bg-red-400' : failureDisplay.isTierA ? 'bg-amber-500' : 'bg-muted-foreground'}`} />
-                                            <span className="font-medium text-foreground">{result.platform_name}</span>
-                                            {failureDisplay.isTierA && (
-                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 text-[10px] font-medium">
-                                                Tier A
-                                              </span>
-                                            )}
-                                            {failureDisplay.isTierC && (
-                                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
-                                                <Ban className="w-2.5 h-2.5" />
-                                                Blocked
-                                              </span>
-                                            )}
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-4 text-center">
-                                          {result.match_type === "visual" && result.confidence_score ? (
-                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                              <Shield className="w-3 h-3" />
-                                              {Math.round(result.confidence_score * 100)}%
-                                            </span>
-                                          ) : (
-                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                              <Info className="w-3 h-3" />
-                                              Text
-                                            </span>
-                                          )}
-                                        </td>
-                                        <td className="py-4 px-4 text-right text-muted-foreground">
-                                          <div className="flex flex-col items-end gap-0.5">
-                                            <span className={`text-sm ${failureDisplay.isTierC ? 'text-red-500' : failureDisplay.isTierA ? 'text-amber-600' : ''}`}>
-                                              {failureDisplay.text}
-                                            </span>
-                                            {failureDisplay.isTierA && result.failure_category && (
-                                              <span className="inline-flex items-center gap-1 text-[10px] text-amber-500">
-                                                <AlertTriangle className="w-2.5 h-2.5" />
-                                                {result.failure_category}
-                                              </span>
-                                            )}
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-4 text-center">
-                                          <div className="flex flex-col gap-1.5 items-center">
-                                            <Button variant="outline" size="sm" asChild>
-                                              <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                                View <ExternalLink className="w-3 h-3 ml-1" />
-                                              </a>
-                                            </Button>
-                                            {/* Always show photo comparison button */}
-                                            <button
-                                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                              className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
-                                                isExpanded 
-                                                  ? 'bg-primary/10 text-primary' 
-                                                  : 'text-muted-foreground hover:text-primary'
-                                              }`}
-                                            >
-                                              <ArrowLeftRight className="w-3 h-3" />
-                                              {isExpanded ? 'Hide' : 'Photos'}
-                                            </button>
-                                          </div>
-                                        </td>
-                                      </tr>
-                                      {/* Inline Photo Comparison for additional results */}
-                                      {isExpanded && (
-                                        <tr className="border-b border-border/50">
-                                          <td colSpan={4} className="p-4 bg-muted/30">
-                                            {resultImages.length > 0 || airbnbImages.length > 0 ? (
-                                              <ImageComparison
-                                                airbnbImages={airbnbImages}
-                                                alternativeImages={resultImages}
-                                                airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                                alternativeTitle={result.listing_title || "Alternative Listing"}
-                                                platformName={result.platform_name}
-                                                sourceAirbnbImage={result.source_airbnb_image}
-                                              />
-                                            ) : (
-                                              <div className="text-center py-6 text-muted-foreground">
-                                                <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                <p className="text-sm">No photos available for comparison</p>
+                        {/* Category 1: Price fetched but unverified */}
+                        {unverifiedWithPrice.length > 0 && (
+                          <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 overflow-hidden">
+                            <button
+                              onClick={() => setShowUnverifiedPrices(!showUnverifiedPrices)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-amber-500/10 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                <AlertCircle className="w-4 h-4 text-amber-500" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {unverifiedWithPrice.length} price{unverifiedWithPrice.length !== 1 ? 's' : ''} fetched (unverified)
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Manual check recommended</span>
+                                {showUnverifiedPrices ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showUnverifiedPrices && (
+                              <div className="border-t border-amber-500/20">
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {unverifiedWithPrice.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const failureDisplay = getFailureDisplay(result);
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
                                               </div>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      )}
-                                    </React.Fragment>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              {result.match_type === "visual" && result.confidence_score ? (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                                  <Shield className="w-3 h-3" />
+                                                  {Math.round(result.confidence_score * 100)}%
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                                  <Info className="w-3 h-3" />
+                                                  Text
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-4 px-4 text-right">
+                                              <div className="flex flex-col items-end gap-0.5">
+                                                <span className="text-sm font-medium text-foreground">
+                                                  ${result.price?.toLocaleString()}
+                                                </span>
+                                                <span className="text-xs text-amber-600">{failureDisplay.text}</span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
                           </div>
                         )}
+                        
+                        {/* Category 2: Blocked by platform */}
+                        {blockedResults.length > 0 && (
+                          <div className="rounded-xl border border-red-500/20 bg-red-500/5 overflow-hidden">
+                            <button
+                              onClick={() => setShowBlockedPlatforms(!showBlockedPlatforms)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-red-500/10 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-red-500" />
+                                <Ban className="w-4 h-4 text-red-500" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {blockedResults.length} platform{blockedResults.length !== 1 ? 's' : ''} blocked access
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Bot detection or rate limit</span>
+                                {showBlockedPlatforms ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showBlockedPlatforms && (
+                              <div className="border-t border-red-500/20">
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {blockedResults.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const failureDisplay = getFailureDisplay(result);
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-red-500" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
+                                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
+                                                  <Ban className="w-2.5 h-2.5" />
+                                                  Blocked
+                                                </span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              {result.match_type === "visual" && result.confidence_score ? (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                                  <Shield className="w-3 h-3" />
+                                                  {Math.round(result.confidence_score * 100)}%
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                                  <Info className="w-3 h-3" />
+                                                  Text
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-4 px-4 text-right text-muted-foreground">
+                                              <span className="text-sm text-red-500">{failureDisplay.text}</span>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Category 3: Extraction failed */}
+                        {failedResults.length > 0 && (
+                          <div className="rounded-xl border border-border bg-muted/30 overflow-hidden">
+                            <button
+                              onClick={() => setShowFailedExtractions(!showFailedExtractions)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/50 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                <AlertCircle className="w-4 h-4 text-muted-foreground" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {failedResults.length} extraction{failedResults.length !== 1 ? 's' : ''} failed
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Page load or price not found</span>
+                                {showFailedExtractions ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showFailedExtractions && (
+                              <div className="border-t border-border">
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {failedResults.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const failureDisplay = getFailureDisplay(result);
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              {result.match_type === "visual" && result.confidence_score ? (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                                  <Shield className="w-3 h-3" />
+                                                  {Math.round(result.confidence_score * 100)}%
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                                  <Info className="w-3 h-3" />
+                                                  Text
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-4 px-4 text-right text-muted-foreground">
+                                              <span className="text-sm">{failureDisplay.text}</span>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
                       </div>
                     )}
 
