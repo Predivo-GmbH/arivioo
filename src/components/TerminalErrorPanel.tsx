@@ -47,16 +47,16 @@ const config: Record<TerminalErrorType, {
     iconColor: "text-orange-500",
     bgColor: "bg-orange-500/10",
     borderColor: "border-orange-500/20",
-    title: "Temporarily Unavailable",
+    title: "Rate Limit Reached",
     description: (
       <>
-        We can't retrieve the price from Airbnb right now due to <span className="font-semibold text-foreground">temporary rate limiting</span>.
+        The platform is <span className="font-semibold text-foreground">limiting automated requests</span>. We stopped the search to avoid further restrictions.
       </>
     ),
     tips: [
-      "Wait a few minutes and try again",
-      "Airbnb limits how often we can check prices",
-      "This is temporary — pricing data will be available again soon",
+      "Wait 10-15 minutes before trying again",
+      "This is a protective measure — the platform will allow requests again soon",
+      "You can view the listing directly on Airbnb in the meantime",
     ],
     primaryAction: { label: "Try Again Later", to: "/dashboard" },
   },
@@ -101,16 +101,16 @@ const config: Record<TerminalErrorType, {
     iconColor: "text-red-500",
     bgColor: "bg-red-500/10",
     borderColor: "border-red-500/20",
-    title: "Access Temporarily Blocked",
+    title: "Access Blocked",
     description: (
       <>
-        Airbnb is <span className="font-semibold text-foreground">blocking automated requests</span>. This is a temporary security measure.
+        The platform detected automated access and <span className="font-semibold text-foreground">blocked the request</span>. We stopped immediately to protect your search.
       </>
     ),
     tips: [
-      "Wait a few minutes and try again",
+      "Wait 10-15 minutes before trying again",
       "Open the listing on Airbnb directly to see pricing",
-      "This usually resolves itself within 5-10 minutes",
+      "This is a security measure — it will resolve automatically",
     ],
     primaryAction: { label: "Try Again Later", to: "/dashboard" },
   },

@@ -66,8 +66,18 @@ function classifyFailure(extractionStatus: string | null, extractionError: strin
   }
 
   // Bot/CAPTCHA
-  if (status === 'blocked_captcha_or_bot' || error.toLowerCase().includes('captcha') || error.toLowerCase().includes('bot')) {
+  if (status === 'blocked_captcha_or_bot' || status === 'blocked_captcha' || error.toLowerCase().includes('captcha') || error.toLowerCase().includes('bot')) {
     return { category: 'blocked', reason: 'Blocked by CAPTCHA' };
+  }
+
+  // Rate limiting / access abort
+  if (status === 'blocked_rate_limit' || status === 'rate_limited_abort') {
+    return { category: 'rate_limited', reason: 'Rate limited by platform' };
+  }
+
+  // Bot block abort (hard stop)
+  if (status === 'bot_blocked_abort') {
+    return { category: 'blocked', reason: 'Blocked by platform (stopped)' };
   }
 
   // Dates not applied
@@ -274,6 +284,7 @@ export function useEnrichedSearchResults() {
 export const FAILURE_CATEGORY_LABELS: Record<string, string> = {
   'provider_error': 'Service unavailable',
   'blocked': 'Platform blocked access',
+  'rate_limited': 'Rate limited (stopped)',
   'dates_not_applied': 'Dates could not be applied',
   'sold_out': 'Not available for dates',
   'unsupported': 'Platform not supported',
