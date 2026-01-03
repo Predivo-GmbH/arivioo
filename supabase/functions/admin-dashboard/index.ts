@@ -2240,9 +2240,21 @@ Deno.serve(async (req) => {
             }
           }
 
-          // Determine verification failures
+          // Determine verification failures AND semantic total verification
           const verification_failures: string[] = [];
+          let semantic_total_verified = false;
+          let price_type: string | null = null;
+          let evidence_snippets: string[] | null = null;
+          
           if (extraction) {
+            // Get price type and evidence from extraction
+            const metadata = extraction.extraction_metadata as Record<string, any> | null;
+            price_type = metadata?.price_type || null;
+            evidence_snippets = Array.isArray(extraction.evidence_snippets) 
+              ? extraction.evidence_snippets.filter((s: any) => typeof s === 'string')
+              : null;
+            
+            // Standard verification failures
             if (extraction.extraction_status !== 'success') {
               verification_failures.push('extraction_not_successful');
             }
@@ -2255,25 +2267,53 @@ Deno.serve(async (req) => {
             if (extraction.confidence_score === null || extraction.confidence_score < 0.5) {
               verification_failures.push('low_confidence');
             }
+            
+            // SEMANTIC TOTAL VERIFICATION
+            // Check if price type indicates nightly (not total)
+            const priceTypeLower = (price_type || '').toLowerCase();
+            const isNightlyPrice = ['nightly', 'per_night', 'unknown'].some(t => priceTypeLower.includes(t));
+            
+            // Check if evidence contains semantic total indicators
+            const totalIndicators = [
+              /\btotal\b/i,
+              /\btrip\s+total\b/i,
+              /\bstay\s+total\b/i,
+              /\bfinal\s+price\b/i,
+              /\bfor\s+\d+\s+nights?\b/i,
+              /\bincluding\s+(all\s+)?taxes\b/i,
+              /\bincludes?\s+(all\s+)?fees?\b/i,
+              /\bpay\s+now\b/i,
+            ];
+            
+            const hasSemanticEvidence = (evidence_snippets || []).some((snippet: string) => 
+              totalIndicators.some(pattern => pattern.test(snippet))
+            );
+            
+            // Valid price types for semantic verification
+            const validTotalTypes = ['total_stay', 'total', 'trip_total', 'stay_total'];
+            const hasValidPriceType = price_type && validTotalTypes.some(t => priceTypeLower.includes(t));
+            
+            // Semantic total is verified if we have valid price type OR semantic evidence
+            semantic_total_verified = (hasValidPriceType || hasSemanticEvidence) && !isNightlyPrice;
+            
+            if (!semantic_total_verified && extraction.extracted_price) {
+              verification_failures.push('semantic_total_not_verified');
+            }
           } else {
             verification_failures.push('no_extraction_attempt');
           }
 
-          // Determine price status
+          // Determine price status - must pass ALL checks including semantic
           let price_status = 'unavailable';
           if (extraction?.extracted_price && extraction.extraction_status === 'success') {
-            if (verification_failures.length === 0 || 
-                (verification_failures.length === 1 && verification_failures[0] === 'extraction_not_successful')) {
-              // Re-check: is it actually verified?
-              const isVerified = 
-                extraction.extraction_status === 'success' &&
-                extraction.dates_validated === true &&
-                extraction.includes_taxes_fees === true &&
-                (extraction.confidence_score ?? 0) >= 0.5;
-              price_status = isVerified ? 'verified' : 'unverified';
-            } else {
-              price_status = 'unverified';
-            }
+            // Check all verification conditions
+            const isVerified = 
+              extraction.extraction_status === 'success' &&
+              extraction.dates_validated === true &&
+              extraction.includes_taxes_fees === true &&
+              (extraction.confidence_score ?? 0) >= 0.5 &&
+              semantic_total_verified; // NEW: Must pass semantic check
+            price_status = isVerified ? 'verified' : 'unverified';
           } else if (extraction?.extracted_price) {
             price_status = 'unverified';
           }
@@ -2310,12 +2350,17 @@ Deno.serve(async (req) => {
             price_status,
             verification_failures,
             
+            // NEW: Semantic verification info
+            semantic_total_verified,
+            price_type,
+            evidence_snippets,
+            
             // Timestamps
             last_attempt_at: extraction?.updated_at || extraction?.created_at,
           };
         });
 
-        // Calculate systemic issues
+        // Calculate systemic issues including semantic verification stats
         const systemic_issues = {
           never_attempted: diagnostics.filter(d => !d.extraction_attempted).length,
           blocked: diagnostics.filter(d => d.extraction_status === 'blocked').length,
@@ -2324,6 +2369,9 @@ Deno.serve(async (req) => {
           verified: diagnostics.filter(d => d.price_status === 'verified').length,
           unverified: diagnostics.filter(d => d.price_status === 'unverified').length,
           tier_a_failures: diagnostics.filter(d => d.coverage_tier === 'A' && d.extraction_status !== 'success').length,
+          // NEW: Semantic verification breakdown
+          semantic_total_passed: diagnostics.filter(d => d.semantic_total_verified).length,
+          semantic_total_failed: diagnostics.filter(d => d.extraction_attempted && !d.semantic_total_verified).length,
         };
 
         return new Response(
