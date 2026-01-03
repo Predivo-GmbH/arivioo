@@ -736,13 +736,50 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
     });
     
     const html = (fnJson?.html || fnJson?.roomsHtml || "");
+    const roomsHtml = fnJson?.roomsHtml || '';
+    const screenshotForOcr = fnJson?.breakdownScreenshot || fnJson?.bookingCardScreenshot || null;
 
     if (!html || html.length < 500) {
+      // Browserless sometimes returns a tiny checkout HTML (JS shell) even though the screenshot is valid.
+      // In that case, still proceed using roomsHtml for parsing and run OCR on the screenshot.
       const serverMsg =
         (typeof fnJson?.error === "string" && fnJson.error) ||
         (typeof fnJson?.message === "string" && fnJson.message) ||
         (typeof fnJson?.name === "string" && fnJson.name) ||
         null;
+
+      const hasRoomsHtml = roomsHtml && roomsHtml.length >= 500;
+      const hasScreenshot = !!screenshotForOcr;
+
+      if (hasRoomsHtml || hasScreenshot) {
+        console.log(`Browserless attempt ${attemptNum}: checkout HTML too small (len=${html?.length || 0}); continuing with roomsHtml=${roomsHtml.length} and screenshot=${hasScreenshot}`);
+
+        result.ok = true;
+        result.html = hasRoomsHtml ? roomsHtml : (html || "");
+        result.roomsHtml = roomsHtml;
+        result.roomsTitle = fnJson?.roomsTitle || '';
+        result.screenshot = screenshotForOcr;
+
+        // Run OCR even when HTML is insufficient (often the only way to get the checkout total)
+        const breakdownOpened = typeof fnJson?.breakdownOpened === 'boolean' ? fnJson.breakdownOpened : false;
+        if (screenshotForOcr) {
+          console.log(`Browserless attempt ${attemptNum}: Running OCR extraction (html_insufficient)...`);
+          result.ocrReference = await extractOcrVisualReference(screenshotForOcr, nights, breakdownOpened);
+        }
+
+        // Bot/dates_unavailable detection uses HTML; if we only have a shell, this may be weak but still safe.
+        result.botIndicators = detectBotIndicators(result.html || '');
+        result.evidenceSnippet = extractEvidenceSnippet(result.html || '');
+
+        result.markdown = (result.html || '')
+          .replace(/<script[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        return result;
+      }
 
       result.error = serverMsg
         ? `Browserless returned insufficient content: ${serverMsg}`
@@ -810,7 +847,6 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
     result.roomsTitle = fnJson?.roomsTitle || '';
 
     // Store screenshot for OCR
-    const screenshotForOcr = fnJson?.breakdownScreenshot || fnJson?.bookingCardScreenshot || null;
     result.screenshot = screenshotForOcr;
 
     // Run OCR extraction on the screenshot
@@ -1980,6 +2016,35 @@ function extractAirbnbBaselineGrounded(
         provider,
         content_hash: contentHash,
         candidates: debugCandidates,
+      },
+    };
+  }
+
+  // CRITICAL: We do NOT proceed with an Airbnb baseline unless we have an all-in total.
+  // If we only found a "$X for N nights" / subtotal-style total (no taxes+fees proof), require user confirmation.
+  if (!selected.includesTaxesFees) {
+    return {
+      status: 'needs_user_confirmation',
+      price: null,
+      currency: selected.currency,
+      includes_taxes_fees: false,
+      evidence_snippet: `${selected.rawMatch} (subtotal only - confirm total incl. taxes/fees)`,
+      subtotal_nights_only: selected.amount,
+      subtotal_nights_count: nights,
+      debug: {
+        provider,
+        content_hash: contentHash,
+        candidates: debugCandidates,
+        selected: {
+          amount: selected.amount,
+          currency: selected.currency,
+          kind: selected.kind,
+          includes_taxes_fees: selected.includesTaxesFees,
+          score: selected.score,
+          labelHint: safeSnippet(selected.labelHint, 120),
+          context: safeSnippet(selected.context, 220),
+          selection_reason: 'best_candidate_was_not_taxes_inclusive',
+        },
       },
     };
   }
