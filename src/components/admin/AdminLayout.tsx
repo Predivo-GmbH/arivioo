@@ -39,6 +39,7 @@ const navItems = [
   { title: 'Platform Coverage', url: '/admin/coverage', icon: Gauge },
   { title: 'Platform Reliability', url: '/admin/reliability', icon: ShieldCheck },
   { title: 'Extraction Diagnostics', url: '/admin/extraction-diagnostics', icon: Microscope },
+  { title: 'Access Layer', url: '/admin/access-layer', icon: ShieldOff },
   { title: 'Pipeline Status', url: '/admin/pipeline', icon: Activity },
   { title: 'Extractions', url: '/admin/extractions', icon: Database },
   { title: 'Search Debug', url: '/admin/search-debug', icon: Activity },
