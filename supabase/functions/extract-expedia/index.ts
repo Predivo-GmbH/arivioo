@@ -52,11 +52,29 @@ type TerminalStatus =
   | 'dates_not_applied'
   | 'no_availability_for_dates'
   | 'blocked_captcha_or_bot'
-  | 'blocked_rate_limit'  // NEW: Explicit rate limit status for hard stop
+  | 'blocked_rate_limit'  // Explicit rate limit status for hard stop
   | 'sold_out'
   | 'price_not_found'
   | 'render_failed'
   | 'validation_error';
+
+/**
+ * Structural proof object - REQUIRED for Verified status
+ * 
+ * This matches the Hotels.com reference implementation format.
+ * Verification can only succeed when ALL boolean fields are explicitly true.
+ */
+interface StructuralProof {
+  breakdown_found: boolean;
+  total_label_found: boolean;
+  rendered_dates_match: boolean;
+  extracted_from_breakdown_total: boolean;
+  proof_version: string;
+  // Optional debugging fields
+  breakdown_selector_used?: string;
+  total_value_raw?: string;
+  date_value_raw?: string;
+}
 
 interface ExtractionRequest {
   extractionId?: string;
@@ -87,6 +105,8 @@ interface ExtractionResult {
     priceVerified: boolean;
     evidenceSnippet: string | null;
   };
+  // Structural proof for verification - REQUIRED for Verified status
+  structuralProof: StructuralProof;
   durationMs: number;
   error: string | null;
 }
@@ -157,6 +177,219 @@ function validatePhaseA(markdown: string): {
     soldOut,
     priceCount: matches.length,
   };
+}
+
+/**
+ * BREAKDOWN DETECTION
+ * 
+ * Detects if a price breakdown container is present with total row.
+ * Required for structural verification.
+ */
+function detectBreakdown(markdown: string): {
+  breakdown_found: boolean;
+  total_label_found: boolean;
+  breakdown_selector_used: string | null;
+  total_value_raw: string | null;
+  breakdown_price: number | null;
+  has_fee_lines: boolean;
+} {
+  const result = {
+    breakdown_found: false,
+    total_label_found: false,
+    breakdown_selector_used: null as string | null,
+    total_value_raw: null as string | null,
+    breakdown_price: null as number | null,
+    has_fee_lines: false,
+  };
+  
+  const lowerMarkdown = markdown.toLowerCase();
+  
+  // Expedia breakdown container indicators
+  const breakdownIndicators = [
+    'price details',
+    'price breakdown',
+    'price summary',
+    'your price summary',
+    'payment summary',
+    'room price',
+    'taxes and fees',
+    'taxes & fees',
+    'total with taxes and fees',
+    'the price is',
+  ];
+  
+  // Check for breakdown container presence
+  for (const indicator of breakdownIndicators) {
+    if (lowerMarkdown.includes(indicator)) {
+      result.breakdown_found = true;
+      result.breakdown_selector_used = indicator;
+      break;
+    }
+  }
+  
+  // Check for fee line items (indicates real breakdown)
+  const feePatterns = [
+    /taxes\s*(?:and|&)?\s*fees/i,
+    /includes?\s*taxes/i,
+    /total\s*with\s*taxes/i,
+  ];
+  result.has_fee_lines = feePatterns.some(p => p.test(markdown));
+  
+  // Look for explicit total row in breakdown context
+  const totalPatterns = [
+    /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/i,
+    /\$?([\d,]+(?:\.\d{2})?)\s*total\s*(?:includes?\s+)?(?:taxes\s+(?:and|&)\s+fees)?/i,
+    /total\s*(?:price|cost)?[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
+    /total\s+with\s+taxes\s+and\s+fees[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
+  ];
+  
+  for (const pattern of totalPatterns) {
+    const match = markdown.match(pattern);
+    if (match) {
+      result.total_label_found = true;
+      result.total_value_raw = match[0];
+      const priceStr = match[1].replace(/,/g, '');
+      result.breakdown_price = parseFloat(priceStr);
+      break;
+    }
+  }
+  
+  return result;
+}
+
+/**
+ * RENDERED DATE DETECTION
+ * 
+ * Extracts dates shown on the rendered page and validates they match
+ * the requested check-in/check-out dates.
+ */
+function validateRenderedDates(
+  markdown: string, 
+  requestedCheckIn: string, 
+  requestedCheckOut: string
+): {
+  rendered_dates_match: boolean;
+  date_value_raw: string | null;
+} {
+  const result = {
+    rendered_dates_match: false,
+    date_value_raw: null as string | null,
+  };
+  
+  // Parse requested dates
+  const reqCheckIn = new Date(requestedCheckIn);
+  const reqCheckOut = new Date(requestedCheckOut);
+  
+  if (isNaN(reqCheckIn.getTime()) || isNaN(reqCheckOut.getTime())) {
+    console.log('[EXPEDIA] Invalid requested dates');
+    return result;
+  }
+  
+  // Expedia date display patterns
+  // Pattern 1: "Jan 15 - Jan 18" or "Jan 15 – Jan 18"
+  const dateRangePattern = /([A-Z][a-z]{2}\s+\d{1,2})\s*[-–]\s*([A-Z][a-z]{2}\s+\d{1,2})/i;
+  
+  // Pattern 2: "Check-in: Jan 15" / "Check-out: Jan 18"
+  const checkInPattern = /check-?in[:\s]+([A-Z][a-z]{2,8}\s+\d{1,2}(?:,?\s*\d{4})?)/i;
+  const checkOutPattern = /check-?out[:\s]+([A-Z][a-z]{2,8}\s+\d{1,2}(?:,?\s*\d{4})?)/i;
+  
+  // Pattern 3: "2025-01-15" ISO format
+  const isoDatePattern = /(\d{4}-\d{2}-\d{2})\s*(?:to|[-–])\s*(\d{4}-\d{2}-\d{2})/i;
+  
+  // Try date range pattern
+  const rangeMatch = markdown.match(dateRangePattern);
+  if (rangeMatch) {
+    result.date_value_raw = rangeMatch[0];
+    
+    // Parse and compare
+    const year = reqCheckIn.getFullYear();
+    const checkInStr = rangeMatch[1] + ', ' + year;
+    const checkOutStr = rangeMatch[2] + ', ' + year;
+    
+    const parsedCheckIn = new Date(checkInStr);
+    const parsedCheckOut = new Date(checkOutStr);
+    
+    // Handle year boundary
+    if (parsedCheckOut < parsedCheckIn) {
+      const nextYear = year + 1;
+      const checkOutStrNextYear = rangeMatch[2] + ', ' + nextYear;
+      const parsedCheckOutNextYear = new Date(checkOutStrNextYear);
+      if (
+        parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
+        parsedCheckIn.getDate() === reqCheckIn.getDate() &&
+        parsedCheckOutNextYear.getMonth() === reqCheckOut.getMonth() &&
+        parsedCheckOutNextYear.getDate() === reqCheckOut.getDate()
+      ) {
+        result.rendered_dates_match = true;
+        return result;
+      }
+    }
+    
+    if (
+      parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
+      parsedCheckIn.getDate() === reqCheckIn.getDate() &&
+      parsedCheckOut.getMonth() === reqCheckOut.getMonth() &&
+      parsedCheckOut.getDate() === reqCheckOut.getDate()
+    ) {
+      result.rendered_dates_match = true;
+      return result;
+    }
+  }
+  
+  // Try ISO date pattern
+  const isoMatch = markdown.match(isoDatePattern);
+  if (isoMatch) {
+    result.date_value_raw = isoMatch[0];
+    
+    const parsedCheckIn = new Date(isoMatch[1]);
+    const parsedCheckOut = new Date(isoMatch[2]);
+    
+    if (
+      parsedCheckIn.getTime() === reqCheckIn.getTime() &&
+      parsedCheckOut.getTime() === reqCheckOut.getTime()
+    ) {
+      result.rendered_dates_match = true;
+      return result;
+    }
+  }
+  
+  // Try separate check-in/check-out patterns
+  const checkInMatch = markdown.match(checkInPattern);
+  const checkOutMatch = markdown.match(checkOutPattern);
+  if (checkInMatch && checkOutMatch) {
+    result.date_value_raw = `${checkInMatch[0]} / ${checkOutMatch[0]}`;
+    
+    const year = reqCheckIn.getFullYear();
+    const parsedCheckIn = new Date(checkInMatch[1] + ', ' + year);
+    const parsedCheckOut = new Date(checkOutMatch[1] + ', ' + year);
+    
+    if (
+      parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
+      parsedCheckIn.getDate() === reqCheckIn.getDate() &&
+      parsedCheckOut.getMonth() === reqCheckOut.getMonth() &&
+      parsedCheckOut.getDate() === reqCheckOut.getDate()
+    ) {
+      result.rendered_dates_match = true;
+      return result;
+    }
+  }
+  
+  // Fallback: check if the exact requested dates appear in content
+  if (markdown.includes(requestedCheckIn) && markdown.includes(requestedCheckOut)) {
+    result.date_value_raw = `${requestedCheckIn} to ${requestedCheckOut}`;
+    result.rendered_dates_match = true;
+    return result;
+  }
+  
+  // Additional fallback: "Your dates are available" is strong signal dates applied
+  if (markdown.toLowerCase().includes('your dates are available')) {
+    result.date_value_raw = 'your dates are available (implicit)';
+    result.rendered_dates_match = true;
+    return result;
+  }
+  
+  console.log('[EXPEDIA] Could not match rendered dates to request');
+  return result;
 }
 
 // Phase B: Extract total price with verification
@@ -384,6 +617,13 @@ async function extractFromExpedia(
       priceVerified: false,
       evidenceSnippet: null,
     },
+    structuralProof: {
+      breakdown_found: false,
+      total_label_found: false,
+      rendered_dates_match: false,
+      extracted_from_breakdown_total: false,
+      proof_version: '1.0',
+    },
     durationMs: 0,
     error: null,
     attempts: [],
@@ -551,6 +791,25 @@ async function extractFromExpedia(
       return result;
     }
     
+    // ============= STRUCTURAL PROOF: Detect breakdown and verify dates =============
+    const breakdownResult = detectBreakdown(markdown);
+    const dateResult = validateRenderedDates(markdown, checkIn, checkOut);
+    
+    result.structuralProof = {
+      breakdown_found: breakdownResult.breakdown_found && breakdownResult.has_fee_lines,
+      total_label_found: breakdownResult.total_label_found,
+      rendered_dates_match: dateResult.rendered_dates_match,
+      extracted_from_breakdown_total: breakdownResult.total_label_found && 
+        breakdownResult.breakdown_price !== null && 
+        breakdownResult.breakdown_price === phaseBResult.extractedPrice,
+      proof_version: '1.0',
+      breakdown_selector_used: breakdownResult.breakdown_selector_used || undefined,
+      total_value_raw: breakdownResult.total_value_raw || undefined,
+      date_value_raw: dateResult.date_value_raw || undefined,
+    };
+    
+    console.log('[EXPEDIA] Structural proof:', JSON.stringify(result.structuralProof));
+    
     // SUCCESS
     result.success = true;
     result.status = 'success';
@@ -645,6 +904,13 @@ Deno.serve(async (req) => {
             platform: 'expedia',
             phaseA: result.phaseA,
             phaseB: result.phaseB,
+            structural_proof: result.structuralProof,
+            verification_status: (
+              result.structuralProof.breakdown_found &&
+              result.structuralProof.total_label_found &&
+              result.structuralProof.rendered_dates_match &&
+              result.structuralProof.extracted_from_breakdown_total
+            ) ? 'Verified' : 'Unverified',
             durationMs: result.durationMs,
           },
           updated_at: new Date().toISOString(),
@@ -658,6 +924,12 @@ Deno.serve(async (req) => {
         result,
         goldenPath: true,
         platform: 'expedia',
+        verification_status: (
+          result.structuralProof.breakdown_found &&
+          result.structuralProof.total_label_found &&
+          result.structuralProof.rendered_dates_match &&
+          result.structuralProof.extracted_from_breakdown_total
+        ) ? 'Verified' : 'Unverified',
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
