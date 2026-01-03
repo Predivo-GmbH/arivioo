@@ -5285,8 +5285,10 @@ async function runSearchWithStreaming(
 
     console.error('Stage 1 error (continuing anyway):', stage1Error);
 
-    // Update search but DON'T set status to error - continue with visual search
+    // CRITICAL FIX: Update search status to searching_platforms so the flow continues properly
+    // Without this, the status stays at "searching" even if visual search completes
     await supabase.from('searches').update({
+      status: 'searching_platforms', // <-- KEY: Ensure status transitions properly
       airbnb_title: airbnbTitle || null,
       last_progress_at: new Date().toISOString(),
     }).eq('id', searchId);
@@ -5903,6 +5905,27 @@ serve(async (req) => {
             sendSSE(controller, "error", { message: errorMessage });
             sendSSE(controller, "complete", { success: false, error: errorMessage });
           } finally {
+            // SAFETY NET: Ensure search always reaches a terminal state
+            // This handles cases where the stream closes before normal completion
+            try {
+              const { data: finalCheck } = await supabase
+                .from("searches")
+                .select("status")
+                .eq("id", searchId)
+                .single();
+              
+              const nonTerminalStatuses = ['pending', 'searching', 'searching_platforms', 'comparing_prices', 'extracting_price', 'scraping_airbnb_page'];
+              if (finalCheck && nonTerminalStatuses.some(s => finalCheck.status?.startsWith(s) || finalCheck.status === s)) {
+                console.log(`SAFETY NET: Search ${searchId} was stuck at "${finalCheck.status}", marking as completed`);
+                await supabase.from("searches").update({ 
+                  status: "completed",
+                  api_error: finalCheck.status === 'searching' ? 'Search stream closed before completion' : null,
+                }).eq("id", searchId);
+              }
+            } catch (safetyErr) {
+              console.error("Safety net check failed:", safetyErr);
+            }
+            
             markControllerInvalid(controller);
             try { controller.close(); } catch { /* already closed */ }
           }
