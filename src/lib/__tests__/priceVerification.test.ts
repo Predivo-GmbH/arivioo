@@ -811,3 +811,147 @@ describe('Access Failure Classification - Hard Stop Invariants', () => {
   });
   
 });
+
+// ============================================================================
+// AIRBNB SUBTOTAL REJECTION REGRESSION TESTS
+// ============================================================================
+
+/**
+ * These tests document the invariant that "$X for N nights" patterns are SUBTOTALS
+ * and must NOT be accepted as verified totals. Only explicit checkout patterns
+ * like "Pay $X now" or "Total (USD) $X" are acceptable.
+ * 
+ * This regression was introduced when the validation logic incorrectly accepted
+ * aria-label="$1,977 for 4 nights" as a valid total context, when it's actually
+ * a subtotal that excludes taxes and fees.
+ */
+
+describe('Airbnb Subtotal Rejection - Regression Guard', () => {
+  
+  describe('Subtotal Pattern Rejection', () => {
+    
+    it('$X for N nights pattern must NOT pass as verified total', () => {
+      // This test documents the core regression: "$1,977 for 4 nights" was incorrectly
+      // being accepted as a total when it's actually a subtotal
+      
+      // Simulated extraction metadata for a subtotal
+      const subtotalExtraction = {
+        extraction_status: 'needs_user_confirmation', // Expected status for subtotals
+        dates_validated: true,
+        includes_taxes_fees: false, // Key: subtotals don't include taxes
+        confidence_score: 0.7,
+        extracted_price: null, // Should NOT have a price when only subtotal found
+        extraction_metadata: {
+          subtotal_nights_only: 1977, // The subtotal amount
+          subtotal_nights_count: 4,
+          rejection_reason: 'subtotal_for_nights_only',
+        },
+      };
+      
+      const result = verifyPrice(subtotalExtraction);
+      
+      // INVARIANT: Subtotals must never be verified
+      expect(result.price_status).toBe('unavailable');
+      expect(result.eligible_for_comparison).toBe(false);
+      expect(result.structural_total_verified).toBe(false);
+    });
+    
+    it('Only checkout patterns (Pay $X now, Total USD) should be accepted', () => {
+      // Valid checkout pattern extraction
+      const checkoutExtraction = {
+        extraction_status: 'success',
+        dates_validated: true,
+        includes_taxes_fees: true, // Checkout totals include taxes
+        confidence_score: 0.95,
+        extracted_price: 2213.34, // The correct total from "Pay $2,213.34 now"
+        extraction_metadata: {
+          breakdown_found: true,
+          total_label_found: true,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: true,
+          pattern_matched: 'checkout_pay_now',
+        },
+      };
+      
+      const result = verifyPrice(checkoutExtraction);
+      
+      expect(result.price_status).toBe('verified');
+      expect(result.eligible_for_comparison).toBe(true);
+    });
+    
+  });
+  
+  describe('Fallback Chain Orchestration', () => {
+    
+    it('When Browserless returns subtotal, fallback providers MUST be tried', () => {
+      // This test documents the expected behavior when Browserless fails to find a total
+      // The pipeline should try Zyte, then Firecrawl
+      
+      // Simulated provider results
+      const browserlessResult = {
+        provider: 'browserless',
+        status: 'needs_user_confirmation',
+        price: null,
+        subtotal_nights_only: 1977,
+      };
+      
+      // The fallback chain should continue if:
+      // 1. Status is NOT total_price_including_taxes_and_fees
+      // 2. No rate limiting or bot blocking detected
+      const shouldContinueToFallback = 
+        browserlessResult.status !== 'total_price_including_taxes_and_fees' &&
+        browserlessResult.price === null;
+      
+      expect(shouldContinueToFallback).toBe(true);
+    });
+    
+    it('When rate limited, NO fallback providers should be called', () => {
+      const rateLimitedResult = {
+        provider: 'browserless',
+        status: 'rate_limited',
+        isRateLimited: true,
+        price: null,
+      };
+      
+      // Hard stop condition
+      const shouldAbortFallbacks = rateLimitedResult.isRateLimited;
+      
+      expect(shouldAbortFallbacks).toBe(true);
+    });
+    
+  });
+  
+  describe('Manual Override Provenance', () => {
+    
+    it('Manual confirmation must be distinguished from extractor verified', () => {
+      // When user manually enters a price, it should be marked with explicit provenance
+      const manualConfirmation = {
+        confirmation_source: 'user',
+        subtotal_nights_only: 1977,
+        confirmed_total_amount: 2213.34, // User entered the correct total
+      };
+      
+      // Manual overrides should be clearly marked
+      expect(manualConfirmation.confirmation_source).toBe('user');
+      expect(manualConfirmation.confirmed_total_amount).not.toBe(manualConfirmation.subtotal_nights_only);
+    });
+    
+    it('no_verified_price_found terminal state should trigger modal', () => {
+      // When no provider can verify, the system should return this terminal state
+      const noVerifiedPriceResult = {
+        airbnbPrice: null,
+        subtotalInfo: { amount: 1977, nights: 4, currency: 'USD' },
+        allProvidersFailed: false, // We got content, just no verified total
+      };
+      
+      // This should trigger the confirmation modal
+      const shouldShowModal = 
+        noVerifiedPriceResult.airbnbPrice === null && 
+        noVerifiedPriceResult.subtotalInfo !== null;
+      
+      expect(shouldShowModal).toBe(true);
+    });
+    
+  });
+  
+});

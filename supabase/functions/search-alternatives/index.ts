@@ -1792,6 +1792,25 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
         continue;
       }
 
+      // CRITICAL FIX: "$X for N nights" is a SUBTOTAL, NOT a total - ALWAYS REJECT
+      // This was the root cause of the regression - these should trigger needs_user_confirmation
+      if (hasForNights && !hasCheckoutTotal && !hasTotalLabel) {
+        candidates.push({
+          rawMatch,
+          amountRaw,
+          amount,
+          currency,
+          index,
+          context: safeSnippet(context, 240),
+          labelHint: safeSnippet(context, 120),
+          kind: 'price_not_available_in_content',
+          includesTaxesFees: false,
+          score: -5,
+          rejectedReason: 'subtotal_for_nights_only',
+        });
+        continue;
+      }
+
       // HIGHEST PRIORITY: Checkout page payment totals (all-in with taxes/fees)
       if (hasCheckoutTotal) {
         includesTaxesFees = true;
@@ -1803,11 +1822,7 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
         score = 10;
       }
 
-      if (hasForNights && !hasNightOnly && !hasCheckoutTotal) {
-        // This is the "$X for Y nights" widget headline; not necessarily taxes-inclusive.
-        kind = 'total_price_excluding_taxes_and_fees';
-        score = Math.max(score, 7);
-      }
+      // REMOVED: hasForNights scoring - "$X for N nights" is a subtotal, already rejected above
 
       if (hasTaxesFeesLabel) {
         includesTaxesFees = true;
@@ -1864,22 +1879,24 @@ function validatePriceExtraction(
     return { ok: false, reason: 'raw_match_not_found_verbatim', evidence: snippet };
   }
 
-  // Accept prices with explicit total labels, taxes/fees labels, "for N nights" aria-labels, OR checkout patterns
+  // Accept prices with explicit total labels, taxes/fees labels, OR checkout patterns
+  // CRITICAL: "$X for N nights" is a SUBTOTAL, NOT a total - it must NOT pass validation as a total
   const hasExplicitTotalLabel =
     /\b(trip total|grand total|total before taxes|total\s*USD|you pay|you will pay)\b/i.test(snippet);
   const hasTaxesFeesLabel =
     /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(snippet);
-  // Airbnb uses aria-label="$X for N nights" as their standard stay total display
-  const hasForNightsAriaLabel =
-    /aria-label="[^"]*\$[\d,]+(?:\.\d+)?\s+for\s+\d+\s+nights?"/i.test(snippet);
-  // Book/stays checkout page patterns - these are the all-in totals
+  
+  // Book/stays checkout page patterns - these are the ONLY all-in totals we accept
   const hasCheckoutPayNow = /\bpay\s*\$[\d,]+(?:\.\d{2})?\s*now\b/i.test(snippet);
   const hasCheckoutTotalUsd = /\btotal\s*\(?\s*USD\s*\)?\s*\$/i.test(snippet);
   const hasDueToday = /\bdue\s+today\b/i.test(snippet);
   const hasAmountDue = /\bamount\s+due\b/i.test(snippet);
   const hasCheckoutPattern = hasCheckoutPayNow || hasCheckoutTotalUsd || hasDueToday || hasAmountDue;
 
-  if (!hasExplicitTotalLabel && !hasTaxesFeesLabel && !hasForNightsAriaLabel && !hasCheckoutPattern) {
+  // REMOVED: hasForNightsAriaLabel - "$X for N nights" is a SUBTOTAL, not a total
+  // This was the root cause of the regression - accepting subtotals as totals
+
+  if (!hasExplicitTotalLabel && !hasTaxesFeesLabel && !hasCheckoutPattern) {
     return { ok: false, reason: 'missing_explicit_total_or_taxes_context', evidence: snippet };
   }
 
