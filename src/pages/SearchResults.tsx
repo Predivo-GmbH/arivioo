@@ -429,7 +429,13 @@ export default function SearchResults() {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${authToken}`,
               },
-              body: JSON.stringify({ searchId, stream: true }),
+              // Check for simulation mode in URL params
+              body: JSON.stringify({ 
+                searchId, 
+                stream: true,
+                // For testing fallback chain: ?simulate_browserless_fail=true
+                simulateBrowserlessFail: new URLSearchParams(window.location.search).get('simulate_browserless_fail') === 'true',
+              }),
               signal: abortControllerRef.current.signal,
             }
           );
