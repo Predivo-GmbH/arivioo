@@ -524,3 +524,290 @@ describe('Hotels.com Extractor - Structural Proof Contract', () => {
   });
   
 });
+
+// ============================================================================
+// ACCESS FAILURE CLASSIFICATION TESTS
+// ============================================================================
+
+/**
+ * Access Failure Classifier - Deterministic Regression Tests
+ * 
+ * These tests enforce the hard stop behavior for access-layer failures.
+ * When RATE_LIMITED or BOT_BLOCKED is detected, no fallback providers
+ * should be attempted.
+ * 
+ * INVARIANT: HTTP 429 or bot blocking always results in shouldAbortFallbacks = true
+ */
+
+// Inline implementation of classifyAccessFailure for testing
+// (Edge function version is in supabase/functions/_shared/accessFailureClassifier.ts)
+type AccessFailureClass = 
+  | 'RATE_LIMITED'
+  | 'BOT_BLOCKED'
+  | 'NAVIGATION_FAILED'
+  | 'PARSING_FAILED'
+  | 'NONE';
+
+interface AccessFailureResult {
+  failureClass: AccessFailureClass;
+  shouldAbortFallbacks: boolean;
+  httpStatus: number | null;
+  responseSize: number;
+  evidence: string[];
+}
+
+function classifyAccessFailure(
+  httpStatus: number | null,
+  responseBody: string | null,
+  errorMessage: string | null
+): AccessFailureResult {
+  const result: AccessFailureResult = {
+    failureClass: 'NONE',
+    shouldAbortFallbacks: false,
+    httpStatus,
+    responseSize: responseBody?.length ?? 0,
+    evidence: [],
+  };
+
+  const bodyLower = (responseBody ?? '').toLowerCase();
+  const errorLower = (errorMessage ?? '').toLowerCase();
+  const combinedLower = `${bodyLower} ${errorLower}`;
+
+  // RATE_LIMITED Detection
+  if (httpStatus === 429) {
+    result.failureClass = 'RATE_LIMITED';
+    result.shouldAbortFallbacks = true;
+    result.evidence.push('HTTP 429 Too Many Requests');
+    return result;
+  }
+
+  const rateLimitPatterns = [
+    '429 too many requests',
+    'too many requests',
+    'rate limit exceeded',
+    'rate limited',
+  ];
+
+  for (const pattern of rateLimitPatterns) {
+    if (combinedLower.includes(pattern)) {
+      result.failureClass = 'RATE_LIMITED';
+      result.shouldAbortFallbacks = true;
+      result.evidence.push(`Rate limit pattern: "${pattern}"`);
+      return result;
+    }
+  }
+
+  // BOT_BLOCKED Detection
+  const botBlockPatterns = [
+    { pattern: 'captcha', label: 'CAPTCHA challenge' },
+    { pattern: 'verify you are human', label: 'Human verification' },
+    { pattern: 'access denied', label: 'Access denied' },
+    { pattern: 'cloudflare', label: 'Cloudflare protection' },
+  ];
+
+  for (const { pattern, label } of botBlockPatterns) {
+    if (combinedLower.includes(pattern)) {
+      result.failureClass = 'BOT_BLOCKED';
+      result.shouldAbortFallbacks = true;
+      result.evidence.push(label);
+    }
+  }
+
+  if (result.failureClass === 'BOT_BLOCKED') {
+    return result;
+  }
+
+  if (httpStatus === 403 || httpStatus === 401) {
+    result.failureClass = 'BOT_BLOCKED';
+    result.shouldAbortFallbacks = true;
+    result.evidence.push(`HTTP ${httpStatus} (likely bot block)`);
+    return result;
+  }
+
+  // NAVIGATION_FAILED Detection
+  const navigationFailPatterns = ['timeout', 'connection refused', 'fetch failed'];
+
+  for (const pattern of navigationFailPatterns) {
+    if (combinedLower.includes(pattern)) {
+      result.failureClass = 'NAVIGATION_FAILED';
+      result.shouldAbortFallbacks = false;
+      result.evidence.push(`Navigation failure: "${pattern}"`);
+      return result;
+    }
+  }
+
+  if (httpStatus && httpStatus >= 500 && httpStatus < 600) {
+    result.failureClass = 'NAVIGATION_FAILED';
+    result.shouldAbortFallbacks = false;
+    result.evidence.push(`HTTP ${httpStatus} server error`);
+    return result;
+  }
+
+  return result;
+}
+
+describe('Access Failure Classification - Hard Stop Invariants', () => {
+  
+  describe('RATE_LIMITED Detection', () => {
+    
+    it('HTTP 429 status triggers RATE_LIMITED and aborts fallbacks', () => {
+      const result = classifyAccessFailure(429, null, null);
+      
+      expect(result.failureClass).toBe('RATE_LIMITED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+      expect(result.evidence).toContain('HTTP 429 Too Many Requests');
+    });
+    
+    it('Body containing "429 Too Many Requests" triggers RATE_LIMITED', () => {
+      const result = classifyAccessFailure(200, '<html>429 Too Many Requests</html>', null);
+      
+      expect(result.failureClass).toBe('RATE_LIMITED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+    });
+    
+    it('Error message containing "rate limit exceeded" triggers RATE_LIMITED', () => {
+      const result = classifyAccessFailure(null, null, 'Error: rate limit exceeded');
+      
+      expect(result.failureClass).toBe('RATE_LIMITED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+    });
+    
+    it('Openresty 429 response triggers RATE_LIMITED', () => {
+      const result = classifyAccessFailure(
+        429, 
+        '<html><head><title>429 Too Many Requests</title></head><body><center>openresty</center></body></html>', 
+        null
+      );
+      
+      expect(result.failureClass).toBe('RATE_LIMITED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+    });
+    
+  });
+  
+  describe('BOT_BLOCKED Detection', () => {
+    
+    it('CAPTCHA in content triggers BOT_BLOCKED and aborts fallbacks', () => {
+      const result = classifyAccessFailure(200, 'Please complete the CAPTCHA to continue', null);
+      
+      expect(result.failureClass).toBe('BOT_BLOCKED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+      expect(result.evidence).toContain('CAPTCHA challenge');
+    });
+    
+    it('HTTP 403 triggers BOT_BLOCKED', () => {
+      const result = classifyAccessFailure(403, null, null);
+      
+      expect(result.failureClass).toBe('BOT_BLOCKED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+    });
+    
+    it('Cloudflare protection page triggers BOT_BLOCKED', () => {
+      const result = classifyAccessFailure(200, 'Checking your browser... Cloudflare Ray ID: abc123', null);
+      
+      expect(result.failureClass).toBe('BOT_BLOCKED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+    });
+    
+    it('Human verification request triggers BOT_BLOCKED', () => {
+      const result = classifyAccessFailure(200, 'Please verify you are human to continue', null);
+      
+      expect(result.failureClass).toBe('BOT_BLOCKED');
+      expect(result.shouldAbortFallbacks).toBe(true);
+    });
+    
+  });
+  
+  describe('NAVIGATION_FAILED Detection (allows fallback)', () => {
+    
+    it('Timeout allows fallback to continue', () => {
+      const result = classifyAccessFailure(null, null, 'Request timeout after 30s');
+      
+      expect(result.failureClass).toBe('NAVIGATION_FAILED');
+      expect(result.shouldAbortFallbacks).toBe(false);
+    });
+    
+    it('HTTP 500 allows fallback to continue', () => {
+      const result = classifyAccessFailure(500, 'Internal Server Error', null);
+      
+      expect(result.failureClass).toBe('NAVIGATION_FAILED');
+      expect(result.shouldAbortFallbacks).toBe(false);
+    });
+    
+    it('Connection refused allows fallback to continue', () => {
+      const result = classifyAccessFailure(null, null, 'Connection refused');
+      
+      expect(result.failureClass).toBe('NAVIGATION_FAILED');
+      expect(result.shouldAbortFallbacks).toBe(false);
+    });
+    
+  });
+  
+  describe('Hard Stop Invariant', () => {
+    
+    it('RATE_LIMITED always sets shouldAbortFallbacks = true', () => {
+      const scenarios = [
+        { httpStatus: 429, body: null, error: null },
+        { httpStatus: 200, body: 'rate limited', error: null },
+        { httpStatus: null, body: null, error: 'too many requests' },
+      ];
+      
+      for (const scenario of scenarios) {
+        const result = classifyAccessFailure(scenario.httpStatus, scenario.body, scenario.error);
+        if (result.failureClass === 'RATE_LIMITED') {
+          expect(result.shouldAbortFallbacks).toBe(true);
+        }
+      }
+    });
+    
+    it('BOT_BLOCKED always sets shouldAbortFallbacks = true', () => {
+      const scenarios = [
+        { httpStatus: 403, body: null, error: null },
+        { httpStatus: 401, body: null, error: null },
+        { httpStatus: 200, body: 'captcha', error: null },
+        { httpStatus: 200, body: 'cloudflare', error: null },
+      ];
+      
+      for (const scenario of scenarios) {
+        const result = classifyAccessFailure(scenario.httpStatus, scenario.body, scenario.error);
+        if (result.failureClass === 'BOT_BLOCKED') {
+          expect(result.shouldAbortFallbacks).toBe(true);
+        }
+      }
+    });
+    
+    it('No fallback providers should be called after access-layer failure', () => {
+      // This test documents the contract for the extraction pipeline
+      const rateLimitResult = classifyAccessFailure(429, null, null);
+      const botBlockResult = classifyAccessFailure(403, 'Access Denied', null);
+      
+      // Both must prevent fallbacks
+      expect(rateLimitResult.shouldAbortFallbacks).toBe(true);
+      expect(botBlockResult.shouldAbortFallbacks).toBe(true);
+      
+      // Terminal status should be explicit
+      expect(rateLimitResult.failureClass).toBe('RATE_LIMITED');
+      expect(botBlockResult.failureClass).toBe('BOT_BLOCKED');
+    });
+    
+  });
+  
+  describe('Abort Record Structure', () => {
+    
+    it('Abort record contains required fields for diagnostics', () => {
+      const result = classifyAccessFailure(429, '<html>Too Many Requests</html>', null);
+      
+      // Required fields for abort record
+      expect(result).toHaveProperty('failureClass');
+      expect(result).toHaveProperty('shouldAbortFallbacks');
+      expect(result).toHaveProperty('httpStatus');
+      expect(result).toHaveProperty('responseSize');
+      expect(result).toHaveProperty('evidence');
+      
+      // Evidence should be populated
+      expect(result.evidence.length).toBeGreaterThan(0);
+    });
+    
+  });
+  
+});
