@@ -2240,11 +2240,25 @@ Deno.serve(async (req) => {
             }
           }
 
-          // Determine verification failures AND semantic total verification
+          // Determine verification failures, semantic AND structural verification
           const verification_failures: string[] = [];
           let semantic_total_verified = false;
+          let structural_total_verified = false;
           let price_type: string | null = null;
           let evidence_snippets: string[] | null = null;
+          
+          // Structural proof signals (from extraction_metadata)
+          let structural_proof: {
+            breakdown_found: boolean | null;
+            total_label_found: boolean | null;
+            rendered_dates_match: boolean | null;
+            extracted_from_breakdown_total: boolean | null;
+          } = {
+            breakdown_found: null,
+            total_label_found: null,
+            rendered_dates_match: null,
+            extracted_from_breakdown_total: null,
+          };
           
           if (extraction) {
             // Get price type and evidence from extraction
@@ -2253,6 +2267,14 @@ Deno.serve(async (req) => {
             evidence_snippets = Array.isArray(extraction.evidence_snippets) 
               ? extraction.evidence_snippets.filter((s: any) => typeof s === 'string')
               : null;
+            
+            // Extract structural proof signals from metadata
+            structural_proof = {
+              breakdown_found: metadata?.breakdown_found ?? null,
+              total_label_found: metadata?.total_label_found ?? null,
+              rendered_dates_match: metadata?.rendered_dates_match ?? null,
+              extracted_from_breakdown_total: metadata?.extracted_from_breakdown_total ?? null,
+            };
             
             // Standard verification failures
             if (extraction.extraction_status !== 'success') {
@@ -2268,12 +2290,10 @@ Deno.serve(async (req) => {
               verification_failures.push('low_confidence');
             }
             
-            // SEMANTIC TOTAL VERIFICATION
-            // Check if price type indicates nightly (not total)
+            // SEMANTIC VERIFICATION (legacy, for debugging)
             const priceTypeLower = (price_type || '').toLowerCase();
             const isNightlyPrice = ['nightly', 'per_night', 'unknown'].some(t => priceTypeLower.includes(t));
             
-            // Check if evidence contains semantic total indicators
             const totalIndicators = [
               /\btotal\b/i,
               /\btrip\s+total\b/i,
@@ -2289,30 +2309,37 @@ Deno.serve(async (req) => {
               totalIndicators.some(pattern => pattern.test(snippet))
             );
             
-            // Valid price types for semantic verification
             const validTotalTypes = ['total_stay', 'total', 'trip_total', 'stay_total'];
             const hasValidPriceType = price_type && validTotalTypes.some(t => priceTypeLower.includes(t));
             
-            // Semantic total is verified if we have valid price type OR semantic evidence
             semantic_total_verified = (hasValidPriceType || hasSemanticEvidence) && !isNightlyPrice;
             
-            if (!semantic_total_verified && extraction.extracted_price) {
-              verification_failures.push('semantic_total_not_verified');
+            // STRUCTURAL VERIFICATION (NEW - the REAL verification)
+            // All four structural proof signals must be explicitly true
+            structural_total_verified = 
+              structural_proof.breakdown_found === true &&
+              structural_proof.total_label_found === true &&
+              structural_proof.rendered_dates_match === true &&
+              structural_proof.extracted_from_breakdown_total === true;
+            
+            // Add structural verification failure if price exists but structural proof failed
+            if (!structural_total_verified && extraction.extracted_price) {
+              verification_failures.push('no_structural_total_proof');
             }
           } else {
             verification_failures.push('no_extraction_attempt');
           }
 
-          // Determine price status - must pass ALL checks including semantic
+          // Determine price status - must pass ALL checks including STRUCTURAL
           let price_status = 'unavailable';
           if (extraction?.extracted_price && extraction.extraction_status === 'success') {
-            // Check all verification conditions
+            // Check all verification conditions - STRUCTURAL is now required
             const isVerified = 
               extraction.extraction_status === 'success' &&
               extraction.dates_validated === true &&
               extraction.includes_taxes_fees === true &&
               (extraction.confidence_score ?? 0) >= 0.5 &&
-              semantic_total_verified; // NEW: Must pass semantic check
+              structural_total_verified; // STRUCTURAL verification is now required (not semantic)
             price_status = isVerified ? 'verified' : 'unverified';
           } else if (extraction?.extracted_price) {
             price_status = 'unverified';
@@ -2350,17 +2377,21 @@ Deno.serve(async (req) => {
             price_status,
             verification_failures,
             
-            // NEW: Semantic verification info
+            // Semantic verification (legacy, for debugging)
             semantic_total_verified,
             price_type,
             evidence_snippets,
+            
+            // NEW: Structural verification (the REAL verification)
+            structural_total_verified,
+            structural_proof,
             
             // Timestamps
             last_attempt_at: extraction?.updated_at || extraction?.created_at,
           };
         });
 
-        // Calculate systemic issues including semantic verification stats
+        // Calculate systemic issues including structural verification stats
         const systemic_issues = {
           never_attempted: diagnostics.filter(d => !d.extraction_attempted).length,
           blocked: diagnostics.filter(d => d.extraction_status === 'blocked').length,
@@ -2369,9 +2400,12 @@ Deno.serve(async (req) => {
           verified: diagnostics.filter(d => d.price_status === 'verified').length,
           unverified: diagnostics.filter(d => d.price_status === 'unverified').length,
           tier_a_failures: diagnostics.filter(d => d.coverage_tier === 'A' && d.extraction_status !== 'success').length,
-          // NEW: Semantic verification breakdown
+          // Semantic verification (legacy, for debugging)
           semantic_total_passed: diagnostics.filter(d => d.semantic_total_verified).length,
           semantic_total_failed: diagnostics.filter(d => d.extraction_attempted && !d.semantic_total_verified).length,
+          // NEW: Structural verification (the REAL verification)
+          structural_total_passed: diagnostics.filter(d => d.structural_total_verified).length,
+          structural_total_failed: diagnostics.filter(d => d.extraction_attempted && !d.structural_total_verified).length,
         };
 
         return new Response(

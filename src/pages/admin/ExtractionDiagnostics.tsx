@@ -70,10 +70,18 @@ interface ExtractionDiagnostic {
   price_status: string;
   verification_failures: string[];
   last_attempt_at: string | null;
-  // NEW: Semantic total verification
+  // Semantic verification (kept for debugging, not used for decisions)
   semantic_total_verified: boolean;
   price_type: string | null;
   evidence_snippets: string[] | null;
+  // NEW: Structural verification (the REAL verification)
+  structural_total_verified: boolean;
+  structural_proof: {
+    breakdown_found: boolean | null;
+    total_label_found: boolean | null;
+    rendered_dates_match: boolean | null;
+    extracted_from_breakdown_total: boolean | null;
+  } | null;
 }
 
 interface SearchSummary {
@@ -100,9 +108,12 @@ interface SystemicIssues {
   verified: number;
   unverified: number;
   tier_a_failures: number;
-  // NEW: Semantic verification breakdown
+  // Semantic verification (kept for debugging)
   semantic_total_failed: number;
   semantic_total_passed: number;
+  // NEW: Structural verification (the REAL verification)
+  structural_total_passed: number;
+  structural_total_failed: number;
 }
 
 const STATUS_CONFIG: Record<string, { icon: any; color: string; label: string }> = {
@@ -128,10 +139,16 @@ const VERIFICATION_FAILURE_LABELS: Record<string, string> = {
   taxes_fees_not_included: 'Missing taxes/fees',
   low_confidence: 'Low confidence score',
   no_extraction_attempt: 'No extraction attempted',
-  // Semantic verification failures
-  semantic_total_not_verified: 'Not proven booking total',
-  price_type_not_total: 'Price is nightly, not total',
+  // STRUCTURAL verification failures (NEW - the real verification)
+  no_structural_total_proof: 'No structural proof of booking total',
+  no_breakdown_found: 'Breakdown not found on page',
+  no_total_label_found: 'Total label not found in breakdown',
+  rendered_dates_do_not_match: 'Rendered dates mismatch',
+  price_not_from_breakdown_total: 'Price not from breakdown total',
   untrusted_extraction_path: 'Path ignores selected dates',
+  // Semantic verification failures (legacy, for debugging)
+  semantic_total_not_verified: 'Semantic total not proven',
+  price_type_not_total: 'Price is nightly, not total',
   breakdown_missing_fees_aggregation: 'Breakdown incomplete',
   no_semantic_total_proof: 'No semantic total evidence',
 };
@@ -174,6 +191,14 @@ function TierBadge({ tier }: { tier: string }) {
 function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
   const [isOpen, setIsOpen] = useState(false);
 
+  // Get structural proof details
+  const structuralProof = diagnostic.structural_proof || {
+    breakdown_found: null,
+    total_label_found: null,
+    rendered_dates_match: null,
+    extracted_from_breakdown_total: null,
+  };
+
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
       <TableRow className="cursor-pointer hover:bg-muted/50" onClick={() => setIsOpen(!isOpen)}>
@@ -209,18 +234,27 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
           {diagnostic.includes_taxes_fees === false && <XCircle className="h-4 w-4 text-red-500" />}
           {diagnostic.includes_taxes_fees === null && <span className="text-muted-foreground">—</span>}
         </TableCell>
+        {/* NEW: Structural verification column (the REAL verification) */}
         <TableCell>
-          {diagnostic.semantic_total_verified ? (
+          {diagnostic.structural_total_verified ? (
             <ShieldCheck className="h-4 w-4 text-green-500" />
           ) : (
-            <ShieldX className="h-4 w-4 text-orange-500" />
+            <ShieldX className="h-4 w-4 text-red-500" />
+          )}
+        </TableCell>
+        {/* Semantic column (kept for debugging, secondary importance) */}
+        <TableCell>
+          {diagnostic.semantic_total_verified ? (
+            <CheckCircle2 className="h-4 w-4 text-green-400" />
+          ) : (
+            <XCircle className="h-4 w-4 text-muted-foreground" />
           )}
         </TableCell>
       </TableRow>
       <CollapsibleContent asChild>
         <TableRow className="bg-muted/30">
-          <TableCell colSpan={8} className="p-4">
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <TableCell colSpan={9} className="p-4">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
               {/* Extraction Details */}
               <div className="space-y-2">
                 <h4 className="font-medium text-sm">Extraction Details</h4>
@@ -273,30 +307,88 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
                 </div>
               </div>
 
-              {/* Verification Status */}
+              {/* STRUCTURAL Verification Status (NEW - Primary) */}
               <div className="space-y-2">
-                <h4 className="font-medium text-sm">Verification Status</h4>
-                {/* Semantic Total Badge */}
+                <h4 className="font-medium text-sm flex items-center gap-2">
+                  <Shield className="h-4 w-4" />
+                  Structural Proof
+                </h4>
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-muted-foreground text-sm">Semantic Total:</span>
-                  {diagnostic.semantic_total_verified ? (
+                  {diagnostic.structural_total_verified ? (
                     <Badge variant="outline" className="bg-green-100 text-green-700">
                       <ShieldCheck className="h-3 w-3 mr-1" />
-                      Verified
+                      VERIFIED
                     </Badge>
                   ) : (
                     <Badge variant="outline" className="bg-red-100 text-red-700">
                       <ShieldX className="h-3 w-3 mr-1" />
-                      Not Proven
+                      NO PROOF
                     </Badge>
                   )}
                 </div>
+                {/* Structural proof details */}
+                <div className="text-xs space-y-1 bg-muted/50 p-2 rounded">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">breakdown_found:</span>
+                    {structuralProof.breakdown_found === true ? (
+                      <CheckCircle2 className="h-3 w-3 text-green-500" />
+                    ) : structuralProof.breakdown_found === false ? (
+                      <XCircle className="h-3 w-3 text-red-500" />
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">total_label_found:</span>
+                    {structuralProof.total_label_found === true ? (
+                      <CheckCircle2 className="h-3 w-3 text-green-500" />
+                    ) : structuralProof.total_label_found === false ? (
+                      <XCircle className="h-3 w-3 text-red-500" />
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">rendered_dates_match:</span>
+                    {structuralProof.rendered_dates_match === true ? (
+                      <CheckCircle2 className="h-3 w-3 text-green-500" />
+                    ) : structuralProof.rendered_dates_match === false ? (
+                      <XCircle className="h-3 w-3 text-red-500" />
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">from_breakdown_total:</span>
+                    {structuralProof.extracted_from_breakdown_total === true ? (
+                      <CheckCircle2 className="h-3 w-3 text-green-500" />
+                    ) : structuralProof.extracted_from_breakdown_total === false ? (
+                      <XCircle className="h-3 w-3 text-red-500" />
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Verification Failures */}
+              <div className="space-y-2">
+                <h4 className="font-medium text-sm">Verification Failures</h4>
                 {diagnostic.price_type && (
                   <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Price Type:</span>
                     <span className="capitalize">{diagnostic.price_type}</span>
                   </div>
                 )}
+                {/* Semantic (legacy, for debugging) */}
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>Semantic:</span>
+                  {diagnostic.semantic_total_verified ? (
+                    <span className="text-green-600">pass</span>
+                  ) : (
+                    <span className="text-orange-500">fail</span>
+                  )}
+                </div>
                 {diagnostic.verification_failures.length === 0 ? (
                   <div className="flex items-center gap-2 text-green-600 text-sm">
                     <ShieldCheck className="h-4 w-4" />
@@ -314,10 +406,10 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
                 )}
               </div>
 
-              {/* Evidence Snippets */}
+              {/* Evidence Snippets (kept for debugging) */}
               {diagnostic.evidence_snippets && diagnostic.evidence_snippets.length > 0 && (
-                <div className="md:col-span-2 lg:col-span-3 space-y-2">
-                  <h4 className="font-medium text-sm">Evidence Snippets</h4>
+                <div className="md:col-span-2 lg:col-span-4 space-y-2">
+                  <h4 className="font-medium text-sm text-muted-foreground">Evidence Snippets (debug only)</h4>
                   <div className="text-sm bg-muted p-2 rounded font-mono text-xs overflow-x-auto space-y-1">
                     {diagnostic.evidence_snippets.slice(0, 3).map((snippet, i) => (
                       <div key={i} className="text-muted-foreground truncate">
@@ -330,7 +422,7 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
 
               {/* Failure Reason (full width) */}
               {diagnostic.failure_reason && (
-                <div className="md:col-span-2 lg:col-span-3 space-y-2">
+                <div className="md:col-span-2 lg:col-span-4 space-y-2">
                   <h4 className="font-medium text-sm">Failure Reason</h4>
                   <div className="text-sm text-muted-foreground bg-muted p-2 rounded font-mono text-xs overflow-x-auto">
                     {diagnostic.failure_reason}
@@ -339,7 +431,7 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
               )}
 
               {/* Links */}
-              <div className="md:col-span-2 lg:col-span-3 flex gap-2">
+              <div className="md:col-span-2 lg:col-span-4 flex gap-2">
                 <Button variant="outline" size="sm" asChild>
                   <a href={diagnostic.listing_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3 mr-1" />
@@ -546,14 +638,25 @@ export default function ExtractionDiagnostics() {
                 </CardTitle>
               </CardHeader>
             </Card>
-            {/* Semantic Verification Stats */}
-            <Card className={systemicIssues.semantic_total_failed > 0 ? 'border-orange-300 bg-orange-50' : 'border-green-200'}>
+            {/* STRUCTURAL Verification Stats (NEW - Primary) */}
+            <Card className={(systemicIssues.structural_total_failed ?? 0) > 0 ? 'border-red-300 bg-red-50' : 'border-green-300 bg-green-50'}>
               <CardHeader className="pb-2">
-                <CardDescription>Semantic Total</CardDescription>
+                <CardDescription className="font-medium">Structural Proof</CardDescription>
                 <CardTitle className="text-lg">
-                  <span className="text-green-600">{systemicIssues.semantic_total_passed ?? 0}</span>
+                  <span className="text-green-600">{systemicIssues.structural_total_passed ?? 0}</span>
                   <span className="text-muted-foreground mx-1">/</span>
-                  <span className="text-orange-600">{systemicIssues.semantic_total_failed ?? 0}</span>
+                  <span className="text-red-600">{systemicIssues.structural_total_failed ?? 0}</span>
+                </CardTitle>
+              </CardHeader>
+            </Card>
+            {/* Semantic Verification Stats (Legacy, for debugging) */}
+            <Card className="border-muted">
+              <CardHeader className="pb-2">
+                <CardDescription className="text-muted-foreground text-xs">Semantic (debug)</CardDescription>
+                <CardTitle className="text-sm text-muted-foreground">
+                  <span>{systemicIssues.semantic_total_passed ?? 0}</span>
+                  <span className="mx-1">/</span>
+                  <span>{systemicIssues.semantic_total_failed ?? 0}</span>
                 </CardTitle>
               </CardHeader>
             </Card>
@@ -596,6 +699,7 @@ export default function ExtractionDiagnostics() {
                     <TableHead className="text-right">Price</TableHead>
                     <TableHead>Dates</TableHead>
                     <TableHead>Taxes</TableHead>
+                    <TableHead>Structural</TableHead>
                     <TableHead>Semantic</TableHead>
                   </TableRow>
                 </TableHeader>
