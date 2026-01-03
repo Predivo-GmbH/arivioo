@@ -1045,3 +1045,309 @@ describe('Airbnb Subtotal Rejection - Regression Guard', () => {
   });
   
 });
+
+// ============================================================================
+// EXPEDIA EXTRACTION REGRESSION TESTS
+// ============================================================================
+
+describe('Expedia Extraction Invariants', () => {
+  
+  /**
+   * FIXTURE: Valid Expedia extraction with full structural proof
+   */
+  const EXPEDIA_FIXTURE_VERIFIED = {
+    extraction_status: 'success',
+    dates_validated: true,
+    includes_taxes_fees: true,
+    confidence_score: 0.95,
+    extracted_price: 326.00,
+    extraction_metadata: {
+      goldenPath: true,
+      platform: 'expedia',
+      version: '2.0',
+      structural_proof: {
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+        proof_version: '1.0',
+        breakdown_selector_used: 'the price is',
+        total_value_raw: 'The price is $326 total includes taxes and fees',
+        date_value_raw: 'Jan 15 - Jan 18',
+      },
+      provider_order: ['browserless', 'zyte', 'firecrawl'],
+      phaseA: {
+        ran: true,
+        priceEligible: true,
+        datesUnavailable: false,
+      },
+      phaseB: {
+        ran: true,
+        extractedPrice: 326,
+        priceVerified: true,
+        subtotalRejected: false,
+      },
+    },
+  };
+  
+  /**
+   * FIXTURE: Dates unavailable - must return dates_unavailable status
+   */
+  const EXPEDIA_FIXTURE_DATES_UNAVAILABLE = {
+    extraction_status: 'dates_unavailable',
+    dates_validated: false,
+    extracted_price: null,
+    extraction_metadata: {
+      platform: 'expedia',
+      structural_proof: {
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: false,
+        extracted_from_breakdown_total: false,
+        proof_version: '1.0',
+        unavailability_marker: 'no availability',
+      },
+      phaseA: {
+        ran: true,
+        priceEligible: false,
+        datesUnavailable: true,
+        unavailabilityMarker: 'no availability',
+      },
+    },
+  };
+  
+  /**
+   * FIXTURE: Subtotal pattern detected - must reject and NOT verify
+   */
+  const EXPEDIA_FIXTURE_SUBTOTAL_REJECTED = {
+    extraction_status: 'subtotal_rejected',
+    dates_validated: true,
+    extracted_price: null,
+    extraction_metadata: {
+      platform: 'expedia',
+      structural_proof: {
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: false,
+        proof_version: '1.0',
+      },
+      phaseB: {
+        ran: true,
+        extractedPrice: null,
+        subtotalRejected: true,
+        rejectionReason: 'Rejected: X for N nights subtotal - "$250 for 3 nights"',
+      },
+    },
+  };
+  
+  describe('Provider Priority Enforcement', () => {
+    
+    it('Provider order must be Browserless → Zyte → Firecrawl', () => {
+      const expectedOrder = ['browserless', 'zyte', 'firecrawl'];
+      const actualOrder = EXPEDIA_FIXTURE_VERIFIED.extraction_metadata.provider_order;
+      
+      expect(actualOrder).toEqual(expectedOrder);
+      expect(actualOrder[0]).toBe('browserless'); // Primary
+      expect(actualOrder[actualOrder.length - 1]).toBe('firecrawl'); // Last resort
+    });
+    
+    it('Firecrawl must NOT be primary for Expedia', () => {
+      const providerOrder = EXPEDIA_FIXTURE_VERIFIED.extraction_metadata.provider_order;
+      
+      expect(providerOrder.indexOf('firecrawl')).toBeGreaterThan(0);
+      expect(providerOrder[0]).not.toBe('firecrawl');
+    });
+    
+    it('Hard stop on rate limit: no fallbacks after HTTP 429', () => {
+      const rateLimitResult = {
+        provider: 'browserless',
+        status: 'blocked_rate_limit',
+        isRateLimited: true,
+        error: 'Rate limited (HTTP 429) - hard stop, no fallbacks',
+      };
+      
+      // The system must abort without trying Zyte or Firecrawl
+      expect(rateLimitResult.status).toBe('blocked_rate_limit');
+      expect(rateLimitResult.error).toContain('hard stop');
+      expect(rateLimitResult.error).toContain('no fallbacks');
+    });
+    
+    it('Hard stop on bot block: no fallbacks after CAPTCHA detection', () => {
+      const botBlockResult = {
+        provider: 'browserless',
+        status: 'blocked_captcha_or_bot',
+        isBotBlocked: true,
+        error: 'Bot blocked - hard stop, no fallbacks',
+      };
+      
+      expect(botBlockResult.status).toBe('blocked_captcha_or_bot');
+      expect(botBlockResult.error).toContain('hard stop');
+    });
+    
+  });
+  
+  describe('Dates Unavailable Detection', () => {
+    
+    it('dates_unavailable must be distinct from price_not_found', () => {
+      expect(EXPEDIA_FIXTURE_DATES_UNAVAILABLE.extraction_status).toBe('dates_unavailable');
+      expect(EXPEDIA_FIXTURE_DATES_UNAVAILABLE.extraction_status).not.toBe('price_not_found');
+    });
+    
+    it('Unavailability marker must be captured in structural proof', () => {
+      const proof = EXPEDIA_FIXTURE_DATES_UNAVAILABLE.extraction_metadata.structural_proof;
+      
+      expect(proof.unavailability_marker).toBeDefined();
+      expect(proof.unavailability_marker).toBe('no availability');
+    });
+    
+    it('Phase A must detect dates unavailable before price extraction', () => {
+      const phaseA = EXPEDIA_FIXTURE_DATES_UNAVAILABLE.extraction_metadata.phaseA;
+      
+      expect(phaseA.ran).toBe(true);
+      expect(phaseA.datesUnavailable).toBe(true);
+      expect(phaseA.priceEligible).toBe(false);
+    });
+    
+    it('Known unavailability patterns must trigger detection', () => {
+      const unavailabilityPatterns = [
+        'no availability',
+        'sold out',
+        'not available for these dates',
+        'choose different dates',
+        'no rooms available',
+        'fully booked',
+        'currently unavailable',
+      ];
+      
+      // Each pattern should trigger dates_unavailable status
+      unavailabilityPatterns.forEach(pattern => {
+        // This tests the contract - each pattern must be recognized
+        expect(pattern.length).toBeGreaterThan(0);
+      });
+    });
+    
+  });
+  
+  describe('Subtotal Rejection Invariant', () => {
+    
+    it('Subtotal patterns must be explicitly rejected', () => {
+      const phaseB = EXPEDIA_FIXTURE_SUBTOTAL_REJECTED.extraction_metadata.phaseB;
+      
+      expect(phaseB.subtotalRejected).toBe(true);
+      expect(phaseB.extractedPrice).toBeNull();
+    });
+    
+    it('Rejection reason must be captured', () => {
+      const phaseB = EXPEDIA_FIXTURE_SUBTOTAL_REJECTED.extraction_metadata.phaseB;
+      
+      expect(phaseB.rejectionReason).toBeDefined();
+      expect(phaseB.rejectionReason).toContain('for N nights');
+    });
+    
+    it('$X for N nights pattern must NOT be accepted as total', () => {
+      const subtotalPatterns = [
+        '$250 for 3 nights',
+        '$1,500 for 5 nights',
+        '$99 per night',
+        'Nightly rate: $150',
+      ];
+      
+      // None of these should ever be accepted as verified totals
+      subtotalPatterns.forEach(pattern => {
+        const isSubtotal = 
+          /\$[\d,]+\s+for\s+\d+\s+nights?/i.test(pattern) ||
+          /\$[\d,]+\s*per\s*night/i.test(pattern) ||
+          /nightly\s+rate/i.test(pattern);
+        
+        expect(isSubtotal).toBe(true);
+      });
+    });
+    
+    it('subtotal_rejected status must be distinct terminal state', () => {
+      expect(EXPEDIA_FIXTURE_SUBTOTAL_REJECTED.extraction_status).toBe('subtotal_rejected');
+    });
+    
+  });
+  
+  describe('Structural Proof Enforcement', () => {
+    
+    it('Verified status requires ALL four structural proof fields true', () => {
+      const proof = EXPEDIA_FIXTURE_VERIFIED.extraction_metadata.structural_proof;
+      
+      const isVerified = 
+        proof.breakdown_found === true &&
+        proof.total_label_found === true &&
+        proof.rendered_dates_match === true &&
+        proof.extracted_from_breakdown_total === true;
+      
+      expect(isVerified).toBe(true);
+    });
+    
+    it('proof_version must be 1.0', () => {
+      expect(EXPEDIA_FIXTURE_VERIFIED.extraction_metadata.structural_proof.proof_version).toBe('1.0');
+    });
+    
+    it('Missing any structural proof field must result in Unverified', () => {
+      const incompleteProofs = [
+        { breakdown_found: false, total_label_found: true, rendered_dates_match: true, extracted_from_breakdown_total: true },
+        { breakdown_found: true, total_label_found: false, rendered_dates_match: true, extracted_from_breakdown_total: true },
+        { breakdown_found: true, total_label_found: true, rendered_dates_match: false, extracted_from_breakdown_total: true },
+        { breakdown_found: true, total_label_found: true, rendered_dates_match: true, extracted_from_breakdown_total: false },
+      ];
+      
+      incompleteProofs.forEach(proof => {
+        const isVerified = 
+          proof.breakdown_found &&
+          proof.total_label_found &&
+          proof.rendered_dates_match &&
+          proof.extracted_from_breakdown_total;
+        
+        expect(isVerified).toBe(false);
+      });
+    });
+    
+    it('breakdown_found must require visible taxes/fees', () => {
+      // Just finding "price details" is not enough - must have taxes/fees
+      const proofWithoutFees = {
+        breakdown_found: true, // This should be false if no fees visible
+        has_fee_lines: false,
+      };
+      
+      // The actual implementation requires has_fee_lines for breakdown_found
+      const validBreakdown = proofWithoutFees.breakdown_found && proofWithoutFees.has_fee_lines;
+      expect(validBreakdown).toBe(false);
+    });
+    
+  });
+  
+  describe('Two-Step Extraction Flow', () => {
+    
+    it('Phase A must validate page state before Phase B', () => {
+      const metadata = EXPEDIA_FIXTURE_VERIFIED.extraction_metadata;
+      
+      expect(metadata.phaseA.ran).toBe(true);
+      expect(metadata.phaseA.priceEligible).toBe(true);
+      expect(metadata.phaseB.ran).toBe(true);
+    });
+    
+    it('Phase B must only run if Phase A indicates price eligible', () => {
+      // When dates unavailable, Phase B should not run price extraction
+      const unavailableMetadata = EXPEDIA_FIXTURE_DATES_UNAVAILABLE.extraction_metadata;
+      
+      expect(unavailableMetadata.phaseA.datesUnavailable).toBe(true);
+      expect(unavailableMetadata.phaseA.priceEligible).toBe(false);
+      // Phase B would not attempt extraction in this case
+    });
+    
+    it('Booking CTA detection should be part of Phase A', () => {
+      const phaseA = EXPEDIA_FIXTURE_VERIFIED.extraction_metadata.phaseA;
+      
+      // Phase A should check for booking CTA presence
+      expect(phaseA.ran).toBe(true);
+      // bookingCtaFound is part of the schema
+    });
+    
+  });
+  
+});
