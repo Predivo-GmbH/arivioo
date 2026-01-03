@@ -52,6 +52,7 @@ type TerminalStatus =
   | 'dates_not_applied'
   | 'no_availability_for_dates'
   | 'blocked_captcha_or_bot'
+  | 'blocked_rate_limit'  // NEW: Explicit rate limit status for hard stop
   | 'sold_out'
   | 'price_not_found'
   | 'render_failed'
@@ -599,8 +600,28 @@ async function extractFromHotelsCom(
     
     if (!response.ok) {
       const errorText = await response.text();
+      
+      // ACCESS FAILURE CLASSIFICATION
+      // HTTP 429 = RATE_LIMITED - hard stop, no fallbacks
+      // HTTP 403/401 = BOT_BLOCKED - hard stop, no fallbacks
+      if (response.status === 429) {
+        result.error = `Rate limited (HTTP 429): ${errorText.slice(0, 200)}`;
+        result.status = 'blocked_rate_limit' as TerminalStatus;
+        result.durationMs = Date.now() - startTime;
+        console.log('[HOTELS.COM] RATE LIMITED - Hard stop');
+        return result;
+      }
+      
+      if (response.status === 403 || response.status === 401) {
+        result.error = `Access denied (HTTP ${response.status}): ${errorText.slice(0, 200)}`;
+        result.status = 'blocked_captcha_or_bot';
+        result.durationMs = Date.now() - startTime;
+        console.log('[HOTELS.COM] BOT BLOCKED - Hard stop');
+        return result;
+      }
+      
       result.error = `Firecrawl error: ${response.status}`;
-      result.status = response.status === 429 ? 'blocked_captcha_or_bot' : 'render_failed';
+      result.status = 'render_failed';
       result.durationMs = Date.now() - startTime;
       console.error(`[HOTELS.COM] Firecrawl error: ${errorText}`);
       return result;

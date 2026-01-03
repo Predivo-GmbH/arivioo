@@ -52,6 +52,7 @@ type TerminalStatus =
   | 'dates_not_applied'
   | 'no_availability_for_dates'
   | 'blocked_captcha_or_bot'
+  | 'blocked_rate_limit'  // NEW: Explicit rate limit status for hard stop
   | 'sold_out'
   | 'price_not_found'
   | 'render_failed'
@@ -262,7 +263,7 @@ interface AttemptResult {
   error?: string;
 }
 
-async function fetchWithFirecrawl(url: string, waitFor: number = 3000): Promise<{ markdown: string; error?: string }> {
+async function fetchWithFirecrawl(url: string, waitFor: number = 3000): Promise<{ markdown: string; error?: string; isRateLimited?: boolean; isBotBlocked?: boolean }> {
   const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
   
   if (!firecrawlApiKey) {
@@ -285,6 +286,13 @@ async function fetchWithFirecrawl(url: string, waitFor: number = 3000): Promise<
     });
     
     if (!response.ok) {
+      // ACCESS FAILURE CLASSIFICATION
+      if (response.status === 429) {
+        return { markdown: '', error: `Rate limited (HTTP 429)`, isRateLimited: true };
+      }
+      if (response.status === 403 || response.status === 401) {
+        return { markdown: '', error: `Bot blocked (HTTP ${response.status})`, isBotBlocked: true };
+      }
       return { markdown: '', error: `Firecrawl error: ${response.status}` };
     }
     
@@ -295,7 +303,7 @@ async function fetchWithFirecrawl(url: string, waitFor: number = 3000): Promise<
   }
 }
 
-async function fetchWithZyte(url: string): Promise<{ markdown: string; error?: string }> {
+async function fetchWithZyte(url: string): Promise<{ markdown: string; error?: string; isRateLimited?: boolean; isBotBlocked?: boolean }> {
   const zyteApiKey = Deno.env.get('ZYTE_API_KEY');
   
   if (!zyteApiKey) {
@@ -320,6 +328,13 @@ async function fetchWithZyte(url: string): Promise<{ markdown: string; error?: s
     });
     
     if (!response.ok) {
+      // ACCESS FAILURE CLASSIFICATION
+      if (response.status === 429) {
+        return { markdown: '', error: `Rate limited (HTTP 429)`, isRateLimited: true };
+      }
+      if (response.status === 403 || response.status === 401) {
+        return { markdown: '', error: `Bot blocked (HTTP ${response.status})`, isBotBlocked: true };
+      }
       return { markdown: '', error: `Zyte error: ${response.status}` };
     }
     
@@ -337,6 +352,9 @@ async function fetchWithZyte(url: string): Promise<{ markdown: string; error?: s
     return { markdown: '', error: error instanceof Error ? error.message : 'Zyte fetch failed' };
   }
 }
+
+// Shared type for fetch results
+type FetchResult = { markdown: string; error?: string; isRateLimited?: boolean; isBotBlocked?: boolean };
 
 async function extractFromExpedia(
   url: string,
@@ -392,7 +410,7 @@ async function extractFromExpedia(
       
       console.log(`[EXPEDIA] Attempt ${attempt}/${MAX_ATTEMPTS} with ${provider}`);
       
-      let fetchResult: { markdown: string; error?: string };
+      let fetchResult: FetchResult;
       
       if (provider === 'firecrawl') {
         fetchResult = await fetchWithFirecrawl(fullUrl, waitFor);
@@ -415,6 +433,26 @@ async function extractFromExpedia(
         attempts.push(attemptResult);
         lastError = fetchResult.error;
         console.log(`[EXPEDIA] Attempt ${attempt} failed: ${fetchResult.error}`);
+        
+        // ACCESS FAILURE HARD STOP - no fallbacks after rate limit or bot block
+        if (fetchResult.isRateLimited) {
+          console.log('[EXPEDIA] RATE LIMITED - Hard stop, no more attempts');
+          result.status = 'blocked_rate_limit' as TerminalStatus;
+          result.error = `Rate limited (HTTP 429) - no fallback providers attempted`;
+          result.attempts = attempts;
+          result.durationMs = Date.now() - startTime;
+          return result;
+        }
+        
+        if (fetchResult.isBotBlocked) {
+          console.log('[EXPEDIA] BOT BLOCKED - Hard stop, no more attempts');
+          result.status = 'blocked_captcha_or_bot';
+          result.error = `Bot blocked - no fallback providers attempted`;
+          result.attempts = attempts;
+          result.durationMs = Date.now() - startTime;
+          return result;
+        }
+        
         continue;
       }
       

@@ -5063,12 +5063,113 @@ async function runSearchWithStreaming(
           { provider: 'firecrawl', run: firecrawlTask },
         ];
 
+    // ========================================================================
+    // ACCESS FAILURE CLASSIFICATION - Hard stop on rate limiting/bot blocking
+    // When RATE_LIMITED or BOT_BLOCKED is detected, abort the entire fallback
+    // chain. No other providers should be attempted.
+    // ========================================================================
+    let accessLayerAbort: { failureClass: 'RATE_LIMITED' | 'BOT_BLOCKED'; provider: string; evidence: string[] } | null = null;
+    
     for (const step of fallbackChain) {
       const label = step.provider.toUpperCase();
       sendProgress(controller, `${label} attempt`, `Trying ${label}…`);
 
       const r = await step.run();
       providerResults.push(r);
+      
+      // ============ ACCESS FAILURE HARD STOP CHECK ============
+      // Check if this provider hit rate limiting or bot blocking
+      // If so, abort immediately - do NOT try fallback providers
+      if (r.isRateLimited) {
+        accessLayerAbort = {
+          failureClass: 'RATE_LIMITED',
+          provider: r.provider,
+          evidence: ['HTTP 429 or rate limit detected'],
+        };
+        console.log(`[ACCESS ABORT] ${r.provider} hit rate limit - aborting fallback chain`);
+        
+        // Persist abort record for diagnostics
+        try {
+          await supabase.from('airbnb_baseline_debug').insert({
+            run_id: debugRunId,
+            search_id: searchId,
+            run_number: 1,
+            provider: r.provider,
+            provider_order: fallbackChain.findIndex(s => s.provider === r.provider) + 1,
+            status: 'rate_limited_abort',
+            duration_ms: r.durationMs || 0,
+            extracted_price: null,
+            currency: null,
+            includes_taxes_fees: null,
+            evidence_snippet: 'ACCESS LAYER ABORT: Rate limited - no fallbacks attempted',
+            rejected_reason: 'rate_limited',
+            airbnb_url: search.airbnb_url,
+            check_in_date: checkIn,
+            check_out_date: checkOut,
+            nights_count: nights,
+          });
+        } catch (e) {
+          console.error('Failed to persist rate limit abort record:', e);
+        }
+        
+        sendProgress(controller, `${label} RATE LIMITED`, 'Access layer hard stop - no fallbacks', {
+          provider: r.provider,
+          failureClass: 'RATE_LIMITED',
+          aborted_before_fallbacks: true,
+        });
+        
+        break; // HARD STOP - do not try other providers
+      }
+      
+      // Check for bot blocking indicators
+      const hasBotBlock = r.error && (
+        r.error.toLowerCase().includes('captcha') ||
+        r.error.toLowerCase().includes('bot detected') ||
+        r.error.toLowerCase().includes('access denied') ||
+        r.error.toLowerCase().includes('cloudflare') ||
+        r.error.toLowerCase().includes('verify you are human')
+      );
+      
+      if (hasBotBlock) {
+        accessLayerAbort = {
+          failureClass: 'BOT_BLOCKED',
+          provider: r.provider,
+          evidence: [r.error || 'Bot blocking detected'],
+        };
+        console.log(`[ACCESS ABORT] ${r.provider} hit bot block - aborting fallback chain`);
+        
+        // Persist abort record for diagnostics
+        try {
+          await supabase.from('airbnb_baseline_debug').insert({
+            run_id: debugRunId,
+            search_id: searchId,
+            run_number: 1,
+            provider: r.provider,
+            provider_order: fallbackChain.findIndex(s => s.provider === r.provider) + 1,
+            status: 'bot_blocked_abort',
+            duration_ms: r.durationMs || 0,
+            extracted_price: null,
+            currency: null,
+            includes_taxes_fees: null,
+            evidence_snippet: `ACCESS LAYER ABORT: Bot blocked - ${r.error}`,
+            rejected_reason: 'bot_blocked',
+            airbnb_url: search.airbnb_url,
+            check_in_date: checkIn,
+            check_out_date: checkOut,
+            nights_count: nights,
+          });
+        } catch (e) {
+          console.error('Failed to persist bot block abort record:', e);
+        }
+        
+        sendProgress(controller, `${label} BOT BLOCKED`, 'Access layer hard stop - no fallbacks', {
+          provider: r.provider,
+          failureClass: 'BOT_BLOCKED',
+          aborted_before_fallbacks: true,
+        });
+        
+        break; // HARD STOP - do not try other providers
+      }
 
       // Persist debug bundle with OCR fields to airbnb_baseline_debug table
       try {
@@ -5175,6 +5276,11 @@ async function runSearchWithStreaming(
           baseline_status: r.baseline.status,
         });
       }
+    }
+    
+    // Log access layer abort summary if triggered
+    if (accessLayerAbort) {
+      console.log(`[ACCESS ABORT SUMMARY] failureClass=${accessLayerAbort.failureClass}, provider=${accessLayerAbort.provider}, evidence=${accessLayerAbort.evidence.join(', ')}`);
     }
 
     // Track subtotal info from any provider that found needs_user_confirmation
