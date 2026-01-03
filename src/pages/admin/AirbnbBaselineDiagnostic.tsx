@@ -66,6 +66,9 @@ interface TestSummary {
   consistent: boolean;
   all_prices_match: boolean;
   results: ValidationRunResult[];
+  // Version marker for deployment verification
+  _version?: string;
+  _deployed_at?: string;
 }
 
 interface DebugHistoryItem {
@@ -495,6 +498,16 @@ export default function AirbnbBaselineDiagnostic() {
     
     // Look for subtotal candidates in the first run's provider results
     for (const providerResult of results.results[0].provider_results) {
+      // First check OCR data (most reliable for subtotal)
+      if (providerResult.ocr_booking_card_amount_value) {
+        return {
+          amount: providerResult.ocr_booking_card_amount_value,
+          nights: results.nights,
+          currency: providerResult.currency || 'USD',
+        };
+      }
+      
+      // Fallback to candidate extraction
       const subtotalCandidate = providerResult.candidates_summary?.find(
         c => c.candidate_type === 'subtotal_nights' || c.kind === 'subtotal'
       );
@@ -783,9 +796,14 @@ export default function AirbnbBaselineDiagnostic() {
             <>
               <Card>
                 <CardHeader>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
                     <CardTitle>Test Summary</CardTitle>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {results._version && (
+                        <Badge className="bg-blue-500/20 text-blue-700 border-blue-500/30 font-mono text-xs">
+                          v: {results._version}
+                        </Badge>
+                      )}
                       <Badge variant="outline" className="font-mono text-xs">
                         run_id: {results.run_id.slice(0, 8)}...
                       </Badge>

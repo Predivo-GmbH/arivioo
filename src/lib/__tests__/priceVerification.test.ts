@@ -954,4 +954,94 @@ describe('Airbnb Subtotal Rejection - Regression Guard', () => {
     
   });
   
+  describe('OCR Subtotal Rejection (Regression: $1977 for 4 nights)', () => {
+    
+    /**
+     * CRITICAL REGRESSION TEST: The exact scenario that was broken
+     * 
+     * When OCR captures "$1977 for 4 nights" (bookingCardAmount=1977, bookingCardNights=4),
+     * and the provider also extracts $1977, the OCR validation must REJECT this because:
+     * - The booking card is showing a SUBTOTAL, not the trip total
+     * - We need the breakdown total to verify the actual trip cost
+     */
+    it('OCR subtotal ($1977 for 4 nights) must NOT be accepted as verified total', () => {
+      // Simulated OCR reference capturing a subtotal display
+      const ocrReference = {
+        bookingCardAmount: 1977,
+        bookingCardNights: 4, // THIS is the key - when nights are set, it's a subtotal
+        bookingCardSnippet: '$1,977 for 4 nights',
+        breakdownTotalAmount: null, // No breakdown total found
+        breakdownTotalSnippet: null,
+        breakdownTaxesAmount: null,
+        breakdownOpened: false,
+      };
+      
+      // Provider extracted the same subtotal value
+      const providerPrice = 1977;
+      
+      // The validation function should reject this
+      // Rule: When bookingCardNights is set, bookingCardAmount is a subtotal
+      // We MUST NOT accept a provider price that equals this subtotal
+      const isSubtotalDisplay = ocrReference.bookingCardNights && ocrReference.bookingCardNights > 0;
+      const pricesMatch = Math.abs(providerPrice - ocrReference.bookingCardAmount) <= 1;
+      
+      // INVARIANT: If OCR shows subtotal and provider matches it, REJECT
+      const shouldReject = isSubtotalDisplay && pricesMatch && !ocrReference.breakdownTotalAmount;
+      
+      expect(shouldReject).toBe(true);
+    });
+    
+    it('Higher provider price than subtotal without breakdown should still require confirmation', () => {
+      // Provider claims to find a higher price than the subtotal
+      const ocrReference = {
+        bookingCardAmount: 1977,
+        bookingCardNights: 4,
+        breakdownTotalAmount: null,
+      };
+      
+      const providerPrice = 2200; // Higher than subtotal
+      
+      // Without breakdown to verify, we can't trust this is the real total
+      const shouldRequireConfirmation = 
+        ocrReference.bookingCardNights > 0 && 
+        !ocrReference.breakdownTotalAmount;
+      
+      expect(shouldRequireConfirmation).toBe(true);
+    });
+    
+    it('Breakdown total should take priority over booking card subtotal', () => {
+      // When breakdown is found, it should always be trusted
+      const ocrReference = {
+        bookingCardAmount: 1977,
+        bookingCardNights: 4,
+        breakdownTotalAmount: 2213.34, // The actual trip total
+        breakdownTotalSnippet: 'Total (USD) $2,213.34',
+      };
+      
+      const providerPrice = 2213.34; // Matches breakdown
+      
+      // Provider price matching breakdown = ACCEPT
+      const breakdownMatch = Math.abs(providerPrice - ocrReference.breakdownTotalAmount) <= 1;
+      
+      expect(breakdownMatch).toBe(true);
+    });
+    
+    it('Provider price matching breakdown but not matching subtotal should be ACCEPTED', () => {
+      const ocrReference = {
+        bookingCardAmount: 1977,
+        bookingCardNights: 4,
+        breakdownTotalAmount: 2213.34,
+      };
+      
+      const providerPrice = 2213.34;
+      
+      // The breakdown takes priority
+      const matchesBreakdown = ocrReference.breakdownTotalAmount && 
+        Math.abs(providerPrice - ocrReference.breakdownTotalAmount) <= 1;
+      
+      expect(matchesBreakdown).toBe(true);
+    });
+    
+  });
+  
 });

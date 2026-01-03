@@ -627,9 +627,10 @@ function validateProviderPriceWithOcr(
 
   const breakdownTotal = ocrReference.breakdownTotalAmount;
   const bookingCardAmount = ocrReference.bookingCardAmount;
+  const bookingCardNights = ocrReference.bookingCardNights;
   const tolerance = 1; // Allow $1 rounding tolerance
 
-  // Rule A: Breakdown Total has absolute priority
+  // Rule A: Breakdown Total has absolute priority (this IS the trip total)
   if (breakdownTotal) {
     const diff = Math.abs(providerPrice - breakdownTotal);
     if (diff <= tolerance) {
@@ -647,33 +648,70 @@ function validateProviderPriceWithOcr(
     }
   }
 
-  // Rule B: No breakdown, use booking card as baseline
+  // Rule B: No breakdown found - booking card is our only reference
   if (bookingCardAmount) {
-    // B1: Provider price lower than OCR baseline -> REJECT
-    if (providerPrice < bookingCardAmount - tolerance) {
-      return {
-        status: 'rejected',
-        mismatchReason: 'provider_price_lower_than_visible_price',
-        validationNote: `Provider $${providerPrice} < OCR baseline $${bookingCardAmount}`
-      };
-    }
+    // CRITICAL FIX: If bookingCardNights is set, the booking card shows a SUBTOTAL
+    // (e.g., "$1977 for 4 nights"), NOT the trip total including taxes/fees.
+    // We MUST NOT accept a price that merely equals this subtotal.
+    const isSubtotalDisplay = bookingCardNights && bookingCardNights > 0;
+    
+    if (isSubtotalDisplay) {
+      // The booking card is showing subtotal - require provider to find a HIGHER price
+      // (the true total including taxes/fees) or we need manual confirmation
+      if (Math.abs(providerPrice - bookingCardAmount) <= tolerance) {
+        return {
+          status: 'rejected',
+          mismatchReason: 'subtotal_match_requires_breakdown',
+          validationNote: `Provider $${providerPrice} equals subtotal "$${bookingCardAmount} for ${bookingCardNights} nights" - need breakdown total for verification`
+        };
+      }
+      
+      // Provider found higher price than subtotal - this COULD be the total with taxes
+      // But without breakdown, we can't verify, so require confirmation
+      if (providerPrice > bookingCardAmount + tolerance) {
+        return {
+          status: 'rejected',
+          mismatchReason: 'no_breakdown_to_verify_total',
+          validationNote: `Provider $${providerPrice} > subtotal $${bookingCardAmount} but no breakdown to verify`
+        };
+      }
+      
+      // Provider price lower than subtotal - definitely wrong
+      if (providerPrice < bookingCardAmount - tolerance) {
+        return {
+          status: 'rejected',
+          mismatchReason: 'provider_price_lower_than_subtotal',
+          validationNote: `Provider $${providerPrice} < subtotal $${bookingCardAmount}`
+        };
+      }
+    } else {
+      // Booking card shows a raw price without nights context - could be total
+      // B1: Provider price lower than OCR baseline -> REJECT
+      if (providerPrice < bookingCardAmount - tolerance) {
+        return {
+          status: 'rejected',
+          mismatchReason: 'provider_price_lower_than_visible_price',
+          validationNote: `Provider $${providerPrice} < OCR baseline $${bookingCardAmount}`
+        };
+      }
 
-    // B2: Provider price equal to OCR baseline -> ACCEPT (excluding taxes)
-    if (Math.abs(providerPrice - bookingCardAmount) <= tolerance) {
-      return {
-        status: 'accepted',
-        acceptedVia: 'equal_to_baseline',
-        validationNote: `Provider $${providerPrice} equals OCR baseline $${bookingCardAmount}`
-      };
-    }
+      // B2: Provider price equal to OCR baseline -> ACCEPT (excluding taxes)
+      if (Math.abs(providerPrice - bookingCardAmount) <= tolerance) {
+        return {
+          status: 'accepted',
+          acceptedVia: 'equal_to_baseline',
+          validationNote: `Provider $${providerPrice} equals OCR baseline $${bookingCardAmount}`
+        };
+      }
 
-    // B3: Provider price higher than OCR baseline -> ACCEPT (including taxes)
-    if (providerPrice > bookingCardAmount + tolerance) {
-      return {
-        status: 'accepted',
-        acceptedVia: 'higher_than_baseline_includes_fees',
-        validationNote: `Provider $${providerPrice} > OCR baseline $${bookingCardAmount} (includes fees)`
-      };
+      // B3: Provider price higher than OCR baseline -> ACCEPT (including taxes)
+      if (providerPrice > bookingCardAmount + tolerance) {
+        return {
+          status: 'accepted',
+          acceptedVia: 'higher_than_baseline_includes_fees',
+          validationNote: `Provider $${providerPrice} > OCR baseline $${bookingCardAmount} (includes fees)`
+        };
+      }
     }
   }
 
@@ -1707,7 +1745,7 @@ Deno.serve(async (req) => {
         }
       }
 
-      // If no success, use priority: rate_limited > dates_unavailable > last result
+      // If no success, use priority: rate_limited > dates_unavailable > needs_user_confirmation
       if (!selectedProvider && providerResults.length > 0) {
         // Check if any provider hit rate_limited (takes priority)
         const rateLimitedResult = providerResults.find(r => r.status === 'rate_limited');
@@ -1722,9 +1760,19 @@ Deno.serve(async (req) => {
           finalEvidenceSnippet = unavailableResult.evidence_snippet;
           console.log(`[Main] Final status: dates_unavailable (from ${unavailableResult.provider})`);
         } else {
-          const last = providerResults[providerResults.length - 1];
-          finalStatus = last.status;
-          finalEvidenceSnippet = last.evidence_snippet;
+          // No verified total from any provider - trigger manual confirmation
+          // Check if we have OCR subtotal info to help the user
+          const ocrRef = sharedOcrReference;
+          if (ocrRef?.bookingCardAmount && ocrRef?.bookingCardNights) {
+            finalStatus = 'needs_user_confirmation';
+            finalEvidenceSnippet = `Subtotal: $${ocrRef.bookingCardAmount} for ${ocrRef.bookingCardNights} nights. Manual total required.`;
+            console.log(`[Main] Final status: needs_user_confirmation (subtotal=$${ocrRef.bookingCardAmount} for ${ocrRef.bookingCardNights} nights)`);
+          } else {
+            const last = providerResults[providerResults.length - 1];
+            finalStatus = 'needs_user_confirmation';
+            finalEvidenceSnippet = last.evidence_snippet || 'No verified total found. Manual confirmation required.';
+            console.log(`[Main] Final status: needs_user_confirmation (no verified total from any provider)`);
+          }
         }
       }
 
@@ -1748,7 +1796,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Summary
+    // Summary with version marker for deployment verification
     const summary = {
       run_id: runId,
       url,
@@ -1759,6 +1807,9 @@ Deno.serve(async (req) => {
       consistent: results.every(r => r.final_status === results[0].final_status),
       all_prices_match: results.every(r => r.final_price === results[0].final_price),
       results,
+      // Version marker for deployment verification
+      _version: 'subtotal-rejection-v2',
+      _deployed_at: new Date().toISOString(),
     };
 
     console.log('\n=== SUMMARY ===');
