@@ -4284,6 +4284,21 @@ async function runSearchWithStreaming(
   let lastScrapedContent: { markdown: string; html: string; hasScreenshot: boolean } = { 
     markdown: '', html: '', hasScreenshot: false 
   };
+  
+  // Helper to check if a title is valid (not a generic/checkout page title)
+  const isValidTitle = (title: string | null | undefined): boolean => {
+    if (!title || typeof title !== 'string') return false;
+    const normalized = title.trim().toLowerCase();
+    const invalidTitles = [
+      'vacation rental',
+      'confirm and pay',
+      'airbnb',
+      'confirm & pay',
+      'request to book',
+      'book your stay',
+    ];
+    return !invalidTitles.some(invalid => normalized === invalid || normalized.startsWith(invalid + ' -'));
+  };
 
   // IMPORTANT: Save dates immediately after extraction so they're available even if search stalls
   console.log(`Extracted dates from URL: checkIn=${checkIn}, checkOut=${checkOut}, nights=${nights}`);
@@ -4312,8 +4327,9 @@ async function runSearchWithStreaming(
       if (existingImages.length > 0) {
         imageUrls = existingImages;
       }
-      if (typeof search.airbnb_title === 'string' && search.airbnb_title.trim()) {
-        airbnbTitle = search.airbnb_title;
+      // Only use existing title if it's a valid property title (not "Confirm and pay")
+      if (isValidTitle(search.airbnb_title)) {
+        airbnbTitle = search.airbnb_title!;
       }
 
       const confirmedAmount = confirmed.confirmed_total_amount;
@@ -4543,10 +4559,13 @@ async function runSearchWithStreaming(
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
         }
 
-        // Extract title
+        // Extract title (only if current title is invalid)
         const metaTitle = data?.data?.metadata?.title;
-        if (metaTitle && airbnbTitle === "Vacation Rental") {
-          airbnbTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        if (metaTitle && !isValidTitle(airbnbTitle)) {
+          const cleanedTitle = metaTitle.replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+          if (isValidTitle(cleanedTitle)) {
+            airbnbTitle = cleanedTitle;
+          }
         }
 
         const baseline = extractBaselineFromContent(html, markdown, 'Firecrawl');
@@ -4664,10 +4683,13 @@ async function runSearchWithStreaming(
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
         }
 
-        // Extract title
+        // Extract title (only if current title is invalid)
         const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch && airbnbTitle === "Vacation Rental") {
-          airbnbTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+        if (titleMatch && !isValidTitle(airbnbTitle)) {
+          const cleanedTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+          if (isValidTitle(cleanedTitle)) {
+            airbnbTitle = cleanedTitle;
+          }
         }
 
         const baseline = extractBaselineFromContent(zyteResult.html, zyteResult.markdown, 'Zyte');
@@ -4832,13 +4854,16 @@ async function runSearchWithStreaming(
         }
 
         // Extract title from ROOMS page (not checkout page which says "Confirm and pay")
-        if (browserlessResult.roomsTitle && airbnbTitle === "Vacation Rental") {
-          airbnbTitle = browserlessResult.roomsTitle
+        if (browserlessResult.roomsTitle && !isValidTitle(airbnbTitle)) {
+          const cleanedTitle = browserlessResult.roomsTitle
             .replace(" - Airbnb", "")
             .replace(" · Airbnb", "")
             .replace(/\s*-\s*(Houses|Apartments|Homes|Villas|Cabins|Cottages|Condos)?\s*(for Rent|to Rent|zur Miete|in)?\s*.*$/i, "")
             .trim();
-          console.log(`Extracted title from rooms page: ${airbnbTitle}`);
+          if (isValidTitle(cleanedTitle)) {
+            airbnbTitle = cleanedTitle;
+            console.log(`Extracted title from rooms page: ${airbnbTitle}`);
+          }
         }
 
         // Capture OCR reference for validation (store for other providers too)
@@ -5204,8 +5229,11 @@ async function runSearchWithStreaming(
         if (resp.ok) {
           const html = await resp.text();
           const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-          if (titleMatch && (!airbnbTitle || airbnbTitle === "Vacation Rental")) {
-            airbnbTitle = titleMatch[1].replace(" - Airbnb", "").trim();
+          if (titleMatch && !isValidTitle(airbnbTitle)) {
+            const cleanedTitle = titleMatch[1].replace(" - Airbnb", "").trim();
+            if (isValidTitle(cleanedTitle)) {
+              airbnbTitle = cleanedTitle;
+            }
           }
 
           if (imageUrls.length === 0) {
