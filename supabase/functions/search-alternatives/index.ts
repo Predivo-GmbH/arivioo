@@ -4668,7 +4668,45 @@ async function runSearchWithStreaming(
 
         lastScrapedContent = { markdown: zyteResult.markdown, html: zyteResult.html, hasScreenshot: Boolean(zyteResult.screenshot) };
 
-        // Extract images for later use
+        // Extract images from ROOMS page (not checkout page) - fetch separately if needed
+        if (imageUrls.length === 0 && bookStaysParams?.rooms_url) {
+          // Try to fetch rooms page for images since checkout page has limited images
+          console.log('Zyte: Fetching rooms page for images:', bookStaysParams.rooms_url.slice(0, 80));
+          try {
+            const roomsResp = await fetchWithTimeout(bookStaysParams.rooms_url, {
+              headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" }
+            }, 15_000);
+            if (roomsResp.ok) {
+              const roomsHtml = await roomsResp.text();
+              const imagePatterns = [
+                /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+                /https:\/\/.*?\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
+              ];
+              const canonicalize = (url: string) => url.replace(/\\u002F/g, "/").split("?")[0];
+              let allImages: string[] = [];
+              for (const pattern of imagePatterns) {
+                allImages.push(...(roomsHtml.match(pattern) || []));
+              }
+              const unique = [...new Set(allImages.map(canonicalize))];
+              imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
+              console.log(`Zyte: Extracted ${imageUrls.length} images from rooms page`);
+              
+              // Also extract title from rooms page if needed
+              const titleMatch = roomsHtml.match(/<title>([^<]+)<\/title>/i);
+              if (titleMatch && !isValidTitle(airbnbTitle)) {
+                const cleanedTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+                if (isValidTitle(cleanedTitle)) {
+                  airbnbTitle = cleanedTitle;
+                  console.log('Zyte: Extracted title from rooms page:', airbnbTitle);
+                }
+              }
+            }
+          } catch (roomsFetchErr) {
+            console.log('Zyte: Failed to fetch rooms page for images:', roomsFetchErr);
+          }
+        }
+        
+        // Fallback: extract images from checkout page if rooms fetch failed
         if (imageUrls.length === 0) {
           const imagePatterns = [
             /https:\/\/a\d+\.muscache\.com\/im\/pictures\/[^"'\s\)]+/gi,
@@ -4683,12 +4721,14 @@ async function runSearchWithStreaming(
           imageUrls = unique.filter(isValidPropertyImage).map((u) => `${u}?im_w=1200`).slice(0, 5);
         }
 
-        // Extract title (only if current title is invalid)
-        const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
-        if (titleMatch && !isValidTitle(airbnbTitle)) {
-          const cleanedTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
-          if (isValidTitle(cleanedTitle)) {
-            airbnbTitle = cleanedTitle;
+        // Extract title from checkout page only if still invalid
+        if (!isValidTitle(airbnbTitle)) {
+          const titleMatch = zyteResult.html.match(/<title>([^<]+)<\/title>/i);
+          if (titleMatch) {
+            const cleanedTitle = titleMatch[1].replace(" - Airbnb", "").replace(" · Airbnb", "").trim();
+            if (isValidTitle(cleanedTitle)) {
+              airbnbTitle = cleanedTitle;
+            }
           }
         }
 
