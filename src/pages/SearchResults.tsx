@@ -13,6 +13,7 @@ import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/l
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
+import { ExtractionStatusSummary } from "@/components/ExtractionStatusSummary";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -73,9 +74,10 @@ interface PriceExtraction {
   id: string;
   search_result_id: string;
   platform_name: string;
-  extraction_status: 'pending' | 'running' | 'success' | 'blocked_captcha' | 'blocked_rate_limit' | 'dates_not_applied' | 'price_not_found' | 'failed_unknown';
+  extraction_status: string;
   extracted_price: number | null;
   extraction_error: string | null;
+  deep_link?: string;
 }
 
 interface SearchData {
@@ -1104,7 +1106,7 @@ export default function SearchResults() {
     const fetchExtractionStatus = async () => {
       const { data } = await supabase
         .from('price_extractions')
-        .select('id, search_result_id, platform_name, extraction_status, extracted_price, extraction_error')
+        .select('id, search_result_id, platform_name, extraction_status, extracted_price, extraction_error, deep_link')
         .eq('search_id', searchId);
       
       if (data) {
@@ -1557,55 +1559,11 @@ export default function SearchResults() {
                   </div>
                 )}
 
-                {/* Price Extraction Status Indicator */}
-                {priceExtractions.length > 0 && (
-                  <div className="mb-6 p-3 rounded-xl bg-muted/50 border border-border">
-                    <div className="flex items-center justify-between flex-wrap gap-2">
-                      <div className="flex items-center gap-2">
-                        {extractingPrices ? (
-                          <>
-                            <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                            <span className="text-sm font-medium text-foreground">Fetching live prices...</span>
-                          </>
-                        ) : (
-                          <>
-                            <CheckCircle className="w-4 h-4 text-success" />
-                            <span className="text-sm font-medium text-foreground">Price extraction complete</span>
-                          </>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                        {(() => {
-                          const pending = priceExtractions.filter(e => e.extraction_status === 'pending' || e.extraction_status === 'running').length;
-                          const success = priceExtractions.filter(e => e.extraction_status === 'success').length;
-                          const failed = priceExtractions.filter(e => !['pending', 'running', 'success'].includes(e.extraction_status)).length;
-                          return (
-                            <>
-                              {pending > 0 && (
-                                <span className="flex items-center gap-1">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                                  {pending} pending
-                                </span>
-                              )}
-                              {success > 0 && (
-                                <span className="flex items-center gap-1">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-success" />
-                                  {success} fetched
-                                </span>
-                              )}
-                              {failed > 0 && (
-                                <span className="flex items-center gap-1">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                                  {failed} unavailable
-                                </span>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {/* Price Extraction Status Summary */}
+                <ExtractionStatusSummary 
+                  extractions={priceExtractions}
+                  isExtracting={extractingPrices}
+                />
 
                 {/* Handle dates unavailable - listing not bookable for selected dates */}
                 {(() => {
