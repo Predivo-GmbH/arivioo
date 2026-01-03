@@ -116,7 +116,7 @@ export function useEnrichedSearchResults() {
     // Fetch price_extractions for this search - include verification fields
     const { data: extractionsData } = await supabase
       .from('price_extractions')
-      .select('id, search_result_id, platform_name, extraction_status, extraction_error, extracted_price, extraction_metadata, includes_taxes_fees, dates_validated, confidence_score, updated_at')
+      .select('id, search_result_id, platform_name, extraction_status, extraction_error, extracted_price, extraction_metadata, includes_taxes_fees, dates_validated, confidence_score, updated_at, evidence_snippets, extraction_stage, price_type')
       .eq('search_id', searchId);
 
     // Fetch platform_adapters for tier info
@@ -193,9 +193,15 @@ export function useEnrichedSearchResults() {
           price_verified_at: null,
           eligible_for_comparison: false,
           verification_failures: ['platform_blocked'],
+          semantic_total_verified: false,
         };
       } else if (extraction) {
-        // We have an extraction record - use verification logic
+        // We have an extraction record - use verification logic with full semantic checks
+        const evidenceSnippets = Array.isArray(extraction.evidence_snippets) 
+          ? extraction.evidence_snippets 
+          : [];
+        const metadata = extraction.extraction_metadata as Record<string, any> | null;
+        
         verification = verifyPrice({
           extraction_status: extraction.extraction_status,
           dates_validated: extraction.dates_validated,
@@ -203,6 +209,12 @@ export function useEnrichedSearchResults() {
           confidence_score: extraction.confidence_score,
           extracted_price: extraction.extracted_price,
           extraction_completed_at: extraction.updated_at,
+          // New semantic verification params
+          price_type: extraction.price_type || metadata?.price_type || null,
+          extraction_stage: extraction.extraction_stage || metadata?.extraction_stage || null,
+          extraction_path: metadata?.extraction_path || null,
+          evidence_snippets: evidenceSnippets,
+          extraction_metadata: metadata,
         });
       } else if (result.price && result.price > 0) {
         // Price exists but no extraction record - scraped price
@@ -215,6 +227,7 @@ export function useEnrichedSearchResults() {
           price_verified_at: null,
           eligible_for_comparison: false,
           verification_failures: ['no_price'],
+          semantic_total_verified: false,
         };
       }
 

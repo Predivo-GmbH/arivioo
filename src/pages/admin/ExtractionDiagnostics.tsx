@@ -68,6 +68,10 @@ interface ExtractionDiagnostic {
   price_status: string;
   verification_failures: string[];
   last_attempt_at: string | null;
+  // NEW: Semantic total verification
+  semantic_total_verified: boolean;
+  price_type: string | null;
+  evidence_snippets: string[] | null;
 }
 
 interface SearchSummary {
@@ -94,6 +98,9 @@ interface SystemicIssues {
   verified: number;
   unverified: number;
   tier_a_failures: number;
+  // NEW: Semantic verification breakdown
+  semantic_total_failed: number;
+  semantic_total_passed: number;
 }
 
 const STATUS_CONFIG: Record<string, { icon: any; color: string; label: string }> = {
@@ -119,6 +126,12 @@ const VERIFICATION_FAILURE_LABELS: Record<string, string> = {
   taxes_fees_not_included: 'Missing taxes/fees',
   low_confidence: 'Low confidence score',
   no_extraction_attempt: 'No extraction attempted',
+  // Semantic verification failures
+  semantic_total_not_verified: 'Not proven booking total',
+  price_type_not_total: 'Price is nightly, not total',
+  untrusted_extraction_path: 'Path ignores selected dates',
+  breakdown_missing_fees_aggregation: 'Breakdown incomplete',
+  no_semantic_total_proof: 'No semantic total evidence',
 };
 
 function ExtractionStatusBadge({ status }: { status: string }) {
@@ -194,10 +207,17 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
           {diagnostic.includes_taxes_fees === false && <XCircle className="h-4 w-4 text-red-500" />}
           {diagnostic.includes_taxes_fees === null && <span className="text-muted-foreground">—</span>}
         </TableCell>
+        <TableCell>
+          {diagnostic.semantic_total_verified ? (
+            <ShieldCheck className="h-4 w-4 text-green-500" />
+          ) : (
+            <ShieldX className="h-4 w-4 text-orange-500" />
+          )}
+        </TableCell>
       </TableRow>
       <CollapsibleContent asChild>
         <TableRow className="bg-muted/30">
-          <TableCell colSpan={7} className="p-4">
+          <TableCell colSpan={8} className="p-4">
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
               {/* Extraction Details */}
               <div className="space-y-2">
@@ -251,9 +271,30 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
                 </div>
               </div>
 
-              {/* Verification Failures */}
+              {/* Verification Status */}
               <div className="space-y-2">
                 <h4 className="font-medium text-sm">Verification Status</h4>
+                {/* Semantic Total Badge */}
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-muted-foreground text-sm">Semantic Total:</span>
+                  {diagnostic.semantic_total_verified ? (
+                    <Badge variant="outline" className="bg-green-100 text-green-700">
+                      <ShieldCheck className="h-3 w-3 mr-1" />
+                      Verified
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="bg-red-100 text-red-700">
+                      <ShieldX className="h-3 w-3 mr-1" />
+                      Not Proven
+                    </Badge>
+                  )}
+                </div>
+                {diagnostic.price_type && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Price Type:</span>
+                    <span className="capitalize">{diagnostic.price_type}</span>
+                  </div>
+                )}
                 {diagnostic.verification_failures.length === 0 ? (
                   <div className="flex items-center gap-2 text-green-600 text-sm">
                     <ShieldCheck className="h-4 w-4" />
@@ -270,6 +311,20 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
                   </div>
                 )}
               </div>
+
+              {/* Evidence Snippets */}
+              {diagnostic.evidence_snippets && diagnostic.evidence_snippets.length > 0 && (
+                <div className="md:col-span-2 lg:col-span-3 space-y-2">
+                  <h4 className="font-medium text-sm">Evidence Snippets</h4>
+                  <div className="text-sm bg-muted p-2 rounded font-mono text-xs overflow-x-auto space-y-1">
+                    {diagnostic.evidence_snippets.slice(0, 3).map((snippet, i) => (
+                      <div key={i} className="text-muted-foreground truncate">
+                        "{snippet}"
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Failure Reason (full width) */}
               {diagnostic.failure_reason && (
@@ -446,6 +501,17 @@ export default function ExtractionDiagnostics() {
                 </CardTitle>
               </CardHeader>
             </Card>
+            {/* Semantic Verification Stats */}
+            <Card className={systemicIssues.semantic_total_failed > 0 ? 'border-orange-300 bg-orange-50' : 'border-green-200'}>
+              <CardHeader className="pb-2">
+                <CardDescription>Semantic Total</CardDescription>
+                <CardTitle className="text-lg">
+                  <span className="text-green-600">{systemicIssues.semantic_total_passed ?? 0}</span>
+                  <span className="text-muted-foreground mx-1">/</span>
+                  <span className="text-orange-600">{systemicIssues.semantic_total_failed ?? 0}</span>
+                </CardTitle>
+              </CardHeader>
+            </Card>
           </div>
         )}
 
@@ -485,6 +551,7 @@ export default function ExtractionDiagnostics() {
                     <TableHead className="text-right">Price</TableHead>
                     <TableHead>Dates</TableHead>
                     <TableHead>Taxes</TableHead>
+                    <TableHead>Semantic</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
