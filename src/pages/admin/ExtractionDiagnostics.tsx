@@ -16,6 +16,8 @@ import {
   HelpCircle,
   Loader2,
   Calendar,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -358,6 +360,37 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
   );
 }
 
+function CopyButton({ text, className = '' }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  
+  return (
+    <Button variant="ghost" size="sm" className={className} onClick={handleCopy}>
+      {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+    </Button>
+  );
+}
+
+function TruncatedId({ id, className = '' }: { id: string; className?: string }) {
+  const truncated = `${id.slice(0, 8)}...${id.slice(-4)}`;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={`font-mono text-xs ${className}`}>{truncated}</span>
+      </TooltipTrigger>
+      <TooltipContent>
+        <span className="font-mono text-xs">{id}</span>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export default function ExtractionDiagnostics() {
   const { getToken } = useAdminAuth();
   const [isLoading, setIsLoading] = useState(true);
@@ -438,14 +471,26 @@ export default function ExtractionDiagnostics() {
             </Button>
             <h1 className="text-2xl font-bold">Extraction Diagnostics</h1>
             {selectedSearch && (
-              <p className="text-muted-foreground text-sm mt-1">
-                {selectedSearch.airbnb_title || selectedSearch.airbnb_url?.split('/rooms/')[1]?.split('?')[0] || selectedSearch.id}
-                {selectedSearch.check_in_date && selectedSearch.check_out_date && (
-                  <span className="ml-2">
-                    ({selectedSearch.check_in_date} → {selectedSearch.check_out_date})
-                  </span>
-                )}
-              </p>
+              <div className="mt-2 space-y-1">
+                <p className="text-muted-foreground text-sm">
+                  {selectedSearch.airbnb_title || selectedSearch.airbnb_url?.split('/rooms/')[1]?.split('?')[0] || 'Untitled'}
+                  {selectedSearch.check_in_date && selectedSearch.check_out_date && (
+                    <span className="ml-2">
+                      ({selectedSearch.check_in_date} → {selectedSearch.check_out_date})
+                    </span>
+                  )}
+                </p>
+                <div className="flex items-center gap-2 bg-muted/50 px-3 py-1.5 rounded-md w-fit">
+                  <span className="text-xs text-muted-foreground">Search ID:</span>
+                  <span className="font-mono text-xs">{selectedSearchId}</span>
+                  <CopyButton text={selectedSearchId || ''} />
+                  <Button variant="ghost" size="sm" asChild className="h-6 px-2">
+                    <a href={`/search/${selectedSearchId}`} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </Button>
+                </div>
+              </div>
             )}
           </div>
           <Button onClick={() => fetchDiagnostics(selectedSearchId)} variant="outline" disabled={isLoading}>
@@ -619,23 +664,30 @@ export default function ExtractionDiagnostics() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Search</TableHead>
+                  <TableHead className="w-40">Search ID</TableHead>
+                  <TableHead>Title</TableHead>
                   <TableHead>Dates</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-center">Extractions</TableHead>
                   <TableHead className="text-center">Success</TableHead>
                   <TableHead className="text-center">Failed</TableHead>
                   <TableHead>Created</TableHead>
-                  <TableHead></TableHead>
+                  <TableHead className="w-24">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filteredSearches.map((search) => (
                   <TableRow key={search.id} className="cursor-pointer hover:bg-muted/50" onClick={() => fetchDiagnostics(search.id)}>
                     <TableCell>
+                      <div className="flex items-center gap-1">
+                        <TruncatedId id={search.id} />
+                        <CopyButton text={search.id} />
+                      </div>
+                    </TableCell>
+                    <TableCell>
                       <div className="max-w-xs truncate">
                         <span className="font-medium">
-                          {search.airbnb_title || search.airbnb_url?.split('/rooms/')[1]?.split('?')[0] || search.id}
+                          {search.airbnb_title || search.airbnb_url?.split('/rooms/')[1]?.split('?')[0] || 'Untitled'}
                         </span>
                       </div>
                     </TableCell>
@@ -656,9 +708,16 @@ export default function ExtractionDiagnostics() {
                       {new Date(search.created_at).toLocaleString()}
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="sm">
-                        <Eye className="h-4 w-4" />
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="sm" asChild onClick={(e) => e.stopPropagation()}>
+                          <a href={`/search/${search.id}`} target="_blank" rel="noopener noreferrer" title="View results page">
+                            <ExternalLink className="h-4 w-4" />
+                          </a>
+                        </Button>
+                        <Button variant="ghost" size="sm" title="View diagnostics">
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
