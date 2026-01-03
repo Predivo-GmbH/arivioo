@@ -1814,14 +1814,16 @@ function validatePriceExtraction(
     return { ok: false, reason: 'raw_match_not_found_verbatim', evidence: snippet };
   }
 
-  // IMPORTANT: "$X for N nights" is treated as a subtotal signal, not a proven trip total.
-  // We only accept totals when the snippet contains an explicit total label OR an explicit taxes/fees label.
+  // Accept prices with explicit total labels, taxes/fees labels, OR "for N nights" aria-labels (Airbnb standard format)
   const hasExplicitTotalLabel =
     /\b(trip total|grand total|total before taxes|total\s*USD|you pay|you will pay)\b/i.test(snippet);
   const hasTaxesFeesLabel =
     /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(snippet);
+  // Airbnb uses aria-label="$X for N nights" as their standard stay total display
+  const hasForNightsAriaLabel =
+    /aria-label="[^"]*\$[\d,]+(?:\.\d+)?\s+for\s+\d+\s+nights?"/i.test(snippet);
 
-  if (!hasExplicitTotalLabel && !hasTaxesFeesLabel) {
+  if (!hasExplicitTotalLabel && !hasTaxesFeesLabel && !hasForNightsAriaLabel) {
     return { ok: false, reason: 'missing_explicit_total_or_taxes_context', evidence: snippet };
   }
 
