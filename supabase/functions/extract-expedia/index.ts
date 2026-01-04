@@ -326,6 +326,8 @@ function extractPropertyId(url: string, content?: string): PropertyIdResult {
 interface HotelSearchUrlResult {
   success: boolean;
   url: string;
+  urlUsd: string;      // Primary USD URL (expedia.com)
+  urlJp: string;       // Fallback JP URL (expedia.co.jp)
   propertyId: string | null;
   domain: string;
   startDate: string;
@@ -335,8 +337,12 @@ interface HotelSearchUrlResult {
 }
 
 /**
- * Build deterministic Hotel-Search offers page URL
- * Target: https://www.expedia.co.jp/Hotel-Search?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&adults=2&selected=PROPERTY_ID
+ * Build TWO deterministic Hotel-Search offers page URLs:
+ * 
+ * PRIMARY (USD): https://www.expedia.com/Hotel-Search?adults=2&currency=USD&locale=en_US&siteid=1&selected=PROPERTY_ID&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+ * FALLBACK (JP): https://www.expedia.co.jp/Hotel-Search?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&adults=2&selected=PROPERTY_ID
+ * 
+ * USD URL is ALWAYS tried first. Only fall back to JP if USD path fails.
  */
 function buildHotelSearchUrl(
   propertyId: string,
@@ -347,46 +353,54 @@ function buildHotelSearchUrl(
 ): HotelSearchUrlResult {
   const result: HotelSearchUrlResult = {
     success: false,
-    url: '',
+    url: '',        // Will be set to primary USD URL
+    urlUsd: '',
+    urlJp: '',
     propertyId,
-    domain: 'www.expedia.co.jp', // Default to Japan domain for international
+    domain: 'www.expedia.com', // Primary is always expedia.com (USD)
     startDate: checkIn,
     endDate: checkOut,
     adults: 2,
     guestMappingReason: null,
   };
   
-  // Extract domain from original URL if possible
-  try {
-    const urlObj = new URL(originalUrl);
-    if (urlObj.hostname.includes('expedia')) {
-      result.domain = urlObj.hostname;
-    }
-  } catch (e) {
-    // Use default domain
-  }
-  
-  // Guest mapping: Expedia Japan may require adults >= 2
+  // Guest mapping: Expedia may require adults >= 2 for some configurations
   // Apply rule: expediaAdults = max(2, airbnbAdults)
   if (airbnbAdults < 2) {
     result.adults = 2;
-    result.guestMappingReason = `Airbnb adults=${airbnbAdults} mapped to Expedia adults=2 (minimum for Japan domain)`;
+    result.guestMappingReason = `Airbnb adults=${airbnbAdults} mapped to Expedia adults=2 (minimum)`;
   } else {
     result.adults = airbnbAdults;
     result.guestMappingReason = `Direct mapping: Airbnb adults=${airbnbAdults} → Expedia adults=${airbnbAdults}`;
   }
   
-  // Build the Hotel-Search URL
-  const searchUrl = new URL(`https://${result.domain}/Hotel-Search`);
-  searchUrl.searchParams.set('startDate', checkIn);
-  searchUrl.searchParams.set('endDate', checkOut);
-  searchUrl.searchParams.set('adults', String(result.adults));
-  searchUrl.searchParams.set('selected', propertyId);
+  // BUILD PRIMARY USD URL (expedia.com with currency=USD, locale=en_US, siteid=1)
+  const usdUrl = new URL('https://www.expedia.com/Hotel-Search');
+  usdUrl.searchParams.set('adults', String(result.adults));
+  usdUrl.searchParams.set('currency', 'USD');
+  usdUrl.searchParams.set('locale', 'en_US');
+  usdUrl.searchParams.set('siteid', '1');
+  usdUrl.searchParams.set('selected', propertyId);
+  usdUrl.searchParams.set('startDate', checkIn);
+  usdUrl.searchParams.set('endDate', checkOut);
   
-  result.url = searchUrl.toString();
+  result.urlUsd = usdUrl.toString();
+  
+  // BUILD FALLBACK JP URL (expedia.co.jp)
+  const jpUrl = new URL('https://www.expedia.co.jp/Hotel-Search');
+  jpUrl.searchParams.set('startDate', checkIn);
+  jpUrl.searchParams.set('endDate', checkOut);
+  jpUrl.searchParams.set('adults', String(result.adults));
+  jpUrl.searchParams.set('selected', propertyId);
+  
+  result.urlJp = jpUrl.toString();
+  
+  // Set the primary URL to USD
+  result.url = result.urlUsd;
   result.success = true;
   
-  console.log(`[EXPEDIA] Hotel-Search URL: ${result.url}`);
+  console.log(`[EXPEDIA] USD offers URL (primary): ${result.urlUsd}`);
+  console.log(`[EXPEDIA] JP offers URL (fallback): ${result.urlJp}`);
   console.log(`[EXPEDIA] Guest mapping: ${result.guestMappingReason}`);
   
   return result;
@@ -496,11 +510,28 @@ interface ExtractionResult {
     discovered_property_url: string;
     parsed_property_id: string | null;
     constructed_offers_url: string | null;
+    // USD-first strategy fields
+    offers_url_usd: string | null;
+    offers_url_jp: string | null;
+    offers_url_used: string | null;
+    usd_attempt_made: boolean;
+    usd_attempt_outcome: string | null;
+    jp_fallback_triggered: boolean;
+    jp_fallback_reason: string | null;
+    // Legacy fields for compatibility
     provider_selected: string | null;
     url_fetched_phase1: string | null;
     url_fetched_phase2: string | null;
     offers_page_reached: boolean;
     reason_offers_not_reached: string | null;
+    // Currency audit
+    conversion_audit: {
+      conversion_not_needed: boolean;
+      original_currency: string | null;
+      original_amount: number | null;
+      converted_usd: number | null;
+      conversion_rate: number | null;
+    } | null;
   };
 }
 
@@ -1235,11 +1266,19 @@ async function extractFromExpedia(
       discovered_property_url: baseUrl,
       parsed_property_id: null,
       constructed_offers_url: null,
+      offers_url_usd: null,
+      offers_url_jp: null,
+      offers_url_used: null,
+      usd_attempt_made: false,
+      usd_attempt_outcome: null,
+      jp_fallback_triggered: false,
+      jp_fallback_reason: null,
       provider_selected: null,
       url_fetched_phase1: null,
       url_fetched_phase2: null,
       offers_page_reached: false,
       reason_offers_not_reached: null,
+      conversion_audit: null,
     },
   };
   
@@ -1341,35 +1380,41 @@ async function extractFromExpedia(
       return result;
     }
     
-    result.goldenPath.offersPageUrl = hotelSearchResult.url;
+    result.goldenPath.offersPageUrl = hotelSearchResult.urlUsd; // Primary is USD
     result.goldenPath.guestMapping = hotelSearchResult.guestMappingReason;
     result.structuralProof.url_injected_startDate = checkIn;
     result.structuralProof.url_injected_endDate = checkOut;
     result.structuralProof.is_offers_page = true;
-    result.structuralProof.offers_page_url = hotelSearchResult.url;
+    
+    // Store both URLs in trace
+    result.expediaTrace.offers_url_usd = hotelSearchResult.urlUsd;
+    result.expediaTrace.offers_url_jp = hotelSearchResult.urlJp;
+    result.expediaTrace.constructed_offers_url = hotelSearchResult.urlUsd;
+    result.expediaTrace.url_fetched_phase1 = hotelSearchResult.urlUsd;
 
-    const offersPageUrl = hotelSearchResult.url;
-    result.expediaTrace.constructed_offers_url = offersPageUrl;
-    result.expediaTrace.url_fetched_phase1 = offersPageUrl;
-
-    console.log(`[EXPEDIA] Hotel-Search URL: ${offersPageUrl}`);
+    console.log(`[EXPEDIA] USD offers URL (primary): ${hotelSearchResult.urlUsd}`);
+    console.log(`[EXPEDIA] JP offers URL (fallback): ${hotelSearchResult.urlJp}`);
     
     // ==========================================================================
-    // STEP 3 & 4: Fetch offers page with provider chain + bounded retries
+    // STEP 3 & 4: Fetch offers page with USD-FIRST strategy + provider chain
     // ==========================================================================
-    console.log('[EXPEDIA] GOLDEN PATH Step 3-4: Fetch offers page with retry support');
+    console.log('[EXPEDIA] GOLDEN PATH Step 3-4: USD-first fetch with provider chain');
     
     let bestContent: string | null = null;
     let successfulProvider: Provider | null = null;
-    let browserlessWasBotBlocked = false;
-    let browserlessWasRateLimited = false;
+    let currentOffersUrl = hotelSearchResult.urlUsd;
+    let usdPathFailed = false;
+    let usdFailureReason: string | null = null;
     
-    // Helper to attempt a fetch with optional retry
+    // Helper to attempt a fetch with optional retry for a specific URL
     const attemptWithRetry = async (
       provider: Provider,
-      fetchFn: (url: string) => Promise<FetchResult>
-    ): Promise<{ content: string | null; traces: ProviderAttemptTrace[] }> => {
+      fetchFn: (url: string) => Promise<FetchResult>,
+      targetUrl: string
+    ): Promise<{ content: string | null; traces: ProviderAttemptTrace[]; blocked: boolean; rateLimited: boolean }> => {
       const traces: ProviderAttemptTrace[] = [];
+      let blocked = false;
+      let rateLimited = false;
       
       for (let attempt = 0; attempt <= MAX_RETRIES_PER_PROVIDER; attempt++) {
         const trace = createTrace(provider, attempt);
@@ -1382,7 +1427,7 @@ async function extractFromExpedia(
           await sleepWithJitter();
         }
         
-        const fetchResult = await fetchFn(offersPageUrl);
+        const fetchResult = await fetchFn(targetUrl);
         
         trace.endedAt = new Date().toISOString();
         trace.contentLength = fetchResult.content.length;
@@ -1392,7 +1437,8 @@ async function extractFromExpedia(
           trace.outcome = 'rate_limited';
           trace.errorMessage = fetchResult.error || 'HTTP 429';
           traces.push(trace);
-          return { content: null, traces }; // No retry on rate limit
+          rateLimited = true;
+          return { content: null, traces, blocked, rateLimited };
         }
         
         if (fetchResult.isBotBlocked) {
@@ -1400,7 +1446,8 @@ async function extractFromExpedia(
           trace.errorMessage = fetchResult.error || null;
           trace.botBlockedFallbackToZyte = provider === 'browserless';
           traces.push(trace);
-          return { content: null, traces }; // No retry on bot block
+          blocked = true;
+          return { content: null, traces, blocked, rateLimited };
         }
         
         if (fetchResult.error) {
@@ -1408,122 +1455,182 @@ async function extractFromExpedia(
           trace.errorMessage = fetchResult.error;
           traces.push(trace);
           
-          // Retry if retryable and we have attempts left
           if (RETRYABLE_OUTCOMES.has(trace.outcome) && attempt < MAX_RETRIES_PER_PROVIDER) {
             trace.retryReason = `Retrying due to ${trace.outcome}`;
             continue;
           }
-          return { content: null, traces };
+          return { content: null, traces, blocked, rateLimited };
         }
         
         if (fetchResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
           trace.outcome = 'success';
           traces.push(trace);
-          return { content: fetchResult.content, traces };
+          return { content: fetchResult.content, traces, blocked, rateLimited };
         }
         
-        // Insufficient content
         trace.outcome = 'insufficient_content';
         trace.errorMessage = `Only ${fetchResult.content.length} chars`;
         traces.push(trace);
         
-        // Retry if below retry threshold
         if (fetchResult.content.length < RETRY_CONTENT_THRESHOLD && attempt < MAX_RETRIES_PER_PROVIDER) {
           trace.retryReason = `Retrying - content too short (${fetchResult.content.length} < ${RETRY_CONTENT_THRESHOLD})`;
           continue;
         }
         
-        return { content: null, traces };
+        return { content: null, traces, blocked, rateLimited };
       }
       
-      return { content: null, traces };
+      return { content: null, traces, blocked, rateLimited };
     };
     
-    // Try Browserless first
-    console.log('[EXPEDIA] Trying Browserless...');
-    const browserlessAttempt = await attemptWithRetry('browserless', fetchWithBrowserless);
-    providerAttemptTrace.push(...browserlessAttempt.traces);
-    
-    const lastBrowserlessTrace = browserlessAttempt.traces[browserlessAttempt.traces.length - 1];
-    
-    if (lastBrowserlessTrace?.outcome === 'rate_limited') {
-      // HARD STOP: Rate limited - no fallbacks
-      console.log('[EXPEDIA] HARD STOP: Browserless rate limited (429)');
-      browserlessWasRateLimited = true;
+    // Run provider chain for a given URL
+    const runProviderChain = async (targetUrl: string, urlLabel: string): Promise<{
+      content: string | null;
+      provider: Provider | null;
+      wasBlocked: boolean;
+      wasRateLimited: boolean;
+    }> => {
+      console.log(`[EXPEDIA] Running provider chain for ${urlLabel}: ${targetUrl}`);
       
+      let contentResult: string | null = null;
+      let selectedProvider: Provider | null = null;
+      let anyBotBlocked = false;
+      let anyRateLimited = false;
+      
+      // Try Browserless
+      console.log(`[EXPEDIA] [${urlLabel}] Trying Browserless...`);
+      const browserlessAttempt = await attemptWithRetry('browserless', fetchWithBrowserless, targetUrl);
+      providerAttemptTrace.push(...browserlessAttempt.traces);
+      
+      if (browserlessAttempt.rateLimited) {
+        anyRateLimited = true;
+        return { content: null, provider: 'browserless', wasBlocked: false, wasRateLimited: true };
+      }
+      
+      if (browserlessAttempt.content) {
+        return { content: browserlessAttempt.content, provider: 'browserless', wasBlocked: false, wasRateLimited: false };
+      }
+      
+      if (browserlessAttempt.blocked) {
+        anyBotBlocked = true;
+        console.log(`[EXPEDIA] [${urlLabel}] Browserless blocked - attempting Zyte fallback`);
+      }
+      
+      // Try Zyte
+      console.log(`[EXPEDIA] [${urlLabel}] Trying Zyte...`);
+      const zyteAttempt = await attemptWithRetry('zyte', fetchWithZyte, targetUrl);
+      providerAttemptTrace.push(...zyteAttempt.traces);
+      
+      if (zyteAttempt.rateLimited) {
+        anyRateLimited = true;
+      }
+      
+      if (zyteAttempt.content) {
+        return { content: zyteAttempt.content, provider: 'zyte', wasBlocked: false, wasRateLimited: false };
+      }
+      
+      if (zyteAttempt.blocked) {
+        anyBotBlocked = true;
+      }
+      
+      // Try Firecrawl (only if not both blocked)
+      if (!anyBotBlocked) {
+        console.log(`[EXPEDIA] [${urlLabel}] Trying Firecrawl...`);
+        const firecrawlAttempt = await attemptWithRetry('firecrawl', fetchWithFirecrawl, targetUrl);
+        providerAttemptTrace.push(...firecrawlAttempt.traces);
+        
+        if (firecrawlAttempt.content) {
+          return { content: firecrawlAttempt.content, provider: 'firecrawl', wasBlocked: false, wasRateLimited: false };
+        }
+      }
+      
+      return { content: null, provider: null, wasBlocked: anyBotBlocked, wasRateLimited: anyRateLimited };
+    };
+    
+    // ==========================================================================
+    // ATTEMPT USD URL FIRST (expedia.com with currency=USD)
+    // ==========================================================================
+    console.log('[EXPEDIA] === ATTEMPTING USD URL FIRST ===');
+    result.expediaTrace.usd_attempt_made = true;
+    
+    const usdResult = await runProviderChain(hotelSearchResult.urlUsd, 'USD');
+    
+    if (usdResult.wasRateLimited) {
+      // HARD STOP on rate limit
       result.status = 'blocked_rate_limit';
-      result.error = 'Browserless rate limited (HTTP 429) - no fallback per anti-amplification policy';
+      result.error = 'Rate limited (HTTP 429) - no fallback per anti-amplification policy';
       result.providerAttemptTrace = providerAttemptTrace;
-      result.providerUsed = 'browserless';
+      result.providerUsed = usdResult.provider || 'browserless';
+      result.expediaTrace.usd_attempt_outcome = 'rate_limited';
       result.durationMs = Date.now() - startTime;
       return result;
     }
     
-    if (lastBrowserlessTrace?.outcome === 'bot_blocked') {
-      browserlessWasBotBlocked = true;
-      console.log('[EXPEDIA] Browserless bot-blocked - attempting Zyte fallback');
-    } else if (browserlessAttempt.content) {
-      bestContent = browserlessAttempt.content;
-      successfulProvider = 'browserless';
-    }
-    
-    // Try Zyte if Browserless didn't succeed
-    if (!successfulProvider && !browserlessWasRateLimited) {
-      console.log('[EXPEDIA] Trying Zyte...');
-      const zyteAttempt = await attemptWithRetry('zyte', fetchWithZyte);
-      providerAttemptTrace.push(...zyteAttempt.traces);
+    if (usdResult.content) {
+      bestContent = usdResult.content;
+      successfulProvider = usdResult.provider;
+      currentOffersUrl = hotelSearchResult.urlUsd;
+      result.expediaTrace.usd_attempt_outcome = 'success';
+      result.expediaTrace.offers_url_used = hotelSearchResult.urlUsd;
+      console.log('[EXPEDIA] USD URL succeeded!');
+    } else {
+      // USD path failed - record reason and try JP fallback
+      usdPathFailed = true;
+      usdFailureReason = usdResult.wasBlocked ? 'blocked' : 'content_failed';
+      result.expediaTrace.usd_attempt_outcome = usdFailureReason;
+      console.log(`[EXPEDIA] USD URL failed: ${usdFailureReason}`);
       
-      const lastZyteTrace = zyteAttempt.traces[zyteAttempt.traces.length - 1];
+      // ==========================================================================
+      // FALLBACK TO JP URL (expedia.co.jp)
+      // ==========================================================================
+      console.log('[EXPEDIA] === FALLING BACK TO JP URL ===');
+      result.expediaTrace.jp_fallback_triggered = true;
+      result.expediaTrace.jp_fallback_reason = usdFailureReason;
       
-      if (lastZyteTrace?.outcome === 'bot_blocked' || lastZyteTrace?.outcome === 'rate_limited') {
-        if (browserlessWasBotBlocked) {
-          // Both providers blocked - terminal
-          result.status = 'expedia_access_blocked';
-          result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
-          result.providerAttemptTrace = providerAttemptTrace;
-          result.providerUsed = 'zyte';
-          result.durationMs = Date.now() - startTime;
-          return result;
-        }
-      } else if (zyteAttempt.content) {
-        bestContent = zyteAttempt.content;
-        successfulProvider = 'zyte';
+      const jpResult = await runProviderChain(hotelSearchResult.urlJp, 'JP');
+      
+      if (jpResult.wasRateLimited) {
+        result.status = 'blocked_rate_limit';
+        result.error = 'Rate limited on JP fallback - no further fallback available';
+        result.providerAttemptTrace = providerAttemptTrace;
+        result.providerUsed = jpResult.provider || 'browserless';
+        result.durationMs = Date.now() - startTime;
+        return result;
       }
-    }
-    
-    // Try Firecrawl (only if Browserless wasn't bot-blocked)
-    if (!successfulProvider && !browserlessWasBotBlocked) {
-      console.log('[EXPEDIA] Trying Firecrawl...');
-      const firecrawlAttempt = await attemptWithRetry('firecrawl', fetchWithFirecrawl);
-      providerAttemptTrace.push(...firecrawlAttempt.traces);
       
-      if (firecrawlAttempt.content) {
-        bestContent = firecrawlAttempt.content;
-        successfulProvider = 'firecrawl';
+      if (jpResult.content) {
+        bestContent = jpResult.content;
+        successfulProvider = jpResult.provider;
+        currentOffersUrl = hotelSearchResult.urlJp;
+        result.expediaTrace.offers_url_used = hotelSearchResult.urlJp;
+        console.log('[EXPEDIA] JP fallback succeeded!');
+      } else if (jpResult.wasBlocked) {
+        result.status = 'expedia_access_blocked';
+        result.error = 'Expedia blocked access on both USD and JP URLs';
+        result.providerAttemptTrace = providerAttemptTrace;
+        result.providerUsed = jpResult.provider || 'browserless';
+        result.durationMs = Date.now() - startTime;
+        return result;
       }
     }
     
     result.providerAttemptTrace = providerAttemptTrace;
     result.providerUsed = successfulProvider;
     result.expediaTrace.provider_selected = successfulProvider;
-    result.expediaTrace.url_fetched_phase2 = offersPageUrl;
+    result.expediaTrace.url_fetched_phase2 = currentOffersUrl;
+    result.structuralProof.offers_page_url = currentOffersUrl;
 
     // No provider succeeded
     if (!bestContent || !successfulProvider) {
       const lastAttempted = providerAttemptTrace.filter(t => t.attempted).pop();
       result.providerUsed = lastAttempted?.provider || 'browserless';
       result.expediaTrace.provider_selected = result.providerUsed;
-      result.expediaTrace.reason_offers_not_reached = browserlessWasBotBlocked
-        ? 'blocked'
+      result.expediaTrace.reason_offers_not_reached = usdPathFailed
+        ? `usd_failed:${usdFailureReason}`
         : 'navigation_failed_or_insufficient_content';
 
-      if (browserlessWasBotBlocked) {
-        result.status = 'expedia_access_blocked';
-        result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
-      } else {
-        result.status = 'offers_page_not_loaded';
-        result.error = 'Could not load Expedia Hotel-Search offers page';
-      }
+      result.status = 'offers_page_not_loaded';
+      result.error = 'Could not load Expedia Hotel-Search offers page on USD or JP URLs';
       result.durationMs = Date.now() - startTime;
       return result;
     }
@@ -1538,18 +1645,18 @@ async function extractFromExpedia(
     // 1) constructed URL gate (params must match), AND
     // 2) content must contain the same date + selected property invariants.
     const gateResult = validateOffersPageUrl(
-      offersPageUrl,
+      currentOffersUrl,
       result.goldenPath.propertyId!,
       checkIn,
       checkOut
     );
 
     // Update structural proof with gate diagnostics
-    result.structuralProof.current_url_at_extraction = offersPageUrl;
+    result.structuralProof.current_url_at_extraction = currentOffersUrl;
     result.structuralProof.offers_page_reached = true; // We attempted offers URL directly
     result.structuralProof.offers_page_gate_passed = gateResult.passed;
     result.structuralProof.property_id_used = result.goldenPath.propertyId || undefined;
-    result.structuralProof.constructed_offers_url = offersPageUrl;
+    result.structuralProof.constructed_offers_url = currentOffersUrl;
 
     // Content invariants (prevents property-page / intermediate-page fragments from ever being priced)
     const requiredInContent = [
@@ -1619,6 +1726,24 @@ async function extractFromExpedia(
     const priceResult = extractPriceFromOffersPage(bestContent, offersPageResult);
     result.priceExtraction = priceResult;
     
+    // Build conversion audit
+    if (priceResult.extracted && priceResult.totalPrice) {
+      const isUsdDirect = priceResult.originalCurrency === 'USD';
+      result.expediaTrace.conversion_audit = {
+        conversion_not_needed: isUsdDirect,
+        original_currency: priceResult.originalCurrency,
+        original_amount: priceResult.originalAmount,
+        converted_usd: priceResult.totalPrice,
+        conversion_rate: isUsdDirect ? 1.0 : priceResult.conversionRate,
+      };
+      
+      if (isUsdDirect) {
+        console.log(`[EXPEDIA] USD price extracted directly - no conversion needed: $${priceResult.totalPrice}`);
+      } else {
+        console.log(`[EXPEDIA] Currency conversion: ${priceResult.originalAmount} ${priceResult.originalCurrency} → $${priceResult.totalPrice} USD (rate: ${priceResult.conversionRate})`);
+      }
+    }
+    
     if (!priceResult.extracted || !priceResult.totalPrice) {
       result.status = 'expedia_total_not_found';
       result.error = priceResult.rejectionReason || 'No total price with taxes found on offers page';
@@ -1652,13 +1777,13 @@ async function extractFromExpedia(
       conversion_rate: priceResult.conversionRate || undefined,
       page_context: 'Hotel-Search offers page',
       is_offers_page: true,
-      offers_page_url: offersPageUrl,
+      offers_page_url: currentOffersUrl,
       // v5.1 gate diagnostics
-      current_url_at_extraction: offersPageUrl,
+      current_url_at_extraction: currentOffersUrl,
       offers_page_reached: true,
       offers_page_gate_passed: true,
       property_id_used: result.goldenPath.propertyId || undefined,
-      constructed_offers_url: offersPageUrl,
+      constructed_offers_url: currentOffersUrl,
     };
     
     // HARD INVARIANT: If structural proof is not fully true, extracted_price MUST be null

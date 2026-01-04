@@ -66,6 +66,8 @@ interface DerivedRequest {
   adults?: number;
   property_id?: string;
   constructed_offers_url?: string;
+  offers_url_usd?: string;
+  offers_url_jp?: string;
 }
 
 interface TestRun {
