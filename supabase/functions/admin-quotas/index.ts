@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { Resend } from "https://esm.sh/resend@2.0.0";
 
 // Allowed origins for CORS - restrict to Lovable app domains
 const ALLOWED_ORIGINS = [
@@ -67,6 +68,48 @@ interface NormalizedQuota {
   limitSource: 'provider_api' | 'configured' | 'inferred' | 'unknown';
 }
 
+// Track if we've already sent an alert this month to avoid spam
+const quotaAlertCache: Map<string, string> = new Map();
+
+async function sendQuotaAlertEmail(providerName: string, usedPercent: number, used: number, limit: number): Promise<void> {
+  const resend = new Resend(Deno.env.get('RESEND_API_KEY'));
+  const cacheKey = `${providerName}-${new Date().toISOString().slice(0, 7)}`; // provider-YYYY-MM
+  
+  // Skip if we already sent an alert this month
+  if (quotaAlertCache.get(cacheKey)) {
+    console.log(`[Quota Alert] Already sent alert for ${providerName} this month, skipping`);
+    return;
+  }
+  
+  try {
+    const { error } = await resend.emails.send({
+      from: 'Arivioo Alerts <noreply@arivioo.com>',
+      to: ['lakeviewer1976@gmail.com'],
+      subject: `⚠️ API Quota Alert: ${providerName} at ${usedPercent}%`,
+      html: `
+        <h2>API Quota Alert</h2>
+        <p><strong>${providerName}</strong> has reached <strong>${usedPercent}%</strong> of its monthly quota.</p>
+        <ul>
+          <li>Used: ${used} requests</li>
+          <li>Limit: ${limit} requests</li>
+          <li>Remaining: ${limit - used} requests</li>
+        </ul>
+        <p>Consider upgrading the plan or reducing usage to avoid service interruption.</p>
+        <p style="color: #666; font-size: 12px;">This is an automated alert from Arivioo.</p>
+      `,
+    });
+    
+    if (error) {
+      console.error('[Quota Alert] Failed to send email:', error);
+    } else {
+      console.log(`[Quota Alert] Alert email sent for ${providerName}`);
+      quotaAlertCache.set(cacheKey, new Date().toISOString());
+    }
+  } catch (err) {
+    console.error('[Quota Alert] Error sending email:', err);
+  }
+}
+
 async function fetchSerpApiQuota(): Promise<{ used: number; remaining: number; limit: number; resetAt?: string; error?: string }> {
   try {
     const apiKey = Deno.env.get('SERPAPI_API_KEY');
@@ -84,6 +127,14 @@ async function fetchSerpApiQuota(): Promise<{ used: number; remaining: number; l
     const remaining = data.plan_searches_left ?? 0;
     // Compute used correctly: limit - remaining, or use total_searches if available
     const used = data.total_searches_this_month ?? (limit - remaining);
+    
+    // Check if usage is at or above 75% and send alert
+    if (limit > 0) {
+      const usedPercent = Math.round((used / limit) * 100);
+      if (usedPercent >= 75) {
+        await sendQuotaAlertEmail('SerpAPI', usedPercent, used, limit);
+      }
+    }
     
     return {
       used,
