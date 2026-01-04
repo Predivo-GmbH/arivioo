@@ -8,8 +8,6 @@ import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
 import { useImageAlignment } from "@/hooks/useImageAlignment";
 import { getObjectPosition, getTransform } from "@/lib/imageAlignment";
 import { formatPrice } from "@/lib/utils";
-import cottageView1 from "@/assets/cottage-view-1.jpg";
-import cottageView2 from "@/assets/cottage-view-2.jpg";
 import type { Json } from "@/integrations/supabase/types";
 
 // Convert JSON to string array
@@ -21,70 +19,43 @@ const toStringArray = (json: Json | null | undefined): string[] => {
   return [];
 };
 
-// Static fallback data
-const STATIC_DATA = {
-  title: "Cozy Lakeside Cottage",
-  airbnbPrice: 180,
-  directPrice: 145,
-  serviceFee: 45,
-  savings: 80,
-  airbnbImage: cottageView1,
-  directImage: cottageView2,
-};
-
 export function Hero() {
   const [url, setUrl] = useState("");
   const navigate = useNavigate();
   const { data: dynamicData, loading } = useLastSuccessfulSearch();
 
-  // Use dynamic data if available
-  const useDynamic = !loading && dynamicData !== null;
+  // Only show comparison if we have REAL verified data with a price
+  const hasVerifiedData = !loading && dynamicData !== null && dynamicData.cheapestResult?.price !== null;
   
-  // Check if savings are simulated
-  const savingsSimulated = useDynamic ? (dynamicData.savingsSimulated ?? false) : false;
-
-  // Extract base values
-  const title = useDynamic ? (dynamicData.airbnb_title || STATIC_DATA.title) : STATIC_DATA.title;
-  const rawAirbnbPrice = useDynamic ? (dynamicData.airbnb_price || STATIC_DATA.airbnbPrice) : STATIC_DATA.airbnbPrice;
+  // Extract values only when we have verified data
+  const title = hasVerifiedData ? (dynamicData.airbnb_title || "Vacation Rental") : "";
+  const airbnbPrice = hasVerifiedData ? dynamicData.airbnb_price || 0 : 0;
+  const directPrice = hasVerifiedData ? dynamicData.cheapestResult?.price || 0 : 0;
   
-  // Calculate Airbnb total with service fees (approx 14% service fee)
+  // Calculate service fee (14%) for Airbnb
   const serviceFeeRate = 0.14;
-  const serviceFee = Math.round(rawAirbnbPrice * serviceFeeRate);
-  const airbnbPriceWithFees = rawAirbnbPrice + serviceFee;
+  const serviceFee = Math.round(airbnbPrice * serviceFeeRate);
+  const airbnbPriceWithFees = airbnbPrice + serviceFee;
   
-  // For display, use rawAirbnbPrice as the base (before fees)
-  const airbnbPrice = rawAirbnbPrice;
-  
-  // Direct price: if we have real data and it's cheaper, use it. Otherwise simulate a lower price.
-  const rawDirectPrice = useDynamic && dynamicData.cheapestResult?.price 
-    ? dynamicData.cheapestResult.price 
-    : null;
-  
-  // Ensure direct is ALWAYS cheaper than Airbnb with fees for the demo
-  // If no real price or real price is higher, simulate ~20% savings vs Airbnb+fees
-  const directPrice = rawDirectPrice !== null && rawDirectPrice < airbnbPriceWithFees
-    ? rawDirectPrice
-    : Math.round(airbnbPriceWithFees * 0.80); // 20% cheaper
-  
-  // Calculate savings per night (Airbnb + fees - direct)
+  // Calculate real savings
   const savings = airbnbPriceWithFees - directPrice;
 
-  // Images - prefer dynamic data from last search
-  const airbnbImages = useDynamic ? toStringArray(dynamicData.airbnb_images) : [];
-  const airbnbImage = useDynamic 
-    ? (dynamicData.cheapestResult?.source_airbnb_image || dynamicData.airbnb_image_url || airbnbImages[0] || STATIC_DATA.airbnbImage)
-    : STATIC_DATA.airbnbImage;
-  const directImage = useDynamic 
-    ? (dynamicData.cheapestResult?.image_url || STATIC_DATA.directImage)
-    : STATIC_DATA.directImage;
+  // Images from verified data
+  const airbnbImages = hasVerifiedData ? toStringArray(dynamicData.airbnb_images) : [];
+  const airbnbImage = hasVerifiedData 
+    ? (dynamicData.cheapestResult?.source_airbnb_image || dynamicData.airbnb_image_url || airbnbImages[0] || "")
+    : "";
+  const directImage = hasVerifiedData 
+    ? (dynamicData.cheapestResult?.image_url || "")
+    : "";
 
   // Align the direct image to the Airbnb reference image (persisted per pair)
   const { alignment, autoAlign, isAutoAligning } = useImageAlignment(airbnbImage, directImage);
   const autoAlignTriggeredRef = useRef(false);
 
   useEffect(() => {
-    // Only auto-align for real/dynamic examples (avoid AI calls for the static fallback)
-    if (!useDynamic) return;
+    // Only auto-align when we have verified data with images
+    if (!hasVerifiedData) return;
     if (!airbnbImage || !directImage) return;
     if (autoAlignTriggeredRef.current) return;
 
@@ -98,7 +69,7 @@ export function Hero() {
 
     autoAlignTriggeredRef.current = true;
     void autoAlign();
-  }, [useDynamic, airbnbImage, directImage, alignment.x, alignment.y, alignment.scale, autoAlign]);
+  }, [hasVerifiedData, airbnbImage, directImage, alignment.x, alignment.y, alignment.scale, autoAlign]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -168,7 +139,8 @@ export function Hero() {
             See how it works ↓
           </button>
 
-          {/* Mockup Preview with Real/Dynamic Images */}
+          {/* Mockup Preview - Only show when we have REAL verified data */}
+          {(loading || hasVerifiedData) && (
           <div className="mt-16 animate-fade-in" style={{ animationDelay: "0.5s" }}>
             <div className="relative max-w-3xl mx-auto">
               <div className="bg-card rounded-2xl shadow-large border border-border p-6 md:p-8">
@@ -246,15 +218,11 @@ export function Hero() {
                     <Sparkles className="w-5 h-5" />
                     Save ${formatPrice(savings)} per night!
                   </div>
-                  {savingsSimulated && (
-                    <p className="text-xs text-muted-foreground">
-                      Example savings — actual results vary by listing
-                    </p>
-                  )}
                 </div>
               </div>
             </div>
           </div>
+          )}
         </div>
       </div>
     </section>
