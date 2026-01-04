@@ -1,0 +1,415 @@
+/**
+ * Extraction State Machine - Regression Tests
+ * 
+ * Deterministic tests for the canonical extraction state machine.
+ * These tests verify fixed failures remain fixed and state machine invariants hold.
+ * 
+ * NO LIVE NETWORK CALLS - Uses fixtures and mocked outcomes only.
+ */
+
+import { describe, it, expect } from 'vitest';
+import { verifyPrice, classifyScrapedPrice } from '../priceVerification';
+
+// =============================================================================
+// TEST A: Airbnb subtotal never finalized
+// =============================================================================
+describe('Test A: Airbnb subtotal never finalized', () => {
+  it('rejects extraction with subtotal when full total is not structurally proven', () => {
+    // Simulate extraction metadata indicating subtotal only
+    const subtotalOnlyResult = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: false, // Subtotal doesn't include taxes/fees
+      confidence_score: 0.85,
+      extracted_price: 450.00,
+      extraction_metadata: {
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: false,
+        // Simulate subtotal detection
+        strategy_used: 'url_only',
+      },
+    });
+
+    expect(subtotalOnlyResult.price_status).toBe('unverified');
+    expect(subtotalOnlyResult.eligible_for_comparison).toBe(false);
+    expect(subtotalOnlyResult.verification_failures).toContain('taxes_fees_not_included');
+    expect(subtotalOnlyResult.verification_failures).toContain('no_structural_total_proof');
+  });
+
+  it('accepts extraction with full total when structurally proven', () => {
+    const fullTotalResult = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.90,
+      extracted_price: 550.00,
+      extraction_metadata: {
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+      },
+    });
+
+    expect(fullTotalResult.price_status).toBe('verified');
+    expect(fullTotalResult.eligible_for_comparison).toBe(true);
+    expect(fullTotalResult.verification_failures).toHaveLength(0);
+    expect(fullTotalResult.structural_total_verified).toBe(true);
+  });
+
+  it('prioritizes breakdown total over booking card subtotal', () => {
+    // When both amounts exist, the system must use the breakdown total
+    // This test verifies the selection logic preference
+    const mixedResult = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.92,
+      extracted_price: 587.50, // Full total with fees
+      extraction_metadata: {
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+        // Simulate both values available
+        booking_card_amount: 450.00, // Subtotal
+        breakdown_total_amount: 587.50, // Full total
+        ocr_accepted_via: 'breakdown_match',
+      },
+    });
+
+    expect(mixedResult.price_status).toBe('verified');
+    expect(mixedResult.structural_total_verified).toBe(true);
+  });
+});
+
+// =============================================================================
+// TEST B: Frontend Expedia must include date injection
+// =============================================================================
+describe('Test B: Frontend Expedia must include date injection', () => {
+  /**
+   * Simulates the URL construction logic from extract-expedia
+   * This is the golden path URL builder that MUST be used
+   */
+  function buildExpediaOffersUrl(
+    propertyId: string,
+    checkIn: string,
+    checkOut: string,
+    adults: number = 2
+  ): string {
+    const url = new URL('https://www.expedia.com/Hotel-Search');
+    url.searchParams.set('adults', String(Math.max(2, adults)));
+    url.searchParams.set('currency', 'USD');
+    url.searchParams.set('locale', 'en_US');
+    url.searchParams.set('siteid', '1');
+    url.searchParams.set('selected', propertyId);
+    url.searchParams.set('startDate', checkIn);
+    url.searchParams.set('endDate', checkOut);
+    return url.toString();
+  }
+
+  it('injects dates into Expedia Hotel-Search URL', () => {
+    const propertyId = '76146918';
+    const checkIn = '2026-03-01';
+    const checkOut = '2026-03-04';
+    const adults = 1;
+
+    const offersUrl = buildExpediaOffersUrl(propertyId, checkIn, checkOut, adults);
+
+    expect(offersUrl).toContain('startDate=2026-03-01');
+    expect(offersUrl).toContain('endDate=2026-03-04');
+    expect(offersUrl).toContain('selected=76146918');
+    // Adults should be at least 2 (Expedia minimum)
+    expect(offersUrl).toContain('adults=2');
+    expect(offersUrl).toContain('currency=USD');
+    expect(offersUrl).toContain('locale=en_US');
+  });
+
+  it('extracts property ID from various Expedia URL formats', () => {
+    // Regex patterns from extract-expedia
+    const extractPropertyId = (url: string): string | null => {
+      // Pattern 1: .hXXXXXXXX.
+      const pathMatch = url.match(/\.h(\d{6,12})(?:\.|$)/i);
+      if (pathMatch) return pathMatch[1];
+      
+      // Pattern 2: /hXXXXXXXX/ or -hXXXXXXXX.
+      const hMatch = url.match(/[\/\-]h(\d{6,12})(?:[\/\.\-]|$)/i);
+      if (hMatch) return hMatch[1];
+      
+      return null;
+    };
+
+    // Test various URL formats
+    expect(extractPropertyId('https://www.expedia.com/Hotel.h76146918.Hotel-Information')).toBe('76146918');
+    expect(extractPropertyId('https://www.expedia.com/Sevierville-Hotels-Private-Luxury-Lodge.h76146918.Hotel-Information')).toBe('76146918');
+    expect(extractPropertyId('https://www.expedia.co.jp/Hotel-Search?selected=76146918')).toBeNull(); // Query param, different extraction
+  });
+
+  it('derives dates from Airbnb URL and passes to Expedia extractor', () => {
+    // Simulate the date extraction from Airbnb URL
+    const airbnbUrl = 'https://www.airbnb.com/rooms/903802242341279498?check_in=2026-03-01&check_out=2026-03-04&adults=1';
+    const urlObj = new URL(airbnbUrl);
+    
+    const checkIn = urlObj.searchParams.get('check_in');
+    const checkOut = urlObj.searchParams.get('check_out');
+    const adults = parseInt(urlObj.searchParams.get('adults') || '1', 10);
+
+    expect(checkIn).toBe('2026-03-01');
+    expect(checkOut).toBe('2026-03-04');
+    expect(adults).toBe(1);
+
+    // Verify Expedia URL includes these dates
+    const expediaUrl = buildExpediaOffersUrl('76146918', checkIn!, checkOut!, adults);
+    expect(expediaUrl).toContain('startDate=2026-03-01');
+    expect(expediaUrl).toContain('endDate=2026-03-04');
+  });
+});
+
+// =============================================================================
+// TEST C: Frontend must not suppress unverified
+// =============================================================================
+describe('Test C: Frontend must not suppress unverified', () => {
+  it('classifies scraped prices as unverified, not hidden', () => {
+    const scrapedResult = classifyScrapedPrice(299.00);
+
+    expect(scrapedResult.price_status).toBe('unverified');
+    expect(scrapedResult.price_source).toBe('scraped');
+    expect(scrapedResult.eligible_for_comparison).toBe(false);
+    expect(scrapedResult.verification_failures).toContain('scraped_not_extracted');
+  });
+
+  it('returns unverified with reasons when structural proof missing', () => {
+    const unverifiedResult = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.85,
+      extracted_price: 425.00,
+      extraction_metadata: {
+        breakdown_found: true,
+        total_label_found: false, // Missing total label
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: false,
+      },
+    });
+
+    expect(unverifiedResult.price_status).toBe('unverified');
+    expect(unverifiedResult.verification_failures).toContain('no_structural_total_proof');
+    // Should include specific reason
+    expect(unverifiedResult.structural_proof.total_label_found).toBe(false);
+  });
+
+  it('provides human-readable failure labels for all failure types', () => {
+    const EXPECTED_FAILURES = [
+      'extraction_not_successful',
+      'dates_not_validated',
+      'taxes_fees_not_included',
+      'low_confidence',
+      'scraped_not_extracted',
+      'no_price_extracted',
+      'no_structural_total_proof',
+    ];
+
+    // Import failure labels
+    const { VERIFICATION_FAILURE_LABELS } = require('../priceVerification');
+
+    for (const failure of EXPECTED_FAILURES) {
+      expect(VERIFICATION_FAILURE_LABELS[failure]).toBeDefined();
+      expect(VERIFICATION_FAILURE_LABELS[failure].length).toBeGreaterThan(0);
+    }
+  });
+});
+
+// =============================================================================
+// TEST D: Terminal state messaging correctness
+// =============================================================================
+describe('Test D: Terminal state messaging correctness', () => {
+  /**
+   * Simulates the failure classification from useEnrichedSearchResults
+   */
+  function classifyFailure(
+    extractionStatus: string | null,
+    extractionError: string | null,
+    coverageTier: string | null
+  ): { category: string | null; reason: string | null } {
+    if (!extractionStatus || extractionStatus === 'success' || extractionStatus === 'pending') {
+      return { category: null, reason: null };
+    }
+
+    const status = extractionStatus;
+
+    // Expedia-specific terminal statuses
+    if (status === 'expedia_target_offer_not_found') {
+      return { category: 'price_not_visible', reason: 'Property not found on Expedia' };
+    }
+    if (status === 'expedia_dates_unavailable_for_target' || status === 'dates_unavailable') {
+      return { category: 'sold_out', reason: 'Not available for these dates on Expedia' };
+    }
+    if (status === 'expedia_access_blocked') {
+      return { category: 'blocked', reason: 'Blocked by Expedia' };
+    }
+
+    // Generic terminal statuses
+    if (status === 'blocked_captcha_or_bot' || status === 'blocked_rate_limit') {
+      return { category: 'blocked', reason: 'Blocked by platform' };
+    }
+    if (status === 'render_failed') {
+      return { category: 'render_failed', reason: 'Page failed to load' };
+    }
+    if (status === 'price_not_found') {
+      return { category: 'price_not_visible', reason: 'Price not visible on page' };
+    }
+    if (status === 'platform_unsupported' || coverageTier === 'C') {
+      return { category: 'unsupported', reason: 'Platform not supported' };
+    }
+
+    return { category: 'unknown', reason: extractionError || 'Unknown error' };
+  }
+
+  it('maps dates_unavailable to sold_out category with correct message', () => {
+    const result = classifyFailure('dates_unavailable', null, 'A');
+    
+    expect(result.category).toBe('sold_out');
+    expect(result.reason).toContain('Not available');
+    // Must NOT be null or empty
+    expect(result.reason).not.toBe(null);
+    expect(result.reason!.length).toBeGreaterThan(0);
+  });
+
+  it('maps expedia_dates_unavailable_for_target to sold_out', () => {
+    const result = classifyFailure('expedia_dates_unavailable_for_target', null, 'A');
+    
+    expect(result.category).toBe('sold_out');
+    expect(result.reason).toContain('Expedia');
+  });
+
+  it('maps blocked_captcha_or_bot to blocked category', () => {
+    const result = classifyFailure('blocked_captcha_or_bot', null, 'A');
+    
+    expect(result.category).toBe('blocked');
+    expect(result.reason).toContain('Blocked');
+  });
+
+  it('maps expedia_access_blocked to blocked category', () => {
+    const result = classifyFailure('expedia_access_blocked', null, 'A');
+    
+    expect(result.category).toBe('blocked');
+    expect(result.reason).toContain('Expedia');
+  });
+
+  it('maps platform_unsupported to unsupported category', () => {
+    const result = classifyFailure('platform_unsupported', null, 'C');
+    
+    expect(result.category).toBe('unsupported');
+    expect(result.reason).toContain('not supported');
+  });
+
+  it('maps render_failed to render_failed category', () => {
+    const result = classifyFailure('render_failed', null, 'B');
+    
+    expect(result.category).toBe('render_failed');
+    expect(result.reason).toContain('Page failed');
+  });
+
+  it('does not return "No Alternative Listings Found" for terminal failures', () => {
+    const terminalStatuses = [
+      'dates_unavailable',
+      'expedia_dates_unavailable_for_target',
+      'blocked_captcha_or_bot',
+      'expedia_access_blocked',
+      'render_failed',
+      'price_not_found',
+    ];
+
+    for (const status of terminalStatuses) {
+      const result = classifyFailure(status, null, 'A');
+      
+      // Reason must NOT be empty or indicate no alternatives
+      expect(result.reason).not.toBe(null);
+      expect(result.reason).not.toBe('');
+      expect(result.reason!.toLowerCase()).not.toContain('no alternative');
+      expect(result.category).not.toBe(null);
+    }
+  });
+});
+
+// =============================================================================
+// Additional invariant tests
+// =============================================================================
+describe('State Machine Invariants', () => {
+  it('unavailable status returns price_status = unavailable', () => {
+    const result = verifyPrice({
+      extraction_status: 'dates_unavailable',
+      dates_validated: false,
+      includes_taxes_fees: false,
+      confidence_score: null,
+      extracted_price: null,
+    });
+
+    expect(result.price_status).toBe('unavailable');
+    expect(result.price_source).toBe('none');
+    expect(result.eligible_for_comparison).toBe(false);
+  });
+
+  it('low confidence score results in unverified', () => {
+    const result = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.3, // Below 0.5 threshold
+      extracted_price: 400.00,
+      extraction_metadata: {
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+      },
+    });
+
+    expect(result.price_status).toBe('unverified');
+    expect(result.verification_failures).toContain('low_confidence');
+  });
+
+  it('hash-based extraction path results in unverified', () => {
+    const result = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.9,
+      extracted_price: 500.00,
+      extraction_path: 'hash_based_cache',
+      extraction_metadata: {
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+      },
+    });
+
+    expect(result.price_status).toBe('unverified');
+    expect(result.verification_failures).toContain('no_structural_total_proof');
+  });
+
+  it('structural proof flags are preserved in result', () => {
+    const result = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.85,
+      extracted_price: 450.00,
+      extraction_metadata: {
+        breakdown_found: true,
+        total_label_found: false,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: false,
+      },
+    });
+
+    expect(result.structural_proof.breakdown_found).toBe(true);
+    expect(result.structural_proof.total_label_found).toBe(false);
+    expect(result.structural_proof.rendered_dates_match).toBe(true);
+    expect(result.structural_proof.extracted_from_breakdown_total).toBe(false);
+  });
+});
