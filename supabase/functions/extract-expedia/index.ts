@@ -67,7 +67,12 @@ type TerminalStatus =
   | 'offers_page_not_loaded'
   | 'expedia_total_not_found'
   | 'expedia_offers_page_not_reached'
-  | 'expedia_total_not_found_on_offers_page';
+  | 'expedia_total_not_found_on_offers_page'
+  // Target card anchoring statuses (v6.3)
+  | 'expedia_target_offer_not_found'
+  | 'expedia_target_offer_mismatch'
+  | 'expedia_dates_unavailable_for_target'
+  | 'expedia_target_total_not_found';
 
 type Provider = 'browserless' | 'zyte' | 'firecrawl';
 
@@ -443,6 +448,14 @@ interface StructuralProof {
   offers_page_gate_passed: boolean;
   property_id_used?: string;
   constructed_offers_url?: string;
+  // TARGET CARD ANCHORING (v6.3)
+  target_property_id?: string;
+  target_card_found?: boolean;
+  target_title_match?: boolean;
+  target_unavailability_detected?: boolean;
+  target_unavailability_text?: string;
+  extraction_scope?: 'target_card_only' | 'page_wide';
+  extracted_from_target_card?: boolean;
 }
 
 interface ExtractionRequest {
@@ -830,6 +843,313 @@ function detectOffersPage(content: string, expectedStartDate: string, expectedEn
   }
   
   console.log(`[EXPEDIA] Offers page detection: loaded=${result.loaded}, offers=${result.hasOfferCards}, hasTotalWithTaxes=${result.hasTotalWithTaxes}, dates=${result.datesRenderedCorrectly}`);
+  
+  return result;
+}
+
+// ============================================================================
+// TARGET CARD ANCHORING (v6.3)
+// Only extract from the specific property card matching the propertyId
+// ============================================================================
+
+interface TargetCardResult {
+  found: boolean;
+  cardContent: string | null;
+  cardStartIndex: number;
+  cardEndIndex: number;
+  titleMatch: boolean;
+  titleFound: string | null;
+  unavailabilityDetected: boolean;
+  unavailabilityText: string | null;
+  anchoringMethod: 'property_id_attr' | 'link_href' | 'json_state' | 'none';
+  debugInfo: string;
+}
+
+/**
+ * Find and isolate the target property card from the offers page content.
+ * Uses multiple strategies in priority order:
+ * 1. DOM attributes containing property ID
+ * 2. Links containing property ID pattern (e.g., .h34107887.)
+ * 3. Embedded JSON state
+ */
+function findTargetCard(
+  content: string,
+  propertyId: string,
+  expectedTitleTokens: string[] = []
+): TargetCardResult {
+  const result: TargetCardResult = {
+    found: false,
+    cardContent: null,
+    cardStartIndex: -1,
+    cardEndIndex: -1,
+    titleMatch: false,
+    titleFound: null,
+    unavailabilityDetected: false,
+    unavailabilityText: null,
+    anchoringMethod: 'none',
+    debugInfo: '',
+  };
+
+  console.log(`[EXPEDIA TARGET] Looking for property ID: ${propertyId}`);
+
+  // Strategy 1: Look for property ID in attributes or content patterns
+  // Search for patterns like:
+  // - data-hotel-id="34107887"
+  // - data-stid="property-listing-34107887"
+  // - selected=34107887
+  // - .h34107887.
+  // - /h34107887/
+  
+  const propertyIdPatterns = [
+    // Direct property ID references
+    new RegExp(`(?:data-hotel-id|data-property-id|data-stid|hotelId|propertyId)[=:"'\\s]+["']?${propertyId}["']?`, 'i'),
+    // URL patterns with property ID
+    new RegExp(`\\.h${propertyId}(?:\\.|/)`, 'i'),
+    new RegExp(`/h${propertyId}(?:/|\\.|$)`, 'i'),
+    new RegExp(`selected[=:]\\s*["']?${propertyId}["']?`, 'i'),
+    // Plain property ID in content (less reliable, used as last resort)
+    new RegExp(`(?:^|[^\\d])${propertyId}(?:[^\\d]|$)`, 'i'),
+  ];
+
+  let anchorIndex = -1;
+  let anchoringMethod: TargetCardResult['anchoringMethod'] = 'none';
+
+  for (const pattern of propertyIdPatterns) {
+    const match = content.match(pattern);
+    if (match && match.index !== undefined) {
+      anchorIndex = match.index;
+      anchoringMethod = pattern.source.includes('data-') ? 'property_id_attr' : 
+                        pattern.source.includes('h' + propertyId) ? 'link_href' : 
+                        'property_id_attr';
+      console.log(`[EXPEDIA TARGET] Found property ID anchor at index ${anchorIndex} using pattern: ${pattern.source}`);
+      result.debugInfo = `Found via pattern: ${pattern.source.substring(0, 50)}...`;
+      break;
+    }
+  }
+
+  if (anchorIndex === -1) {
+    console.log('[EXPEDIA TARGET] Property ID anchor not found in content');
+    result.debugInfo = 'TARGET_CARD_NOT_FOUND - no property ID anchor in content';
+    return result;
+  }
+
+  // Extract a "card" region around the anchor
+  // Cards are typically 500-3000 chars of content
+  // Look backward to find card boundary (look for previous card or section marker)
+  // Look forward to find next card boundary
+  
+  const CARD_SEARCH_BACKWARD = 1500;
+  const CARD_SEARCH_FORWARD = 2000;
+  
+  // Card boundary markers (sections that separate property cards)
+  const cardBoundaryMarkers = [
+    /(?:^|\s)(?:compare\s+prices?|view\s+deal|book\s+now|reserve\s+now)(?:\s|$)/gi,
+    /(?:^|\s)property\s+\d+\s+of\s+\d+/gi,
+    /(?:^|\s)sponsored(?:\s+listing)?(?:\s|$)/gi,
+    // Look for other property ID patterns (other cards)
+    /\.h\d{6,12}\./gi,
+  ];
+  
+  // Simple approach: extract content centered on anchor with reasonable bounds
+  const cardStart = Math.max(0, anchorIndex - CARD_SEARCH_BACKWARD);
+  const cardEnd = Math.min(content.length, anchorIndex + CARD_SEARCH_FORWARD);
+  const cardContent = content.slice(cardStart, cardEnd);
+  
+  result.found = true;
+  result.cardContent = cardContent;
+  result.cardStartIndex = cardStart;
+  result.cardEndIndex = cardEnd;
+  result.anchoringMethod = anchoringMethod;
+  
+  // Check for title tokens if provided
+  if (expectedTitleTokens.length > 0) {
+    const lowerCard = cardContent.toLowerCase();
+    const matchedTokens = expectedTitleTokens.filter(token => 
+      lowerCard.includes(token.toLowerCase().replace(/[-\s]+/g, '')) ||
+      lowerCard.includes(token.toLowerCase())
+    );
+    
+    // Require at least 2 tokens to match, or >50% of tokens
+    const matchThreshold = Math.min(2, Math.ceil(expectedTitleTokens.length * 0.5));
+    result.titleMatch = matchedTokens.length >= matchThreshold;
+    
+    // Try to extract actual title from card
+    const titlePatterns = [
+      /(?:property|hotel|cabin|house|apartment|cottage|villa|suite)[:\s]+([^,\n]+)/i,
+      /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,5})\s+(?:cabin|house|hotel|cottage|villa|suite)/i,
+    ];
+    
+    for (const pattern of titlePatterns) {
+      const titleMatch = cardContent.match(pattern);
+      if (titleMatch && titleMatch[1]) {
+        result.titleFound = titleMatch[1].trim().substring(0, 100);
+        break;
+      }
+    }
+    
+    console.log(`[EXPEDIA TARGET] Title match: ${result.titleMatch}, matched tokens: ${matchedTokens.join(', ')}, expected: ${expectedTitleTokens.join(', ')}`);
+  } else {
+    // No title tokens provided, assume match
+    result.titleMatch = true;
+  }
+  
+  // Check for unavailability signals WITHIN the target card
+  const targetCardUnavailabilityPatterns = [
+    { pattern: /minimum\s+(?:length\s+of\s+)?stay\s+not\s+met/i, label: 'minimum stay not met' },
+    { pattern: /minimum\s+stay\s+(?:is\s+)?\d+\s+nights?/i, label: 'minimum stay requirement' },
+    { pattern: /not\s+available/i, label: 'not available' },
+    { pattern: /sold\s+out/i, label: 'sold out' },
+    { pattern: /no\s+availability/i, label: 'no availability' },
+    { pattern: /unavailable/i, label: 'unavailable' },
+    { pattern: /no\s+rooms?\s+(?:left|available)/i, label: 'no rooms available' },
+    { pattern: /fully\s+booked/i, label: 'fully booked' },
+    { pattern: /choose\s+different\s+dates/i, label: 'choose different dates' },
+    { pattern: /空室なし/i, label: '空室なし (no vacancy)' },
+  ];
+  
+  for (const { pattern, label } of targetCardUnavailabilityPatterns) {
+    const match = cardContent.match(pattern);
+    if (match) {
+      result.unavailabilityDetected = true;
+      result.unavailabilityText = label;
+      console.log(`[EXPEDIA TARGET] Unavailability detected in target card: "${label}" (matched: "${match[0]}")`);
+      break;
+    }
+  }
+  
+  console.log(`[EXPEDIA TARGET] Card found: ${result.found}, length: ${cardContent.length}, unavailable: ${result.unavailabilityDetected}`);
+  
+  return result;
+}
+
+/**
+ * Extract price ONLY from within the target card content.
+ * Refuses to look outside the card bounds.
+ */
+function extractPriceFromTargetCard(
+  cardContent: string,
+  propertyId: string
+): PriceExtractionResult {
+  const result: PriceExtractionResult = {
+    extracted: false,
+    totalPrice: null,
+    currency: 'USD',
+    originalAmount: null,
+    originalCurrency: null,
+    conversionRate: null,
+    includesTaxesFees: false,
+    evidenceSnippet: null,
+    extractionContext: 'target_card_only',
+    rejectionReason: null,
+    nightlyPrice: null,
+    nightlyCurrency: null,
+  };
+  
+  const lowerCard = cardContent.toLowerCase();
+  
+  // Must have "total with taxes" indicator in the target card
+  const hasTaxesIndicator = [
+    'total with taxes and fees',
+    'with taxes and fees',
+    'total with taxes',
+    'includes taxes',
+    'total includes',
+  ].some(ind => lowerCard.includes(ind));
+  
+  if (!hasTaxesIndicator) {
+    result.rejectionReason = 'No "total with taxes" indicator found in target card';
+    console.log('[EXPEDIA TARGET] No taxes indicator in target card');
+    return result;
+  }
+  
+  // Look for "$X,XXX total" pattern in target card
+  // Pattern: currency symbol + amount + "total" (but NOT "per night" or "nightly")
+  const offerCardPricePattern = /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)\s*total(?!\s*(?:per|\/)\s*night)/gi;
+  
+  const matches: Array<{ priceStr: string; idx: number }> = [];
+  let match;
+  
+  while ((match = offerCardPricePattern.exec(cardContent)) !== null) {
+    // Check context to ensure it's not a nightly rate
+    const contextStart = Math.max(0, match.index - 50);
+    const contextEnd = Math.min(cardContent.length, match.index + match[0].length + 50);
+    const context = cardContent.slice(contextStart, contextEnd);
+    
+    if (/per\s*night|\/\s*night|nightly/i.test(context)) {
+      console.log(`[EXPEDIA TARGET] Rejected nightly price: ${match[1]}`);
+      continue;
+    }
+    
+    matches.push({ priceStr: match[1], idx: match.index });
+  }
+  
+  if (matches.length === 0) {
+    // Try backup pattern: look for largest price near taxes indicator
+    const labelPatterns = ['total with taxes and fees', 'with taxes and fees', 'total with taxes'];
+    
+    for (const label of labelPatterns) {
+      const labelIdx = lowerCard.indexOf(label);
+      if (labelIdx !== -1) {
+        // Search 300 chars before and after the label
+        const searchStart = Math.max(0, labelIdx - 300);
+        const searchEnd = Math.min(cardContent.length, labelIdx + 300);
+        const nearbyContent = cardContent.slice(searchStart, searchEnd);
+        
+        // Find all prices in the vicinity
+        const pricePattern = /[\$€£¥]\s*[\d,]+(?:\.\d{2})?/g;
+        let priceMatch;
+        const nearbyPrices: Array<{ str: string; amount: number }> = [];
+        
+        while ((priceMatch = pricePattern.exec(nearbyContent)) !== null) {
+          const numStr = priceMatch[0].replace(/[^\d.]/g, '');
+          const amount = parseFloat(numStr);
+          if (!isNaN(amount) && amount > 0) {
+            nearbyPrices.push({ str: priceMatch[0], amount });
+          }
+        }
+        
+        // Pick the largest price (likely the total, not nightly)
+        if (nearbyPrices.length > 0) {
+          nearbyPrices.sort((a, b) => b.amount - a.amount);
+          const largest = nearbyPrices[0];
+          
+          // Verify it's not obviously a nightly rate (should be > $100 for multi-night stays)
+          if (largest.amount > 50) {
+            matches.push({ priceStr: largest.str, idx: labelIdx });
+            console.log(`[EXPEDIA TARGET] Found price via label proximity: ${largest.str}`);
+          }
+        }
+        
+        if (matches.length > 0) break;
+      }
+    }
+  }
+  
+  if (matches.length === 0) {
+    result.rejectionReason = 'No "$X total" price pattern found in target card';
+    console.log('[EXPEDIA TARGET] No price pattern found in target card');
+    return result;
+  }
+  
+  // Use the first match (or could pick largest)
+  const selectedMatch = matches[0];
+  const currencyResult = detectAndConvertCurrency(selectedMatch.priceStr);
+  
+  if (currencyResult.detected && currencyResult.convertedAmountUsd) {
+    result.extracted = true;
+    result.totalPrice = currencyResult.convertedAmountUsd;
+    result.currency = 'USD';
+    result.originalAmount = currencyResult.originalAmount;
+    result.originalCurrency = currencyResult.currencyCode;
+    result.conversionRate = currencyResult.conversionRate;
+    result.includesTaxesFees = true;
+    result.evidenceSnippet = `TARGET_CARD [${propertyId}]: ${selectedMatch.priceStr} total (with taxes and fees)`;
+    result.extractionContext = 'target_card_only';
+    
+    console.log(`[EXPEDIA TARGET] Extracted from target card: ${selectedMatch.priceStr} → $${result.totalPrice} USD`);
+  } else {
+    result.rejectionReason = `Could not parse currency from: ${selectedMatch.priceStr}`;
+  }
   
   return result;
 }
@@ -1870,25 +2190,147 @@ async function extractFromExpedia(
     }
     
     // ==========================================================================
-    // STEP 6: HARD GATE - Must have "includes taxes" indicator on page
+    // STEP 6: TARGET CARD ANCHORING (v6.3)
+    // Find and lock to the target property card before any price extraction
     // ==========================================================================
-    console.log('[EXPEDIA] HARD GATE Step: Verify "includes taxes" indicator exists');
+    console.log('[EXPEDIA] TARGET CARD Step 6: Find and anchor to target property card');
     
-    if (!offersPageResult.hasTotalWithTaxes) {
-      // HARD STOP: No "includes taxes" indicator = no price extraction
-      console.log('[EXPEDIA] HARD GATE FAILED: No "includes taxes" indicator on page');
-      result.status = 'expedia_total_not_found_on_offers_page';
-      result.error = 'Offers page loaded but no "includes taxes" total indicator found';
+    const propertyId = result.goldenPath.propertyId!;
+    
+    // Expected title tokens for the target property (from Airbnb listing if available)
+    // For now, we skip title validation unless explicitly provided
+    const expectedTitleTokens: string[] = [];
+    
+    const targetCardResult = findTargetCard(bestContent, propertyId, expectedTitleTokens);
+    
+    // Update structural proof with target card info
+    result.structuralProof.target_property_id = propertyId;
+    result.structuralProof.target_card_found = targetCardResult.found;
+    result.structuralProof.target_title_match = targetCardResult.titleMatch;
+    result.structuralProof.extraction_scope = 'target_card_only';
+    
+    // Check for target card not found
+    if (!targetCardResult.found) {
+      console.log(`[EXPEDIA] TARGET_CARD_NOT_FOUND for property ${propertyId}`);
+      result.status = 'expedia_target_offer_not_found';
+      result.error = `Target property card (${propertyId}) not found on offers page`;
+      result.priceExtraction = {
+        extracted: false,
+        totalPrice: null,
+        currency: 'USD',
+        originalAmount: null,
+        originalCurrency: null,
+        conversionRate: null,
+        includesTaxesFees: false,
+        evidenceSnippet: `TRACE: TARGET_CARD_NOT_FOUND, selected=${propertyId}, debug=${targetCardResult.debugInfo}`,
+        extractionContext: 'target_card_anchoring_failed',
+        rejectionReason: `Target property card not found: ${targetCardResult.debugInfo}`,
+        nightlyPrice: null,
+        nightlyCurrency: null,
+      };
+      result.structuralProof.target_unavailability_detected = false;
+      result.structuralProof.extracted_from_target_card = false;
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    // Check for title mismatch (if title validation is enabled)
+    if (expectedTitleTokens.length > 0 && !targetCardResult.titleMatch) {
+      console.log(`[EXPEDIA] TARGET_TITLE_MISMATCH: found "${targetCardResult.titleFound}", expected tokens: ${expectedTitleTokens.join(', ')}`);
+      result.status = 'expedia_target_offer_mismatch';
+      result.error = `Target property title mismatch: found "${targetCardResult.titleFound}"`;
+      result.priceExtraction = {
+        extracted: false,
+        totalPrice: null,
+        currency: 'USD',
+        originalAmount: null,
+        originalCurrency: null,
+        conversionRate: null,
+        includesTaxesFees: false,
+        evidenceSnippet: `TRACE: TARGET_TITLE_MISMATCH, found="${targetCardResult.titleFound}", expected=[${expectedTitleTokens.join(', ')}]`,
+        extractionContext: 'target_card_title_mismatch',
+        rejectionReason: `Title mismatch in target card`,
+        nightlyPrice: null,
+        nightlyCurrency: null,
+      };
+      result.structuralProof.target_unavailability_detected = false;
+      result.structuralProof.extracted_from_target_card = false;
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    // Check for unavailability WITHIN the target card (before any price extraction)
+    if (targetCardResult.unavailabilityDetected) {
+      console.log(`[EXPEDIA] DATES_UNAVAILABLE_FOR_TARGET: ${targetCardResult.unavailabilityText}`);
+      result.status = 'expedia_dates_unavailable_for_target';
+      result.error = `Target property unavailable: ${targetCardResult.unavailabilityText}`;
+      
+      // Extract evidence snippet from target card
+      let evidenceSnippet = `TARGET_CARD [${propertyId}]: ${targetCardResult.unavailabilityText}`;
+      if (targetCardResult.cardContent) {
+        // Find the actual unavailability text in the card
+        const unavailPatterns = [
+          /minimum\s+(?:length\s+of\s+)?stay\s+not\s+met/i,
+          /minimum\s+stay\s+(?:is\s+)?\d+\s+nights?/i,
+        ];
+        for (const pattern of unavailPatterns) {
+          const match = targetCardResult.cardContent.match(pattern);
+          if (match) {
+            const idx = targetCardResult.cardContent.indexOf(match[0]);
+            const start = Math.max(0, idx - 30);
+            const end = Math.min(targetCardResult.cardContent.length, idx + match[0].length + 30);
+            evidenceSnippet = targetCardResult.cardContent.slice(start, end).replace(/\s+/g, ' ').trim();
+            break;
+          }
+        }
+      }
+      
+      result.priceExtraction = {
+        extracted: false,
+        totalPrice: null,
+        currency: 'USD',
+        originalAmount: null,
+        originalCurrency: null,
+        conversionRate: null,
+        includesTaxesFees: false,
+        evidenceSnippet: evidenceSnippet,
+        extractionContext: 'target_card_unavailable',
+        rejectionReason: `Target property unavailable for dates: ${targetCardResult.unavailabilityText}`,
+        nightlyPrice: null,
+        nightlyCurrency: null,
+      };
+      
+      result.structuralProof = {
+        ...result.structuralProof,
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: false,
+        extracted_from_breakdown_total: false,
+        proof_version: '6.3-target-card-unavailable',
+        target_unavailability_detected: true,
+        target_unavailability_text: targetCardResult.unavailabilityText || undefined,
+        extracted_from_target_card: false,
+        offers_page_reached: true,
+        offers_page_gate_passed: true,
+      };
+      
       result.durationMs = Date.now() - startTime;
       return result;
     }
     
     // ==========================================================================
-    // STEP 7: Extract total price from offers page
+    // STEP 7: Extract price ONLY from the target card
     // ==========================================================================
-    console.log('[EXPEDIA] GOLDEN PATH Step 7: Extract price from offers page');
+    console.log('[EXPEDIA] TARGET CARD Step 7: Extract price from target card ONLY');
     
-    const priceResult = extractPriceFromOffersPage(bestContent, offersPageResult);
+    if (!targetCardResult.cardContent) {
+      result.status = 'expedia_target_total_not_found';
+      result.error = 'Target card found but content is empty';
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    const priceResult = extractPriceFromTargetCard(targetCardResult.cardContent, propertyId);
     result.priceExtraction = priceResult;
     
     // Build conversion audit
@@ -1903,30 +2345,31 @@ async function extractFromExpedia(
       };
       
       if (isUsdDirect) {
-        console.log(`[EXPEDIA] USD price extracted directly - no conversion needed: $${priceResult.totalPrice}`);
+        console.log(`[EXPEDIA] USD price extracted from TARGET CARD: $${priceResult.totalPrice}`);
       } else {
-        console.log(`[EXPEDIA] Currency conversion: ${priceResult.originalAmount} ${priceResult.originalCurrency} → $${priceResult.totalPrice} USD (rate: ${priceResult.conversionRate})`);
+        console.log(`[EXPEDIA] Currency conversion from TARGET CARD: ${priceResult.originalAmount} ${priceResult.originalCurrency} → $${priceResult.totalPrice} USD`);
       }
     }
     
     if (!priceResult.extracted || !priceResult.totalPrice) {
-      result.status = 'expedia_total_not_found';
-      result.error = priceResult.rejectionReason || 'No total price with taxes found on offers page';
+      result.status = 'expedia_target_total_not_found';
+      result.error = priceResult.rejectionReason || 'No total price with taxes found in target card';
+      result.structuralProof.extracted_from_target_card = false;
       result.durationMs = Date.now() - startTime;
       return result;
     }
     
     // ==========================================================================
-    // STEP 8: Build structural proof with HARD INVARIANT
+    // STEP 8: Build structural proof with TARGET CARD ANCHORING
     // ==========================================================================
-    console.log('[EXPEDIA] GOLDEN PATH Step 8: Build structural proof with invariant');
+    console.log('[EXPEDIA] TARGET CARD Step 8: Build structural proof with target card anchoring');
     
     const structuralProof: StructuralProof = {
-      breakdown_found: offersPageResult.hasTotalWithTaxes,
+      breakdown_found: true, // Offer-card total qualifies as breakdown equivalent
       total_label_found: priceResult.includesTaxesFees,
       rendered_dates_match: offersPageResult.datesRenderedCorrectly,
       extracted_from_breakdown_total: priceResult.extracted && priceResult.includesTaxesFees,
-      proof_version: '3.0-hard-gate',
+      proof_version: '6.3-target-card',
       breakdown_selector_used: priceResult.extractionContext || undefined,
       total_value_raw: priceResult.evidenceSnippet || undefined,
       date_value_raw: `${checkIn} to ${checkOut}`,
@@ -1940,7 +2383,7 @@ async function extractFromExpedia(
       original_amount: priceResult.originalAmount || undefined,
       converted_amount_usd: priceResult.totalPrice || undefined,
       conversion_rate: priceResult.conversionRate || undefined,
-      page_context: 'Hotel-Search offers page',
+      page_context: 'Hotel-Search offers page - target card',
       is_offers_page: true,
       offers_page_url: currentOffersUrl,
       // v5.1 gate diagnostics
@@ -1949,22 +2392,30 @@ async function extractFromExpedia(
       offers_page_gate_passed: true,
       property_id_used: result.goldenPath.propertyId || undefined,
       constructed_offers_url: currentOffersUrl,
+      // TARGET CARD ANCHORING (v6.3)
+      target_property_id: propertyId,
+      target_card_found: true,
+      target_title_match: targetCardResult.titleMatch,
+      target_unavailability_detected: false,
+      extraction_scope: 'target_card_only',
+      extracted_from_target_card: true,
     };
     
-    // HARD INVARIANT: If structural proof is not fully true, extracted_price MUST be null
+    // HARD INVARIANT: Must have extracted from target card with full proof
     const isFullyVerified = 
       structuralProof.breakdown_found &&
       structuralProof.total_label_found &&
       structuralProof.rendered_dates_match &&
       structuralProof.extracted_from_breakdown_total &&
-      structuralProof.offers_page_gate_passed;
+      structuralProof.offers_page_gate_passed &&
+      structuralProof.extracted_from_target_card;
     
     if (!isFullyVerified) {
-      // HARD INVARIANT VIOLATION: Cannot return price without full proof
-      console.log('[EXPEDIA] INVARIANT ENFORCED: Proof not fully true, nullifying price');
+      // HARD INVARIANT VIOLATION: Cannot return price without full proof INCLUDING target card
+      console.log('[EXPEDIA] INVARIANT ENFORCED: Proof not fully true (target card anchoring), nullifying price');
       result.structuralProof = structuralProof;
-      result.status = 'expedia_total_not_found_on_offers_page';
-      result.error = 'Structural proof incomplete - cannot return price without full verification';
+      result.status = 'expedia_target_total_not_found';
+      result.error = 'Structural proof incomplete - cannot return price without target card verification';
       result.durationMs = Date.now() - startTime;
       return result;
     }
@@ -1972,7 +2423,7 @@ async function extractFromExpedia(
     result.structuralProof = structuralProof;
     
     console.log('[EXPEDIA] Structural proof:', JSON.stringify(result.structuralProof, null, 2));
-    console.log(`[EXPEDIA] Success: $${priceResult.totalPrice} USD (Verified)`);
+    console.log(`[EXPEDIA] Success: $${priceResult.totalPrice} USD (Verified from TARGET CARD)`);
     
     result.success = true;
     result.status = 'success';
