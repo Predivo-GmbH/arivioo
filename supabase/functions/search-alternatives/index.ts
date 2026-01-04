@@ -2803,12 +2803,13 @@ const vrboAdapter: PlatformAdapter = {
   },
 };
 
-// Expedia Adapter - IMPROVED
+// Expedia Adapter - IMPROVED (with .co.jp for USD fallback path)
 const expediaAdapter: PlatformAdapter = {
   name: "Expedia",
   capability: "url_driven",
   reliability: "high",
-  domains: ["expedia.com", "expedia.de", "expedia.fr", "expedia.co.uk", "expedia.es", "expedia.it", "expedia.nl", "expedia.be"],
+  // Include all regional TLDs - extract-expedia will build proper offers URL
+  domains: ["expedia.com", "expedia.de", "expedia.fr", "expedia.co.uk", "expedia.es", "expedia.it", "expedia.nl", "expedia.be", "expedia.co.jp", "expedia.ca", "expedia.com.au"],
   scrapeWaitTime: 10000,
   useScreenshotFallback: true,
   generateDeepLink: (baseUrl, checkIn, checkOut, adults = 2, children = 0, rooms = 1) => {
