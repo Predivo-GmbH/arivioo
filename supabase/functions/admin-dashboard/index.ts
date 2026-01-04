@@ -2575,34 +2575,52 @@ Deno.serve(async (req) => {
       let errorMessage: string | null = null;
 
       // Run Airbnb baseline extraction
+      // NOTE: airbnb-baseline-test validates admin session, so pass the admin token from request
       try {
         console.log('[Extraction Test] Running Airbnb baseline extraction');
         const airbnbResponse = await fetch(`${supabaseUrl}/functions/v1/airbnb-baseline-test`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${supabaseServiceKey}`,
+            // Pass the admin session token (already validated above), not service key
+            'Authorization': `Bearer ${token}`,
           },
-          body: JSON.stringify({ url: airbnb_url }),
+          body: JSON.stringify({ 
+            url: airbnb_url,
+            runs: 1, // Single run for test harness (faster iteration)
+            delay_seconds: 0,
+          }),
         });
 
         const airbnbData = await airbnbResponse.json();
         
+        // airbnb-baseline-test returns a different structure - extract from results array
+        const firstRun = airbnbData.results?.[0];
+        const finalPrice = firstRun?.final_price ?? airbnbData.price;
+        const finalCurrency = firstRun?.final_currency ?? airbnbData.currency ?? 'USD';
+        const finalStatus = firstRun?.final_status ?? airbnbData.status;
+        const finalIncludesTaxesFees = firstRun?.final_includes_taxes_fees ?? true;
+        const providerUsed = firstRun?.selected_provider ?? airbnbData.provider;
+        const evidenceSnippet = firstRun?.final_evidence_snippet ?? '';
+        const providerResults = firstRun?.provider_results ?? [];
+        
         results.airbnb = {
           platform: 'airbnb',
-          status: airbnbData.success ? 'success' : 'failed',
-          terminal_status: airbnbData.terminalStatus || airbnbData.status,
-          extracted_price: airbnbData.extractedTotal || airbnbData.price,
-          currency: airbnbData.currency || 'USD',
-          includes_taxes_fees: airbnbData.includesTaxesFees ?? true,
-          provider_used: airbnbData.providerUsed || airbnbData.provider,
-          evidence_snippets: airbnbData.evidenceSnippets || airbnbData.evidence || [],
-          verification_status: airbnbData.verified ? 'verified' : 'unverified',
-          structural_proof: airbnbData.structuralProof || {},
+          status: finalPrice ? 'success' : 'failed',
+          terminal_status: finalStatus,
+          extracted_price: finalPrice,
+          currency: finalCurrency,
+          includes_taxes_fees: finalIncludesTaxesFees,
+          provider_used: providerUsed,
+          evidence_snippets: evidenceSnippet ? [evidenceSnippet] : [],
+          verification_status: finalPrice ? 'verified' : 'unverified',
+          structural_proof: {},
+          provider_results: providerResults,
+          run_id: airbnbData.run_id,
           error: airbnbData.error,
         };
 
-        if (!airbnbData.success) {
+        if (!finalPrice) {
           overallStatus = 'partial';
         }
       } catch (err: any) {
@@ -2619,6 +2637,10 @@ Deno.serve(async (req) => {
       if (expedia_url) {
         try {
           console.log('[Extraction Test] Running Expedia extraction');
+          console.log(`[Extraction Test] Expedia dates: checkIn=${check_in}, checkOut=${check_out}, adults=${adults}`);
+          
+          // extract-expedia expects camelCase: checkIn, checkOut, adults
+          // Service key is fine for extract-expedia (it doesn't require admin session)
           const expediaResponse = await fetch(`${supabaseUrl}/functions/v1/extract-expedia`, {
             method: 'POST',
             headers: {
@@ -2627,32 +2649,34 @@ Deno.serve(async (req) => {
             },
             body: JSON.stringify({
               url: expedia_url,
-              check_in,
-              check_out,
-              adults,
-              guests,
-              airbnb_baseline_price: results.airbnb?.extracted_price,
-              currency: currency || 'USD',
+              // CRITICAL: Use camelCase as expected by extract-expedia handler
+              checkIn: check_in,
+              checkOut: check_out,
+              adults: adults,
             }),
           });
 
           const expediaData = await expediaResponse.json();
+          console.log('[Extraction Test] Expedia response:', JSON.stringify(expediaData, null, 2).slice(0, 1000));
           
           results.expedia = {
             platform: 'expedia',
             status: expediaData.success ? 'success' : 'failed',
-            terminal_status: expediaData.terminalStatus || expediaData.extraction_status,
-            extracted_price: expediaData.extractedPrice ?? expediaData.extracted_price,
-            currency: expediaData.currency || 'JPY',
-            converted_usd: expediaData.convertedUsd ?? expediaData.converted_usd,
-            includes_taxes_fees: expediaData.includesTaxesFees ?? expediaData.includes_taxes_fees,
-            provider_used: expediaData.providerUsed || expediaData.provider_used,
-            evidence_snippets: expediaData.evidenceSnippets || expediaData.evidence_snippets || [],
-            verification_status: expediaData.verified ? 'verified' : (expediaData.verificationStatus || 'unverified'),
-            structural_proof: expediaData.structuralProof || expediaData.structural_proof || {},
-            expedia_trace: expediaData.expediaTrace || expediaData.expedia_trace || {},
-            date_injection: expediaData.dateInjection || expediaData.date_injection || {},
-            error: expediaData.error || expediaData.extraction_error,
+            terminal_status: expediaData.status,
+            extracted_price: expediaData.price,
+            original_amount: expediaData.originalAmount,
+            original_currency: expediaData.originalCurrency,
+            conversion_rate: expediaData.conversionRate,
+            currency: expediaData.currency || 'USD',
+            includes_taxes_fees: expediaData.includesTaxesFees,
+            provider_used: expediaData.providerUsed,
+            evidence_snippets: [],
+            verification_status: expediaData.success ? 'verified' : 'unverified',
+            structural_proof: expediaData.structuralProof || {},
+            golden_path: expediaData.goldenPath || {},
+            provider_attempt_trace: expediaData.providerAttemptTrace || [],
+            duration_ms: expediaData.durationMs,
+            error: expediaData.error,
           };
 
           if (!expediaData.success) {
