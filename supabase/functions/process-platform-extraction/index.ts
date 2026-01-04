@@ -121,23 +121,35 @@ async function getPlatformTier(
   try {
     const platformLower = platformName.toLowerCase();
     
+    console.log(`[WORKER] getPlatformTier: Looking up tier for platform="${platformName}" (lower="${platformLower}")`);
+    
     // Query platform_adapters for coverage_tier
-    const { data: adapters } = await supabaseClient
+    const { data: adapters, error: queryError } = await supabaseClient
       .from('platform_adapters')
-      .select('coverage_tier, tier_reason, dedicated_extractor, platform_domain')
+      .select('coverage_tier, tier_reason, dedicated_extractor, platform_domain, platform_name')
       .or(`platform_name.ilike.%${platformLower}%,platform_domain.ilike.%${platformLower}%`)
       .limit(1);
     
+    if (queryError) {
+      console.error(`[WORKER] getPlatformTier query error: ${JSON.stringify(queryError)}`);
+      return { tier: 'B', reason: `Query error: ${queryError.message}`, dedicatedExtractor: null };
+    }
+    
+    console.log(`[WORKER] getPlatformTier: Query returned ${adapters?.length || 0} adapters: ${JSON.stringify(adapters)}`);
+    
     if (adapters && adapters.length > 0) {
       const adapter = adapters[0];
-      return {
+      const result = {
         tier: (adapter.coverage_tier || 'B') as CoverageTier,
         reason: adapter.tier_reason,
         dedicatedExtractor: adapter.dedicated_extractor,
       };
+      console.log(`[WORKER] getPlatformTier: Resolved tier=${result.tier}, dedicatedExtractor=${result.dedicatedExtractor}`);
+      return result;
     }
     
     // Default to Tier B (best effort) for unknown platforms
+    console.log(`[WORKER] getPlatformTier: No adapter found, defaulting to Tier B`);
     return { tier: 'B', reason: 'Platform not in adapter registry', dedicatedExtractor: null };
   } catch (error) {
     console.error(`[WORKER] Error looking up platform tier: ${error}`);
@@ -708,8 +720,10 @@ Deno.serve(async (req) => {
     }
     
     // ============= TIER A: GOLDEN PATH with dedicated extractor =============
+    console.log(`[WORKER] Routing decision for ${platform}: tier=${tierInfo.tier}, dedicatedExtractor=${dedicatedExtractor}, willUseGoldenPath=${tierInfo.tier === 'A' && !!dedicatedExtractor}`);
+    
     if (tierInfo.tier === 'A' && dedicatedExtractor) {
-      console.log(`[WORKER] Using GOLDEN PATH extractor: ${dedicatedExtractor} for ${platform}`);
+      console.log(`[WORKER] *** USING GOLDEN PATH extractor: ${dedicatedExtractor} for ${platform} ***`);
       
       result.phaseA.ran = true;
       result.phaseB.ran = true;
