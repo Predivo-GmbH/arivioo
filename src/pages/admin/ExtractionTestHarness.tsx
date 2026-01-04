@@ -28,6 +28,16 @@ interface ExtractionResult {
   terminal_status?: string;
   extracted_price?: number | null;
   currency?: string;
+  // Airbnb fields
+  provider_results?: Array<Record<string, any>>;
+  run_id?: string;
+  // Expedia fields
+  original_amount?: number;
+  original_currency?: string;
+  conversion_rate?: number;
+  golden_path?: Record<string, any>;
+  provider_attempt_trace?: Array<Record<string, any>>;
+  duration_ms?: number;
   converted_usd?: number;
   includes_taxes_fees?: boolean;
   provider_used?: string;
@@ -389,6 +399,17 @@ function ExtractionResultPanel({ result, title, onCopy }: ExtractionResultPanelP
               }
             </p>
           </div>
+          {result.original_amount != null && result.original_currency && (
+            <div>
+              <span className="text-xs text-muted-foreground">Original Amount</span>
+              <p className="font-mono text-lg">
+                {result.original_currency} {result.original_amount.toLocaleString()}
+              </p>
+              {result.conversion_rate && (
+                <p className="text-xs text-muted-foreground">Rate: {result.conversion_rate}</p>
+              )}
+            </div>
+          )}
           {result.converted_usd != null && (
             <div>
               <span className="text-xs text-muted-foreground">Converted (USD)</span>
@@ -403,6 +424,12 @@ function ExtractionResultPanel({ result, title, onCopy }: ExtractionResultPanelP
             <span className="text-xs text-muted-foreground">Includes Taxes</span>
             <p className="font-medium">{result.includes_taxes_fees ? 'Yes' : 'No'}</p>
           </div>
+          {result.duration_ms && (
+            <div>
+              <span className="text-xs text-muted-foreground">Duration</span>
+              <p className="font-medium">{(result.duration_ms / 1000).toFixed(2)}s</p>
+            </div>
+          )}
         </div>
 
         {/* Error */}
@@ -426,6 +453,77 @@ function ExtractionResultPanel({ result, title, onCopy }: ExtractionResultPanelP
                       : String(value ?? '-')
                     }
                   </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Golden Path (Expedia) */}
+        {result.golden_path && Object.keys(result.golden_path).length > 0 && (
+          <div className="space-y-2">
+            <h5 className="text-sm font-medium">Golden Path</h5>
+            <div className="bg-muted rounded p-3 space-y-1">
+              {Object.entries(result.golden_path).map(([key, value]) => (
+                <div key={key} className="flex items-start gap-2 text-xs">
+                  <span className="text-muted-foreground font-medium min-w-[180px]">{key}:</span>
+                  <span className="font-mono break-all">
+                    {typeof value === 'boolean' 
+                      ? (value ? '✓ true' : '✗ false')
+                      : String(value ?? '-')
+                    }
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Provider Attempt Trace (Expedia) */}
+        {result.provider_attempt_trace && result.provider_attempt_trace.length > 0 && (
+          <div className="space-y-2">
+            <h5 className="text-sm font-medium">Provider Attempts</h5>
+            <div className="space-y-2">
+              {result.provider_attempt_trace.map((attempt, i) => (
+                <div key={i} className="bg-muted rounded p-3 text-xs">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Badge variant={attempt.outcome === 'success' ? 'default' : 'secondary'} className={attempt.outcome === 'success' ? 'bg-green-500' : ''}>
+                      {attempt.provider}
+                    </Badge>
+                    <span className="font-mono">{attempt.outcome}</span>
+                    {attempt.httpStatus && (
+                      <span className="text-muted-foreground">HTTP {attempt.httpStatus}</span>
+                    )}
+                  </div>
+                  {attempt.errorMessage && (
+                    <p className="text-destructive">{attempt.errorMessage}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Provider Results (Airbnb) */}
+        {result.provider_results && result.provider_results.length > 0 && (
+          <div className="space-y-2">
+            <h5 className="text-sm font-medium">Provider Results</h5>
+            <div className="space-y-2">
+              {result.provider_results.map((pr, i) => (
+                <div key={i} className="bg-muted rounded p-3 text-xs">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Badge variant={pr.status?.includes('total_price') ? 'default' : 'secondary'} className={pr.status?.includes('total_price') ? 'bg-green-500' : ''}>
+                      {pr.provider}
+                    </Badge>
+                    <span className="font-mono">{pr.status}</span>
+                    {pr.price && (
+                      <span className="font-medium">${pr.price.toLocaleString()}</span>
+                    )}
+                    <span className="text-muted-foreground">{pr.duration_ms}ms</span>
+                  </div>
+                  {pr.evidence_snippet && (
+                    <p className="text-muted-foreground truncate">{pr.evidence_snippet}</p>
+                  )}
                 </div>
               ))}
             </div>
