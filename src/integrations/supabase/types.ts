@@ -598,6 +598,33 @@ export type Database = {
         }
         Relationships: []
       }
+      bypass_password_attempts: {
+        Row: {
+          attempted_at: string
+          created_at: string
+          id: string
+          ip_address: string
+          user_agent: string | null
+          was_successful: boolean
+        }
+        Insert: {
+          attempted_at?: string
+          created_at?: string
+          id?: string
+          ip_address: string
+          user_agent?: string | null
+          was_successful?: boolean
+        }
+        Update: {
+          attempted_at?: string
+          created_at?: string
+          id?: string
+          ip_address?: string
+          user_agent?: string | null
+          was_successful?: boolean
+        }
+        Relationships: []
+      }
       extraction_test_runs: {
         Row: {
           admin_email: string

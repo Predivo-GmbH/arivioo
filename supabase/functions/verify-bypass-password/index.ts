@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
@@ -26,17 +26,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Simple in-memory rate limiting (resets on function cold start)
-// For production, use Redis or database-backed rate limiting
-const rateLimitMap = new Map<string, { attempts: number; lastAttempt: number; lockedUntil: number }>();
-
+// Rate limiting configuration
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour window
 const MAX_ATTEMPTS = 5; // 5 attempts per hour per IP
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minute lockout after exceeding limit
 const ACCESS_GRANT_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours access grant
 
 function getClientIP(req: Request): string {
-  // Check common headers for client IP
   const forwardedFor = req.headers.get('x-forwarded-for');
   if (forwardedFor) {
     return forwardedFor.split(',')[0].trim();
@@ -45,42 +41,7 @@ function getClientIP(req: Request): string {
   if (realIP) {
     return realIP;
   }
-  // Fallback to connection info if available
   return 'unknown';
-}
-
-function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
-  const now = Date.now();
-  const record = rateLimitMap.get(ip);
-  
-  if (!record) {
-    rateLimitMap.set(ip, { attempts: 1, lastAttempt: now, lockedUntil: 0 });
-    return { allowed: true };
-  }
-  
-  // Check if currently locked out
-  if (record.lockedUntil > now) {
-    return { allowed: false, retryAfter: Math.ceil((record.lockedUntil - now) / 1000) };
-  }
-  
-  // Reset counter if window has passed
-  if (now - record.lastAttempt > RATE_LIMIT_WINDOW_MS) {
-    rateLimitMap.set(ip, { attempts: 1, lastAttempt: now, lockedUntil: 0 });
-    return { allowed: true };
-  }
-  
-  // Check if exceeded attempts
-  if (record.attempts >= MAX_ATTEMPTS) {
-    record.lockedUntil = now + LOCKOUT_DURATION_MS;
-    rateLimitMap.set(ip, record);
-    return { allowed: false, retryAfter: Math.ceil(LOCKOUT_DURATION_MS / 1000) };
-  }
-  
-  // Increment attempts
-  record.attempts++;
-  record.lastAttempt = now;
-  rateLimitMap.set(ip, record);
-  return { allowed: true };
 }
 
 // Timing-safe string comparison to prevent timing attacks
@@ -94,17 +55,111 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
+// Persistent rate limiting using database
+async function checkRateLimitPersistent(
+  supabase: SupabaseClient,
+  ip: string
+): Promise<{ allowed: boolean; retryAfter?: number }> {
+  const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString();
+  
+  try {
+    // Count recent failed attempts from this IP
+    const { count, error } = await supabase
+      .from('bypass_password_attempts')
+      .select('*', { count: 'exact', head: true })
+      .eq('ip_address', ip)
+      .eq('was_successful', false)
+      .gte('attempted_at', windowStart);
+    
+    if (error) {
+      console.error('Rate limit check error:', error);
+      // Fail open but log the issue - don't block legitimate users due to DB issues
+      return { allowed: true };
+    }
+    
+    const attemptCount = count || 0;
+    
+    if (attemptCount >= MAX_ATTEMPTS) {
+      // Check when the oldest attempt in window was made to calculate retry time
+      const { data: oldestAttempt } = await supabase
+        .from('bypass_password_attempts')
+        .select('attempted_at')
+        .eq('ip_address', ip)
+        .eq('was_successful', false)
+        .gte('attempted_at', windowStart)
+        .order('attempted_at', { ascending: true })
+        .limit(1)
+        .single();
+      
+      if (oldestAttempt && oldestAttempt.attempted_at) {
+        const oldestTime = new Date(oldestAttempt.attempted_at).getTime();
+        const unlockTime = oldestTime + RATE_LIMIT_WINDOW_MS;
+        const retryAfter = Math.max(0, Math.ceil((unlockTime - Date.now()) / 1000));
+        return { allowed: false, retryAfter: Math.max(retryAfter, 60) }; // Minimum 60 seconds
+      }
+      
+      return { allowed: false, retryAfter: Math.ceil(LOCKOUT_DURATION_MS / 1000) };
+    }
+    
+    return { allowed: true };
+  } catch (err) {
+    console.error('Rate limit check exception:', err);
+    // Fail open on unexpected errors
+    return { allowed: true };
+  }
+}
+
+// Log attempt to database for persistent tracking
+async function logAttempt(
+  supabase: SupabaseClient,
+  ip: string,
+  wasSuccessful: boolean,
+  userAgent: string | null
+): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('bypass_password_attempts')
+      .insert({
+        ip_address: ip,
+        was_successful: wasSuccessful,
+        user_agent: userAgent?.substring(0, 500) || null, // Limit user agent length
+        attempted_at: new Date().toISOString()
+      });
+    
+    if (error) {
+      console.error('Failed to log bypass attempt:', error);
+    }
+  } catch (err) {
+    console.error('Exception logging bypass attempt:', err);
+  }
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   const clientIP = getClientIP(req);
+  const userAgent = req.headers.get('user-agent');
   
-  // Check rate limit before processing
-  const rateCheck = checkRateLimit(clientIP);
+  // Initialize Supabase client with service role for rate limiting
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  
+  if (!supabaseUrl || !supabaseServiceKey) {
+    console.error('Missing Supabase configuration');
+    return new Response(
+      JSON.stringify({ valid: false, error: 'Service not configured' }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+  
+  const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  
+  // Check persistent rate limit
+  const rateCheck = await checkRateLimitPersistent(supabase, clientIP);
   if (!rateCheck.allowed) {
-    console.warn(`Rate limit exceeded for IP: ${clientIP}`);
+    console.warn(`Persistent rate limit exceeded for IP: ${clientIP}`);
     return new Response(
       JSON.stringify({ 
         valid: false, 
@@ -127,6 +182,8 @@ serve(async (req) => {
     
     if (!password || typeof password !== 'string') {
       console.warn(`Invalid password format from IP: ${clientIP}`);
+      // Log failed attempt
+      await logAttempt(supabase, clientIP, false, userAgent);
       return new Response(
         JSON.stringify({ valid: false, error: 'Password is required' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -136,6 +193,7 @@ serve(async (req) => {
     // Enforce password length limits to prevent DOS via large payloads
     if (password.length > 100) {
       console.warn(`Password too long from IP: ${clientIP}`);
+      await logAttempt(supabase, clientIP, false, userAgent);
       return new Response(
         JSON.stringify({ valid: false, error: 'Invalid password format' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -156,16 +214,15 @@ serve(async (req) => {
     const isValid = password.length === BYPASS_PASSWORD.length && 
       timingSafeEqual(password, BYPASS_PASSWORD);
     
-    // Log all attempts with IP (but not the password itself)
+    // Log attempt to database (persistent audit trail)
+    await logAttempt(supabase, clientIP, isValid, userAgent);
+    
+    // Log to console as well for immediate visibility
     console.log(`Bypass password verification from IP ${clientIP}: ${isValid ? 'SUCCESS' : 'FAILED'}`);
 
-    // SECURITY FIX: If valid and userId provided, create server-side access grant
+    // If valid and userId provided, create server-side access grant
     if (isValid && userId && typeof userId === 'string') {
       try {
-        const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-        const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-        const supabase = createClient(supabaseUrl, supabaseServiceKey);
-        
         const grantedUntil = new Date(Date.now() + ACCESS_GRANT_DURATION_MS).toISOString();
         
         // Upsert access grant (insert or update if exists)
@@ -182,7 +239,6 @@ serve(async (req) => {
         
         if (grantError) {
           console.error('Error creating access grant:', grantError);
-          // Don't fail the request, just log the error
         } else {
           console.log(`Access grant created for user ${userId} until ${grantedUntil}`);
         }
@@ -193,7 +249,6 @@ serve(async (req) => {
         );
       } catch (grantError) {
         console.error('Error in access grant creation:', grantError);
-        // Still return valid response, access grant is supplementary
       }
     }
 
@@ -204,6 +259,8 @@ serve(async (req) => {
 
   } catch (error) {
     console.error('Error in verify-bypass-password:', error);
+    // Log failed attempt for malformed requests
+    await logAttempt(supabase, clientIP, false, userAgent);
     return new Response(
       JSON.stringify({ valid: false, error: 'Internal server error' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
