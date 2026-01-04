@@ -1927,42 +1927,73 @@ export default function SearchResults() {
                                 {moreExpensiveResults.map((result) => {
                                   const alternativeTotal = result.price || 0;
                                   const priceDiff = Math.round(alternativeTotal - (airbnbTotal || 0));
+                                  const resultImages = toStringArray(result.images);
+                                  const isExpanded = expandedComparison === result.id;
                                   return (
-                                    <tr key={result.id} className="border-b border-border/50 hover:bg-muted/30">
-                                      <td className="py-4 px-4">
-                                        <div className="flex items-center gap-2">
-                                          <span className="w-2 h-2 rounded-full bg-amber-500" />
-                                          <span className="font-medium text-foreground">{result.platform_name}</span>
-                                        </div>
-                                      </td>
-                                      <td className="py-4 px-4 text-center">
-                                        {result.match_type === "visual" && result.confidence_score ? (
-                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                            <Shield className="w-3 h-3" />
-                                            {Math.round(result.confidence_score)}%
-                                          </span>
-                                        ) : (
-                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                            <Info className="w-3 h-3" />
-                                            Text
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="py-4 px-4 text-right">
-                                        <span className="font-semibold text-foreground">{currencySymbol}{Math.round(alternativeTotal)}</span>
-                                        <span className="text-amber-600 text-xs ml-2">(+{currencySymbol}{priceDiff})</span>
-                                      </td>
-                                      <td className="py-4 px-4 hidden lg:table-cell">
-                                        <span className="text-xs text-muted-foreground">May have different terms</span>
-                                      </td>
-                                      <td className="py-4 px-4 text-center">
-                                        <Button variant="outline" size="sm" asChild>
-                                          <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                            View <ExternalLink className="w-3 h-3 ml-1" />
-                                          </a>
-                                        </Button>
-                                      </td>
-                                    </tr>
+                                    <React.Fragment key={result.id}>
+                                      <tr className="border-b border-border/50 hover:bg-muted/30">
+                                        <td className="py-4 px-4">
+                                          <div className="flex items-center gap-2">
+                                            <span className="w-2 h-2 rounded-full bg-amber-500" />
+                                            <span className="font-medium text-foreground">{result.platform_name}</span>
+                                          </div>
+                                        </td>
+                                        <td className="py-4 px-4 text-center">
+                                          {result.match_type === "visual" && result.confidence_score ? (
+                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
+                                              <Shield className="w-3 h-3" />
+                                              {Math.round(result.confidence_score)}%
+                                            </span>
+                                          ) : (
+                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
+                                              <Info className="w-3 h-3" />
+                                              Text
+                                            </span>
+                                          )}
+                                        </td>
+                                        <td className="py-4 px-4 text-right">
+                                          <span className="font-semibold text-foreground">{currencySymbol}{Math.round(alternativeTotal)}</span>
+                                          <span className="text-amber-600 text-xs ml-2">(+{currencySymbol}{priceDiff})</span>
+                                        </td>
+                                        <td className="py-4 px-4 hidden lg:table-cell">
+                                          <span className="text-xs text-muted-foreground">May have different terms</span>
+                                        </td>
+                                        <td className="py-4 px-4 text-center">
+                                          <div className="flex flex-col gap-1.5 items-center">
+                                            <Button variant="outline" size="sm" asChild>
+                                              <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                View <ExternalLink className="w-3 h-3 ml-1" />
+                                              </a>
+                                            </Button>
+                                            <button
+                                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                              className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                            >
+                                              <ArrowLeftRight className="w-3 h-3" />
+                                              {isExpanded ? 'Hide' : 'Photos'}
+                                            </button>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                      {isExpanded && (
+                                        <tr className="border-b border-border/50">
+                                          <td colSpan={5} className="p-4 bg-muted/30">
+                                            {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                              <ImageComparison 
+                                                airbnbImages={airbnbImages} 
+                                                alternativeImages={resultImages} 
+                                                airbnbTitle={search?.airbnb_title || "Airbnb Listing"} 
+                                                alternativeTitle={result.listing_title || "Alternative Listing"} 
+                                                platformName={result.platform_name} 
+                                                sourceAirbnbImage={result.source_airbnb_image} 
+                                              />
+                                            ) : (
+                                              <p className="text-sm text-muted-foreground text-center py-4">No photos available for comparison</p>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      )}
+                                    </React.Fragment>
                                   );
                                 })}
                               </tbody>
