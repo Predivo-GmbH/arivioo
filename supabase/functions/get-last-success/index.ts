@@ -133,56 +133,51 @@ serve(async (req) => {
       // Use verified extracted price, not stale search_results.price
       const verifiedPrice = getVerifiedPrice(bestResult);
 
+      // CRITICAL: Only return results with VERIFIED extracted prices
+      // No simulation - if no verified price, skip this search and try the next one
+      if (verifiedPrice === null) {
+        console.log("Skipping search - no verified extracted price:", {
+          search_id: search.id,
+          platform: bestResult.platform_name,
+        });
+        continue; // Try the next search
+      }
+
       const nightsCount = search.nights_count ?? null;
       const airbnbTotal = search.airbnb_price && nightsCount ? search.airbnb_price * nightsCount : null;
-      // Use verified extracted price only, not stale search_results.price
       const bestTotal = verifiedPrice && nightsCount ? verifiedPrice * nightsCount : null;
 
       // Add service fee estimate (14%)
       const airbnbWithFees = airbnbTotal ? airbnbTotal * 1.14 : null;
 
-      // Calculate real savings if available
-      let potentialSavings = airbnbWithFees && bestTotal
+      // Calculate real savings - no simulation
+      const potentialSavings = airbnbWithFees && bestTotal
         ? Math.round(airbnbWithFees - bestTotal)
         : null;
-      let savingsPercentage = airbnbWithFees && potentialSavings !== null
+      const savingsPercentage = airbnbWithFees && potentialSavings !== null
         ? Math.round((potentialSavings / airbnbWithFees) * 100)
         : null;
       
-      // Flag to indicate if savings are simulated (for marketing transparency)
-      let savingsSimulated = false;
-      
-      // If we have a verified image pair but no real savings data,
-      // generate simulated savings for marketing/demo purposes
-      // This helps explain how the product works without requiring live booking data
-      if ((potentialSavings === null || potentialSavings <= 0) && hasImagePair(bestResult)) {
-        const basePrice = search.airbnb_price || 150; // Default price if unknown
-        const nights = nightsCount || 3;
-        
-        // Simulate realistic savings (15-25% off Airbnb price)
-        const simulatedSavingsPercent = 15 + Math.floor(Math.random() * 10); // 15-24%
-        const simulatedAirbnbTotal = Math.round(basePrice * nights * 1.14);
-        const simulatedDirectTotal = Math.round(simulatedAirbnbTotal * (1 - simulatedSavingsPercent / 100));
-        
-        potentialSavings = simulatedAirbnbTotal - simulatedDirectTotal;
-        savingsPercentage = simulatedSavingsPercent;
-        savingsSimulated = true;
+      // Only return if we have actual savings (verified price cheaper than Airbnb)
+      if (potentialSavings === null || potentialSavings <= 0) {
+        console.log("Skipping search - no savings with verified price:", {
+          search_id: search.id,
+          verifiedPrice,
+          airbnbWithFees,
+        });
+        continue; // Try the next search
       }
 
-      console.log("Found last successful visual match for landing demo:", {
+      console.log("Found verified savings for landing demo:", {
         created_at: search.created_at,
-        has_airbnb_image_url: Boolean(search.airbnb_image_url),
-        has_airbnb_images: Array.isArray(search.airbnb_images) && search.airbnb_images.length > 0,
         result_platform: bestResult.platform_name,
-        has_result_image: Boolean(bestResult.image_url),
-        has_source_airbnb_image: Boolean(bestResult.source_airbnb_image),
-        has_result_price: bestResult.price !== null,
-        confidence_score: bestResult.confidence_score,
-        savings_simulated: savingsSimulated,
+        verified_price: verifiedPrice,
+        airbnb_price: search.airbnb_price,
+        potential_savings: potentialSavings,
       });
 
       // Return sanitized data - no personal travel dates or IDs
-      // Use verified extracted price, not stale search_results.price
+      // Only real verified prices, no simulation
       return new Response(
         JSON.stringify({
           success: true,
@@ -194,14 +189,14 @@ serve(async (req) => {
             nights_count: nightsCount,
             cheapestResult: {
               platform_name: bestResult.platform_name,
-              price: verifiedPrice, // Use verified price, not stale search_results.price
+              price: verifiedPrice,
               confidence_score: bestResult.confidence_score,
               image_url: bestResult.image_url,
               source_airbnb_image: bestResult.source_airbnb_image,
             },
             potentialSavings,
             savingsPercentage,
-            savingsSimulated, // Let UI know if these are simulated for demo
+            savingsSimulated: false, // Never simulated - only real verified prices
           },
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
