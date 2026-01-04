@@ -81,6 +81,12 @@ interface ExtractionDiagnostic {
     total_label_found: boolean | null;
     rendered_dates_match: boolean | null;
     extracted_from_breakdown_total: boolean | null;
+    // Expedia diagnostics
+    current_url_at_extraction?: string | null;
+    offers_page_reached?: boolean | null;
+    constructed_offers_url?: string | null;
+    property_id_used?: string | null;
+    expedia_trace?: any | null;
   } | null;
 }
 
@@ -368,6 +374,34 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
                       <span className="text-muted-foreground">—</span>
                     )}
                   </div>
+
+                  {/* Expedia hard-gate trace (if present) */}
+                  {(structuralProof.current_url_at_extraction || structuralProof.constructed_offers_url || structuralProof.property_id_used || structuralProof.offers_page_reached !== undefined) && (
+                    <div className="mt-2 pt-2 border-t border-border space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">offers_page_reached:</span>
+                        <span className="font-mono">{structuralProof.offers_page_reached === null || structuralProof.offers_page_reached === undefined ? '—' : String(structuralProof.offers_page_reached)}</span>
+                      </div>
+                      {structuralProof.property_id_used && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-muted-foreground">propertyId_used:</span>
+                          <span className="font-mono truncate max-w-[220px]">{structuralProof.property_id_used}</span>
+                        </div>
+                      )}
+                      {structuralProof.constructed_offers_url && (
+                        <div className="space-y-1">
+                          <div className="text-muted-foreground">constructed_offers_url:</div>
+                          <div className="font-mono text-[10px] break-all">{structuralProof.constructed_offers_url}</div>
+                        </div>
+                      )}
+                      {structuralProof.current_url_at_extraction && (
+                        <div className="space-y-1">
+                          <div className="text-muted-foreground">current_url_at_extraction:</div>
+                          <div className="font-mono text-[10px] break-all">{structuralProof.current_url_at_extraction}</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 

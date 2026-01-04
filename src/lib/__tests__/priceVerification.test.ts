@@ -241,6 +241,34 @@ const FIXTURE_G_NO_STRUCTURAL_METADATA = {
   },
 };
 
+/**
+ * FIXTURE H: Expedia fragmentary price (property/intermediate page) with NO structural proof
+ *
+ * This is the failure mode we never want to compare: random JPY fragments like "¥25,094".
+ * Even if a number exists in evidence, missing structural proof MUST make it Unverified.
+ */
+const FIXTURE_H_EXPEDIA_FRAGMENT_NO_PROOF = {
+  extraction_status: 'success',
+  dates_validated: true,
+  includes_taxes_fees: false,
+  confidence_score: 0.95,
+  extracted_price: 79.86,
+  currency: 'JPY',
+  evidence_snippets: [
+    'TRACE offers_url=https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887 final_url=null offers_reached=false provider=firecrawl',
+    '¥25,094',
+    '¥79,863 total',
+  ],
+  extraction_metadata: {
+    platform: 'expedia',
+    // intentionally missing breakdown_found/total_label_found/... -> should force NO PROOF
+    expedia_trace: {
+      offers_page_reached: false,
+      reason_offers_not_reached: 'URL not /Hotel-Search',
+    },
+  },
+};
+
 // ============================================================================
 // REGRESSION TESTS
 // ============================================================================
@@ -338,6 +366,15 @@ describe('Price Verification - Structural Verification Invariant', () => {
       expect(result.structural_proof.total_label_found).toBeNull();
       expect(result.structural_proof.rendered_dates_match).toBeNull();
       expect(result.structural_proof.extracted_from_breakdown_total).toBeNull();
+    });
+
+    it('FIXTURE H: Expedia fragmentary prices without structural proof are never eligible', () => {
+      const result = verifyPrice(FIXTURE_H_EXPEDIA_FRAGMENT_NO_PROOF as any);
+
+      expect(result.structural_total_verified).toBe(false);
+      expect(result.price_status).toBe('unverified');
+      expect(result.eligible_for_comparison).toBe(false);
+      expect(result.verification_failures).toContain('no_structural_total_proof');
     });
     
   });

@@ -2253,6 +2253,12 @@ Deno.serve(async (req) => {
             total_label_found: boolean | null;
             rendered_dates_match: boolean | null;
             extracted_from_breakdown_total: boolean | null;
+            // Expedia runtime diagnostics (optional)
+            current_url_at_extraction?: string | null;
+            offers_page_reached?: boolean | null;
+            constructed_offers_url?: string | null;
+            property_id_used?: string | null;
+            expedia_trace?: any | null;
           } = {
             breakdown_found: null,
             total_label_found: null,
@@ -2263,17 +2269,27 @@ Deno.serve(async (req) => {
           if (extraction) {
             // Get price type and evidence from extraction
             const metadata = extraction.extraction_metadata as Record<string, any> | null;
-            price_type = metadata?.price_type || null;
-            evidence_snippets = Array.isArray(extraction.evidence_snippets) 
+            const structuralSource = (metadata?.structuralProof && typeof metadata.structuralProof === 'object')
+              ? metadata.structuralProof
+              : metadata;
+
+            price_type = metadata?.price_type || structuralSource?.price_type || null;
+            evidence_snippets = Array.isArray(extraction.evidence_snippets)
               ? extraction.evidence_snippets.filter((s: any) => typeof s === 'string')
               : null;
-            
-            // Extract structural proof signals from metadata
+
+            // Extract structural proof signals from metadata (supports both legacy top-level + new nested structuralProof)
             structural_proof = {
-              breakdown_found: metadata?.breakdown_found ?? null,
-              total_label_found: metadata?.total_label_found ?? null,
-              rendered_dates_match: metadata?.rendered_dates_match ?? null,
-              extracted_from_breakdown_total: metadata?.extracted_from_breakdown_total ?? null,
+              breakdown_found: structuralSource?.breakdown_found ?? null,
+              total_label_found: structuralSource?.total_label_found ?? null,
+              rendered_dates_match: structuralSource?.rendered_dates_match ?? null,
+              extracted_from_breakdown_total: structuralSource?.extracted_from_breakdown_total ?? null,
+              // Extra Expedia diagnostics (optional)
+              current_url_at_extraction: structuralSource?.current_url_at_extraction ?? null,
+              offers_page_reached: structuralSource?.offers_page_reached ?? null,
+              constructed_offers_url: structuralSource?.constructed_offers_url ?? null,
+              property_id_used: structuralSource?.property_id_used ?? null,
+              expedia_trace: metadata?.expedia_trace ?? null,
             };
             
             // Standard verification failures
