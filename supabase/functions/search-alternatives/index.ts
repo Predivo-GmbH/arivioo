@@ -4169,8 +4169,9 @@ async function addTargetedTextMatches(opts: {
   foundUrls: Set<string>;
   controller?: SSEController;
   errorTracker?: ApiErrorTracker;
+  checkSkip?: () => Promise<boolean>;
 }) {
-  const { serpApiKey, title, cityHint, imageUrlForVerification, alternatives, foundUrls, controller, errorTracker } = opts;
+  const { serpApiKey, title, cityHint, imageUrlForVerification, alternatives, foundUrls, controller, errorTracker, checkSkip } = opts;
 
   const cleanTitle = title.replace(/\s+/g, " ").trim();
   const queries = [
@@ -4180,6 +4181,13 @@ async function addTargetedTextMatches(opts: {
   ].map(q => q.replace(/\s+/g, " ").trim());
 
   for (const q of queries) {
+    // Check if skip was requested
+    if (checkSkip && await checkSkip()) {
+      console.log("Text search: Skip requested, aborting");
+      controller && sendProgress(controller, "Skipped text search", "Moving to results");
+      break;
+    }
+    
     // Check if we should abort due to API errors
     if (errorTracker && shouldAbortDueToApiErrors(errorTracker)) {
       console.log("Aborting text search due to API errors");
@@ -4231,6 +4239,12 @@ async function addTargetedTextMatches(opts: {
       let confidence_score: number | null = null;
 
       if (imageUrlForVerification && thumb) {
+        // Check skip before expensive AI comparison
+        if (checkSkip && await checkSkip()) {
+          console.log("Text search: Skip requested during AI verification, aborting");
+          controller && sendProgress(controller, "Skipped verification", "Moving to results");
+          return; // Exit the function early
+        }
         const ai = await compareImagesWithAI(imageUrlForVerification, thumb);
         if (ai.isMatch && ai.score >= 90) {
           match_type = 'visual';
@@ -5814,6 +5828,7 @@ async function runSearchWithStreaming(
       foundUrls,
       controller,
       errorTracker: apiErrorTracker,
+      checkSkip: claimSkipNow, // Pass skip checker to abort text search on skip request
     });
   }
 
