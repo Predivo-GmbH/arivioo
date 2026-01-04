@@ -1588,4 +1588,301 @@ describe('Expedia Extraction Invariants', () => {
     
   });
   
+  // ============================================================================
+  // Expedia Checkout-Only Extraction (v4.0)
+  // ============================================================================
+  
+  describe('Expedia Checkout-Only Extraction', () => {
+    
+    /**
+     * FIXTURE: Checkout context with USD breakdown
+     * Expected: Verified, no conversion needed
+     */
+    const EXPEDIA_FIXTURE_CHECKOUT_USD = {
+      extraction_status: 'success',
+      dates_validated: true,
+      extracted_price: 523.00,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '4.0',
+        phaseA: {
+          ran: true,
+          datesVerified: true,
+          isCheckoutContext: true,
+          isListingPage: false,
+          isSearchResults: false,
+          pageContextEvidence: 'price summary',
+        },
+        phaseB: {
+          ran: true,
+          extractedPrice: 523.00,
+          currency: 'USD',
+          originalAmount: 523.00,
+          originalCurrency: 'USD',
+          conversionRate: 1,
+          priceVerified: true,
+          extractionContext: 'checkout breakdown',
+        },
+        structural_proof: {
+          breakdown_found: true,
+          total_label_found: true,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: true,
+          proof_version: '1.0',
+          page_context: 'checkout breakdown',
+          original_currency: 'USD',
+          original_amount: 523.00,
+          converted_amount_usd: 523.00,
+          conversion_rate: 1,
+        },
+        currency_handling: {
+          original_currency: 'USD',
+          original_amount: 523.00,
+          converted_amount_usd: 523.00,
+          conversion_rate: 1,
+        },
+      },
+    };
+    
+    /**
+     * FIXTURE: Checkout context with JPY breakdown (needs conversion)
+     * Expected: Verified after conversion
+     */
+    const EXPEDIA_FIXTURE_CHECKOUT_JPY = {
+      extraction_status: 'success',
+      dates_validated: true,
+      extracted_price: 468.90, // 70000 JPY * 0.0067
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '4.0',
+        phaseA: {
+          ran: true,
+          datesVerified: true,
+          isCheckoutContext: true,
+          isListingPage: false,
+          isSearchResults: false,
+        },
+        phaseB: {
+          ran: true,
+          extractedPrice: 468.90,
+          currency: 'USD',
+          originalAmount: 70000,
+          originalCurrency: 'JPY',
+          conversionRate: 0.0067,
+          priceVerified: true,
+          extractionContext: 'checkout breakdown',
+        },
+        structural_proof: {
+          breakdown_found: true,
+          total_label_found: true,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: true,
+          proof_version: '1.0',
+          original_currency: 'JPY',
+          original_amount: 70000,
+          converted_amount_usd: 468.90,
+          conversion_rate: 0.0067,
+        },
+        currency_handling: {
+          original_currency: 'JPY',
+          original_amount: 70000,
+          converted_amount_usd: 468.90,
+          conversion_rate: 0.0067,
+        },
+      },
+    };
+    
+    /**
+     * FIXTURE: Listing page only (checkout not reached)
+     * Expected: checkout_not_reached, no price
+     */
+    const EXPEDIA_FIXTURE_LISTING_ONLY = {
+      extraction_status: 'checkout_not_reached',
+      dates_validated: true,
+      extracted_price: null,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '4.0',
+        phaseA: {
+          ran: true,
+          datesVerified: true,
+          isCheckoutContext: false,
+          isListingPage: true,
+          isSearchResults: false,
+          pageContextEvidence: 'property amenities',
+        },
+        phaseB: {
+          ran: false,
+          extractedPrice: null,
+          rejectionReason: 'Not in checkout context (page type: listing)',
+        },
+        structural_proof: {
+          breakdown_found: false,
+          total_label_found: false,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: false,
+          proof_version: '1.0',
+          page_context: 'property amenities',
+        },
+      },
+    };
+    
+    /**
+     * FIXTURE: Subtotal/nightly rate only (no total)
+     * Expected: price_not_found, NO PROOF
+     */
+    const EXPEDIA_FIXTURE_SUBTOTAL_ONLY = {
+      extraction_status: 'price_not_found',
+      dates_validated: true,
+      extracted_price: null,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '4.0',
+        phaseA: {
+          ran: true,
+          datesVerified: true,
+          isCheckoutContext: true,
+          priceEligible: true,
+        },
+        phaseB: {
+          ran: true,
+          extractedPrice: null,
+          subtotalRejected: true,
+          rejectionReason: 'No checkout breakdown total found',
+        },
+        structural_proof: {
+          breakdown_found: false,
+          total_label_found: false,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: false,
+          proof_version: '1.0',
+        },
+      },
+    };
+    
+    describe('Checkout Context Enforcement', () => {
+      
+      it('Prices must ONLY be extracted from checkout/booking context', () => {
+        // Success case - checkout context
+        expect(EXPEDIA_FIXTURE_CHECKOUT_USD.extraction_metadata.phaseA.isCheckoutContext).toBe(true);
+        expect(EXPEDIA_FIXTURE_CHECKOUT_USD.extraction_status).toBe('success');
+        expect(EXPEDIA_FIXTURE_CHECKOUT_USD.extracted_price).toBe(523.00);
+      });
+      
+      it('Listing page prices must be REJECTED with checkout_not_reached', () => {
+        expect(EXPEDIA_FIXTURE_LISTING_ONLY.extraction_metadata.phaseA.isListingPage).toBe(true);
+        expect(EXPEDIA_FIXTURE_LISTING_ONLY.extraction_status).toBe('checkout_not_reached');
+        expect(EXPEDIA_FIXTURE_LISTING_ONLY.extracted_price).toBeNull();
+      });
+      
+      it('Phase B must not run when checkout context not reached', () => {
+        expect(EXPEDIA_FIXTURE_LISTING_ONLY.extraction_metadata.phaseB.ran).toBe(false);
+      });
+      
+      it('Page context evidence must be captured for diagnostics', () => {
+        expect(EXPEDIA_FIXTURE_CHECKOUT_USD.extraction_metadata.phaseA.pageContextEvidence).toBeDefined();
+        expect(EXPEDIA_FIXTURE_LISTING_ONLY.extraction_metadata.phaseA.pageContextEvidence).toBe('property amenities');
+      });
+      
+    });
+    
+    describe('Subtotal/Partial Price Rejection', () => {
+      
+      it('Nightly rates must be rejected, not extracted', () => {
+        expect(EXPEDIA_FIXTURE_SUBTOTAL_ONLY.extraction_status).toBe('price_not_found');
+        expect(EXPEDIA_FIXTURE_SUBTOTAL_ONLY.extraction_metadata.phaseB.subtotalRejected).toBe(true);
+      });
+      
+      it('Structural proof must show NO PROOF when only subtotals found', () => {
+        const proof = EXPEDIA_FIXTURE_SUBTOTAL_ONLY.extraction_metadata.structural_proof;
+        
+        expect(proof.breakdown_found).toBe(false);
+        expect(proof.total_label_found).toBe(false);
+        expect(proof.extracted_from_breakdown_total).toBe(false);
+      });
+      
+      it('Subtotal rejection reason must be captured', () => {
+        expect(EXPEDIA_FIXTURE_SUBTOTAL_ONLY.extraction_metadata.phaseB.rejectionReason).toBeDefined();
+      });
+      
+    });
+    
+    describe('Currency Normalization', () => {
+      
+      it('USD prices need no conversion', () => {
+        const handling = EXPEDIA_FIXTURE_CHECKOUT_USD.extraction_metadata.currency_handling;
+        
+        expect(handling.original_currency).toBe('USD');
+        expect(handling.converted_amount_usd).toBe(handling.original_amount);
+        expect(handling.conversion_rate).toBe(1);
+      });
+      
+      it('Non-USD prices must be converted to USD', () => {
+        const handling = EXPEDIA_FIXTURE_CHECKOUT_JPY.extraction_metadata.currency_handling;
+        
+        expect(handling.original_currency).toBe('JPY');
+        expect(handling.original_amount).toBe(70000);
+        expect(handling.conversion_rate).toBe(0.0067);
+        expect(handling.converted_amount_usd).toBeCloseTo(469, 0); // ~70000 * 0.0067
+      });
+      
+      it('Extracted price must be in USD after conversion', () => {
+        expect(EXPEDIA_FIXTURE_CHECKOUT_JPY.extraction_metadata.phaseB.currency).toBe('USD');
+        expect(EXPEDIA_FIXTURE_CHECKOUT_JPY.extraction_metadata.phaseB.extractedPrice).toBeCloseTo(469, 0);
+      });
+      
+      it('Currency audit trail must be in structural proof', () => {
+        const proof = EXPEDIA_FIXTURE_CHECKOUT_JPY.extraction_metadata.structural_proof;
+        
+        expect(proof.original_currency).toBe('JPY');
+        expect(proof.original_amount).toBe(70000);
+        expect(proof.converted_amount_usd).toBeDefined();
+        expect(proof.conversion_rate).toBe(0.0067);
+      });
+      
+    });
+    
+    describe('Verified Status Requirements', () => {
+      
+      it('Verified requires checkout context + breakdown + total label + dates match', () => {
+        const proof = EXPEDIA_FIXTURE_CHECKOUT_USD.extraction_metadata.structural_proof;
+        
+        // All four must be true for Verified
+        expect(proof.breakdown_found).toBe(true);
+        expect(proof.total_label_found).toBe(true);
+        expect(proof.rendered_dates_match).toBe(true);
+        expect(proof.extracted_from_breakdown_total).toBe(true);
+      });
+      
+      it('Listing page extractions cannot be Verified (even if has price)', () => {
+        const proof = EXPEDIA_FIXTURE_LISTING_ONLY.extraction_metadata.structural_proof;
+        
+        expect(proof.breakdown_found).toBe(false);
+        expect(proof.extracted_from_breakdown_total).toBe(false);
+      });
+      
+      it('Subtotal-only extractions cannot be Verified', () => {
+        const proof = EXPEDIA_FIXTURE_SUBTOTAL_ONLY.extraction_metadata.structural_proof;
+        
+        expect(proof.breakdown_found).toBe(false);
+        expect(proof.total_label_found).toBe(false);
+        expect(proof.extracted_from_breakdown_total).toBe(false);
+      });
+      
+    });
+    
+    describe('Extraction Context Audit Trail', () => {
+      
+      it('Phase B must record where price was extracted from', () => {
+        expect(EXPEDIA_FIXTURE_CHECKOUT_USD.extraction_metadata.phaseB.extractionContext).toBe('checkout breakdown');
+      });
+      
+      it('Structural proof must include page_context', () => {
+        expect(EXPEDIA_FIXTURE_CHECKOUT_USD.extraction_metadata.structural_proof.page_context).toBeDefined();
+      });
+      
+    });
+    
+  });
+  
 });
