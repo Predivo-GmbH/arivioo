@@ -744,41 +744,99 @@ Deno.serve(async (req) => {
       const extractorResult = extractorResponse.result;
       
       if (extractorResult) {
-        // Phase A results
-        result.phaseA.datesValidated = extractorResult.phaseA?.datesValidated || extractorResult.dates_validated || false;
-        result.phaseA.detectedCheckIn = extractorResult.phaseA?.detectedCheckIn || extractorResult.detected_checkin || null;
-        result.phaseA.detectedCheckOut = extractorResult.phaseA?.detectedCheckOut || extractorResult.detected_checkout || null;
-        result.phaseA.status = extractorResult.phaseA?.status || (result.phaseA.datesValidated ? 'success' : 'dates_not_applied');
+        // EXPEDIA-SPECIFIC: extract-expedia returns a flattened format
+        // with 'price' (not extracted_price), 'status', 'success', 'structuralProof', etc.
+        const isExpedia = dedicatedExtractor === 'extract-expedia';
         
-        // Phase B results
-        result.phaseB.extractedPrice = extractorResult.phaseB?.extractedPrice || extractorResult.extracted_price || null;
-        result.phaseB.currency = extractorResult.phaseB?.currency || extractorResult.currency || null;
-        result.phaseB.includesTaxesFees = extractorResult.phaseB?.includesTaxesFees ?? extractorResult.includes_taxes_fees ?? null;
-        result.phaseB.status = extractorResult.phaseB?.status || extractorResult.status || 'extraction_error';
-        result.phaseB.evidence = extractorResult.phaseB?.evidenceSnippet || extractorResult.evidence_snippet || null;
-        
-        // Map to terminal status
-        if (extractorResult.success && result.phaseB.extractedPrice) {
-          result.finalStatus = 'success';
-        } else if (!result.phaseA.datesValidated) {
-          // Map Phase A failure
-          const phaseAStatus = extractorResult.phaseA?.status || extractorResult.status || '';
-          if (phaseAStatus.includes('sold_out') || phaseAStatus.includes('no_availability')) {
-            result.finalStatus = 'no_availability_for_dates';
-          } else if (phaseAStatus.includes('blocked') || phaseAStatus.includes('captcha')) {
-            result.finalStatus = 'blocked_captcha_or_bot';
-          } else {
-            result.finalStatus = 'dates_not_applied';
-          }
-        } else {
-          // Phase A passed but Phase B failed
-          const phaseBStatus = extractorResult.phaseB?.status || extractorResult.status || '';
-          if (phaseBStatus.includes('price_not_found') || phaseBStatus.includes('no_price')) {
-            result.finalStatus = 'price_not_found_after_dates_applied';
-          } else if (phaseBStatus.includes('blocked')) {
-            result.finalStatus = 'blocked_captcha_or_bot';
+        if (isExpedia) {
+          // Expedia response format:
+          // { success, status, price, currency, includesTaxesFees, structuralProof, providerUsed, ... }
+          const expediaPrice = extractorResult.price ?? null;
+          const expediaStatus = extractorResult.status || 'extraction_error';
+          const expediaSuccess = extractorResult.success === true;
+          const proof = extractorResult.structuralProof || {};
+          
+          // Phase A: dates are validated if success or offers page was reached
+          result.phaseA.datesValidated = expediaSuccess || proof.offers_page_gate_passed || false;
+          result.phaseA.status = result.phaseA.datesValidated ? 'success' : expediaStatus;
+          
+          // Phase B: price extraction
+          result.phaseB.extractedPrice = expediaPrice;
+          result.phaseB.currency = extractorResult.currency || 'USD';
+          result.phaseB.includesTaxesFees = extractorResult.includesTaxesFees ?? null;
+          result.phaseB.status = expediaStatus;
+          result.phaseB.evidence = extractorResult.error || null;
+          
+          // Map Expedia terminal status directly - these are already canonical
+          const expediaTerminalStatuses = [
+            'success',
+            'expedia_target_offer_not_found',
+            'expedia_target_offer_mismatch',
+            'expedia_dates_unavailable_for_target',
+            'expedia_target_total_not_found',
+            'expedia_offers_page_not_reached',
+            'expedia_total_not_found_on_offers_page',
+            'expedia_access_blocked',
+            'property_id_not_found',
+            'dates_unavailable',
+            'blocked_captcha_or_bot',
+            'blocked_rate_limit',
+          ];
+          
+          if (expediaSuccess && expediaPrice) {
+            result.finalStatus = 'success';
+          } else if (expediaTerminalStatuses.includes(expediaStatus)) {
+            // Trust Expedia's terminal status - map to our enums where possible
+            if (expediaStatus.includes('unavailable') || expediaStatus.includes('dates_unavailable')) {
+              result.finalStatus = 'no_availability_for_dates';
+            } else if (expediaStatus.includes('blocked') || expediaStatus.includes('access_blocked')) {
+              result.finalStatus = 'blocked_captcha_or_bot';
+            } else if (expediaStatus.includes('not_found') || expediaStatus.includes('mismatch')) {
+              result.finalStatus = 'price_not_found_after_dates_applied';
+            } else {
+              result.finalStatus = 'extraction_error';
+            }
           } else {
             result.finalStatus = 'extraction_error';
+          }
+          
+          // NOTE: extract-expedia already persisted to DB when extractionId was provided
+          // We don't need to call ensureTerminalStatus as it would override the correct status
+          console.log(`[WORKER] Expedia extraction: status=${expediaStatus}, price=${expediaPrice}, finalStatus=${result.finalStatus}`);
+          
+        } else {
+          // Generic dedicated extractor response handling (non-Expedia)
+          result.phaseA.datesValidated = extractorResult.phaseA?.datesValidated || extractorResult.dates_validated || false;
+          result.phaseA.detectedCheckIn = extractorResult.phaseA?.detectedCheckIn || extractorResult.detected_checkin || null;
+          result.phaseA.detectedCheckOut = extractorResult.phaseA?.detectedCheckOut || extractorResult.detected_checkout || null;
+          result.phaseA.status = extractorResult.phaseA?.status || (result.phaseA.datesValidated ? 'success' : 'dates_not_applied');
+          
+          result.phaseB.extractedPrice = extractorResult.phaseB?.extractedPrice || extractorResult.extracted_price || null;
+          result.phaseB.currency = extractorResult.phaseB?.currency || extractorResult.currency || null;
+          result.phaseB.includesTaxesFees = extractorResult.phaseB?.includesTaxesFees ?? extractorResult.includes_taxes_fees ?? null;
+          result.phaseB.status = extractorResult.phaseB?.status || extractorResult.status || 'extraction_error';
+          result.phaseB.evidence = extractorResult.phaseB?.evidenceSnippet || extractorResult.evidence_snippet || null;
+          
+          if (extractorResult.success && result.phaseB.extractedPrice) {
+            result.finalStatus = 'success';
+          } else if (!result.phaseA.datesValidated) {
+            const phaseAStatus = extractorResult.phaseA?.status || extractorResult.status || '';
+            if (phaseAStatus.includes('sold_out') || phaseAStatus.includes('no_availability')) {
+              result.finalStatus = 'no_availability_for_dates';
+            } else if (phaseAStatus.includes('blocked') || phaseAStatus.includes('captcha')) {
+              result.finalStatus = 'blocked_captcha_or_bot';
+            } else {
+              result.finalStatus = 'dates_not_applied';
+            }
+          } else {
+            const phaseBStatus = extractorResult.phaseB?.status || extractorResult.status || '';
+            if (phaseBStatus.includes('price_not_found') || phaseBStatus.includes('no_price')) {
+              result.finalStatus = 'price_not_found_after_dates_applied';
+            } else if (phaseBStatus.includes('blocked')) {
+              result.finalStatus = 'blocked_captcha_or_bot';
+            } else {
+              result.finalStatus = 'extraction_error';
+            }
           }
         }
       } else {

@@ -51,6 +51,46 @@ function classifyFailure(extractionStatus: string | null, extractionError: strin
   const error = extractionError || '';
   const status = extractionStatus;
 
+  // ========== EXPEDIA-SPECIFIC TERMINAL STATUSES (v6.3 target card anchoring) ==========
+  // These must be checked first as they are the canonical Expedia statuses
+  
+  // Target property card not found on offers page
+  if (status === 'expedia_target_offer_not_found') {
+    return { category: 'price_not_visible', reason: 'Property not found on Expedia' };
+  }
+  
+  // Target property card title doesn't match (wrong property)
+  if (status === 'expedia_target_offer_mismatch') {
+    return { category: 'price_not_visible', reason: 'Property mismatch on Expedia' };
+  }
+  
+  // Target property card shows unavailability (e.g., "Minimum stay not met")
+  if (status === 'expedia_dates_unavailable_for_target' || status === 'dates_unavailable') {
+    return { category: 'sold_out', reason: 'Not available for these dates on Expedia' };
+  }
+  
+  // Target card found but couldn't extract total price
+  if (status === 'expedia_target_total_not_found') {
+    return { category: 'price_not_visible', reason: 'Total price not visible on Expedia' };
+  }
+  
+  // Offers page not reached
+  if (status === 'expedia_offers_page_not_reached' || status === 'expedia_total_not_found_on_offers_page') {
+    return { category: 'render_failed', reason: 'Expedia offers page not loaded' };
+  }
+  
+  // Expedia blocked access (CAPTCHA/bot detection)
+  if (status === 'expedia_access_blocked') {
+    return { category: 'blocked', reason: 'Blocked by Expedia' };
+  }
+  
+  // Property ID not found in URL
+  if (status === 'property_id_not_found') {
+    return { category: 'price_not_visible', reason: 'Property not found on Expedia' };
+  }
+
+  // ========== GENERIC PROVIDER ERRORS ==========
+  
   // Provider errors
   if (error.includes('Zyte error: 400') || error.includes('Zyte 400')) {
     return { category: 'provider_error', reason: 'Provider rejected request' };
