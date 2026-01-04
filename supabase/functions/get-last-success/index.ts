@@ -79,7 +79,7 @@ serve(async (req) => {
       // Then fall back to any visual match (>= 70%) for demo purposes
       const { data: results, error: resultsError } = await supabase
         .from("search_results")
-        .select("*")
+        .select("*, price_extractions!price_extractions_search_result_id_fkey(extraction_status, extracted_price)")
         .eq("search_id", search.id)
         .eq("match_type", "visual")
         .gte("confidence_score", 0.70) // Lower threshold for flexible matching
@@ -93,28 +93,50 @@ serve(async (req) => {
 
       if (!results || results.length === 0) continue;
 
+      // CRITICAL: Only use prices from SUCCESSFUL extractions
+      // The search_results.price field may contain stale/initial estimates
+      // We must check price_extractions for actual extracted prices
+      const getVerifiedPrice = (r: typeof results[0]): number | null => {
+        const extraction = r.price_extractions;
+        if (!extraction) return null;
+        // Only use prices from successful extractions (verified or unverified)
+        const status = extraction.extraction_status;
+        if (status === 'completed' || status === 'verified' || status === 'unverified') {
+          return extraction.extracted_price ?? null;
+        }
+        return null;
+      };
+
       // Prioritize results for demo display:
-      // 1. Best: Has image + source_airbnb_image (for side-by-side) + price with savings
+      // 1. Best: Has image + source_airbnb_image (for side-by-side) + VERIFIED price with savings
       // 2. Good: Has image + source_airbnb_image (for side-by-side) - even without price
       // 3. Acceptable: Has image only
       // The key is to get REAL matched image pairs for transparency/trust
       const hasImagePair = (r: typeof results[0]) => 
         r.image_url && r.source_airbnb_image;
       
-      const hasSavings = (r: typeof results[0]) => 
-        r.price !== null && search.airbnb_price && r.price < search.airbnb_price;
+      const hasSavings = (r: typeof results[0]) => {
+        const verifiedPrice = getVerifiedPrice(r);
+        return verifiedPrice !== null && search.airbnb_price && verifiedPrice < search.airbnb_price;
+      };
+
+      const hasVerifiedPrice = (r: typeof results[0]) => getVerifiedPrice(r) !== null;
 
       const bestResult =
         results.find((r) => hasImagePair(r) && hasSavings(r)) ||
-        results.find((r) => hasImagePair(r) && r.price !== null) ||
+        results.find((r) => hasImagePair(r) && hasVerifiedPrice(r)) ||
         results.find((r) => hasImagePair(r)) ||
-        results.find((r) => r.image_url && r.price !== null) ||
+        results.find((r) => r.image_url && hasVerifiedPrice(r)) ||
         results.find((r) => r.image_url) ||
         results[0];
+      
+      // Use verified extracted price, not stale search_results.price
+      const verifiedPrice = getVerifiedPrice(bestResult);
 
       const nightsCount = search.nights_count ?? null;
       const airbnbTotal = search.airbnb_price && nightsCount ? search.airbnb_price * nightsCount : null;
-      const bestTotal = bestResult.price && nightsCount ? bestResult.price * nightsCount : null;
+      // Use verified extracted price only, not stale search_results.price
+      const bestTotal = verifiedPrice && nightsCount ? verifiedPrice * nightsCount : null;
 
       // Add service fee estimate (14%)
       const airbnbWithFees = airbnbTotal ? airbnbTotal * 1.14 : null;
@@ -160,6 +182,7 @@ serve(async (req) => {
       });
 
       // Return sanitized data - no personal travel dates or IDs
+      // Use verified extracted price, not stale search_results.price
       return new Response(
         JSON.stringify({
           success: true,
@@ -171,7 +194,7 @@ serve(async (req) => {
             nights_count: nightsCount,
             cheapestResult: {
               platform_name: bestResult.platform_name,
-              price: bestResult.price,
+              price: verifiedPrice, // Use verified price, not stale search_results.price
               confidence_score: bestResult.confidence_score,
               image_url: bestResult.image_url,
               source_airbnb_image: bestResult.source_airbnb_image,
