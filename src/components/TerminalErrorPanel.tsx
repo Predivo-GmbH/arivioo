@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { AlertCircle, Calendar, Info, Check, ExternalLink, Search, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected";
+type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected" | "expedia_access_blocked";
 
 interface TerminalErrorPanelProps {
   type: TerminalErrorType;
@@ -111,6 +111,24 @@ const config: Record<TerminalErrorType, {
       "Wait 10-15 minutes before trying again",
       "Open the listing on Airbnb directly to see pricing",
       "This is a security measure — it will resolve automatically",
+    ],
+    primaryAction: { label: "Try Again Later", to: "/dashboard" },
+  },
+  expedia_access_blocked: {
+    icon: AlertCircle,
+    iconColor: "text-red-500",
+    bgColor: "bg-red-500/10",
+    borderColor: "border-red-500/20",
+    title: "Expedia Access Blocked",
+    description: (
+      <>
+        Expedia detected automated access and <span className="font-semibold text-foreground">blocked the request</span>. We cannot retrieve pricing for these dates right now.
+      </>
+    ),
+    tips: [
+      "Wait 10-15 minutes before trying again",
+      "Open the listing directly on Expedia to see pricing",
+      "This is a temporary security measure — it will resolve automatically",
     ],
     primaryAction: { label: "Try Again Later", to: "/dashboard" },
   },
