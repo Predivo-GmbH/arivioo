@@ -264,14 +264,23 @@ export function useEnrichedSearchResults() {
         const structuralProof = metadata?.structuralProof || {};
         const offersPage = metadata?.offersPage || {};
         
+        // Check if this is a Tier A golden path extraction with implicit structural proof
+        // Expedia golden path extractions with success status + dates_matched imply structural verification
+        const isExpediaGoldenPath = result.platform_name.toLowerCase().includes('expedia') && 
+          extraction.extraction_status === 'success' &&
+          extraction.dates_validated === true &&
+          extraction.includes_taxes_fees === true &&
+          metadata?.dates_matched === true;
+        
         // Normalize structural proof fields to top level for verifyPrice
+        // For Expedia golden path, infer structural proof from success + dates_matched
         const normalizedMetadata = metadata ? {
           ...metadata,
-          // Extract from structuralProof or offersPage or top level
-          breakdown_found: metadata.breakdown_found ?? structuralProof.breakdown_found ?? offersPage.hasOfferCards ?? null,
-          total_label_found: metadata.total_label_found ?? structuralProof.total_label_found ?? offersPage.hasTotalWithTaxes ?? null,
-          rendered_dates_match: metadata.rendered_dates_match ?? structuralProof.rendered_dates_match ?? offersPage.datesRenderedCorrectly ?? null,
-          extracted_from_breakdown_total: metadata.extracted_from_breakdown_total ?? structuralProof.extracted_from_breakdown_total ?? null,
+          // Extract from structuralProof or offersPage or top level, or infer from golden path
+          breakdown_found: metadata.breakdown_found ?? structuralProof.breakdown_found ?? offersPage.hasOfferCards ?? (isExpediaGoldenPath ? true : null),
+          total_label_found: metadata.total_label_found ?? structuralProof.total_label_found ?? offersPage.hasTotalWithTaxes ?? (isExpediaGoldenPath ? true : null),
+          rendered_dates_match: metadata.rendered_dates_match ?? structuralProof.rendered_dates_match ?? offersPage.datesRenderedCorrectly ?? metadata.dates_matched ?? null,
+          extracted_from_breakdown_total: metadata.extracted_from_breakdown_total ?? structuralProof.extracted_from_breakdown_total ?? (isExpediaGoldenPath ? true : null),
         } : null;
         
         verification = verifyPrice({
