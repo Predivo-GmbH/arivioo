@@ -630,6 +630,7 @@ export type Database = {
           admin_email: string
           airbnb_url: string
           created_at: string
+          derived_request: Json | null
           duration_ms: number | null
           error_message: string | null
           expedia_url: string | null
@@ -642,6 +643,7 @@ export type Database = {
           admin_email: string
           airbnb_url: string
           created_at?: string
+          derived_request?: Json | null
           duration_ms?: number | null
           error_message?: string | null
           expedia_url?: string | null
@@ -654,6 +656,7 @@ export type Database = {
           admin_email?: string
           airbnb_url?: string
           created_at?: string
+          derived_request?: Json | null
           duration_ms?: number | null
           error_message?: string | null
           expedia_url?: string | null

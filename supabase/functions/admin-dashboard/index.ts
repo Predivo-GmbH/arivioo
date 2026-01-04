@@ -2486,7 +2486,7 @@ Deno.serve(async (req) => {
       console.log('[Admin Dashboard] Running extraction test');
       const startTime = Date.now();
       
-      let body: { airbnb_url: string; expedia_url?: string | null; skip_discovery?: boolean };
+      let body: { airbnb_url: string; expedia_url?: string | null; skip_discovery?: boolean; expedia_only?: boolean };
       try {
         body = await req.json();
       } catch {
@@ -2496,7 +2496,7 @@ Deno.serve(async (req) => {
         );
       }
 
-      const { airbnb_url, expedia_url, skip_discovery = true } = body;
+      const { airbnb_url, expedia_url, skip_discovery = true, expedia_only = false } = body;
 
       if (!airbnb_url) {
         return new Response(
@@ -2540,7 +2540,38 @@ Deno.serve(async (req) => {
         guests,
         currency,
         skip_discovery,
+        expedia_only,
       };
+
+      // Build derived_request with parsed values
+      let derived_request: Record<string, any> = {
+        check_in,
+        check_out,
+        adults,
+        currency,
+      };
+
+      // Parse Expedia property ID if URL provided
+      if (expedia_url) {
+        const propertyIdMatch = expedia_url.match(/\.h(\d{6,12})(?:\.|$)/i) || 
+                                expedia_url.match(/[\/\-]h(\d{6,12})(?:[\/\.\-]|$)/i);
+        if (propertyIdMatch) {
+          derived_request.property_id = propertyIdMatch[1];
+          // Build offers URL
+          try {
+            const expediaUrlObj = new URL(expedia_url);
+            const domain = expediaUrlObj.hostname;
+            const offersUrl = new URL(`https://${domain}/Hotel-Search`);
+            offersUrl.searchParams.set('startDate', check_in);
+            offersUrl.searchParams.set('endDate', check_out);
+            offersUrl.searchParams.set('adults', String(Math.max(2, adults)));
+            offersUrl.searchParams.set('selected', propertyIdMatch[1]);
+            derived_request.constructed_offers_url = offersUrl.toString();
+          } catch (e) {
+            console.log('[Extraction Test] Could not construct offers URL:', e);
+          }
+        }
+      }
 
       // Create test run record
       const { data: testRun, error: insertError } = await supabase
@@ -2550,6 +2581,7 @@ Deno.serve(async (req) => {
           airbnb_url,
           expedia_url: expedia_url || null,
           request_params,
+          derived_request,
           status: 'running',
         })
         .select()
@@ -2574,63 +2606,66 @@ Deno.serve(async (req) => {
       let overallStatus = 'success';
       let errorMessage: string | null = null;
 
-      // Run Airbnb baseline extraction
+      // Run Airbnb baseline extraction (skip if expedia_only mode)
       // NOTE: airbnb-baseline-test validates admin session, so pass the admin token from request
-      try {
-        console.log('[Extraction Test] Running Airbnb baseline extraction');
-        const airbnbResponse = await fetch(`${supabaseUrl}/functions/v1/airbnb-baseline-test`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            // Pass the admin session token (already validated above), not service key
-            'Authorization': `Bearer ${token}`,
-          },
-          body: JSON.stringify({ 
-            url: airbnb_url,
-            runs: 1, // Single run for test harness (faster iteration)
-            delay_seconds: 0,
-          }),
-        });
+      if (!expedia_only) {
+        try {
+          console.log('[Extraction Test] Running Airbnb baseline extraction');
+          const airbnbResponse = await fetch(`${supabaseUrl}/functions/v1/airbnb-baseline-test`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({ 
+              url: airbnb_url,
+              runs: 1, // Single run for test harness (faster iteration)
+              delay_seconds: 0,
+            }),
+          });
 
-        const airbnbData = await airbnbResponse.json();
-        
-        // airbnb-baseline-test returns a different structure - extract from results array
-        const firstRun = airbnbData.results?.[0];
-        const finalPrice = firstRun?.final_price ?? airbnbData.price;
-        const finalCurrency = firstRun?.final_currency ?? airbnbData.currency ?? 'USD';
-        const finalStatus = firstRun?.final_status ?? airbnbData.status;
-        const finalIncludesTaxesFees = firstRun?.final_includes_taxes_fees ?? true;
-        const providerUsed = firstRun?.selected_provider ?? airbnbData.provider;
-        const evidenceSnippet = firstRun?.final_evidence_snippet ?? '';
-        const providerResults = firstRun?.provider_results ?? [];
-        
-        results.airbnb = {
-          platform: 'airbnb',
-          status: finalPrice ? 'success' : 'failed',
-          terminal_status: finalStatus,
-          extracted_price: finalPrice,
-          currency: finalCurrency,
-          includes_taxes_fees: finalIncludesTaxesFees,
-          provider_used: providerUsed,
-          evidence_snippets: evidenceSnippet ? [evidenceSnippet] : [],
-          verification_status: finalPrice ? 'verified' : 'unverified',
-          structural_proof: {},
-          provider_results: providerResults,
-          run_id: airbnbData.run_id,
-          error: airbnbData.error,
-        };
+          const airbnbData = await airbnbResponse.json();
+          
+          // airbnb-baseline-test returns a different structure - extract from results array
+          const firstRun = airbnbData.results?.[0];
+          const finalPrice = firstRun?.final_price ?? airbnbData.price;
+          const finalCurrency = firstRun?.final_currency ?? airbnbData.currency ?? 'USD';
+          const finalStatus = firstRun?.final_status ?? airbnbData.status;
+          const finalIncludesTaxesFees = firstRun?.final_includes_taxes_fees ?? true;
+          const providerUsed = firstRun?.selected_provider ?? airbnbData.provider;
+          const evidenceSnippet = firstRun?.final_evidence_snippet ?? '';
+          const providerResults = firstRun?.provider_results ?? [];
+          
+          results.airbnb = {
+            platform: 'airbnb',
+            status: finalPrice ? 'success' : 'failed',
+            terminal_status: finalStatus,
+            extracted_price: finalPrice,
+            currency: finalCurrency,
+            includes_taxes_fees: finalIncludesTaxesFees,
+            provider_used: providerUsed,
+            evidence_snippets: evidenceSnippet ? [evidenceSnippet] : [],
+            verification_status: finalPrice ? 'verified' : 'unverified',
+            structural_proof: {},
+            provider_results: providerResults,
+            run_id: airbnbData.run_id,
+            error: airbnbData.error,
+          };
 
-        if (!finalPrice) {
+          if (!finalPrice) {
+            overallStatus = 'partial';
+          }
+        } catch (err: any) {
+          console.error('[Extraction Test] Airbnb extraction failed:', err);
+          results.airbnb = {
+            platform: 'airbnb',
+            status: 'error',
+            error: err.message || 'Airbnb extraction failed',
+          };
           overallStatus = 'partial';
         }
-      } catch (err: any) {
-        console.error('[Extraction Test] Airbnb extraction failed:', err);
-        results.airbnb = {
-          platform: 'airbnb',
-          status: 'error',
-          error: err.message || 'Airbnb extraction failed',
-        };
-        overallStatus = 'partial';
+      } else {
+        console.log('[Extraction Test] Skipping Airbnb extraction (expedia_only mode)');
       }
 
       // Run Expedia extraction if URL provided

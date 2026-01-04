@@ -36,7 +36,18 @@ interface ExtractionResult {
   original_currency?: string;
   conversion_rate?: number;
   golden_path?: Record<string, any>;
-  provider_attempt_trace?: Array<Record<string, any>>;
+  provider_attempt_trace?: Array<{
+    provider: string;
+    attempted: boolean;
+    attemptIndex?: number;
+    outcome: string;
+    contentLength?: number;
+    contentLengthBytes?: number;
+    errorMessage?: string;
+    isRetry?: boolean;
+    retryReason?: string;
+    httpStatus?: number;
+  }>;
   duration_ms?: number;
   converted_usd?: number;
   includes_taxes_fees?: boolean;
@@ -49,6 +60,14 @@ interface ExtractionResult {
   error?: string;
 }
 
+interface DerivedRequest {
+  check_in?: string;
+  check_out?: string;
+  adults?: number;
+  property_id?: string;
+  constructed_offers_url?: string;
+}
+
 interface TestRun {
   id: string;
   created_at: string;
@@ -56,6 +75,7 @@ interface TestRun {
   airbnb_url: string;
   expedia_url: string | null;
   request_params: Record<string, any>;
+  derived_request?: DerivedRequest;
   results_json: {
     airbnb?: ExtractionResult;
     expedia?: ExtractionResult;
@@ -137,6 +157,52 @@ export default function ExtractionTestHarness() {
     setAirbnbUrl(run.airbnb_url);
     setExpediaUrl(run.expedia_url || '');
     setShowHistory(false);
+  };
+
+  const rerunTest = async (run: TestRun) => {
+    setAirbnbUrl(run.airbnb_url);
+    setExpediaUrl(run.expedia_url || '');
+    setShowHistory(false);
+    // Trigger run after state updates
+    setTimeout(() => runTest(), 100);
+  };
+
+  const retryExpediaOnly = async () => {
+    if (!currentResult?.expedia_url && !expediaUrl.trim()) {
+      toast.error('No Expedia URL to retry');
+      return;
+    }
+    
+    setIsRunning(true);
+    
+    try {
+      const token = getToken();
+      if (!token) throw new Error('Not authenticated');
+
+      // Use derived_request if available for dates
+      const derivedDates = currentResult?.derived_request || currentResult?.results_json?.request_dates;
+      
+      const { data, error } = await supabase.functions.invoke('admin-dashboard/extraction-test', {
+        headers: { Authorization: `Bearer ${token}` },
+        body: {
+          airbnb_url: airbnbUrl.trim(),
+          expedia_url: expediaUrl.trim() || currentResult?.expedia_url,
+          skip_discovery: true,
+          expedia_only: true,
+        },
+      });
+
+      if (error) throw error;
+
+      setCurrentResult(data.run);
+      toast.success('Expedia retry completed');
+      fetchRecentRuns();
+    } catch (err: any) {
+      console.error('Expedia retry failed:', err);
+      toast.error(err.message || 'Retry failed');
+    } finally {
+      setIsRunning(false);
+    }
   };
 
   const copyToClipboard = (text: string) => {
@@ -304,11 +370,25 @@ export default function ExtractionTestHarness() {
 
                 {/* Expedia Result */}
                 {currentResult.results_json?.expedia && (
-                  <ExtractionResultPanel 
-                    result={currentResult.results_json.expedia} 
-                    title="Expedia Extraction"
-                    onCopy={copyToClipboard}
-                  />
+                  <div className="space-y-3">
+                    <ExtractionResultPanel 
+                      result={currentResult.results_json.expedia} 
+                      title="Expedia Extraction"
+                      onCopy={copyToClipboard}
+                    />
+                    {/* Retry Expedia Button */}
+                    {currentResult.expedia_url && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={retryExpediaOnly}
+                        disabled={isRunning}
+                      >
+                        <RefreshCw className={`h-4 w-4 mr-2 ${isRunning ? 'animate-spin' : ''}`} />
+                        Retry Expedia Now
+                      </Button>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -332,19 +412,48 @@ export default function ExtractionTestHarness() {
                   recentRuns.map((run) => (
                     <div
                       key={run.id}
-                      className="flex items-center justify-between p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
-                      onClick={() => loadRun(run)}
+                      className="flex items-center justify-between p-3 rounded-lg border hover:bg-muted/50 transition-colors"
                     >
-                      <div className="flex-1 min-w-0">
+                      <div className="flex-1 min-w-0 cursor-pointer" onClick={() => loadRun(run)}>
                         <div className="flex items-center gap-2">
                           {getStatusBadge(run.status)}
                           <span className="text-xs text-muted-foreground">
                             {new Date(run.created_at).toLocaleString()}
                           </span>
+                          {run.results_json?.request_dates && (
+                            <span className="text-xs font-mono text-muted-foreground">
+                              {run.results_json.request_dates.check_in} → {run.results_json.request_dates.check_out}
+                            </span>
+                          )}
                         </div>
                         <p className="text-sm font-mono truncate mt-1">{run.airbnb_url}</p>
                       </div>
-                      <ExternalLink className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                      <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => { e.stopPropagation(); loadRun(run); }}
+                          title="Load run"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => { e.stopPropagation(); rerunTest(run); }}
+                          title="Rerun test"
+                        >
+                          <RefreshCw className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => { e.stopPropagation(); copyToClipboard(JSON.stringify(run.results_json, null, 2)); }}
+                          title="Copy JSON"
+                        >
+                          <Copy className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   ))
                 )}
@@ -482,21 +591,32 @@ function ExtractionResultPanel({ result, title, onCopy }: ExtractionResultPanelP
         {/* Provider Attempt Trace (Expedia) */}
         {result.provider_attempt_trace && result.provider_attempt_trace.length > 0 && (
           <div className="space-y-2">
-            <h5 className="text-sm font-medium">Provider Attempts</h5>
+            <h5 className="text-sm font-medium">Provider Attempts ({result.provider_attempt_trace.length})</h5>
             <div className="space-y-2">
               {result.provider_attempt_trace.map((attempt, i) => (
-                <div key={i} className="bg-muted rounded p-3 text-xs">
-                  <div className="flex items-center gap-2 mb-2">
+                <div key={i} className={`bg-muted rounded p-3 text-xs ${attempt.isRetry ? 'border-l-2 border-yellow-500' : ''}`}>
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
                     <Badge variant={attempt.outcome === 'success' ? 'default' : 'secondary'} className={attempt.outcome === 'success' ? 'bg-green-500' : ''}>
                       {attempt.provider}
                     </Badge>
+                    {attempt.isRetry && (
+                      <Badge variant="outline" className="text-yellow-600 border-yellow-500">
+                        Retry #{attempt.attemptIndex}
+                      </Badge>
+                    )}
                     <span className="font-mono">{attempt.outcome}</span>
-                    {attempt.httpStatus && (
-                      <span className="text-muted-foreground">HTTP {attempt.httpStatus}</span>
+                    {attempt.contentLength != null && (
+                      <span className="text-muted-foreground">{attempt.contentLength.toLocaleString()} chars</span>
+                    )}
+                    {attempt.contentLengthBytes != null && (
+                      <span className="text-muted-foreground">({(attempt.contentLengthBytes / 1024).toFixed(1)} KB)</span>
                     )}
                   </div>
                   {attempt.errorMessage && (
                     <p className="text-destructive">{attempt.errorMessage}</p>
+                  )}
+                  {attempt.retryReason && (
+                    <p className="text-yellow-600">{attempt.retryReason}</p>
                   )}
                 </div>
               ))}
