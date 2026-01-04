@@ -121,6 +121,10 @@ const getCurrencySymbol = (currency: string | null | undefined): string => {
 // Resolve the effective error code used for UX branching.
 // IMPORTANT: dates_unavailable is terminal and must override any "needs confirmation" UX.
 // Maps backend error codes to terminal UX types for consistent friendly messaging.
+//
+// CRITICAL: 'rate_limited' from SerpAPI (alternative discovery) should NOT be terminal
+// if Airbnb extraction succeeded. Only treat rate_limited as terminal when we have
+// no Airbnb price.
 const resolveSearchErrorCode = (s: SearchData | null): string | null => {
   if (!s) return null;
 
@@ -152,6 +156,14 @@ const resolveSearchErrorCode = (s: SearchData | null): string | null => {
   }
 
   if (!rawCode) return null;
+  
+  // CRITICAL: 'rate_limited' from SerpAPI should NOT be terminal if Airbnb price was extracted.
+  // SerpAPI rate limiting only affects alternative discovery, not the Airbnb baseline.
+  // If we have a valid Airbnb price, the search can still complete successfully.
+  if (rawCode === 'rate_limited' && s.airbnb_price && s.airbnb_price > 0) {
+    // Don't treat as terminal - search completed with Airbnb price even if alternatives failed
+    return null;
+  }
   
   // Normalize common error codes to terminal UX types
   const codeMap: Record<string, string> = {
