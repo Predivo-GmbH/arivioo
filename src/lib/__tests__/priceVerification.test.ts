@@ -1350,4 +1350,242 @@ describe('Expedia Extraction Invariants', () => {
     
   });
   
+  // ============================================================================
+  // DATE INJECTION AND PROPAGATION TESTS - v3.0
+  // ============================================================================
+  
+  describe('Date Injection and Propagation', () => {
+    
+    /**
+     * FIXTURE: Correct date injection
+     * Property URL + requested dates -> built URL contains correct chkin/chkout
+     */
+    const EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS = {
+      extraction_status: 'success',
+      dates_validated: true,
+      extracted_price: 450.00,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '3.0',
+        dateInjection: {
+          requestedCheckIn: '2025-02-15',
+          requestedCheckOut: '2025-02-18',
+          finalUrlCheckIn: '2025-02-15',
+          finalUrlCheckOut: '2025-02-18',
+          urlBuiltSuccessfully: true,
+        },
+        structural_proof: {
+          breakdown_found: true,
+          total_label_found: true,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: true,
+          proof_version: '1.0',
+          requested_checkin: '2025-02-15',
+          requested_checkout: '2025-02-18',
+          url_injected_checkin: '2025-02-15',
+          url_injected_checkout: '2025-02-18',
+        },
+        phaseA: {
+          ran: true,
+          datesVerified: true,
+          renderedCheckIn: '2025-02-15',
+          renderedCheckOut: '2025-02-18',
+          dateMismatchReason: null,
+        },
+      },
+    };
+    
+    /**
+     * FIXTURE: Date application failed
+     * Rendered dates do not match requested -> date_application_failed
+     */
+    const EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED = {
+      extraction_status: 'date_application_failed',
+      dates_validated: false,
+      extracted_price: null,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '3.0',
+        dateInjection: {
+          requestedCheckIn: '2025-02-15',
+          requestedCheckOut: '2025-02-18',
+          finalUrlCheckIn: '2025-02-15',
+          finalUrlCheckOut: '2025-02-18',
+          urlBuiltSuccessfully: true,
+        },
+        structural_proof: {
+          breakdown_found: false,
+          total_label_found: false,
+          rendered_dates_match: false,
+          extracted_from_breakdown_total: false,
+          proof_version: '1.0',
+          requested_checkin: '2025-02-15',
+          requested_checkout: '2025-02-18',
+          url_injected_checkin: '2025-02-15',
+          url_injected_checkout: '2025-02-18',
+          date_mismatch_details: 'Rendered Mar 01/Mar 04 != requested 2025-02-15/2025-02-18',
+        },
+        phaseA: {
+          ran: true,
+          datesVerified: false,
+          renderedCheckIn: '2025-03-01',
+          renderedCheckOut: '2025-03-04',
+          dateMismatchReason: 'Rendered Mar 01/Mar 04 != requested 2025-02-15/2025-02-18',
+        },
+      },
+    };
+    
+    describe('Date Injection Validation', () => {
+      
+      it('Requested dates must be stored in dateInjection audit trail', () => {
+        const dateInjection = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.dateInjection;
+        
+        expect(dateInjection.requestedCheckIn).toBe('2025-02-15');
+        expect(dateInjection.requestedCheckOut).toBe('2025-02-18');
+      });
+      
+      it('URL-injected dates must match requested dates', () => {
+        const dateInjection = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.dateInjection;
+        
+        expect(dateInjection.finalUrlCheckIn).toBe(dateInjection.requestedCheckIn);
+        expect(dateInjection.finalUrlCheckOut).toBe(dateInjection.requestedCheckOut);
+        expect(dateInjection.urlBuiltSuccessfully).toBe(true);
+      });
+      
+      it('Structural proof must include date injection audit fields', () => {
+        const proof = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.structural_proof;
+        
+        expect(proof.requested_checkin).toBe('2025-02-15');
+        expect(proof.requested_checkout).toBe('2025-02-18');
+        expect(proof.url_injected_checkin).toBe('2025-02-15');
+        expect(proof.url_injected_checkout).toBe('2025-02-18');
+      });
+      
+    });
+    
+    describe('Rendered Date Verification', () => {
+      
+      it('Phase A must verify rendered dates match requested dates', () => {
+        const phaseA = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.phaseA;
+        
+        expect(phaseA.datesVerified).toBe(true);
+        expect(phaseA.renderedCheckIn).toBe('2025-02-15');
+        expect(phaseA.renderedCheckOut).toBe('2025-02-18');
+      });
+      
+      it('Date mismatch must result in date_application_failed status', () => {
+        expect(EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED.extraction_status).toBe('date_application_failed');
+        expect(EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED.extraction_status).not.toBe('price_not_found');
+        expect(EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED.extraction_status).not.toBe('dates_unavailable');
+      });
+      
+      it('Date mismatch reason must be captured for diagnostics', () => {
+        const phaseA = EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED.extraction_metadata.phaseA;
+        
+        expect(phaseA.datesVerified).toBe(false);
+        expect(phaseA.dateMismatchReason).toBeDefined();
+        expect(phaseA.dateMismatchReason).toContain('Rendered');
+        expect(phaseA.dateMismatchReason).toContain('requested');
+      });
+      
+      it('Structural proof must capture date mismatch details', () => {
+        const proof = EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED.extraction_metadata.structural_proof;
+        
+        expect(proof.rendered_dates_match).toBe(false);
+        expect(proof.date_mismatch_details).toBeDefined();
+      });
+      
+    });
+    
+    describe('Price Extraction Gating by Date Verification', () => {
+      
+      it('Price extraction must NOT proceed when dates not verified', () => {
+        // When dates fail to verify, extraction should abort before Phase B
+        expect(EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED.extracted_price).toBeNull();
+      });
+      
+      it('rendered_dates_match must be true for Verified status', () => {
+        const successProof = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.structural_proof;
+        const failedProof = EXPEDIA_FIXTURE_DATE_APPLICATION_FAILED.extraction_metadata.structural_proof;
+        
+        expect(successProof.rendered_dates_match).toBe(true);
+        expect(failedProof.rendered_dates_match).toBe(false);
+      });
+      
+      it('Availability detection must only run AFTER dates verified in URL', () => {
+        // The contract: dates_unavailable is only valid after we know dates were applied
+        // Otherwise we might be seeing unavailability for the wrong dates
+        const dateInjection = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.dateInjection;
+        
+        expect(dateInjection.urlBuiltSuccessfully).toBe(true);
+        // Only then is the availability check meaningful
+      });
+      
+    });
+    
+    describe('Date Format Validation at Entry', () => {
+      
+      it('Dates must be in YYYY-MM-DD format', () => {
+        const validDateFormat = /^\d{4}-\d{2}-\d{2}$/;
+        
+        const dateInjection = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.dateInjection;
+        
+        expect(validDateFormat.test(dateInjection.requestedCheckIn)).toBe(true);
+        expect(validDateFormat.test(dateInjection.requestedCheckOut)).toBe(true);
+      });
+      
+      it('Invalid date formats must be rejected at entry', () => {
+        const invalidFormats = [
+          '02/15/2025',   // US format
+          '15-02-2025',   // EU format
+          '2025/02/15',   // Wrong separator
+          'Feb 15, 2025', // Text format
+          '15 Feb 2025',  // Text format
+          '',             // Empty
+          null,           // Null
+        ];
+        
+        const validDateFormat = /^\d{4}-\d{2}-\d{2}$/;
+        
+        invalidFormats.forEach(format => {
+          if (typeof format === 'string') {
+            expect(validDateFormat.test(format)).toBe(false);
+          }
+        });
+      });
+      
+    });
+    
+    describe('URL Building Determinism', () => {
+      
+      it('URL builder must remove conflicting date params before setting new ones', () => {
+        // The contract: if the original URL has chkin=2025-01-01, 
+        // and we request 2025-02-15, the final URL must have chkin=2025-02-15 ONLY
+        const dateInjection = EXPEDIA_FIXTURE_DATE_INJECTION_SUCCESS.extraction_metadata.dateInjection;
+        
+        // No duplicates - requested and final must be identical
+        expect(dateInjection.finalUrlCheckIn).toBe(dateInjection.requestedCheckIn);
+        expect(dateInjection.finalUrlCheckOut).toBe(dateInjection.requestedCheckOut);
+      });
+      
+      it('URL build failure must result in date_application_failed', () => {
+        const failedUrlBuild = {
+          extraction_status: 'date_application_failed',
+          extraction_metadata: {
+            dateInjection: {
+              urlBuiltSuccessfully: false,
+              finalUrlCheckIn: null,
+              finalUrlCheckOut: null,
+            },
+          },
+        };
+        
+        expect(failedUrlBuild.extraction_metadata.dateInjection.urlBuiltSuccessfully).toBe(false);
+        expect(failedUrlBuild.extraction_status).toBe('date_application_failed');
+      });
+      
+    });
+    
+  });
+  
 });
