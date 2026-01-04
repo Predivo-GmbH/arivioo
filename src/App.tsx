@@ -28,6 +28,7 @@ import AirbnbBaselineDiagnostic from "./pages/admin/AirbnbBaselineDiagnostic";
 import PlatformReliability from "./pages/admin/PlatformReliability";
 import ExtractionDiagnostics from "./pages/admin/ExtractionDiagnostics";
 import AccessLayerTelemetry from "./pages/admin/AccessLayerTelemetry";
+import ExtractionTestHarness from "./pages/admin/ExtractionTestHarness";
 
 const queryClient = new QueryClient();
 
@@ -57,6 +58,7 @@ const App = () => (
             <Route path="reliability" element={<PlatformReliability />} />
             <Route path="extraction-diagnostics" element={<ExtractionDiagnostics />} />
             <Route path="access-layer" element={<AccessLayerTelemetry />} />
+            <Route path="extraction-test" element={<ExtractionTestHarness />} />
             <Route path="adapters" element={<Adapters />} />
             <Route path="blocked" element={<BlockedPlatforms />} />
             <Route path="quotas" element={<Quotas />} />
