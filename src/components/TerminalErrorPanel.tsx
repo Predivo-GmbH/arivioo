@@ -2,7 +2,23 @@ import { Link } from "react-router-dom";
 import { AlertCircle, Calendar, Info, Check, ExternalLink, Search, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected" | "expedia_access_blocked" | "expedia_total_not_found" | "property_id_not_found" | "offers_page_not_loaded" | "expedia_offers_page_not_reached" | "expedia_total_not_found_on_offers_page";
+type TerminalErrorType = 
+  | "dates_unavailable" 
+  | "rate_limited" 
+  | "airbnb_total_not_visible" 
+  | "provider_timeout" 
+  | "bot_detected" 
+  | "expedia_access_blocked" 
+  | "expedia_total_not_found" 
+  | "property_id_not_found" 
+  | "offers_page_not_loaded" 
+  | "expedia_offers_page_not_reached" 
+  | "expedia_total_not_found_on_offers_page"
+  // Target card anchoring statuses (v6.3)
+  | "expedia_target_offer_not_found"
+  | "expedia_target_offer_mismatch"
+  | "expedia_dates_unavailable_for_target"
+  | "expedia_target_total_not_found";
 
 interface TerminalErrorPanelProps {
   type: TerminalErrorType;
@@ -219,6 +235,79 @@ const config: Record<TerminalErrorType, {
       "The property may not display a complete total on this page",
       "Open the listing directly on Expedia to see the full price",
       "Try a different property that shows clearer pricing",
+    ],
+    primaryAction: { label: "View on Expedia", to: "/dashboard" },
+  },
+  // Target card anchoring statuses (v6.3)
+  expedia_target_offer_not_found: {
+    icon: AlertCircle,
+    iconColor: "text-amber-500",
+    bgColor: "bg-amber-500/10",
+    borderColor: "border-amber-500/20",
+    title: "Property Not Found on Expedia",
+    description: (
+      <>
+        We searched the Expedia offers page but couldn't locate the <span className="font-semibold text-foreground">target property card</span>.
+      </>
+    ),
+    tips: [
+      "The property may be listed under a different name on Expedia",
+      "Open the listing directly on Expedia to verify availability",
+      "Try a different property or check back later",
+    ],
+    primaryAction: { label: "View on Expedia", to: "/dashboard" },
+  },
+  expedia_target_offer_mismatch: {
+    icon: AlertCircle,
+    iconColor: "text-amber-500",
+    bgColor: "bg-amber-500/10",
+    borderColor: "border-amber-500/20",
+    title: "Property Mismatch on Expedia",
+    description: (
+      <>
+        We found a property on Expedia but the <span className="font-semibold text-foreground">title doesn't match</span> the expected listing.
+      </>
+    ),
+    tips: [
+      "The property may have been renamed or updated on Expedia",
+      "Open the listing directly on Expedia to verify it's the same property",
+      "Compare photos to confirm the match",
+    ],
+    primaryAction: { label: "View on Expedia", to: "/dashboard" },
+  },
+  expedia_dates_unavailable_for_target: {
+    icon: Calendar,
+    iconColor: "text-blue-500",
+    bgColor: "bg-blue-500/10",
+    borderColor: "border-blue-500/20",
+    title: "Dates Not Available on Expedia",
+    description: (
+      <>
+        This property is <span className="font-semibold text-foreground">not available</span> for your selected dates on Expedia.
+      </>
+    ),
+    tips: [
+      "The property may have different availability on Expedia",
+      "Try different check-in and check-out dates",
+      "Check the listing directly on Expedia for available dates",
+    ],
+    primaryAction: { label: "Try Different Dates", to: "/dashboard" },
+  },
+  expedia_target_total_not_found: {
+    icon: AlertCircle,
+    iconColor: "text-amber-500",
+    bgColor: "bg-amber-500/10",
+    borderColor: "border-amber-500/20",
+    title: "No Price for This Property",
+    description: (
+      <>
+        We found the property on Expedia but couldn't extract the <span className="font-semibold text-foreground">"total includes taxes & fees"</span> price.
+      </>
+    ),
+    tips: [
+      "The property card may not display a complete total",
+      "Open the listing directly on Expedia to see the full price",
+      "Pricing may require selecting specific options first",
     ],
     primaryAction: { label: "View on Expedia", to: "/dashboard" },
   },

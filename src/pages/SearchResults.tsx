@@ -184,6 +184,17 @@ const resolveSearchErrorCode = (s: SearchData | null): string | null => {
     'airbnb_timeout': 'provider_timeout',
     'airbnb_dates_not_applied': 'airbnb_total_not_visible',
     'airbnb_price_element_missing': 'airbnb_total_not_visible',
+    // Expedia-specific terminal states (v6.3 target card anchoring)
+    'expedia_access_blocked': 'expedia_access_blocked',
+    'expedia_target_offer_not_found': 'expedia_target_offer_not_found',
+    'expedia_target_offer_mismatch': 'expedia_target_offer_mismatch',
+    'expedia_dates_unavailable_for_target': 'expedia_dates_unavailable_for_target',
+    'expedia_target_total_not_found': 'expedia_target_total_not_found',
+    'expedia_total_not_found': 'expedia_total_not_found',
+    'expedia_offers_page_not_reached': 'expedia_offers_page_not_reached',
+    'expedia_total_not_found_on_offers_page': 'expedia_total_not_found_on_offers_page',
+    'property_id_not_found': 'property_id_not_found',
+    'offers_page_not_loaded': 'offers_page_not_loaded',
   };
   
   return codeMap[rawCode] || rawCode;
@@ -1615,12 +1626,31 @@ export default function SearchResults() {
                 {/* Handle all terminal error states with unified TerminalErrorPanel */}
                 {(() => {
                   const errorCode = resolveSearchErrorCode(search);
-                  const terminalTypes = ["dates_unavailable", "rate_limited", "airbnb_total_not_visible", "provider_timeout", "bot_detected"];
+                  // All supported terminal types from TerminalErrorPanel
+                  const terminalTypes = [
+                    "dates_unavailable", 
+                    "rate_limited", 
+                    "airbnb_total_not_visible", 
+                    "provider_timeout", 
+                    "bot_detected",
+                    // Expedia-specific terminal states
+                    "expedia_access_blocked",
+                    "expedia_total_not_found",
+                    "property_id_not_found",
+                    "offers_page_not_loaded",
+                    "expedia_offers_page_not_reached",
+                    "expedia_total_not_found_on_offers_page",
+                    // Target card anchoring statuses (v6.3)
+                    "expedia_target_offer_not_found",
+                    "expedia_target_offer_mismatch",
+                    "expedia_dates_unavailable_for_target",
+                    "expedia_target_total_not_found",
+                  ];
                   
                   if (errorCode && terminalTypes.includes(errorCode)) {
                     return (
                       <TerminalErrorPanel
-                        type={errorCode as "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected"}
+                        type={errorCode as any}
                         airbnbUrl={search?.airbnb_url}
                         checkIn={checkIn}
                         checkOut={checkOut}
