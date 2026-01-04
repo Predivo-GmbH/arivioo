@@ -733,8 +733,16 @@ function detectOffersPage(content: string, expectedStartDate: string, expectedEn
   ];
   result.propertyFound = propertyIndicators.some(ind => lowerContent.includes(ind));
   
-  // STRICT: Check for "includes taxes" indicator - this is MANDATORY
+  // Check for "total with taxes and fees" - the offer card format on Expedia
+  // This includes both:
+  // - "includes taxes" / "total includes taxes" (breakdown format)
+  // - "Total with taxes and fees" / "with taxes and fees" (offer card format)
   const totalWithTaxesIndicators = [
+    // Offer card format (what we see on USD offers page)
+    'total with taxes and fees',
+    'with taxes and fees',
+    'total with taxes',
+    // Breakdown format
     'includes taxes',
     'total includes',
     'includes all taxes',
@@ -885,23 +893,88 @@ function extractPriceFromOffersPage(content: string, offersPageResult: OffersPag
   
   // Must have offers page with taxes line
   if (!offersPageResult.hasTotalWithTaxes) {
-    result.rejectionReason = 'No "includes taxes" indicator found on offers page';
+    result.rejectionReason = 'No "total with taxes and fees" indicator found on offers page';
     return result;
   }
   
-  // STRICT total patterns for offers page - only accept "total includes taxes & fees"
+  const lowerContent = content.toLowerCase();
+  
+  // ============================================================================
+  // PRIORITY 1: Offer-card format - "$X,XXX total" with "Total with taxes and fees" label
+  // This is the PRIMARY format on Expedia USD offers pages
+  // ============================================================================
+  
+  // Look for "Total with taxes and fees" label (case-insensitive)
+  const offerCardLabelPatterns = [
+    /total\s+with\s+taxes\s+and\s+fees/i,
+    /with\s+taxes\s+and\s+fees/i,
+    /total\s+with\s+taxes/i,
+  ];
+  
+  for (const labelPattern of offerCardLabelPatterns) {
+    const labelMatch = content.match(labelPattern);
+    if (labelMatch) {
+      const labelIdx = content.indexOf(labelMatch[0]);
+      // Search for "$X,XXX total" pattern in surrounding 500 chars (before and after the label)
+      const searchStart = Math.max(0, labelIdx - 300);
+      const searchEnd = Math.min(content.length, labelIdx + 300);
+      const nearbyContent = content.slice(searchStart, searchEnd);
+      
+      // Pattern: "$1,872 total" - currency + amount + "total"
+      // This explicitly captures the offer-card total format
+      const offerCardPricePattern = /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)\s*total(?!\s*(?:per|\/)\s*night)/i;
+      const priceMatch = nearbyContent.match(offerCardPricePattern);
+      
+      if (priceMatch && priceMatch[1]) {
+        // Additional check: make sure this isn't a nightly price by checking surrounding context
+        const priceIdx = nearbyContent.indexOf(priceMatch[0]);
+        const contextStart = Math.max(0, priceIdx - 50);
+        const contextEnd = Math.min(nearbyContent.length, priceIdx + priceMatch[0].length + 50);
+        const priceContext = nearbyContent.slice(contextStart, contextEnd);
+        
+        // Reject if it's a per-night price
+        if (/per\s*night|\/\s*night|nightly/i.test(priceContext)) {
+          console.log('[EXPEDIA] Rejected offer-card price - appears to be nightly');
+          continue;
+        }
+        
+        const currencyResult = detectAndConvertCurrency(priceMatch[1]);
+        
+        if (currencyResult.detected && currencyResult.convertedAmountUsd) {
+          result.extracted = true;
+          result.totalPrice = currencyResult.convertedAmountUsd;
+          result.currency = 'USD';
+          result.originalAmount = currencyResult.originalAmount;
+          result.originalCurrency = currencyResult.currencyCode;
+          result.conversionRate = currencyResult.conversionRate;
+          result.includesTaxesFees = true;
+          result.evidenceSnippet = `${priceMatch[0]} | ${labelMatch[0]}`.substring(0, 200);
+          result.extractionContext = 'Hotel-Search offers page - offer card total with taxes and fees';
+          
+          console.log(`[EXPEDIA] Offer-card total extracted: ${currencyResult.originalAmount} ${currencyResult.currencyCode} = $${result.totalPrice} USD`);
+          console.log(`[EXPEDIA] Evidence: "${priceMatch[0]}" near "${labelMatch[0]}"`);
+          return result;
+        }
+      }
+    }
+  }
+  
+  // ============================================================================
+  // PRIORITY 2: Traditional patterns - "total includes taxes & fees"
+  // ============================================================================
+  
   const offersTotalPatterns = [
-    // "Total: ¥XX,XXX includes taxes & fees"
+    // "Total: $X,XXX includes taxes & fees"
     /total[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)\s*(?:includes?|including)\s*(?:all\s+)?taxes/i,
-    // "¥XX,XXX total includes taxes"
+    // "$X,XXX total includes taxes"
     /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)\s*total\s+includes?\s*(?:all\s+)?taxes/i,
-    // "Price: ¥XX,XXX (includes taxes and fees)"
+    // "Price: $X,XXX (includes taxes and fees)"
     /price[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)\s*\(?includes?\s*(?:all\s+)?taxes/i,
-    // "Total for X nights: ¥XX,XXX"
+    // "Total for X nights: $X,XXX"
     /total\s+(?:for\s+\d+\s+nights?)?[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)/i,
-    // "¥XX,XXX for X nights (includes taxes)"
+    // "$X,XXX for X nights (includes taxes)"
     /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)\s+for\s+\d+\s+nights?\s*\(?includes?/i,
-    // Your total: ¥XX,XXX
+    // Your total: $X,XXX
     /your\s+total[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)/i,
     // "includes taxes" near a price
     /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)[\s\S]{0,50}includes?\s+(?:all\s+)?taxes/i,
@@ -945,37 +1018,63 @@ function extractPriceFromOffersPage(content: string, offersPageResult: OffersPag
     }
   }
   
-  // Secondary: Try to find any price with "includes taxes" nearby
-  const includesTaxesMatch = content.match(/includes?\s+(?:all\s+)?taxes\s*(?:and|&)?\s*fees?/i);
-  if (includesTaxesMatch) {
-    const idx = content.indexOf(includesTaxesMatch[0]);
-    // Look for price in surrounding 300 chars
-    const start = Math.max(0, idx - 150);
-    const end = Math.min(content.length, idx + 150);
-    const nearbyContent = content.slice(start, end);
-    
-    // Find any currency + number
-    const priceMatch = nearbyContent.match(/([\$€£¥]\s*[\d,]+(?:\.\d{2})?)/);
-    if (priceMatch) {
-      const currencyResult = detectAndConvertCurrency(priceMatch[1]);
-      if (currencyResult.detected && currencyResult.convertedAmountUsd) {
-        result.extracted = true;
-        result.totalPrice = currencyResult.convertedAmountUsd;
-        result.currency = 'USD';
-        result.originalAmount = currencyResult.originalAmount;
-        result.originalCurrency = currencyResult.currencyCode;
-        result.conversionRate = currencyResult.conversionRate;
-        result.includesTaxesFees = true;
-        result.evidenceSnippet = nearbyContent.replace(/\s+/g, ' ').trim().substring(0, 200);
-        result.extractionContext = 'Hotel-Search offers page - price near "includes taxes" label';
+  // ============================================================================
+  // PRIORITY 3: Find "total with taxes" label and look for largest nearby price
+  // ============================================================================
+  
+  const taxesLabelPatterns = [
+    /total\s+with\s+taxes\s+and\s+fees/i,
+    /with\s+taxes\s+and\s+fees/i,
+    /includes?\s+(?:all\s+)?taxes\s*(?:and|&)?\s*fees?/i,
+  ];
+  
+  for (const labelPattern of taxesLabelPatterns) {
+    const labelMatch = content.match(labelPattern);
+    if (labelMatch) {
+      const idx = content.indexOf(labelMatch[0]);
+      // Look for prices in surrounding 400 chars
+      const start = Math.max(0, idx - 200);
+      const end = Math.min(content.length, idx + 200);
+      const nearbyContent = content.slice(start, end);
+      
+      // Find all currency + number patterns in nearby content
+      const pricePattern = /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)/g;
+      const allPrices: { value: number; raw: string; currencyResult: CurrencyDetectionResult }[] = [];
+      
+      let priceMatch;
+      while ((priceMatch = pricePattern.exec(nearbyContent)) !== null) {
+        const currencyResult = detectAndConvertCurrency(priceMatch[1]);
+        if (currencyResult.detected && currencyResult.convertedAmountUsd) {
+          allPrices.push({
+            value: currencyResult.convertedAmountUsd,
+            raw: priceMatch[1],
+            currencyResult,
+          });
+        }
+      }
+      
+      if (allPrices.length > 0) {
+        // Choose the LARGEST price (total is always >= nightly)
+        allPrices.sort((a, b) => b.value - a.value);
+        const largestPrice = allPrices[0];
         
-        console.log(`[EXPEDIA] Offers page price (nearby method): ${currencyResult.originalAmount} ${currencyResult.currencyCode} = $${result.totalPrice} USD`);
+        result.extracted = true;
+        result.totalPrice = largestPrice.currencyResult.convertedAmountUsd;
+        result.currency = 'USD';
+        result.originalAmount = largestPrice.currencyResult.originalAmount;
+        result.originalCurrency = largestPrice.currencyResult.currencyCode;
+        result.conversionRate = largestPrice.currencyResult.conversionRate;
+        result.includesTaxesFees = true;
+        result.evidenceSnippet = `${largestPrice.raw} (largest near "${labelMatch[0]}")`.substring(0, 200);
+        result.extractionContext = 'Hotel-Search offers page - largest price near taxes label';
+        
+        console.log(`[EXPEDIA] Offers page price (largest-near-label method): ${largestPrice.currencyResult.originalAmount} ${largestPrice.currencyResult.currencyCode} = $${result.totalPrice} USD`);
         return result;
       }
     }
   }
   
-  result.rejectionReason = 'No total price with "includes taxes" found on offers page';
+  result.rejectionReason = 'No total price with "total with taxes and fees" found on offers page';
   return result;
 }
 
