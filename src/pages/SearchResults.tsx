@@ -1101,9 +1101,14 @@ export default function SearchResults() {
     }
   }, [loading, results.length, hasCelebrated]);
 
-  // Poll for price extraction status when search is done
+  // Poll for price extraction status - runs when extractingPrices is true OR after search completes
   useEffect(() => {
-    if (loading || !searchId) return;
+    // Don't poll if we don't have a searchId yet
+    if (!searchId) return;
+    
+    // Skip initial poll if we're in early loading phase and no extractions started
+    // But allow polling once extractingPrices is triggered by SSE
+    if (loading && !extractingPrices) return;
     
     const fetchExtractionStatus = async () => {
       const { data } = await supabase
@@ -1134,12 +1139,12 @@ export default function SearchResults() {
     // Initial fetch
     fetchExtractionStatus();
     
-    // Poll every 5 seconds if extractions are in progress
+    // Poll every 3 seconds while extractions are in progress
     const pollInterval = setInterval(() => {
       if (extractingPrices) {
         fetchExtractionStatus();
       }
-    }, 5000);
+    }, 3000);
     
     return () => clearInterval(pollInterval);
   }, [loading, searchId, extractingPrices]);
@@ -1501,7 +1506,8 @@ export default function SearchResults() {
       </header>
 
       <main className="container px-4 py-8 md:py-12">
-        {loading ? (
+        {/* Show progress page while loading OR while price extraction is in progress */}
+        {(loading || extractingPrices) ? (
           <PipelineProgress
             status={search?.status}
             isComplete={false}
