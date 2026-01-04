@@ -2758,8 +2758,8 @@ Deno.serve(async (req) => {
       );
     }
 
-    // EXTRACTION TEST HISTORY - Get recent test runs
-    if (action === 'extraction-test-history' && req.method === 'GET') {
+    // EXTRACTION TEST HISTORY - Get recent test runs (accept both GET and POST for compatibility with supabase.functions.invoke)
+    if (action === 'extraction-test-history' && (req.method === 'GET' || req.method === 'POST')) {
       const { data: runs, error } = await supabase
         .from('extraction_test_runs')
         .select('*')
