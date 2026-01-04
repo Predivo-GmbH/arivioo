@@ -26,34 +26,30 @@ const corsHeaders = {
 };
 
 /**
- * Expedia Production Extraction Function - v2.0
+ * Expedia Production Extraction Function - v3.0
  * 
- * PROVIDER PRIORITY (per system requirements):
+ * DATE INJECTION FIX:
+ * - Dates are the single source of truth from request payload
+ * - URL is deterministically rebuilt with exact chkin/chkout params
+ * - Rendered dates are validated before price extraction
+ * - date_application_failed returned if dates cannot be proven
+ * 
+ * PROVIDER PRIORITY:
  * 1. Browserless (primary) - best for JavaScript rendering
  * 2. Zyte (secondary) - fallback for non-access failures
- * 3. Firecrawl (last resort) - only if Browserless and Zyte fail for non-access reasons
- * 
- * HARD STOP RULE:
- * If Browserless returns RATE_LIMITED (429) or BOT_BLOCKED, abort immediately - no fallbacks.
+ * 3. Firecrawl (last resort) - only if both fail for non-access reasons
  * 
  * TWO-STEP EXTRACTION:
- * Phase 1: Load listing page with dates applied
- * Phase 2: Navigate to booking/checkout context for breakdown extraction
- * 
- * DATES UNAVAILABLE DETECTION:
- * Explicit detection of "sold out", "no availability", etc. surfaced as distinct status.
- * 
- * EXTRACTION RULES:
- * - Never accept subtotals ("$X for N nights")
- * - Only accept totals from breakdown with taxes/fees visible
- * - All structural_proof fields must be explicitly set
+ * Phase 1: Load listing page with dates applied, validate dates match
+ * Phase 2: Extract price from breakdown (only if dates verified)
  */
 
-// Terminal status values - includes dates_unavailable
+// Terminal status values
 type TerminalStatus = 
   | 'success'
+  | 'date_application_failed'    // NEW: Dates could not be applied/verified
   | 'dates_not_applied'
-  | 'dates_unavailable'        // NEW: Explicit unavailability status
+  | 'dates_unavailable'
   | 'no_availability_for_dates'
   | 'blocked_captcha_or_bot'
   | 'blocked_rate_limit'
@@ -61,17 +57,14 @@ type TerminalStatus =
   | 'price_not_found'
   | 'render_failed'
   | 'validation_error'
-  | 'subtotal_rejected';       // NEW: Subtotal explicitly rejected
+  | 'subtotal_rejected';
 
-// Provider types - ordered by priority
 type Provider = 'browserless' | 'zyte' | 'firecrawl';
 
-// Provider priority order (Browserless first, Firecrawl last)
 const PROVIDER_ORDER: Provider[] = ['browserless', 'zyte', 'firecrawl'];
 
 /**
  * Structural proof object - REQUIRED for Verified status
- * All boolean fields must be explicitly true for Verified.
  */
 interface StructuralProof {
   breakdown_found: boolean;
@@ -79,12 +72,17 @@ interface StructuralProof {
   rendered_dates_match: boolean;
   extracted_from_breakdown_total: boolean;
   proof_version: string;
-  // Debugging fields
   breakdown_selector_used?: string;
   total_value_raw?: string;
   date_value_raw?: string;
   phase2_navigation_used?: boolean;
   unavailability_marker?: string;
+  // Date injection audit fields
+  requested_checkin?: string;
+  requested_checkout?: string;
+  url_injected_checkin?: string;
+  url_injected_checkout?: string;
+  date_mismatch_details?: string;
 }
 
 interface ExtractionRequest {
@@ -107,6 +105,11 @@ interface PhaseAResult {
   contentHash: string | null;
   contentLength: number;
   bookingCtaFound: boolean;
+  // Date validation results
+  datesVerified: boolean;
+  renderedCheckIn: string | null;
+  renderedCheckOut: string | null;
+  dateMismatchReason: string | null;
 }
 
 interface PhaseBResult {
@@ -130,6 +133,14 @@ interface ExtractionResult {
   error: string | null;
   providerUsed: Provider | null;
   attempts: AttemptResult[];
+  // Audit trail for date injection
+  dateInjection: {
+    requestedCheckIn: string;
+    requestedCheckOut: string;
+    finalUrlCheckIn: string | null;
+    finalUrlCheckOut: string | null;
+    urlBuiltSuccessfully: boolean;
+  };
 }
 
 interface AttemptResult {
@@ -145,15 +156,128 @@ interface AttemptResult {
 }
 
 // Configuration
-const MAX_PROVIDER_ATTEMPTS = 3; // Try each provider up to 3 times
 const MINIMAL_CONTENT_THRESHOLD = 3000;
 const BROWSERLESS_TIMEOUT = 45000;
 const ZYTE_TIMEOUT = 45000;
 const FIRECRAWL_TIMEOUT = 30000;
 
 // ============================================================================
-// HELPER FUNCTIONS
+// DATE VALIDATION - STRICT
 // ============================================================================
+
+/**
+ * Validate date format (YYYY-MM-DD)
+ */
+function isValidDateFormat(dateStr: string): boolean {
+  if (!dateStr) return false;
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(dateStr)) return false;
+  
+  const date = new Date(dateStr);
+  return !isNaN(date.getTime());
+}
+
+/**
+ * Parse date from various formats to YYYY-MM-DD
+ */
+function parseDateToYYYYMMDD(dateStr: string, referenceYear?: number): string | null {
+  if (!dateStr) return null;
+  
+  // Already in YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return dateStr;
+  }
+  
+  // Handle "Jan 15" format
+  const monthDayMatch = dateStr.match(/([A-Z][a-z]{2})\s+(\d{1,2})/i);
+  if (monthDayMatch) {
+    const months: Record<string, string> = {
+      'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+      'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+      'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+    };
+    const month = months[monthDayMatch[1].toLowerCase()];
+    const day = monthDayMatch[2].padStart(2, '0');
+    const year = referenceYear || new Date().getFullYear();
+    if (month) {
+      return `${year}-${month}-${day}`;
+    }
+  }
+  
+  return null;
+}
+
+// ============================================================================
+// DETERMINISTIC URL BUILDER
+// ============================================================================
+
+interface UrlBuildResult {
+  success: boolean;
+  url: string;
+  injectedCheckIn: string | null;
+  injectedCheckOut: string | null;
+  error?: string;
+}
+
+/**
+ * Build Expedia URL with EXACT date injection
+ * - Removes any existing date params
+ * - Sets chkin=YYYY-MM-DD and chkout=YYYY-MM-DD exactly
+ * - Preserves other params
+ */
+function buildExpediaUrlDeterministic(
+  baseUrl: string, 
+  checkIn: string, 
+  checkOut: string, 
+  adults: number = 2
+): UrlBuildResult {
+  try {
+    const url = new URL(baseUrl);
+    
+    // Remove any conflicting date params (clean slate)
+    const dateParamsToRemove = ['chkin', 'chkout', 'checkin', 'checkout', 'startDate', 'endDate'];
+    for (const param of dateParamsToRemove) {
+      url.searchParams.delete(param);
+    }
+    
+    // Set exact dates in YYYY-MM-DD format
+    url.searchParams.set('chkin', checkIn);
+    url.searchParams.set('chkout', checkOut);
+    url.searchParams.set('adults', String(adults));
+    url.searchParams.set('x_pwa', '1');
+    
+    // Verify dates were set correctly by re-reading
+    const verifyCheckIn = url.searchParams.get('chkin');
+    const verifyCheckOut = url.searchParams.get('chkout');
+    
+    if (verifyCheckIn !== checkIn || verifyCheckOut !== checkOut) {
+      return {
+        success: false,
+        url: url.toString(),
+        injectedCheckIn: verifyCheckIn,
+        injectedCheckOut: verifyCheckOut,
+        error: `Date injection mismatch: expected ${checkIn}/${checkOut}, got ${verifyCheckIn}/${verifyCheckOut}`
+      };
+    }
+    
+    console.log(`[EXPEDIA] URL built: chkin=${checkIn}, chkout=${checkOut}`);
+    
+    return {
+      success: true,
+      url: url.toString(),
+      injectedCheckIn: checkIn,
+      injectedCheckOut: checkOut,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      url: baseUrl,
+      injectedCheckIn: null,
+      injectedCheckOut: null,
+      error: `URL build failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+    };
+  }
+}
 
 function simpleHash(str: string): string {
   let hash = 0;
@@ -163,15 +287,6 @@ function simpleHash(str: string): string {
     hash = hash & hash;
   }
   return Math.abs(hash).toString(16).padStart(8, '0');
-}
-
-function buildExpediaUrl(baseUrl: string, checkIn: string, checkOut: string, adults: number = 2): string {
-  const url = new URL(baseUrl);
-  url.searchParams.set('chkin', checkIn);
-  url.searchParams.set('chkout', checkOut);
-  url.searchParams.set('x_pwa', '1');
-  url.searchParams.set('adults', String(adults));
-  return url.toString();
 }
 
 // ============================================================================
@@ -185,9 +300,6 @@ interface UnavailabilityResult {
 }
 
 function detectDatesUnavailable(content: string): UnavailabilityResult {
-  const lowerContent = content.toLowerCase();
-  
-  // Explicit unavailability patterns - ordered by specificity
   const unavailabilityPatterns = [
     { pattern: /no\s+availability/i, label: 'no availability' },
     { pattern: /sold\s+out/i, label: 'sold out' },
@@ -205,7 +317,6 @@ function detectDatesUnavailable(content: string): UnavailabilityResult {
   for (const { pattern, label } of unavailabilityPatterns) {
     const match = content.match(pattern);
     if (match) {
-      // Extract evidence snippet around the match
       const idx = content.toLowerCase().indexOf(match[0].toLowerCase());
       const start = Math.max(0, idx - 50);
       const end = Math.min(content.length, idx + match[0].length + 50);
@@ -221,7 +332,7 @@ function detectDatesUnavailable(content: string): UnavailabilityResult {
   
   // Additional check: No booking CTA + unavailability text
   const noBookingCta = !/book\s+now|reserve\s+now|continue\s+booking/i.test(content);
-  const hasUnavailabilityContext = /unfortunately|sorry|we\s+couldn['']?t/i.test(lowerContent);
+  const hasUnavailabilityContext = /unfortunately|sorry|we\s+couldn['']?t/i.test(content.toLowerCase());
   
   if (noBookingCta && hasUnavailabilityContext) {
     return {
@@ -245,9 +356,6 @@ interface SubtotalCheckResult {
 }
 
 function detectSubtotal(priceText: string): SubtotalCheckResult {
-  const lowerText = priceText.toLowerCase();
-  
-  // Patterns that indicate a subtotal (NOT a total)
   const subtotalPatterns = [
     { pattern: /\$[\d,]+(?:\.\d{2})?\s*(?:per|\/)\s*night/i, label: 'per night rate' },
     { pattern: /\$[\d,]+(?:\.\d{2})?\s+for\s+\d+\s+nights?/i, label: 'X for N nights subtotal' },
@@ -273,7 +381,7 @@ function detectSubtotal(priceText: string): SubtotalCheckResult {
 }
 
 // ============================================================================
-// BREAKDOWN DETECTION - Enhanced
+// BREAKDOWN DETECTION
 // ============================================================================
 
 interface BreakdownResult {
@@ -299,7 +407,6 @@ function detectBreakdown(content: string): BreakdownResult {
   
   const lowerContent = content.toLowerCase();
   
-  // Breakdown container indicators (Expedia-specific)
   const breakdownIndicators = [
     'price details',
     'price breakdown',
@@ -322,7 +429,6 @@ function detectBreakdown(content: string): BreakdownResult {
     }
   }
   
-  // Check for visible taxes/fees (required for structural proof)
   const taxPatterns = [
     /taxes\s*(?:and|&)?\s*fees[:\s]*\$?[\d,]+/i,
     /\$[\d,]+(?:\.\d{2})?\s*(?:in\s+)?taxes/i,
@@ -332,17 +438,11 @@ function detectBreakdown(content: string): BreakdownResult {
   result.has_taxes_visible = taxPatterns.some(p => p.test(content));
   result.has_fee_lines = result.has_taxes_visible;
   
-  // Look for explicit total row patterns (highest to lowest specificity)
   const totalPatterns = [
-    // "The price is $XXX total" - most explicit
     /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/i,
-    // "Total: $XXX" or "Total $XXX"
     /total[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    // "$XXX total includes taxes"
     /\$?([\d,]+(?:\.\d{2})?)\s*total\s+includes?\s+taxes/i,
-    // "Trip total: $XXX"
     /trip\s+total[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    // "$XXX total" at end of breakdown context
     /\$?([\d,]+(?:\.\d{2})?)\s*total(?:\s|$)/i,
   ];
   
@@ -361,12 +461,15 @@ function detectBreakdown(content: string): BreakdownResult {
 }
 
 // ============================================================================
-// RENDERED DATE VALIDATION
+// RENDERED DATE VALIDATION - STRICT
 // ============================================================================
 
 interface DateValidationResult {
   rendered_dates_match: boolean;
+  renderedCheckIn: string | null;
+  renderedCheckOut: string | null;
   date_value_raw: string | null;
+  mismatchReason: string | null;
 }
 
 function validateRenderedDates(
@@ -376,13 +479,17 @@ function validateRenderedDates(
 ): DateValidationResult {
   const result: DateValidationResult = {
     rendered_dates_match: false,
+    renderedCheckIn: null,
+    renderedCheckOut: null,
     date_value_raw: null,
+    mismatchReason: null,
   };
   
   const reqCheckIn = new Date(requestedCheckIn);
   const reqCheckOut = new Date(requestedCheckOut);
   
   if (isNaN(reqCheckIn.getTime()) || isNaN(reqCheckOut.getTime())) {
+    result.mismatchReason = 'Invalid requested dates';
     console.log('[EXPEDIA] Invalid requested dates for validation');
     return result;
   }
@@ -395,35 +502,27 @@ function validateRenderedDates(
     result.date_value_raw = rangeMatch[0];
     const year = reqCheckIn.getFullYear();
     
-    try {
-      const parsedCheckIn = new Date(`${rangeMatch[1]}, ${year}`);
-      const parsedCheckOut = new Date(`${rangeMatch[2]}, ${year}`);
-      
+    const parsedCheckIn = parseDateToYYYYMMDD(rangeMatch[1], year);
+    const parsedCheckOut = parseDateToYYYYMMDD(rangeMatch[2], year);
+    
+    result.renderedCheckIn = parsedCheckIn;
+    result.renderedCheckOut = parsedCheckOut;
+    
+    if (parsedCheckIn && parsedCheckOut) {
       // Handle year boundary (Dec-Jan)
+      let checkOutYear = year;
       if (parsedCheckOut < parsedCheckIn) {
-        const nextYearCheckOut = new Date(`${rangeMatch[2]}, ${year + 1}`);
-        if (
-          parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
-          parsedCheckIn.getDate() === reqCheckIn.getDate() &&
-          nextYearCheckOut.getMonth() === reqCheckOut.getMonth() &&
-          nextYearCheckOut.getDate() === reqCheckOut.getDate()
-        ) {
-          result.rendered_dates_match = true;
-          return result;
-        }
+        checkOutYear = year + 1;
+        result.renderedCheckOut = parseDateToYYYYMMDD(rangeMatch[2], checkOutYear);
       }
       
-      if (
-        parsedCheckIn.getMonth() === reqCheckIn.getMonth() &&
-        parsedCheckIn.getDate() === reqCheckIn.getDate() &&
-        parsedCheckOut.getMonth() === reqCheckOut.getMonth() &&
-        parsedCheckOut.getDate() === reqCheckOut.getDate()
-      ) {
+      if (parsedCheckIn === requestedCheckIn && (result.renderedCheckOut === requestedCheckOut)) {
         result.rendered_dates_match = true;
+        console.log(`[EXPEDIA] Dates validated: ${parsedCheckIn} to ${result.renderedCheckOut}`);
         return result;
+      } else {
+        result.mismatchReason = `Rendered ${parsedCheckIn}/${result.renderedCheckOut} != requested ${requestedCheckIn}/${requestedCheckOut}`;
       }
-    } catch {
-      // Date parsing failed, continue to other patterns
     }
   }
   
@@ -433,16 +532,25 @@ function validateRenderedDates(
   
   if (isoMatch) {
     result.date_value_raw = isoMatch[0];
+    result.renderedCheckIn = isoMatch[1];
+    result.renderedCheckOut = isoMatch[2];
+    
     if (isoMatch[1] === requestedCheckIn && isoMatch[2] === requestedCheckOut) {
       result.rendered_dates_match = true;
+      console.log(`[EXPEDIA] Dates validated (ISO): ${isoMatch[1]} to ${isoMatch[2]}`);
       return result;
+    } else {
+      result.mismatchReason = `Rendered ${isoMatch[1]}/${isoMatch[2]} != requested ${requestedCheckIn}/${requestedCheckOut}`;
     }
   }
   
   // Pattern 3: Exact date strings in content
   if (content.includes(requestedCheckIn) && content.includes(requestedCheckOut)) {
     result.date_value_raw = `${requestedCheckIn} to ${requestedCheckOut}`;
+    result.renderedCheckIn = requestedCheckIn;
+    result.renderedCheckOut = requestedCheckOut;
     result.rendered_dates_match = true;
+    console.log('[EXPEDIA] Dates validated (exact match in content)');
     return result;
   }
   
@@ -450,18 +558,27 @@ function validateRenderedDates(
   if (/your\s+dates\s+are\s+available/i.test(content)) {
     result.date_value_raw = 'your dates are available (implicit)';
     result.rendered_dates_match = true;
+    console.log('[EXPEDIA] Dates validated (implicit availability message)');
     return result;
   }
   
-  console.log('[EXPEDIA] Could not validate rendered dates');
+  if (!result.mismatchReason) {
+    result.mismatchReason = 'No recognizable date range found in content';
+  }
+  
+  console.log(`[EXPEDIA] Date validation failed: ${result.mismatchReason}`);
   return result;
 }
 
 // ============================================================================
-// PHASE A: Validate page state
+// PHASE A: Validate page state AND dates
 // ============================================================================
 
-function runPhaseA(content: string): PhaseAResult {
+function runPhaseA(
+  content: string, 
+  requestedCheckIn: string, 
+  requestedCheckOut: string
+): PhaseAResult {
   const lowerContent = content.toLowerCase();
   
   // Check dates unavailable FIRST (highest priority)
@@ -477,8 +594,15 @@ function runPhaseA(content: string): PhaseAResult {
       contentHash: simpleHash(content),
       contentLength: content.length,
       bookingCtaFound: false,
+      datesVerified: false,
+      renderedCheckIn: null,
+      renderedCheckOut: null,
+      dateMismatchReason: 'Dates unavailable',
     };
   }
+  
+  // Validate rendered dates match requested dates
+  const dateValidation = validateRenderedDates(content, requestedCheckIn, requestedCheckOut);
   
   // Check for "enter dates" state
   const enterDatesIndicators = [
@@ -492,7 +616,7 @@ function runPhaseA(content: string): PhaseAResult {
   ];
   const enterDatesFound = enterDatesIndicators.some(ind => lowerContent.includes(ind));
   
-  // Check for booking CTA (indicates page is actionable)
+  // Check for booking CTA
   const bookingCtaPatterns = [
     /book\s+now/i,
     /reserve\s+now/i,
@@ -503,11 +627,11 @@ function runPhaseA(content: string): PhaseAResult {
   ];
   const bookingCtaFound = bookingCtaPatterns.some(p => p.test(content));
   
-  // Count total price patterns (not subtotals)
+  // Count total price patterns
   const totalPricePattern = /\$[\d,]+(?:\.\d{2})?\s*total/gi;
   const totalMatches = content.match(totalPricePattern) || [];
   
-  // Price-eligible if we find totals, not in "enter dates" state, and not sold out
+  // Price-eligible if we find totals, not in "enter dates" state
   const priceEligible = totalMatches.length > 0 && !enterDatesFound;
   
   return {
@@ -520,6 +644,10 @@ function runPhaseA(content: string): PhaseAResult {
     contentHash: simpleHash(content),
     contentLength: content.length,
     bookingCtaFound,
+    datesVerified: dateValidation.rendered_dates_match,
+    renderedCheckIn: dateValidation.renderedCheckIn,
+    renderedCheckOut: dateValidation.renderedCheckOut,
+    dateMismatchReason: dateValidation.mismatchReason,
   };
 }
 
@@ -527,7 +655,7 @@ function runPhaseA(content: string): PhaseAResult {
 // PHASE B: Extract total price (strict - no subtotals)
 // ============================================================================
 
-function runPhaseB(content: string, checkIn: string, checkOut: string): PhaseBResult {
+function runPhaseB(content: string): PhaseBResult {
   const result: PhaseBResult = {
     ran: true,
     extractedPrice: null,
@@ -539,15 +667,11 @@ function runPhaseB(content: string, checkIn: string, checkOut: string): PhaseBRe
     rejectionReason: null,
   };
   
-  // First, look for explicit total patterns
+  // Look for explicit total patterns
   const totalPatterns = [
-    // "The price is $XXX total" - most reliable
     /the\s+price\s+is\s+\$([\d,]+(?:\.\d{2})?)\s*total/i,
-    // "$XXX total includes taxes"
     /\$([\d,]+(?:\.\d{2})?)\s*total\s+includes?\s+taxes/i,
-    // "Total: $XXX" in breakdown context
     /total[:\s]+\$([\d,]+(?:\.\d{2})?)/i,
-    // "Trip total: $XXX"
     /trip\s+total[:\s]+\$([\d,]+(?:\.\d{2})?)/i,
   ];
   
@@ -557,7 +681,6 @@ function runPhaseB(content: string, checkIn: string, checkOut: string): PhaseBRe
       const priceStr = match[1].replace(/,/g, '');
       const price = parseFloat(priceStr);
       
-      // Get surrounding context for evidence
       const idx = content.indexOf(match[0]);
       const start = Math.max(0, idx - 30);
       const end = Math.min(content.length, idx + match[0].length + 50);
@@ -569,14 +692,13 @@ function runPhaseB(content: string, checkIn: string, checkOut: string): PhaseBRe
         result.subtotalRejected = true;
         result.rejectionReason = `Rejected: ${subtotalCheck.pattern} - "${subtotalCheck.rawValue}"`;
         console.log(`[EXPEDIA] Subtotal rejected: ${result.rejectionReason}`);
-        continue; // Try next pattern
+        continue;
       }
       
       result.extractedPrice = price;
       result.currency = 'USD';
       result.evidenceSnippet = evidence;
       
-      // Check if taxes included
       const contextLower = evidence.toLowerCase();
       if (contextLower.includes('taxes') && contextLower.includes('fees')) {
         result.includesTaxesFees = true;
@@ -584,7 +706,7 @@ function runPhaseB(content: string, checkIn: string, checkOut: string): PhaseBRe
         result.includesTaxesFees = true;
       }
       
-      // HALLUCINATION GUARD: Verify price appears verbatim
+      // HALLUCINATION GUARD
       const priceFormatted = price.toLocaleString('en-US');
       const priceSimple = price.toString();
       result.priceVerified = evidence.includes(priceFormatted) || 
@@ -611,7 +733,6 @@ function runPhaseB(content: string, checkIn: string, checkOut: string): PhaseBRe
     const end = Math.min(content.length, idx + match[0].length + 50);
     const evidence = content.slice(start, end).replace(/\s+/g, ' ').trim();
     
-    // Reject subtotals
     const subtotalCheck = detectSubtotal(evidence);
     if (subtotalCheck.isSubtotal) {
       result.subtotalRejected = true;
@@ -682,7 +803,6 @@ async function fetchWithBrowserless(url: string): Promise<FetchResult> {
     
     const html = await response.text();
     
-    // Convert HTML to text-like content for pattern matching
     const text = html
       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
       .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
@@ -690,7 +810,6 @@ async function fetchWithBrowserless(url: string): Promise<FetchResult> {
       .replace(/\s+/g, ' ')
       .trim();
     
-    // Check for bot detection in content
     if (/please\s+verify|captcha|unusual\s+traffic/i.test(text)) {
       return { content: text, error: 'Bot detection in content', isBotBlocked: true };
     }
@@ -804,14 +923,15 @@ async function fetchWithFirecrawl(url: string, waitFor: number = 5000): Promise<
       if (response.status === 429) {
         return { content: '', error: 'Rate limited (HTTP 429)', isRateLimited: true };
       }
-      if (response.status === 403 || response.status === 401) {
-        return { content: '', error: `Bot blocked (HTTP ${response.status})`, isBotBlocked: true };
-      }
       return { content: '', error: `Firecrawl error: ${response.status}` };
     }
     
     const data = await response.json();
     const markdown = data.data?.markdown || data.markdown || '';
+    
+    if (/captcha|verify.*human/i.test(markdown)) {
+      return { content: markdown, error: 'Bot detection', isBotBlocked: true };
+    }
     
     console.log(`[EXPEDIA] Firecrawl returned ${markdown.length} chars`);
     return { content: markdown };
@@ -826,11 +946,11 @@ async function fetchWithFirecrawl(url: string, waitFor: number = 5000): Promise<
 }
 
 // ============================================================================
-// MAIN EXTRACTION ORCHESTRATOR
+// MAIN EXTRACTION FUNCTION
 // ============================================================================
 
 async function extractFromExpedia(
-  url: string,
+  baseUrl: string,
   checkIn: string,
   checkOut: string,
   adults: number = 2
@@ -838,6 +958,7 @@ async function extractFromExpedia(
   const startTime = Date.now();
   const attempts: AttemptResult[] = [];
   
+  // Initialize result with date injection audit
   const result: ExtractionResult = {
     success: false,
     status: 'validation_error',
@@ -851,6 +972,10 @@ async function extractFromExpedia(
       contentHash: null,
       contentLength: 0,
       bookingCtaFound: false,
+      datesVerified: false,
+      renderedCheckIn: null,
+      renderedCheckOut: null,
+      dateMismatchReason: null,
     },
     phaseB: {
       ran: false,
@@ -868,25 +993,50 @@ async function extractFromExpedia(
       rendered_dates_match: false,
       extracted_from_breakdown_total: false,
       proof_version: '1.0',
+      requested_checkin: checkIn,
+      requested_checkout: checkOut,
     },
     durationMs: 0,
     error: null,
     providerUsed: null,
     attempts: [],
+    dateInjection: {
+      requestedCheckIn: checkIn,
+      requestedCheckOut: checkOut,
+      finalUrlCheckIn: null,
+      finalUrlCheckOut: null,
+      urlBuiltSuccessfully: false,
+    },
   };
   
   try {
-    // Build URL with date parameters
-    const fullUrl = buildExpediaUrl(url, checkIn, checkOut, adults);
-    console.log(`[EXPEDIA] Starting extraction: ${fullUrl.slice(0, 100)}...`);
-    console.log(`[EXPEDIA] Dates: ${checkIn} to ${checkOut}, Adults: ${adults}`);
-    console.log(`[EXPEDIA] Provider order: ${PROVIDER_ORDER.join(' → ')}`);
+    // ===== STEP 1: Build URL deterministically with exact dates =====
+    console.log(`[EXPEDIA] Building URL with dates: ${checkIn} to ${checkOut}`);
     
-    let bestContent = '';
+    const urlBuild = buildExpediaUrlDeterministic(baseUrl, checkIn, checkOut, adults);
+    
+    result.dateInjection.urlBuiltSuccessfully = urlBuild.success;
+    result.dateInjection.finalUrlCheckIn = urlBuild.injectedCheckIn;
+    result.dateInjection.finalUrlCheckOut = urlBuild.injectedCheckOut;
+    result.structuralProof.url_injected_checkin = urlBuild.injectedCheckIn || undefined;
+    result.structuralProof.url_injected_checkout = urlBuild.injectedCheckOut || undefined;
+    
+    if (!urlBuild.success) {
+      result.status = 'date_application_failed';
+      result.error = urlBuild.error || 'Failed to build URL with dates';
+      result.durationMs = Date.now() - startTime;
+      console.log(`[EXPEDIA] URL build failed: ${result.error}`);
+      return result;
+    }
+    
+    const fullUrl = urlBuild.url;
+    console.log(`[EXPEDIA] Final URL: ${fullUrl}`);
+    
+    // ===== STEP 2: Fetch with provider chain =====
+    let bestContent: string | null = null;
     let successfulProvider: Provider | null = null;
     let hardStopReason: string | null = null;
     
-    // ============= PROVIDER LOOP: Browserless → Zyte → Firecrawl =============
     for (const provider of PROVIDER_ORDER) {
       console.log(`[EXPEDIA] Trying provider: ${provider}`);
       
@@ -913,7 +1063,7 @@ async function extractFromExpedia(
       };
       attempts.push(attempt);
       
-      // ===== HARD STOP: Rate limit or bot block from primary provider =====
+      // HARD STOP: Rate limit or bot block from primary provider
       if (provider === 'browserless' && (fetchResult.isRateLimited || fetchResult.isBotBlocked)) {
         hardStopReason = fetchResult.isRateLimited 
           ? 'Rate limited (HTTP 429) - hard stop, no fallbacks'
@@ -928,32 +1078,49 @@ async function extractFromExpedia(
         return result;
       }
       
-      // Check for errors (non-hard-stop)
       if (fetchResult.error) {
         console.log(`[EXPEDIA] ${provider} error: ${fetchResult.error}`);
         continue;
       }
       
-      // Check content sufficiency
       if (fetchResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
         console.log(`[EXPEDIA] ${provider}: Insufficient content (${fetchResult.content.length} chars)`);
         continue;
       }
       
-      // ===== PHASE A: Check page state =====
-      const phaseAResult = runPhaseA(fetchResult.content);
+      // ===== PHASE A: Check page state AND validate dates =====
+      const phaseAResult = runPhaseA(fetchResult.content, checkIn, checkOut);
+      result.phaseA = phaseAResult;
       
-      // Dates unavailable - terminal state
+      // Dates unavailable - terminal state (only valid AFTER dates are confirmed in URL)
       if (phaseAResult.datesUnavailable) {
         console.log(`[EXPEDIA] Dates unavailable: ${phaseAResult.unavailabilityMarker}`);
         
         result.status = 'dates_unavailable';
         result.error = `Dates unavailable: ${phaseAResult.unavailabilityMarker}`;
-        result.phaseA = phaseAResult;
         result.providerUsed = provider;
         result.attempts = attempts;
         result.durationMs = Date.now() - startTime;
         result.structuralProof.unavailability_marker = phaseAResult.unavailabilityMarker || undefined;
+        return result;
+      }
+      
+      // Check date verification - CRITICAL
+      if (!phaseAResult.datesVerified) {
+        console.log(`[EXPEDIA] ${provider}: Dates not verified - ${phaseAResult.dateMismatchReason}`);
+        result.structuralProof.date_mismatch_details = phaseAResult.dateMismatchReason || undefined;
+        
+        // Try next provider - maybe rendered differently
+        if (provider !== 'firecrawl') {
+          continue;
+        }
+        
+        // After all providers, if dates still not verified, it's a hard failure
+        result.status = 'date_application_failed';
+        result.error = `Dates could not be verified: ${phaseAResult.dateMismatchReason}`;
+        result.providerUsed = provider;
+        result.attempts = attempts;
+        result.durationMs = Date.now() - startTime;
         return result;
       }
       
@@ -962,24 +1129,22 @@ async function extractFromExpedia(
         console.log('[EXPEDIA] Property sold out');
         result.status = 'sold_out';
         result.error = 'Property sold out for these dates';
-        result.phaseA = phaseAResult;
         result.providerUsed = provider;
         result.attempts = attempts;
         result.durationMs = Date.now() - startTime;
         return result;
       }
       
-      // Price eligible - we have content to work with
-      if (phaseAResult.priceEligible) {
-        console.log(`[EXPEDIA] ${provider} succeeded - price eligible`);
+      // Price eligible and dates verified
+      if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
+        console.log(`[EXPEDIA] ${provider} succeeded - price eligible, dates verified`);
         bestContent = fetchResult.content;
         successfulProvider = provider;
         attempt.success = true;
-        result.phaseA = phaseAResult;
         break;
       }
       
-      console.log(`[EXPEDIA] ${provider}: Not price eligible (enterDates=${phaseAResult.enterDatesFound})`);
+      console.log(`[EXPEDIA] ${provider}: Not price eligible (enterDates=${phaseAResult.enterDatesFound}, datesVerified=${phaseAResult.datesVerified})`);
     }
     
     result.attempts = attempts;
@@ -987,16 +1152,22 @@ async function extractFromExpedia(
     
     // No usable content from any provider
     if (!bestContent || !successfulProvider) {
-      const lastAttempt = attempts[attempts.length - 1];
-      result.status = 'render_failed';
-      result.error = `All providers failed. Last error: ${lastAttempt?.error || 'No content'}`;
+      // Check if the issue is date verification
+      if (result.phaseA.dateMismatchReason && !result.phaseA.datesVerified) {
+        result.status = 'date_application_failed';
+        result.error = `Dates not applied/verified: ${result.phaseA.dateMismatchReason}`;
+      } else {
+        const lastAttempt = attempts[attempts.length - 1];
+        result.status = 'render_failed';
+        result.error = `All providers failed. Last error: ${lastAttempt?.error || 'No content'}`;
+      }
       result.durationMs = Date.now() - startTime;
       console.log('[EXPEDIA] All providers exhausted');
       return result;
     }
     
-    // ============= PHASE B: Extract price =============
-    const phaseBResult = runPhaseB(bestContent, checkIn, checkOut);
+    // ===== PHASE B: Extract price (only if dates verified) =====
+    const phaseBResult = runPhaseB(bestContent);
     result.phaseB = phaseBResult;
     
     // Subtotal was rejected
@@ -1017,14 +1188,13 @@ async function extractFromExpedia(
       return result;
     }
     
-    // ============= STRUCTURAL PROOF =============
+    // ===== STRUCTURAL PROOF =====
     const breakdownResult = detectBreakdown(bestContent);
-    const dateResult = validateRenderedDates(bestContent, checkIn, checkOut);
     
     result.structuralProof = {
       breakdown_found: breakdownResult.breakdown_found && breakdownResult.has_fee_lines,
       total_label_found: breakdownResult.total_label_found,
-      rendered_dates_match: dateResult.rendered_dates_match,
+      rendered_dates_match: result.phaseA.datesVerified,
       extracted_from_breakdown_total: 
         breakdownResult.total_label_found &&
         breakdownResult.breakdown_price !== null &&
@@ -1032,13 +1202,19 @@ async function extractFromExpedia(
       proof_version: '1.0',
       breakdown_selector_used: breakdownResult.breakdown_selector_used || undefined,
       total_value_raw: breakdownResult.total_value_raw || undefined,
-      date_value_raw: dateResult.date_value_raw || undefined,
+      date_value_raw: result.phaseA.renderedCheckIn && result.phaseA.renderedCheckOut 
+        ? `${result.phaseA.renderedCheckIn} to ${result.phaseA.renderedCheckOut}` 
+        : undefined,
       phase2_navigation_used: false,
+      requested_checkin: checkIn,
+      requested_checkout: checkOut,
+      url_injected_checkin: result.dateInjection.finalUrlCheckIn || undefined,
+      url_injected_checkout: result.dateInjection.finalUrlCheckOut || undefined,
     };
     
     console.log('[EXPEDIA] Structural proof:', JSON.stringify(result.structuralProof, null, 2));
     
-    // ============= SUCCESS =============
+    // ===== SUCCESS =====
     result.success = true;
     result.status = 'success';
     result.durationMs = Date.now() - startTime;
@@ -1075,6 +1251,46 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json() as ExtractionRequest;
     const { url, extractionId, checkIn, checkOut, adults = 2 } = body;
+    
+    // ===== STRICT DATE VALIDATION AT ENTRY =====
+    if (!checkIn || !checkOut) {
+      console.log('[EXPEDIA] Missing required dates');
+      return new Response(
+        JSON.stringify({ 
+          success: false, 
+          error: 'checkIn and checkOut dates are required',
+          status: 'validation_error'
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (!isValidDateFormat(checkIn) || !isValidDateFormat(checkOut)) {
+      console.log(`[EXPEDIA] Invalid date format: checkIn=${checkIn}, checkOut=${checkOut}`);
+      return new Response(
+        JSON.stringify({ 
+          success: false, 
+          error: `Invalid date format. Expected YYYY-MM-DD, got checkIn="${checkIn}", checkOut="${checkOut}"`,
+          status: 'validation_error'
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    // Validate date order
+    const checkInDate = new Date(checkIn);
+    const checkOutDate = new Date(checkOut);
+    if (checkOutDate <= checkInDate) {
+      console.log(`[EXPEDIA] Invalid date range: ${checkIn} to ${checkOut}`);
+      return new Response(
+        JSON.stringify({ 
+          success: false, 
+          error: `checkOut must be after checkIn. Got ${checkIn} to ${checkOut}`,
+          status: 'validation_error'
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
     
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -1115,14 +1331,10 @@ Deno.serve(async (req) => {
       );
     }
     
-    if (!checkIn || !checkOut) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'checkIn and checkOut dates required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
+    console.log(`[EXPEDIA] Starting extraction: ${checkIn} to ${checkOut}`);
+    console.log(`[EXPEDIA] Base URL: ${targetUrl}`);
     
-    // Run extraction
+    // Run extraction with strict date handling
     const result = await extractFromExpedia(targetUrl, checkIn, checkOut, adults);
     
     // Compute verification status
@@ -1144,11 +1356,14 @@ Deno.serve(async (req) => {
           extraction_error: result.error,
           page_content_hash: result.phaseA.contentHash,
           provider_used: result.providerUsed,
+          dates_validated: result.phaseA.datesVerified,
+          detected_checkin: result.phaseA.renderedCheckIn,
+          detected_checkout: result.phaseA.renderedCheckOut,
           evidence_snippets: result.phaseB.evidenceSnippet ? [result.phaseB.evidenceSnippet] : null,
           extraction_metadata: {
             goldenPath: true,
             platform: 'expedia',
-            version: '2.0',
+            version: '3.0',
             phaseA: result.phaseA,
             phaseB: result.phaseB,
             structural_proof: result.structuralProof,
@@ -1156,6 +1371,7 @@ Deno.serve(async (req) => {
             provider_order: PROVIDER_ORDER,
             attempts: result.attempts,
             durationMs: result.durationMs,
+            dateInjection: result.dateInjection,
           },
           updated_at: new Date().toISOString(),
         })
@@ -1168,9 +1384,10 @@ Deno.serve(async (req) => {
         result,
         goldenPath: true,
         platform: 'expedia',
-        version: '2.0',
+        version: '3.0',
         verification_status: isVerified ? 'Verified' : 'Unverified',
         provider_used: result.providerUsed,
+        dateInjection: result.dateInjection,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
