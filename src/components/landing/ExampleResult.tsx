@@ -5,8 +5,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useLastSuccessfulSearch } from "@/hooks/useLastSuccessfulSearch";
 import { useImageAlignment } from "@/hooks/useImageAlignment";
 import { getObjectPosition, getTransform } from "@/lib/imageAlignment";
-import cottageView1 from "@/assets/cottage-view-1.jpg";
-import cottageView2 from "@/assets/cottage-view-2.jpg";
 import type { Json } from "@/integrations/supabase/types";
 
 // Convert JSON to string array
@@ -18,28 +16,6 @@ const toStringArray = (json: Json | null | undefined): string[] => {
   return [];
 };
 
-// Format date for display
-const formatDate = (dateStr: string): string => {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-};
-
-// Static fallback data
-const STATIC_DATA = {
-  title: "Cozy Lakeside Cottage",
-  airbnbPrice: 180,
-  directPrice: 133,
-  airbnbTotal: 540,
-  directTotal: 399,
-  nights: 3,
-  savings: 141,
-  savingsPercent: 26,
-  unlockFee: 14.10,
-  dates: "Jan 15–18, 2025",
-  airbnbImage: cottageView1,
-  directImage: cottageView2,
-};
-
 export function ExampleResult() {
   const [sliderPosition, setSliderPosition] = useState(50);
   const [isDragging, setIsDragging] = useState(false);
@@ -48,61 +24,48 @@ export function ExampleResult() {
   
   const { data: dynamicData, loading } = useLastSuccessfulSearch();
 
-  // Use dynamic data if available, otherwise static
-  const useDynamic = !loading && dynamicData !== null;
+  // Only show when we have REAL verified data with a price
+  const hasVerifiedData = !loading && dynamicData !== null && dynamicData.cheapestResult?.price !== null;
   
-  // Check if savings are simulated (for demo/marketing purposes)
-  const savingsSimulated = useDynamic ? (dynamicData.savingsSimulated ?? false) : false;
-  
-  // Extract values from dynamic data or use static
-  const title = useDynamic ? (dynamicData.airbnb_title || STATIC_DATA.title) : STATIC_DATA.title;
-  const rawAirbnbPrice = useDynamic ? (dynamicData.airbnb_price || STATIC_DATA.airbnbPrice) : STATIC_DATA.airbnbPrice;
-  const nights = useDynamic ? (dynamicData.nights_count || STATIC_DATA.nights) : STATIC_DATA.nights;
+  // Extract values only when we have verified data
+  const title = hasVerifiedData ? (dynamicData.airbnb_title || "Vacation Rental") : "";
+  const rawAirbnbPrice = hasVerifiedData ? (dynamicData.airbnb_price || 0) : 0;
+  const nights = hasVerifiedData ? (dynamicData.nights_count || 1) : 1;
   
   // Calculate Airbnb totals with service fees (14%)
   const serviceFeeRate = 0.14;
   const airbnbTotal = rawAirbnbPrice * nights;
   const serviceFee = Math.round(airbnbTotal * serviceFeeRate);
   const airbnbGrandTotal = airbnbTotal + serviceFee;
-  const airbnbPrice = rawAirbnbPrice; // Per night before fees
+  const airbnbPrice = rawAirbnbPrice;
   
-  // Get raw direct price if available
-  const rawDirectPrice = useDynamic && dynamicData.cheapestResult?.price 
-    ? dynamicData.cheapestResult.price 
-    : null;
+  // Get verified direct price
+  const directPrice = hasVerifiedData ? (dynamicData.cheapestResult?.price || 0) : 0;
+  const directTotal = directPrice * nights;
   
-  // Ensure direct is ALWAYS cheaper than Airbnb+fees for demo
-  // If no real price or real price is higher, simulate ~20% savings
-  const directPricePerNight = rawDirectPrice !== null && (rawDirectPrice * nights) < airbnbGrandTotal
-    ? rawDirectPrice
-    : Math.round((airbnbGrandTotal / nights) * 0.80); // 20% cheaper per night
-  
-  const directPrice = directPricePerNight;
-  const directTotal = directPricePerNight * nights;
-  
-  // Calculate savings (Airbnb grand total - direct total)
+  // Calculate savings
   const savings = airbnbGrandTotal - directTotal;
-  const savingsPercent = Math.round((savings / airbnbGrandTotal) * 100);
+  const savingsPercent = airbnbGrandTotal > 0 ? Math.round((savings / airbnbGrandTotal) * 100) : 0;
   const unlockFee = Math.round(savings * 0.1 * 100) / 100;
   
-  // Date display - use generic "X nights" for privacy when showing dynamic data
-  const dates = useDynamic && dynamicData.nights_count
+  // Date display
+  const dates = hasVerifiedData && dynamicData.nights_count
     ? `${dynamicData.nights_count} nights`
-    : STATIC_DATA.dates;
+    : "";
   
-  // Images - prefer dynamic data from last search
-  const airbnbImages = useDynamic ? toStringArray(dynamicData.airbnb_images) : [];
-  const airbnbImage = useDynamic 
-    ? (dynamicData.cheapestResult?.source_airbnb_image || dynamicData.airbnb_image_url || airbnbImages[0] || STATIC_DATA.airbnbImage)
-    : STATIC_DATA.airbnbImage;
-  const directImage = useDynamic 
-    ? (dynamicData.cheapestResult?.image_url || STATIC_DATA.directImage)
-    : STATIC_DATA.directImage;
+  // Images from verified data
+  const airbnbImages = hasVerifiedData ? toStringArray(dynamicData.airbnb_images) : [];
+  const airbnbImage = hasVerifiedData 
+    ? (dynamicData.cheapestResult?.source_airbnb_image || dynamicData.airbnb_image_url || airbnbImages[0] || "")
+    : "";
+  const directImage = hasVerifiedData 
+    ? (dynamicData.cheapestResult?.image_url || "")
+    : "";
 
   const { alignment, autoAlign } = useImageAlignment(airbnbImage, directImage);
 
   useEffect(() => {
-    if (!useDynamic) return;
+    if (!hasVerifiedData) return;
     if (!airbnbImage || !directImage) return;
     if (autoAlignTriggeredRef.current) return;
 
@@ -114,17 +77,17 @@ export function ExampleResult() {
 
     autoAlignTriggeredRef.current = true;
     void autoAlign();
-  }, [useDynamic, airbnbImage, directImage, alignment.x, alignment.y, alignment.scale, autoAlign]);
+  }, [hasVerifiedData, airbnbImage, directImage, alignment.x, alignment.y, alignment.scale, autoAlign]);
   
   // Confidence score
-  const confidenceScore = useDynamic && dynamicData.cheapestResult?.confidence_score
+  const confidenceScore = hasVerifiedData && dynamicData.cheapestResult?.confidence_score
     ? Math.round(dynamicData.cheapestResult.confidence_score * 100)
-    : 98;
+    : 0;
   
   // Platform name
-  const directPlatform = useDynamic && dynamicData.cheapestResult?.platform_name
+  const directPlatform = hasVerifiedData && dynamicData.cheapestResult?.platform_name
     ? dynamicData.cheapestResult.platform_name
-    : "Direct Booking";
+    : "";
 
   // Handle slider drag
   const handleMouseMove = (e: MouseEvent | TouchEvent) => {
@@ -157,6 +120,11 @@ export function ExampleResult() {
     }
   }, [isDragging]);
 
+  // Don't render anything if no verified data
+  if (!hasVerifiedData) {
+    return null;
+  }
+
   return (
     <section className="py-12 sm:py-20 md:py-32 bg-card">
       <div className="container px-4">
@@ -165,11 +133,7 @@ export function ExampleResult() {
             See the Savings in Action
           </h2>
           <p className="text-base sm:text-lg text-muted-foreground">
-            {useDynamic 
-              ? (savingsSimulated 
-                  ? "A real verified match from a recent search — example savings shown" 
-                  : "A real comparison from a recent search")
-              : "Here's what a typical Arivioo comparison looks like"}
+            A real comparison from a recent search
           </p>
         </div>
 
@@ -402,7 +366,7 @@ export function ExampleResult() {
               {/* Savings Summary */}
               <div className="border-2 border-success/30 bg-success/5 rounded-xl sm:rounded-2xl p-4 sm:p-8 text-center">
                 <p className="text-muted-foreground mb-2 sm:mb-3 text-base sm:text-lg">
-                  {savingsSimulated ? "Typical savings by booking direct" : "Your potential savings by booking direct"}
+                  Your potential savings by booking direct
                 </p>
                 <div className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-3 mb-2 sm:mb-3">
                   <p className="text-3xl sm:text-5xl font-bold text-success">${savings}</p>
@@ -411,16 +375,9 @@ export function ExampleResult() {
                 <p className="text-sm sm:text-base text-muted-foreground mb-3 sm:mb-4">
                   Same property, same dates — just without the platform fees
                 </p>
-                {savingsSimulated ? (
-                  <p className="text-xs sm:text-sm text-muted-foreground italic">
-                    <Sparkles className="w-3 h-3 inline mr-1" />
-                    Example savings shown — actual savings vary by listing
-                  </p>
-                ) : (
-                  <p className="text-xs sm:text-sm text-muted-foreground">
-                    <strong>Unlock fee:</strong> ${unlockFee.toFixed(2)} (10% of your savings) — Only pay when you save
-                  </p>
-                )}
+                <p className="text-xs sm:text-sm text-muted-foreground">
+                  <strong>Unlock fee:</strong> ${unlockFee.toFixed(2)} (10% of your savings) — Only pay when you save
+                </p>
               </div>
 
               {/* Info note */}
