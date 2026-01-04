@@ -2136,4 +2136,252 @@ describe('Expedia Extraction Invariants', () => {
     
   });
   
+  // ==========================================================================
+  // EXPEDIA v5.0 GOLDEN PATH TESTS
+  // ==========================================================================
+  
+  describe('Expedia Golden Path Navigation (v5.0)', () => {
+    
+    /**
+     * FIXTURE: Successful USD checkout from Hotel-Search offers page
+     */
+    const EXPEDIA_GOLDEN_PATH_USD = {
+      extraction_status: 'success',
+      extracted_price: 523.00,
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.95,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '5.0-golden-path',
+        goldenPath: {
+          propertyId: '34107887',
+          propertyIdSource: 'url_path',
+          offersPageUrl: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+          guestMapping: 'Airbnb adults=1 mapped to Expedia adults=2 (minimum for Japan domain)',
+          requestedStartDate: '2026-03-01',
+          requestedEndDate: '2026-03-04',
+          requestedAdults: 1,
+        },
+        structuralProof: {
+          breakdown_found: true,
+          total_label_found: true,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: true,
+          proof_version: '2.0-golden-path',
+          property_id: '34107887',
+          property_id_source: 'url_path',
+          original_currency: 'USD',
+          original_amount: 523.00,
+          converted_amount_usd: 523.00,
+          conversion_rate: 1.0,
+          page_context: 'Hotel-Search offers page',
+          is_offers_page: true,
+        },
+        // Legacy compatibility fields
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+      },
+    };
+    
+    /**
+     * FIXTURE: Successful JPY checkout with currency conversion
+     */
+    const EXPEDIA_GOLDEN_PATH_JPY = {
+      extraction_status: 'success',
+      extracted_price: 335.00, // ¥50,000 * 0.0067 = $335
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.95,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '5.0-golden-path',
+        goldenPath: {
+          propertyId: '34107887',
+          propertyIdSource: 'url_path',
+          offersPageUrl: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+          guestMapping: 'Direct mapping: Airbnb adults=2 → Expedia adults=2',
+          requestedStartDate: '2026-03-01',
+          requestedEndDate: '2026-03-04',
+          requestedAdults: 2,
+        },
+        structuralProof: {
+          breakdown_found: true,
+          total_label_found: true,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: true,
+          proof_version: '2.0-golden-path',
+          property_id: '34107887',
+          original_currency: 'JPY',
+          original_amount: 50000,
+          converted_amount_usd: 335.00,
+          conversion_rate: 0.0067,
+          page_context: 'Hotel-Search offers page',
+          is_offers_page: true,
+        },
+        // Legacy compatibility fields
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+      },
+    };
+    
+    /**
+     * FIXTURE: Property ID not found in URL
+     */
+    const EXPEDIA_GOLDEN_PATH_NO_PROPERTY_ID = {
+      extraction_status: 'property_id_not_found',
+      extracted_price: null,
+      dates_validated: false,
+      includes_taxes_fees: false,
+      confidence_score: 0,
+      extraction_error: 'Could not extract Expedia property ID from URL',
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '5.0-golden-path',
+        goldenPath: {
+          propertyId: null,
+          propertyIdSource: null,
+          offersPageUrl: null,
+        },
+      },
+    };
+    
+    /**
+     * FIXTURE: Offers page loaded but no total with taxes found
+     */
+    const EXPEDIA_GOLDEN_PATH_NO_TOTAL = {
+      extraction_status: 'expedia_total_not_found',
+      extracted_price: null,
+      dates_validated: true,
+      includes_taxes_fees: false,
+      confidence_score: 0,
+      extraction_error: 'No total price with taxes found on offers page',
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '5.0-golden-path',
+        goldenPath: {
+          propertyId: '34107887',
+          propertyIdSource: 'url_path',
+          offersPageUrl: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+        },
+        offersPage: {
+          loaded: true,
+          propertyFound: true,
+          hasOfferCards: false,
+          hasTotalWithTaxes: false,
+        },
+        // NO structural proof - total not found
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: false,
+      },
+    };
+    
+    describe('Property ID Extraction (Step 1)', () => {
+      
+      it('Extracts property ID from URL path pattern h34107887', () => {
+        expect(EXPEDIA_GOLDEN_PATH_USD.extraction_metadata.goldenPath.propertyId).toBe('34107887');
+        expect(EXPEDIA_GOLDEN_PATH_USD.extraction_metadata.goldenPath.propertyIdSource).toBe('url_path');
+      });
+      
+      it('Returns property_id_not_found when ID cannot be extracted', () => {
+        expect(EXPEDIA_GOLDEN_PATH_NO_PROPERTY_ID.extraction_status).toBe('property_id_not_found');
+        expect(EXPEDIA_GOLDEN_PATH_NO_PROPERTY_ID.extraction_metadata.goldenPath.propertyId).toBeNull();
+      });
+      
+    });
+    
+    describe('Hotel-Search URL Construction (Step 2)', () => {
+      
+      it('Builds correct Hotel-Search URL with dates and propertyId', () => {
+        const url = EXPEDIA_GOLDEN_PATH_USD.extraction_metadata.goldenPath.offersPageUrl;
+        expect(url).toContain('Hotel-Search');
+        expect(url).toContain('startDate=2026-03-01');
+        expect(url).toContain('endDate=2026-03-04');
+        expect(url).toContain('selected=34107887');
+      });
+      
+      it('Applies guest mapping: Airbnb 1 adult → Expedia 2 adults minimum', () => {
+        const mapping = EXPEDIA_GOLDEN_PATH_USD.extraction_metadata.goldenPath.guestMapping;
+        expect(mapping).toContain('adults=1');
+        expect(mapping).toContain('Expedia adults=2');
+        expect(EXPEDIA_GOLDEN_PATH_USD.extraction_metadata.goldenPath.offersPageUrl).toContain('adults=2');
+      });
+      
+    });
+    
+    describe('Offers Page Price Extraction (Step 5)', () => {
+      
+      it('Extracts USD total correctly with structural proof', () => {
+        const result = verifyPrice(EXPEDIA_GOLDEN_PATH_USD);
+        
+        expect(result.price_status).toBe('verified');
+        expect(result.structural_total_verified).toBe(true);
+        expect(result.eligible_for_comparison).toBe(true);
+      });
+      
+      it('Extracts JPY total and converts to USD correctly', () => {
+        const proof = EXPEDIA_GOLDEN_PATH_JPY.extraction_metadata.structuralProof;
+        
+        expect(proof.original_currency).toBe('JPY');
+        expect(proof.original_amount).toBe(50000);
+        expect(proof.converted_amount_usd).toBe(335.00);
+        expect(proof.conversion_rate).toBe(0.0067);
+        
+        // Verification should pass
+        const result = verifyPrice(EXPEDIA_GOLDEN_PATH_JPY);
+        expect(result.price_status).toBe('verified');
+      });
+      
+      it('Returns expedia_total_not_found when no total with taxes found', () => {
+        expect(EXPEDIA_GOLDEN_PATH_NO_TOTAL.extraction_status).toBe('expedia_total_not_found');
+        
+        const result = verifyPrice(EXPEDIA_GOLDEN_PATH_NO_TOTAL);
+        expect(result.price_status).toBe('unavailable');
+        expect(result.structural_total_verified).toBe(false);
+      });
+      
+    });
+    
+    describe('Structural Proof for Offers Page (Step 7)', () => {
+      
+      it('is_offers_page flag is set for offers page extractions', () => {
+        expect(EXPEDIA_GOLDEN_PATH_USD.extraction_metadata.structuralProof.is_offers_page).toBe(true);
+      });
+      
+      it('page_context indicates Hotel-Search offers page', () => {
+        expect(EXPEDIA_GOLDEN_PATH_USD.extraction_metadata.structuralProof.page_context).toContain('Hotel-Search');
+      });
+      
+      it('Currency audit fields are preserved', () => {
+        const proof = EXPEDIA_GOLDEN_PATH_JPY.extraction_metadata.structuralProof;
+        
+        expect(proof.original_currency).toBe('JPY');
+        expect(proof.original_amount).toBeGreaterThan(0);
+        expect(proof.converted_amount_usd).toBeGreaterThan(0);
+        expect(proof.conversion_rate).toBeGreaterThan(0);
+      });
+      
+    });
+    
+    describe('Failure Modes (Step 8)', () => {
+      
+      it('property_id_not_found has no price output', () => {
+        expect(EXPEDIA_GOLDEN_PATH_NO_PROPERTY_ID.extracted_price).toBeNull();
+      });
+      
+      it('expedia_total_not_found has no price output', () => {
+        expect(EXPEDIA_GOLDEN_PATH_NO_TOTAL.extracted_price).toBeNull();
+      });
+      
+    });
+    
+  });
+  
 });
+

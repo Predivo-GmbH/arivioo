@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { AlertCircle, Calendar, Info, Check, ExternalLink, Search, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected" | "expedia_access_blocked";
+type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected" | "expedia_access_blocked" | "expedia_total_not_found" | "property_id_not_found" | "offers_page_not_loaded";
 
 interface TerminalErrorPanelProps {
   type: TerminalErrorType;
@@ -131,6 +131,60 @@ const config: Record<TerminalErrorType, {
       "This is a temporary security measure — it will resolve automatically",
     ],
     primaryAction: { label: "Try Again Later", to: "/dashboard" },
+  },
+  expedia_total_not_found: {
+    icon: AlertCircle,
+    iconColor: "text-amber-500",
+    bgColor: "bg-amber-500/10",
+    borderColor: "border-amber-500/20",
+    title: "Expedia Price Not Found",
+    description: (
+      <>
+        We found the property on Expedia but couldn't extract a <span className="font-semibold text-foreground">total price including taxes & fees</span>.
+      </>
+    ),
+    tips: [
+      "Open the listing directly on Expedia to see the full price",
+      "The property may not display a complete total on the offers page",
+      "Try a different property that shows clearer pricing",
+    ],
+    primaryAction: { label: "View on Expedia", to: "/dashboard" },
+  },
+  property_id_not_found: {
+    icon: AlertCircle,
+    iconColor: "text-amber-500",
+    bgColor: "bg-amber-500/10",
+    borderColor: "border-amber-500/20",
+    title: "Property Not Identified",
+    description: (
+      <>
+        We couldn't extract the <span className="font-semibold text-foreground">property ID</span> from the Expedia URL. This is needed to find pricing.
+      </>
+    ),
+    tips: [
+      "Ensure you're using a valid Expedia property page URL",
+      "The URL should contain a property ID like 'h12345678'",
+      "Try copying the URL directly from the Expedia website",
+    ],
+    primaryAction: { label: "Try Again", to: "/dashboard" },
+  },
+  offers_page_not_loaded: {
+    icon: Clock,
+    iconColor: "text-purple-500",
+    bgColor: "bg-purple-500/10",
+    borderColor: "border-purple-500/20",
+    title: "Expedia Offers Page Failed",
+    description: (
+      <>
+        We couldn't load the <span className="font-semibold text-foreground">Expedia offers page</span> with pricing for your dates.
+      </>
+    ),
+    tips: [
+      "Try again in a moment — it may work on the next attempt",
+      "Open the listing on Expedia to verify pricing directly",
+      "Check if the property is available for your selected dates",
+    ],
+    primaryAction: { label: "Try Again", to: "/dashboard" },
   },
 };
 
