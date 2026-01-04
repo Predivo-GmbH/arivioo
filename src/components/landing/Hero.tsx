@@ -140,7 +140,7 @@ export function Hero() {
           </button>
 
           {/* Mockup Preview - Only show when we have REAL verified data */}
-          {(loading || hasVerifiedData) && (
+          {hasVerifiedData && (
           <div className="mt-16 animate-fade-in" style={{ animationDelay: "0.5s" }}>
             <div className="relative max-w-3xl mx-auto">
               <div className="bg-card rounded-2xl shadow-large border border-border p-6 md:p-8">
