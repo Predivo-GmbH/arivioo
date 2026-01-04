@@ -5943,6 +5943,150 @@ async function runSearchWithStreaming(
       .update({ status: `scraping_price_${alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${i + 1}_of_${toScrape.length}`, last_progress_at: new Date().toISOString() })
       .eq("id", searchId);
 
+    // ============================================================================
+    // EXPEDIA GOLDEN PATH: Route Expedia URLs to dedicated extract-expedia function
+    // This uses the same logic as the Admin Dashboard extraction test
+    // ============================================================================
+    const isExpediaUrl = alt.listing_url.toLowerCase().includes('expedia.');
+    
+    if (isExpediaUrl) {
+      console.log(`[EXPEDIA GOLDEN PATH] Routing ${alt.platform_name} to dedicated extract-expedia function`);
+      sendProgress(
+        controller,
+        `Extracting Expedia price (Golden Path)`,
+        `Using verified extraction with target card anchoring`,
+        { platform: alt.platform_name }
+      );
+      
+      try {
+        const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+        const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+        
+        // Extract adults from Airbnb URL or default to 2
+        const adultsParam = (() => {
+          try {
+            const airbnbUrlObj = new URL(search.airbnb_url);
+            const adults = parseInt(airbnbUrlObj.searchParams.get('adults') || airbnbUrlObj.searchParams.get('numberOfAdults') || '2', 10);
+            return Math.max(2, adults); // Expedia requires minimum 2 adults
+          } catch {
+            return 2;
+          }
+        })();
+        
+        // Call extract-expedia with the same parameters as admin test harness
+        const expediaResponse = await fetch(`${supabaseUrl}/functions/v1/extract-expedia`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseServiceKey}`,
+          },
+          body: JSON.stringify({
+            url: alt.listing_url,
+            checkIn: checkIn,
+            checkOut: checkOut,
+            adults: adultsParam,
+            requireValidation: true,
+            searchId: searchId,
+            // Note: extractionId will be created by the function if not provided
+          }),
+        });
+        
+        if (!expediaResponse.ok) {
+          const errorText = await expediaResponse.text();
+          console.error(`[EXPEDIA GOLDEN PATH] extract-expedia HTTP error: ${expediaResponse.status}`, errorText);
+          sendProgress(controller, `Expedia extraction failed`, `HTTP ${expediaResponse.status}`, {
+            platform: alt.platform_name,
+            error: true,
+          });
+          // Mark with terminal status for UI
+          (alt as any)._expediaTerminalStatus = 'render_failed';
+          (alt as any)._expediaError = `HTTP ${expediaResponse.status}`;
+          continue;
+        }
+        
+        const expediaResult = await expediaResponse.json();
+        console.log(`[EXPEDIA GOLDEN PATH] Result:`, JSON.stringify({
+          success: expediaResult.success,
+          status: expediaResult.status,
+          price: expediaResult.price,
+          structuralProof: expediaResult.structuralProof ? {
+            offers_page_gate_passed: expediaResult.structuralProof.offers_page_gate_passed,
+            target_card_found: expediaResult.structuralProof.target_card_found,
+            extracted_from_target_card: expediaResult.structuralProof.extracted_from_target_card,
+          } : null,
+        }));
+        
+        // Store Expedia-specific metadata on the alternative for later DB persistence
+        (alt as any)._expediaResult = expediaResult;
+        (alt as any)._expediaTerminalStatus = expediaResult.status;
+        (alt as any)._expediaStructuralProof = expediaResult.structuralProof;
+        (alt as any)._expediaTrace = expediaResult.expedia_trace;
+        
+        // Map Expedia result to standard price format
+        if (expediaResult.success && expediaResult.price) {
+          // Calculate per-night rate from total
+          const expediaNights = calculateNights(checkIn, checkOut);
+          const perNightRate = Math.round(expediaResult.price / expediaNights);
+          
+          alt.price = perNightRate;
+          alt.price_check_in = checkIn;
+          alt.price_check_out = checkOut;
+          alt.dates_differ = false;
+          
+          // Mark as verified if structural proof passes
+          const isVerified = expediaResult.structuralProof?.extracted_from_target_card === true;
+          (alt as any)._expediaVerified = isVerified;
+          
+          sendProgress(
+            controller,
+            `Found Expedia price${isVerified ? ' (Verified)' : ''}`,
+            `$${expediaResult.price} total ($${perNightRate}/night) - includes taxes & fees`,
+            { platform: alt.platform_name, price: perNightRate, verified: isVerified, totalPrice: expediaResult.price }
+          );
+        } else {
+          // No price found - report the terminal status
+          const statusMessage = (() => {
+            switch (expediaResult.status) {
+              case 'expedia_target_offer_not_found':
+                return 'Property not found on Expedia';
+              case 'expedia_dates_unavailable_for_target':
+                return 'Not available for these dates on Expedia';
+              case 'expedia_target_offer_mismatch':
+                return 'Property mismatch on Expedia';
+              case 'expedia_target_total_not_found':
+                return 'Total price not visible on Expedia';
+              case 'expedia_access_blocked':
+              case 'blocked_captcha_or_bot':
+                return 'Blocked by Expedia';
+              case 'dates_unavailable':
+                return 'Dates unavailable on Expedia';
+              default:
+                return expediaResult.error || 'Extraction failed';
+            }
+          })();
+          
+          sendProgress(controller, `No Expedia price`, statusMessage, {
+            platform: alt.platform_name,
+            status: expediaResult.status,
+          });
+        }
+        
+      } catch (expediaError) {
+        console.error(`[EXPEDIA GOLDEN PATH] Exception:`, expediaError);
+        sendProgress(controller, `Expedia extraction error`, String(expediaError), {
+          platform: alt.platform_name,
+          error: true,
+        });
+        (alt as any)._expediaTerminalStatus = 'extraction_error';
+        (alt as any)._expediaError = String(expediaError);
+      }
+      
+      continue; // Skip generic extraction for Expedia
+    }
+    
+    // ============================================================================
+    // GENERIC PATH: Use Firecrawl-based extraction for non-Expedia platforms
+    // ============================================================================
     if (!firecrawlApiKey) continue;
 
     const priceData = await scrapePriceFromListing(alt.listing_url, checkIn, checkOut, firecrawlApiKey, alt.platform_name, claimSkipNow);
