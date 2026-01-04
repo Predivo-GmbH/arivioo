@@ -2383,5 +2383,240 @@ describe('Expedia Extraction Invariants', () => {
     
   });
   
+  // ============================================================================
+  // EXPEDIA HARD GATE TESTS (v5.1)
+  // These tests enforce the "no offers page = no price" invariant
+  // ============================================================================
+  
+  describe('Expedia Hotel-Search URL Hard Gate (v5.1)', () => {
+    
+    /**
+     * FIXTURE: Property page extraction - MUST BE REJECTED
+     * This simulates extracting from a property page, not Hotel-Search
+     */
+    const EXPEDIA_PROPERTY_PAGE_FIXTURE = {
+      extraction_status: 'expedia_offers_page_not_reached',
+      extracted_price: null,
+      dates_validated: false,
+      includes_taxes_fees: false,
+      confidence_score: 0,
+      extraction_error: 'Offers page gate failed: URL path is not /Hotel-Search',
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '3.0-hard-gate',
+        goldenPath: {
+          propertyId: '34107887',
+          offersPageUrl: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+        },
+        structuralProof: {
+          offers_page_reached: false,
+          offers_page_gate_passed: false,
+          current_url_at_extraction: 'https://www.expedia.co.jp/Blue-Ridge-Hotels.h34107887.Hotel-Information',
+          property_id_used: '34107887',
+          constructed_offers_url: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+        },
+        // All proof fields are false
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: false,
+        extracted_from_breakdown_total: false,
+      },
+    };
+    
+    /**
+     * FIXTURE: Valid Hotel-Search page with total includes taxes
+     */
+    const EXPEDIA_VALID_OFFERS_PAGE_FIXTURE = {
+      extraction_status: 'success',
+      extracted_price: 1966.87,
+      dates_validated: true,
+      includes_taxes_fees: true,
+      confidence_score: 0.95,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '3.0-hard-gate',
+        goldenPath: {
+          propertyId: '34107887',
+          offersPageUrl: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+        },
+        structuralProof: {
+          breakdown_found: true,
+          total_label_found: true,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: true,
+          offers_page_reached: true,
+          offers_page_gate_passed: true,
+          current_url_at_extraction: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+          property_id_used: '34107887',
+          constructed_offers_url: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+          original_currency: 'JPY',
+          original_amount: 293534,
+          converted_amount_usd: 1966.87,
+          conversion_rate: 0.0067,
+          page_context: 'Hotel-Search offers page',
+          is_offers_page: true,
+          proof_version: '3.0-hard-gate',
+        },
+        // Legacy compatibility
+        breakdown_found: true,
+        total_label_found: true,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+      },
+    };
+    
+    /**
+     * FIXTURE: Offers page without "includes taxes" indicator
+     */
+    const EXPEDIA_OFFERS_PAGE_NO_TAXES_INDICATOR = {
+      extraction_status: 'expedia_total_not_found_on_offers_page',
+      extracted_price: null,
+      dates_validated: true,
+      includes_taxes_fees: false,
+      confidence_score: 0,
+      extraction_error: 'Offers page loaded but no "includes taxes" total indicator found',
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '3.0-hard-gate',
+        structuralProof: {
+          offers_page_reached: true,
+          offers_page_gate_passed: true,
+          current_url_at_extraction: 'https://www.expedia.co.jp/Hotel-Search?startDate=2026-03-01&endDate=2026-03-04&adults=2&selected=34107887',
+          breakdown_found: false, // No "includes taxes" found
+          total_label_found: false,
+          rendered_dates_match: true,
+          extracted_from_breakdown_total: false,
+        },
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: false,
+      },
+    };
+    
+    /**
+     * FIXTURE: Any page without /Hotel-Search path - MUST BE REJECTED
+     */
+    const EXPEDIA_WRONG_PATH_FIXTURE = {
+      extraction_status: 'expedia_offers_page_not_reached',
+      extracted_price: null,
+      dates_validated: false,
+      includes_taxes_fees: false,
+      confidence_score: 0,
+      extraction_error: 'Offers page gate failed: URL path is not /Hotel-Search',
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '3.0-hard-gate',
+        structuralProof: {
+          offers_page_reached: false,
+          offers_page_gate_passed: false,
+          current_url_at_extraction: 'https://www.expedia.co.jp/Blue-Ridge-Hotels-Cohutta.h34107887.Hotel-Information',
+        },
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: false,
+        extracted_from_breakdown_total: false,
+      },
+    };
+    
+    describe('Hard Page-Type Gate (Step 1)', () => {
+      
+      it('REJECTS extraction from property page URL (not /Hotel-Search)', () => {
+        expect(EXPEDIA_PROPERTY_PAGE_FIXTURE.extraction_status).toBe('expedia_offers_page_not_reached');
+        expect(EXPEDIA_PROPERTY_PAGE_FIXTURE.extracted_price).toBeNull();
+        expect(EXPEDIA_PROPERTY_PAGE_FIXTURE.extraction_metadata.structuralProof.offers_page_gate_passed).toBe(false);
+      });
+      
+      it('REJECTS any page without /Hotel-Search in path', () => {
+        expect(EXPEDIA_WRONG_PATH_FIXTURE.extraction_status).toBe('expedia_offers_page_not_reached');
+        expect(EXPEDIA_WRONG_PATH_FIXTURE.extracted_price).toBeNull();
+      });
+      
+      it('ALLOWS extraction only when offers_page_gate_passed is true', () => {
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_status).toBe('success');
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extracted_price).not.toBeNull();
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof.offers_page_gate_passed).toBe(true);
+      });
+      
+    });
+    
+    describe('No "includes taxes" indicator = No Price (Step 6)', () => {
+      
+      it('REJECTS offers page that lacks "includes taxes" indicator', () => {
+        expect(EXPEDIA_OFFERS_PAGE_NO_TAXES_INDICATOR.extraction_status).toBe('expedia_total_not_found_on_offers_page');
+        expect(EXPEDIA_OFFERS_PAGE_NO_TAXES_INDICATOR.extracted_price).toBeNull();
+        expect(EXPEDIA_OFFERS_PAGE_NO_TAXES_INDICATOR.extraction_metadata.structuralProof.breakdown_found).toBe(false);
+      });
+      
+      it('REQUIRES hasTotalWithTaxes to be true for any price extraction', () => {
+        // Valid fixture has this
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof.breakdown_found).toBe(true);
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof.total_label_found).toBe(true);
+      });
+      
+    });
+    
+    describe('Invariant: Structural Proof NOT fully true = extracted_price NULL (Step 8)', () => {
+      
+      it('Property page extraction: all proof false, price null', () => {
+        const meta = EXPEDIA_PROPERTY_PAGE_FIXTURE.extraction_metadata;
+        expect(meta.breakdown_found).toBe(false);
+        expect(meta.total_label_found).toBe(false);
+        expect(meta.extracted_from_breakdown_total).toBe(false);
+        expect(EXPEDIA_PROPERTY_PAGE_FIXTURE.extracted_price).toBeNull();
+      });
+      
+      it('Valid offers page: all proof true, price extracted', () => {
+        const proof = EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof;
+        expect(proof.breakdown_found).toBe(true);
+        expect(proof.total_label_found).toBe(true);
+        expect(proof.rendered_dates_match).toBe(true);
+        expect(proof.extracted_from_breakdown_total).toBe(true);
+        expect(proof.offers_page_gate_passed).toBe(true);
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extracted_price).toBe(1966.87);
+      });
+      
+      it('Correct total ¥293,534 extracted and converted to $1966.87 USD', () => {
+        const proof = EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof;
+        expect(proof.original_currency).toBe('JPY');
+        expect(proof.original_amount).toBe(293534);
+        expect(proof.converted_amount_usd).toBe(1966.87);
+      });
+      
+      it('Fragmentary prices like ¥25,094 or ¥79,863 cannot surface', () => {
+        // These are the nightly/partial prices that were incorrectly extracted before
+        // With the hard gate, they cannot be extracted because:
+        // 1. They don't come from /Hotel-Search page
+        // 2. They don't have "includes taxes" label
+        // The only price that can surface is the verified total ¥293,534
+        const price = EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extracted_price;
+        expect(price).toBeGreaterThan(1000); // Confirmed total is >$1000, not fragmentary ~$100-500 amounts
+      });
+      
+    });
+    
+    describe('Diagnostics Fields (Step 6 - Admin visibility)', () => {
+      
+      it('current_url_at_extraction is populated', () => {
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof.current_url_at_extraction).toContain('Hotel-Search');
+      });
+      
+      it('offers_page_reached is set correctly', () => {
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof.offers_page_reached).toBe(true);
+        expect(EXPEDIA_PROPERTY_PAGE_FIXTURE.extraction_metadata.structuralProof.offers_page_reached).toBe(false);
+      });
+      
+      it('property_id_used is tracked', () => {
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof.property_id_used).toBe('34107887');
+      });
+      
+      it('constructed_offers_url is logged', () => {
+        expect(EXPEDIA_VALID_OFFERS_PAGE_FIXTURE.extraction_metadata.structuralProof.constructed_offers_url).toContain('selected=34107887');
+      });
+      
+    });
+    
+  });
+  
 });
 

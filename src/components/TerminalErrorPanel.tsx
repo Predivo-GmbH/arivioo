@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { AlertCircle, Calendar, Info, Check, ExternalLink, Search, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected" | "expedia_access_blocked" | "expedia_total_not_found" | "property_id_not_found" | "offers_page_not_loaded";
+type TerminalErrorType = "dates_unavailable" | "rate_limited" | "airbnb_total_not_visible" | "provider_timeout" | "bot_detected" | "expedia_access_blocked" | "expedia_total_not_found" | "property_id_not_found" | "offers_page_not_loaded" | "expedia_offers_page_not_reached" | "expedia_total_not_found_on_offers_page";
 
 interface TerminalErrorPanelProps {
   type: TerminalErrorType;
@@ -185,6 +185,42 @@ const config: Record<TerminalErrorType, {
       "Check if the property is available for your selected dates",
     ],
     primaryAction: { label: "Try Again", to: "/dashboard" },
+  },
+  expedia_offers_page_not_reached: {
+    icon: AlertCircle,
+    iconColor: "text-amber-500",
+    bgColor: "bg-amber-500/10",
+    borderColor: "border-amber-500/20",
+    title: "Expedia Offers Page Not Reached",
+    description: (
+      <>
+        We couldn't navigate to the <span className="font-semibold text-foreground">Expedia offers page</span> with pricing. The URL gate check failed.
+      </>
+    ),
+    tips: [
+      "Try again in a moment — navigation may work on the next attempt",
+      "Open the listing directly on Expedia to see pricing",
+      "Ensure the property is still available on Expedia",
+    ],
+    primaryAction: { label: "Try Again", to: "/dashboard" },
+  },
+  expedia_total_not_found_on_offers_page: {
+    icon: AlertCircle,
+    iconColor: "text-amber-500",
+    bgColor: "bg-amber-500/10",
+    borderColor: "border-amber-500/20",
+    title: "No Price on Offers Page",
+    description: (
+      <>
+        We reached the Expedia offers page but couldn't find a <span className="font-semibold text-foreground">"total includes taxes" price</span>.
+      </>
+    ),
+    tips: [
+      "The property may not display a complete total on this page",
+      "Open the listing directly on Expedia to see the full price",
+      "Try a different property that shows clearer pricing",
+    ],
+    primaryAction: { label: "View on Expedia", to: "/dashboard" },
   },
 };
 
