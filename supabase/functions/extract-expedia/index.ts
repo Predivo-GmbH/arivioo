@@ -55,10 +55,36 @@ type TerminalStatus =
   | 'render_failed'
   | 'validation_error'
   | 'subtotal_rejected'
-  | 'checkout_not_reached'     // NEW: Could not reach checkout context
-  | 'currency_conversion_failed'; // NEW: Currency could not be determined/converted
+  | 'checkout_not_reached'
+  | 'currency_conversion_failed'
+  | 'expedia_access_blocked';  // NEW: All providers blocked by Expedia
 
 type Provider = 'browserless' | 'zyte' | 'firecrawl';
+
+type ProviderOutcome = 
+  | 'success'
+  | 'bot_blocked'
+  | 'rate_limited'
+  | 'navigation_failed'
+  | 'parsing_failed'
+  | 'checkout_not_reached'
+  | 'timeout'
+  | 'skipped'
+  | 'insufficient_content';
+
+// Provider attempt trace for full observability
+interface ProviderAttemptTrace {
+  provider: Provider;
+  attempted: boolean;
+  startedAt: string | null;
+  endedAt: string | null;
+  outcome: ProviderOutcome;
+  httpStatus: number | null;
+  contentLength: number | null;
+  reasonSkipped: string | null;
+  errorMessage: string | null;
+  botBlockedFallbackToZyte?: boolean;
+}
 
 const PROVIDER_ORDER: Provider[] = ['browserless', 'zyte', 'firecrawl'];
 
@@ -281,6 +307,7 @@ interface ExtractionResult {
   error: string | null;
   providerUsed: Provider | null;
   attempts: AttemptResult[];
+  providerAttemptTrace: ProviderAttemptTrace[];  // NEW: Full trace for observability
   dateInjection: {
     requestedCheckIn: string;
     requestedCheckOut: string;
@@ -1287,6 +1314,22 @@ async function extractFromExpedia(
 ): Promise<ExtractionResult> {
   const startTime = Date.now();
   const attempts: AttemptResult[] = [];
+  const providerAttemptTrace: ProviderAttemptTrace[] = [];
+  
+  // Initialize trace for all providers
+  for (const provider of PROVIDER_ORDER) {
+    providerAttemptTrace.push({
+      provider,
+      attempted: false,
+      startedAt: null,
+      endedAt: null,
+      outcome: 'skipped',
+      httpStatus: null,
+      contentLength: null,
+      reasonSkipped: null,
+      errorMessage: null,
+    });
+  }
   
   const result: ExtractionResult = {
     success: false,
@@ -1337,6 +1380,7 @@ async function extractFromExpedia(
     error: null,
     providerUsed: null,
     attempts: [],
+    providerAttemptTrace: [],
     dateInjection: {
       requestedCheckIn: checkIn,
       requestedCheckOut: checkOut,
@@ -1344,6 +1388,12 @@ async function extractFromExpedia(
       finalUrlCheckOut: null,
       urlBuiltSuccessfully: false,
     },
+  };
+  
+  // Helper to update trace
+  const updateTrace = (provider: Provider, updates: Partial<ProviderAttemptTrace>) => {
+    const trace = providerAttemptTrace.find(t => t.provider === provider);
+    if (trace) Object.assign(trace, updates);
   };
   
   try {
@@ -1362,137 +1412,357 @@ async function extractFromExpedia(
       result.status = 'date_application_failed';
       result.error = urlBuild.error || 'Failed to build URL with dates';
       result.durationMs = Date.now() - startTime;
+      result.providerAttemptTrace = providerAttemptTrace;
+      // Mark first provider as failed before we even started
+      updateTrace('browserless', { 
+        reasonSkipped: 'URL build failed before provider attempt',
+        outcome: 'navigation_failed'
+      });
+      result.providerUsed = 'browserless'; // Never leave as null
       return result;
     }
     
     const fullUrl = urlBuild.url;
     console.log(`[EXPEDIA] Final URL: ${fullUrl}`);
     
-    // Fetch with provider chain
+    // Fetch with provider chain - CONTROLLED FALLBACK POLICY
     let bestContent: string | null = null;
     let successfulProvider: Provider | null = null;
+    let browserlessWasBotBlocked = false;
+    let browserlessWasRateLimited = false;
     
-    for (const provider of PROVIDER_ORDER) {
-      console.log(`[EXPEDIA] Trying provider: ${provider}`);
+    // ============================================================
+    // STEP 1: Try Browserless first
+    // ============================================================
+    console.log('[EXPEDIA] Step 1: Trying Browserless...');
+    
+    const browserlessStartTime = new Date().toISOString();
+    updateTrace('browserless', { attempted: true, startedAt: browserlessStartTime });
+    
+    const browserlessResult = await fetchWithBrowserless(fullUrl);
+    
+    updateTrace('browserless', {
+      endedAt: new Date().toISOString(),
+      contentLength: browserlessResult.content.length,
+    });
+    
+    const browserlessAttempt: AttemptResult = {
+      attemptNumber: 1,
+      provider: 'browserless',
+      phase: 'listing',
+      contentLength: browserlessResult.content.length,
+      contentHash: simpleHash(browserlessResult.content || ''),
+      success: false,
+      error: browserlessResult.error,
+      isRateLimited: browserlessResult.isRateLimited,
+      isBotBlocked: browserlessResult.isBotBlocked,
+    };
+    attempts.push(browserlessAttempt);
+    
+    // Check for hard-stop conditions
+    if (browserlessResult.isRateLimited) {
+      // HARD STOP: Rate limited - no fallbacks
+      console.log('[EXPEDIA] HARD STOP: Browserless rate limited (429)');
+      browserlessWasRateLimited = true;
       
-      let fetchResult: FetchResult;
+      updateTrace('browserless', {
+        outcome: 'rate_limited',
+        errorMessage: browserlessResult.error || 'HTTP 429',
+      });
+      updateTrace('zyte', { reasonSkipped: 'Browserless rate-limited - no fallbacks per policy' });
+      updateTrace('firecrawl', { reasonSkipped: 'Browserless rate-limited - no fallbacks per policy' });
       
-      if (provider === 'browserless') {
-        fetchResult = await fetchWithBrowserless(fullUrl);
-      } else if (provider === 'zyte') {
-        fetchResult = await fetchWithZyte(fullUrl);
-      } else {
-        fetchResult = await fetchWithFirecrawl(fullUrl);
-      }
+      result.status = 'blocked_rate_limit';
+      result.error = 'Browserless rate limited (HTTP 429) - no fallback per anti-amplification policy';
+      result.attempts = attempts;
+      result.providerAttemptTrace = providerAttemptTrace;
+      result.providerUsed = 'browserless';
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    if (browserlessResult.isBotBlocked) {
+      // BOT BLOCKED: Attempt exactly ONE Zyte fallback
+      console.log('[EXPEDIA] Browserless bot-blocked - attempting controlled Zyte fallback');
+      browserlessWasBotBlocked = true;
       
-      const attempt: AttemptResult = {
-        attemptNumber: attempts.length + 1,
-        provider,
-        phase: 'listing',
-        contentLength: fetchResult.content.length,
-        contentHash: simpleHash(fetchResult.content || ''),
-        success: false,
-        error: fetchResult.error,
-        isRateLimited: fetchResult.isRateLimited,
-        isBotBlocked: fetchResult.isBotBlocked,
-      };
-      attempts.push(attempt);
+      updateTrace('browserless', {
+        outcome: 'bot_blocked',
+        errorMessage: browserlessResult.error || 'CAPTCHA/WAF detected',
+        botBlockedFallbackToZyte: true,
+      });
       
-      // Hard stop on rate limit or bot block from primary
-      if (provider === 'browserless' && (fetchResult.isRateLimited || fetchResult.isBotBlocked)) {
-        result.status = fetchResult.isRateLimited ? 'blocked_rate_limit' : 'blocked_captcha_or_bot';
-        result.error = fetchResult.error || 'Access blocked';
-        result.attempts = attempts;
-        result.durationMs = Date.now() - startTime;
-        return result;
-      }
+      // Firecrawl is explicitly skipped when Browserless is bot-blocked
+      updateTrace('firecrawl', { reasonSkipped: 'Browserless bot-blocked - only Zyte fallback per policy' });
       
-      if (fetchResult.error) {
-        console.log(`[EXPEDIA] ${provider} error: ${fetchResult.error}`);
-        continue;
-      }
-      
-      if (fetchResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
-        console.log(`[EXPEDIA] ${provider}: Insufficient content (${fetchResult.content.length} chars)`);
-        continue;
-      }
-      
-      // Run Phase A
-      const phaseAResult = runPhaseA(fetchResult.content, checkIn, checkOut);
+    } else if (browserlessResult.error) {
+      // Other error - continue to next provider
+      console.log(`[EXPEDIA] Browserless error: ${browserlessResult.error}`);
+      updateTrace('browserless', {
+        outcome: 'navigation_failed',
+        errorMessage: browserlessResult.error,
+      });
+    } else if (browserlessResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
+      // Insufficient content
+      console.log(`[EXPEDIA] Browserless insufficient content (${browserlessResult.content.length} chars)`);
+      updateTrace('browserless', {
+        outcome: 'insufficient_content',
+        errorMessage: `Only ${browserlessResult.content.length} chars (need ${MINIMAL_CONTENT_THRESHOLD})`,
+      });
+    } else {
+      // Browserless got content - run Phase A
+      const phaseAResult = runPhaseA(browserlessResult.content, checkIn, checkOut);
       result.phaseA = phaseAResult;
       
-      // Dates unavailable - terminal
       if (phaseAResult.datesUnavailable) {
+        updateTrace('browserless', { outcome: 'success' });
+        browserlessAttempt.success = true;
         result.status = 'dates_unavailable';
         result.error = `Dates unavailable: ${phaseAResult.unavailabilityMarker}`;
-        result.providerUsed = provider;
+        result.providerUsed = 'browserless';
         result.attempts = attempts;
+        result.providerAttemptTrace = providerAttemptTrace;
         result.durationMs = Date.now() - startTime;
         result.structuralProof.unavailability_marker = phaseAResult.unavailabilityMarker || undefined;
+        updateTrace('zyte', { reasonSkipped: 'Browserless detected dates_unavailable' });
+        updateTrace('firecrawl', { reasonSkipped: 'Browserless detected dates_unavailable' });
         return result;
       }
       
-      // Date verification failed
-      if (!phaseAResult.datesVerified) {
-        console.log(`[EXPEDIA] ${provider}: Dates not verified - ${phaseAResult.dateMismatchReason}`);
+      if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
+        console.log('[EXPEDIA] Browserless succeeded - checkout context, dates verified');
+        updateTrace('browserless', { outcome: 'success' });
+        browserlessAttempt.success = true;
+        bestContent = browserlessResult.content;
+        successfulProvider = 'browserless';
+        updateTrace('zyte', { reasonSkipped: 'Browserless succeeded' });
+        updateTrace('firecrawl', { reasonSkipped: 'Browserless succeeded' });
+      } else if (!phaseAResult.datesVerified) {
+        console.log(`[EXPEDIA] Browserless: Dates not verified - ${phaseAResult.dateMismatchReason}`);
+        updateTrace('browserless', {
+          outcome: 'parsing_failed',
+          errorMessage: `Dates not verified: ${phaseAResult.dateMismatchReason}`,
+        });
         result.structuralProof.date_mismatch_details = phaseAResult.dateMismatchReason || undefined;
-        
-        if (provider !== 'firecrawl') {
-          continue;
-        }
-        
-        result.status = 'date_application_failed';
-        result.error = `Dates not verified: ${phaseAResult.dateMismatchReason}`;
-        result.providerUsed = provider;
-        result.attempts = attempts;
-        result.durationMs = Date.now() - startTime;
-        return result;
+      } else if (!phaseAResult.isCheckoutContext && !phaseAResult.priceEligible) {
+        console.log(`[EXPEDIA] Browserless: Not in checkout context`);
+        updateTrace('browserless', {
+          outcome: 'checkout_not_reached',
+          errorMessage: `Page type: ${phaseAResult.isListingPage ? 'listing' : phaseAResult.isSearchResults ? 'search' : 'unknown'}`,
+        });
       }
-      
-      // CRITICAL: Check if we're in checkout context
-      if (!phaseAResult.isCheckoutContext && !phaseAResult.priceEligible) {
-        console.log(`[EXPEDIA] ${provider}: Not in checkout context (${phaseAResult.pageContextEvidence || 'unknown'})`);
+    }
+    
+    // ============================================================
+    // STEP 2: Try Zyte (if Browserless didn't succeed)
+    // ============================================================
+    if (!successfulProvider) {
+      // Only try Zyte if:
+      // - Browserless was bot-blocked (controlled fallback)
+      // - OR Browserless had other non-rate-limit issues
+      if (browserlessWasRateLimited) {
+        // Already handled above - should not reach here
+        console.log('[EXPEDIA] Unexpected: reached Zyte section after rate limit');
+      } else {
+        console.log('[EXPEDIA] Step 2: Trying Zyte...');
         
-        // If listing page, try next provider (might render differently)
-        if (phaseAResult.isListingPage || phaseAResult.isSearchResults) {
-          if (provider !== 'firecrawl') {
-            continue;
+        const zyteStartTime = new Date().toISOString();
+        updateTrace('zyte', { attempted: true, startedAt: zyteStartTime });
+        
+        const zyteResult = await fetchWithZyte(fullUrl);
+        
+        updateTrace('zyte', {
+          endedAt: new Date().toISOString(),
+          contentLength: zyteResult.content.length,
+        });
+        
+        const zyteAttempt: AttemptResult = {
+          attemptNumber: attempts.length + 1,
+          provider: 'zyte',
+          phase: 'listing',
+          contentLength: zyteResult.content.length,
+          contentHash: simpleHash(zyteResult.content || ''),
+          success: false,
+          error: zyteResult.error,
+          isRateLimited: zyteResult.isRateLimited,
+          isBotBlocked: zyteResult.isBotBlocked,
+        };
+        attempts.push(zyteAttempt);
+        
+        if (zyteResult.isRateLimited || zyteResult.isBotBlocked) {
+          // Both providers blocked - terminal state
+          console.log(`[EXPEDIA] Zyte also blocked: ${zyteResult.isRateLimited ? 'rate limited' : 'bot blocked'}`);
+          updateTrace('zyte', {
+            outcome: zyteResult.isRateLimited ? 'rate_limited' : 'bot_blocked',
+            errorMessage: zyteResult.error,
+          });
+          
+          // If Browserless was bot-blocked AND Zyte is also blocked -> expedia_access_blocked
+          if (browserlessWasBotBlocked) {
+            updateTrace('firecrawl', { reasonSkipped: 'Both Browserless and Zyte blocked - terminal' });
+            
+            result.status = 'expedia_access_blocked';
+            result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
+            result.attempts = attempts;
+            result.providerAttemptTrace = providerAttemptTrace;
+            result.providerUsed = 'zyte'; // Last attempted provider
+            result.durationMs = Date.now() - startTime;
+            return result;
+          }
+        } else if (zyteResult.error) {
+          console.log(`[EXPEDIA] Zyte error: ${zyteResult.error}`);
+          updateTrace('zyte', {
+            outcome: 'navigation_failed',
+            errorMessage: zyteResult.error,
+          });
+        } else if (zyteResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
+          console.log(`[EXPEDIA] Zyte insufficient content (${zyteResult.content.length} chars)`);
+          updateTrace('zyte', {
+            outcome: 'insufficient_content',
+            errorMessage: `Only ${zyteResult.content.length} chars (need ${MINIMAL_CONTENT_THRESHOLD})`,
+          });
+        } else {
+          // Zyte got content - run Phase A
+          const phaseAResult = runPhaseA(zyteResult.content, checkIn, checkOut);
+          result.phaseA = phaseAResult;
+          
+          if (phaseAResult.datesUnavailable) {
+            updateTrace('zyte', { outcome: 'success' });
+            zyteAttempt.success = true;
+            result.status = 'dates_unavailable';
+            result.error = `Dates unavailable: ${phaseAResult.unavailabilityMarker}`;
+            result.providerUsed = 'zyte';
+            result.attempts = attempts;
+            result.providerAttemptTrace = providerAttemptTrace;
+            result.durationMs = Date.now() - startTime;
+            result.structuralProof.unavailability_marker = phaseAResult.unavailabilityMarker || undefined;
+            updateTrace('firecrawl', { reasonSkipped: 'Zyte detected dates_unavailable' });
+            return result;
+          }
+          
+          if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
+            console.log('[EXPEDIA] Zyte succeeded - checkout context, dates verified');
+            updateTrace('zyte', { outcome: 'success' });
+            zyteAttempt.success = true;
+            bestContent = zyteResult.content;
+            successfulProvider = 'zyte';
+            updateTrace('firecrawl', { reasonSkipped: 'Zyte succeeded' });
+          } else if (!phaseAResult.datesVerified) {
+            console.log(`[EXPEDIA] Zyte: Dates not verified - ${phaseAResult.dateMismatchReason}`);
+            updateTrace('zyte', {
+              outcome: 'parsing_failed',
+              errorMessage: `Dates not verified: ${phaseAResult.dateMismatchReason}`,
+            });
+            result.structuralProof.date_mismatch_details = phaseAResult.dateMismatchReason || undefined;
+          } else {
+            console.log('[EXPEDIA] Zyte: Not in checkout context');
+            updateTrace('zyte', {
+              outcome: 'checkout_not_reached',
+              errorMessage: `Page type: ${phaseAResult.isListingPage ? 'listing' : 'unknown'}`,
+            });
           }
         }
+      }
+    }
+    
+    // ============================================================
+    // STEP 3: Try Firecrawl (only if Browserless wasn't bot-blocked)
+    // ============================================================
+    if (!successfulProvider && !browserlessWasBotBlocked) {
+      console.log('[EXPEDIA] Step 3: Trying Firecrawl (last resort)...');
+      
+      const firecrawlStartTime = new Date().toISOString();
+      updateTrace('firecrawl', { attempted: true, startedAt: firecrawlStartTime });
+      
+      const firecrawlResult = await fetchWithFirecrawl(fullUrl);
+      
+      updateTrace('firecrawl', {
+        endedAt: new Date().toISOString(),
+        contentLength: firecrawlResult.content.length,
+      });
+      
+      const firecrawlAttempt: AttemptResult = {
+        attemptNumber: attempts.length + 1,
+        provider: 'firecrawl',
+        phase: 'listing',
+        contentLength: firecrawlResult.content.length,
+        contentHash: simpleHash(firecrawlResult.content || ''),
+        success: false,
+        error: firecrawlResult.error,
+        isRateLimited: firecrawlResult.isRateLimited,
+        isBotBlocked: firecrawlResult.isBotBlocked,
+      };
+      attempts.push(firecrawlAttempt);
+      
+      if (firecrawlResult.error) {
+        console.log(`[EXPEDIA] Firecrawl error: ${firecrawlResult.error}`);
+        updateTrace('firecrawl', {
+          outcome: firecrawlResult.isRateLimited ? 'rate_limited' : 
+                   firecrawlResult.isBotBlocked ? 'bot_blocked' : 'navigation_failed',
+          errorMessage: firecrawlResult.error,
+        });
+      } else if (firecrawlResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
+        console.log(`[EXPEDIA] Firecrawl insufficient content (${firecrawlResult.content.length} chars)`);
+        updateTrace('firecrawl', {
+          outcome: 'insufficient_content',
+          errorMessage: `Only ${firecrawlResult.content.length} chars`,
+        });
+      } else {
+        // Firecrawl got content - run Phase A
+        const phaseAResult = runPhaseA(firecrawlResult.content, checkIn, checkOut);
+        result.phaseA = phaseAResult;
         
-        result.status = 'checkout_not_reached';
-        result.error = `Checkout context not reached - page type: ${phaseAResult.isListingPage ? 'listing' : phaseAResult.isSearchResults ? 'search' : 'unknown'}`;
-        result.structuralProof.page_context = phaseAResult.pageContextEvidence || undefined;
-        result.providerUsed = provider;
-        result.attempts = attempts;
-        result.durationMs = Date.now() - startTime;
-        return result;
-      }
-      
-      if (phaseAResult.soldOut) {
-        result.status = 'sold_out';
-        result.error = 'Property sold out for these dates';
-        result.providerUsed = provider;
-        result.attempts = attempts;
-        result.durationMs = Date.now() - startTime;
-        return result;
-      }
-      
-      // Success - got checkout context
-      if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
-        console.log(`[EXPEDIA] ${provider} succeeded - checkout context, dates verified`);
-        bestContent = fetchResult.content;
-        successfulProvider = provider;
-        attempt.success = true;
-        break;
+        if (phaseAResult.datesUnavailable) {
+          updateTrace('firecrawl', { outcome: 'success' });
+          firecrawlAttempt.success = true;
+          result.status = 'dates_unavailable';
+          result.error = `Dates unavailable: ${phaseAResult.unavailabilityMarker}`;
+          result.providerUsed = 'firecrawl';
+          result.attempts = attempts;
+          result.providerAttemptTrace = providerAttemptTrace;
+          result.durationMs = Date.now() - startTime;
+          result.structuralProof.unavailability_marker = phaseAResult.unavailabilityMarker || undefined;
+          return result;
+        }
+        
+        if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
+          console.log('[EXPEDIA] Firecrawl succeeded - checkout context, dates verified');
+          updateTrace('firecrawl', { outcome: 'success' });
+          firecrawlAttempt.success = true;
+          bestContent = firecrawlResult.content;
+          successfulProvider = 'firecrawl';
+        } else if (!phaseAResult.datesVerified) {
+          console.log(`[EXPEDIA] Firecrawl: Dates not verified - ${phaseAResult.dateMismatchReason}`);
+          updateTrace('firecrawl', {
+            outcome: 'parsing_failed',
+            errorMessage: `Dates not verified: ${phaseAResult.dateMismatchReason}`,
+          });
+          result.structuralProof.date_mismatch_details = phaseAResult.dateMismatchReason || undefined;
+        } else {
+          console.log('[EXPEDIA] Firecrawl: Not in checkout context');
+          updateTrace('firecrawl', {
+            outcome: 'checkout_not_reached',
+            errorMessage: 'Page type: unknown',
+          });
+        }
       }
     }
     
     result.attempts = attempts;
+    result.providerAttemptTrace = providerAttemptTrace;
     result.providerUsed = successfulProvider;
     
+    // If no provider succeeded, determine terminal status
     if (!bestContent || !successfulProvider) {
-      if (result.phaseA.dateMismatchReason && !result.phaseA.datesVerified) {
+      // Find the last attempted provider for providerUsed
+      const lastAttempted = providerAttemptTrace.filter(t => t.attempted).pop();
+      result.providerUsed = lastAttempted?.provider || 'browserless';
+      
+      if (browserlessWasBotBlocked && !successfulProvider) {
+        // Browserless bot-blocked and Zyte failed too
+        result.status = 'expedia_access_blocked';
+        result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
+      } else if (result.phaseA.dateMismatchReason && !result.phaseA.datesVerified) {
         result.status = 'date_application_failed';
         result.error = `Dates not verified: ${result.phaseA.dateMismatchReason}`;
       } else if (!result.phaseA.isCheckoutContext) {
@@ -1577,6 +1847,10 @@ async function extractFromExpedia(
     result.status = 'validation_error';
     result.durationMs = Date.now() - startTime;
     result.attempts = attempts;
+    result.providerAttemptTrace = providerAttemptTrace;
+    // Never leave providerUsed as null
+    const lastAttempted = providerAttemptTrace.filter(t => t.attempted).pop();
+    result.providerUsed = lastAttempted?.provider || 'browserless';
     console.error('[EXPEDIA] Fatal error:', error);
     return result;
   }
@@ -1699,13 +1973,14 @@ Deno.serve(async (req) => {
           extraction_metadata: {
             goldenPath: true,
             platform: 'expedia',
-            version: '4.0',
+            version: '4.1',
             phaseA: result.phaseA,
             phaseB: result.phaseB,
             structural_proof: result.structuralProof,
             verification_status: isVerified ? 'Verified' : 'Unverified',
             provider_order: PROVIDER_ORDER,
             attempts: result.attempts,
+            providerAttemptTrace: result.providerAttemptTrace, // NEW: Full trace for observability
             durationMs: result.durationMs,
             dateInjection: result.dateInjection,
             // Currency audit

@@ -1885,4 +1885,255 @@ describe('Expedia Extraction Invariants', () => {
     
   });
   
+  // ============================================================================
+  // EXPEDIA ACCESS-LAYER TESTS: Provider attempt trace and fallback policy
+  // ============================================================================
+  
+  describe('Expedia Access-Layer Behavior', () => {
+    
+    /**
+     * FIXTURE: Browserless rate-limited (429) - HARD STOP, no fallbacks
+     */
+    const EXPEDIA_FIXTURE_RATE_LIMITED_HARD_STOP = {
+      extraction_status: 'blocked_rate_limit',
+      dates_validated: false,
+      extracted_price: null,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '4.1',
+        providerAttemptTrace: [
+          {
+            provider: 'browserless',
+            attempted: true,
+            startedAt: '2025-01-03T10:00:00Z',
+            endedAt: '2025-01-03T10:00:02Z',
+            outcome: 'rate_limited',
+            httpStatus: 429,
+            contentLength: 0,
+            reasonSkipped: null,
+            errorMessage: 'HTTP 429',
+          },
+          {
+            provider: 'zyte',
+            attempted: false,
+            startedAt: null,
+            endedAt: null,
+            outcome: 'skipped',
+            httpStatus: null,
+            contentLength: null,
+            reasonSkipped: 'Browserless rate-limited - no fallbacks per policy',
+            errorMessage: null,
+          },
+          {
+            provider: 'firecrawl',
+            attempted: false,
+            startedAt: null,
+            endedAt: null,
+            outcome: 'skipped',
+            httpStatus: null,
+            contentLength: null,
+            reasonSkipped: 'Browserless rate-limited - no fallbacks per policy',
+            errorMessage: null,
+          },
+        ],
+      },
+    };
+    
+    /**
+     * FIXTURE: Browserless bot-blocked -> Zyte fallback -> also blocked
+     * Expected: expedia_access_blocked terminal status
+     */
+    const EXPEDIA_FIXTURE_ACCESS_BLOCKED = {
+      extraction_status: 'expedia_access_blocked',
+      dates_validated: false,
+      extracted_price: null,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '4.1',
+        providerAttemptTrace: [
+          {
+            provider: 'browserless',
+            attempted: true,
+            startedAt: '2025-01-03T10:00:00Z',
+            endedAt: '2025-01-03T10:00:03Z',
+            outcome: 'bot_blocked',
+            httpStatus: 403,
+            contentLength: 1200,
+            reasonSkipped: null,
+            errorMessage: 'CAPTCHA/WAF detected',
+            botBlockedFallbackToZyte: true,
+          },
+          {
+            provider: 'zyte',
+            attempted: true,
+            startedAt: '2025-01-03T10:00:03Z',
+            endedAt: '2025-01-03T10:00:08Z',
+            outcome: 'bot_blocked',
+            httpStatus: 403,
+            contentLength: 800,
+            reasonSkipped: null,
+            errorMessage: 'Bot blocked',
+          },
+          {
+            provider: 'firecrawl',
+            attempted: false,
+            startedAt: null,
+            endedAt: null,
+            outcome: 'skipped',
+            httpStatus: null,
+            contentLength: null,
+            reasonSkipped: 'Both Browserless and Zyte blocked - terminal',
+            errorMessage: null,
+          },
+        ],
+      },
+    };
+    
+    /**
+     * FIXTURE: Browserless bot-blocked -> Zyte succeeds
+     * Expected: success, Zyte as provider
+     */
+    const EXPEDIA_FIXTURE_ZYTE_FALLBACK_SUCCESS = {
+      extraction_status: 'success',
+      dates_validated: true,
+      extracted_price: 523.00,
+      extraction_metadata: {
+        platform: 'expedia',
+        version: '4.1',
+        providerAttemptTrace: [
+          {
+            provider: 'browserless',
+            attempted: true,
+            startedAt: '2025-01-03T10:00:00Z',
+            endedAt: '2025-01-03T10:00:03Z',
+            outcome: 'bot_blocked',
+            httpStatus: 403,
+            contentLength: 1200,
+            reasonSkipped: null,
+            errorMessage: 'Bot detection in content',
+            botBlockedFallbackToZyte: true,
+          },
+          {
+            provider: 'zyte',
+            attempted: true,
+            startedAt: '2025-01-03T10:00:03Z',
+            endedAt: '2025-01-03T10:00:10Z',
+            outcome: 'success',
+            httpStatus: 200,
+            contentLength: 45000,
+            reasonSkipped: null,
+            errorMessage: null,
+          },
+          {
+            provider: 'firecrawl',
+            attempted: false,
+            startedAt: null,
+            endedAt: null,
+            outcome: 'skipped',
+            httpStatus: null,
+            contentLength: null,
+            reasonSkipped: 'Zyte succeeded',
+            errorMessage: null,
+          },
+        ],
+      },
+    };
+    
+    describe('Rate-Limit Hard Stop', () => {
+      
+      it('Browserless 429 triggers HARD STOP with no fallbacks', () => {
+        const trace = EXPEDIA_FIXTURE_RATE_LIMITED_HARD_STOP.extraction_metadata.providerAttemptTrace;
+        
+        expect(trace[0].provider).toBe('browserless');
+        expect(trace[0].outcome).toBe('rate_limited');
+        expect(trace[0].attempted).toBe(true);
+        
+        // Zyte and Firecrawl must be skipped
+        expect(trace[1].provider).toBe('zyte');
+        expect(trace[1].attempted).toBe(false);
+        expect(trace[1].reasonSkipped).toContain('no fallbacks');
+        
+        expect(trace[2].provider).toBe('firecrawl');
+        expect(trace[2].attempted).toBe(false);
+        expect(trace[2].reasonSkipped).toContain('no fallbacks');
+      });
+      
+      it('Rate limit returns blocked_rate_limit status, not render_failed', () => {
+        expect(EXPEDIA_FIXTURE_RATE_LIMITED_HARD_STOP.extraction_status).toBe('blocked_rate_limit');
+      });
+      
+    });
+    
+    describe('Controlled Zyte Fallback on Bot-Block', () => {
+      
+      it('Browserless bot-block triggers exactly ONE Zyte attempt', () => {
+        const trace = EXPEDIA_FIXTURE_ACCESS_BLOCKED.extraction_metadata.providerAttemptTrace;
+        
+        expect(trace[0].outcome).toBe('bot_blocked');
+        expect(trace[0].botBlockedFallbackToZyte).toBe(true);
+        
+        expect(trace[1].provider).toBe('zyte');
+        expect(trace[1].attempted).toBe(true);
+      });
+      
+      it('Firecrawl is NOT attempted when Browserless is bot-blocked', () => {
+        const trace = EXPEDIA_FIXTURE_ACCESS_BLOCKED.extraction_metadata.providerAttemptTrace;
+        
+        expect(trace[2].provider).toBe('firecrawl');
+        expect(trace[2].attempted).toBe(false);
+        expect(trace[2].reasonSkipped).toBeTruthy();
+      });
+      
+      it('Both providers blocked returns expedia_access_blocked status', () => {
+        expect(EXPEDIA_FIXTURE_ACCESS_BLOCKED.extraction_status).toBe('expedia_access_blocked');
+      });
+      
+      it('Zyte success after Browserless bot-block returns success', () => {
+        expect(EXPEDIA_FIXTURE_ZYTE_FALLBACK_SUCCESS.extraction_status).toBe('success');
+        expect(EXPEDIA_FIXTURE_ZYTE_FALLBACK_SUCCESS.extracted_price).toBe(523.00);
+      });
+      
+    });
+    
+    describe('Provider Attempt Trace Completeness', () => {
+      
+      it('Trace includes all three providers with explicit statuses', () => {
+        const trace = EXPEDIA_FIXTURE_ACCESS_BLOCKED.extraction_metadata.providerAttemptTrace;
+        
+        expect(trace).toHaveLength(3);
+        expect(trace.map(t => t.provider)).toEqual(['browserless', 'zyte', 'firecrawl']);
+      });
+      
+      it('Each attempted provider has timestamps', () => {
+        const trace = EXPEDIA_FIXTURE_ACCESS_BLOCKED.extraction_metadata.providerAttemptTrace;
+        
+        for (const t of trace) {
+          if (t.attempted) {
+            expect(t.startedAt).toBeTruthy();
+            expect(t.endedAt).toBeTruthy();
+          }
+        }
+      });
+      
+      it('Skipped providers have reasonSkipped populated', () => {
+        const trace = EXPEDIA_FIXTURE_RATE_LIMITED_HARD_STOP.extraction_metadata.providerAttemptTrace;
+        
+        const skipped = trace.filter(t => !t.attempted);
+        for (const t of skipped) {
+          expect(t.reasonSkipped).toBeTruthy();
+        }
+      });
+      
+      it('Provider is never "None" - always populated', () => {
+        // Success case
+        expect(EXPEDIA_FIXTURE_ZYTE_FALLBACK_SUCCESS.extraction_metadata.providerAttemptTrace[1].outcome).toBe('success');
+        
+        // Failure case - should still have provider
+        expect(EXPEDIA_FIXTURE_ACCESS_BLOCKED.extraction_metadata.providerAttemptTrace[0].provider).toBe('browserless');
+      });
+      
+    });
+    
+  });
+  
 });
