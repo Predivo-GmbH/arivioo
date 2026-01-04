@@ -86,14 +86,18 @@ type ProviderOutcome =
 interface ProviderAttemptTrace {
   provider: Provider;
   attempted: boolean;
+  attemptIndex: number; // 0 = first attempt, 1 = retry, etc.
   startedAt: string | null;
   endedAt: string | null;
   outcome: ProviderOutcome;
   httpStatus: number | null;
   contentLength: number | null;
+  contentLengthBytes: number | null;
   reasonSkipped: string | null;
   errorMessage: string | null;
   botBlockedFallbackToZyte?: boolean;
+  isRetry?: boolean;
+  retryReason?: string;
 }
 
 const PROVIDER_ORDER: Provider[] = ['browserless', 'zyte', 'firecrawl'];
@@ -502,9 +506,20 @@ interface ExtractionResult {
 
 // Configuration
 const MINIMAL_CONTENT_THRESHOLD = 2000;
+const RETRY_CONTENT_THRESHOLD = 5000; // Below this, retry is allowed
 const BROWSERLESS_TIMEOUT = 45000;
 const ZYTE_TIMEOUT = 45000;
 const FIRECRAWL_TIMEOUT = 30000;
+const MAX_RETRIES_PER_PROVIDER = 1; // 1 retry = 2 total attempts
+const RETRY_BACKOFF_BASE_MS = 500;
+const RETRY_BACKOFF_JITTER_MS = 1000;
+
+// Retryable outcomes - transient failures that may succeed on retry
+const RETRYABLE_OUTCOMES: Set<ProviderOutcome> = new Set([
+  'insufficient_content',
+  'timeout',
+  'navigation_failed',
+]);
 
 // ============================================================================
 // DATE VALIDATION
@@ -1137,20 +1152,29 @@ async function extractFromExpedia(
   const startTime = Date.now();
   const providerAttemptTrace: ProviderAttemptTrace[] = [];
   
-  // Initialize trace for all providers
-  for (const provider of PROVIDER_ORDER) {
-    providerAttemptTrace.push({
-      provider,
-      attempted: false,
-      startedAt: null,
-      endedAt: null,
-      outcome: 'skipped',
-      httpStatus: null,
-      contentLength: null,
-      reasonSkipped: null,
-      errorMessage: null,
-    });
-  }
+  // Note: We no longer pre-initialize traces; we build them during execution
+  // to properly track attempt indices and retries
+  
+  // Helper to add a trace entry
+  const addTrace = (trace: ProviderAttemptTrace) => {
+    providerAttemptTrace.push(trace);
+  };
+  
+  // Helper to create initial trace
+  const createTrace = (provider: Provider, attemptIndex: number = 0): ProviderAttemptTrace => ({
+    provider,
+    attempted: false,
+    attemptIndex,
+    startedAt: null,
+    endedAt: null,
+    outcome: 'skipped',
+    httpStatus: null,
+    contentLength: null,
+    contentLengthBytes: null,
+    reasonSkipped: null,
+    errorMessage: null,
+    isRetry: attemptIndex > 0,
+  });
   
   const result: ExtractionResult = {
     success: false,
@@ -1219,10 +1243,56 @@ async function extractFromExpedia(
     },
   };
   
-  // Helper to update trace
-  const updateTrace = (provider: Provider, updates: Partial<ProviderAttemptTrace>) => {
-    const trace = providerAttemptTrace.find(t => t.provider === provider);
-    if (trace) Object.assign(trace, updates);
+  // Helper function to sleep with jitter
+  const sleepWithJitter = async () => {
+    const delay = RETRY_BACKOFF_BASE_MS + Math.random() * RETRY_BACKOFF_JITTER_MS;
+    await new Promise(resolve => setTimeout(resolve, delay));
+  };
+  
+  // Helper to attempt a provider with optional retry
+  const attemptProvider = async (
+    provider: Provider,
+    fetchFn: (url: string) => Promise<FetchResult>,
+    url: string
+  ): Promise<{ content: string | null; shouldRetry: boolean; trace: ProviderAttemptTrace }> => {
+    const trace = createTrace(provider, 0);
+    trace.attempted = true;
+    trace.startedAt = new Date().toISOString();
+    
+    const fetchResult = await fetchFn(url);
+    
+    trace.endedAt = new Date().toISOString();
+    trace.contentLength = fetchResult.content.length;
+    trace.contentLengthBytes = new TextEncoder().encode(fetchResult.content).length;
+    
+    if (fetchResult.isRateLimited) {
+      trace.outcome = 'rate_limited';
+      trace.errorMessage = fetchResult.error || 'HTTP 429';
+      return { content: null, shouldRetry: false, trace };
+    }
+    
+    if (fetchResult.isBotBlocked) {
+      trace.outcome = 'bot_blocked';
+      trace.errorMessage = fetchResult.error || null;
+      return { content: null, shouldRetry: false, trace };
+    }
+    
+    if (fetchResult.error) {
+      trace.outcome = fetchResult.error.includes('timeout') ? 'timeout' : 'navigation_failed';
+      trace.errorMessage = fetchResult.error;
+      // Allow retry for timeouts and navigation failures
+      return { content: null, shouldRetry: true, trace };
+    }
+    
+    if (fetchResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
+      trace.outcome = 'success';
+      return { content: fetchResult.content, shouldRetry: false, trace };
+    }
+    
+    trace.outcome = 'insufficient_content';
+    trace.errorMessage = `Only ${fetchResult.content.length} chars`;
+    // Allow retry only if below retry threshold
+    return { content: null, shouldRetry: fetchResult.content.length < RETRY_CONTENT_THRESHOLD, trace };
   };
   
   try {
@@ -1239,7 +1309,6 @@ async function extractFromExpedia(
       result.error = `Could not extract Expedia property ID from URL: ${baseUrl}`;
       result.durationMs = Date.now() - startTime;
       result.providerAttemptTrace = providerAttemptTrace;
-      updateTrace('browserless', { reasonSkipped: 'Property ID extraction failed' });
       result.providerUsed = 'browserless';
       return result;
     }
@@ -1286,35 +1355,101 @@ async function extractFromExpedia(
     console.log(`[EXPEDIA] Hotel-Search URL: ${offersPageUrl}`);
     
     // ==========================================================================
-    // STEP 3 & 4: Fetch offers page with provider chain
+    // STEP 3 & 4: Fetch offers page with provider chain + bounded retries
     // ==========================================================================
-    console.log('[EXPEDIA] GOLDEN PATH Step 3-4: Fetch offers page');
+    console.log('[EXPEDIA] GOLDEN PATH Step 3-4: Fetch offers page with retry support');
     
     let bestContent: string | null = null;
     let successfulProvider: Provider | null = null;
     let browserlessWasBotBlocked = false;
     let browserlessWasRateLimited = false;
     
+    // Helper to attempt a fetch with optional retry
+    const attemptWithRetry = async (
+      provider: Provider,
+      fetchFn: (url: string) => Promise<FetchResult>
+    ): Promise<{ content: string | null; traces: ProviderAttemptTrace[] }> => {
+      const traces: ProviderAttemptTrace[] = [];
+      
+      for (let attempt = 0; attempt <= MAX_RETRIES_PER_PROVIDER; attempt++) {
+        const trace = createTrace(provider, attempt);
+        trace.attempted = true;
+        trace.startedAt = new Date().toISOString();
+        trace.isRetry = attempt > 0;
+        
+        if (attempt > 0) {
+          console.log(`[EXPEDIA] Retry ${attempt} for ${provider}...`);
+          await sleepWithJitter();
+        }
+        
+        const fetchResult = await fetchFn(offersPageUrl);
+        
+        trace.endedAt = new Date().toISOString();
+        trace.contentLength = fetchResult.content.length;
+        trace.contentLengthBytes = new TextEncoder().encode(fetchResult.content).length;
+        
+        if (fetchResult.isRateLimited) {
+          trace.outcome = 'rate_limited';
+          trace.errorMessage = fetchResult.error || 'HTTP 429';
+          traces.push(trace);
+          return { content: null, traces }; // No retry on rate limit
+        }
+        
+        if (fetchResult.isBotBlocked) {
+          trace.outcome = 'bot_blocked';
+          trace.errorMessage = fetchResult.error || null;
+          trace.botBlockedFallbackToZyte = provider === 'browserless';
+          traces.push(trace);
+          return { content: null, traces }; // No retry on bot block
+        }
+        
+        if (fetchResult.error) {
+          trace.outcome = fetchResult.error.includes('timeout') ? 'timeout' : 'navigation_failed';
+          trace.errorMessage = fetchResult.error;
+          traces.push(trace);
+          
+          // Retry if retryable and we have attempts left
+          if (RETRYABLE_OUTCOMES.has(trace.outcome) && attempt < MAX_RETRIES_PER_PROVIDER) {
+            trace.retryReason = `Retrying due to ${trace.outcome}`;
+            continue;
+          }
+          return { content: null, traces };
+        }
+        
+        if (fetchResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
+          trace.outcome = 'success';
+          traces.push(trace);
+          return { content: fetchResult.content, traces };
+        }
+        
+        // Insufficient content
+        trace.outcome = 'insufficient_content';
+        trace.errorMessage = `Only ${fetchResult.content.length} chars`;
+        traces.push(trace);
+        
+        // Retry if below retry threshold
+        if (fetchResult.content.length < RETRY_CONTENT_THRESHOLD && attempt < MAX_RETRIES_PER_PROVIDER) {
+          trace.retryReason = `Retrying - content too short (${fetchResult.content.length} < ${RETRY_CONTENT_THRESHOLD})`;
+          continue;
+        }
+        
+        return { content: null, traces };
+      }
+      
+      return { content: null, traces };
+    };
+    
     // Try Browserless first
     console.log('[EXPEDIA] Trying Browserless...');
-    const browserlessStartTime = new Date().toISOString();
-    updateTrace('browserless', { attempted: true, startedAt: browserlessStartTime });
+    const browserlessAttempt = await attemptWithRetry('browserless', fetchWithBrowserless);
+    providerAttemptTrace.push(...browserlessAttempt.traces);
     
-    const browserlessResult = await fetchWithBrowserless(offersPageUrl);
+    const lastBrowserlessTrace = browserlessAttempt.traces[browserlessAttempt.traces.length - 1];
     
-    updateTrace('browserless', {
-      endedAt: new Date().toISOString(),
-      contentLength: browserlessResult.content.length,
-    });
-    
-    if (browserlessResult.isRateLimited) {
+    if (lastBrowserlessTrace?.outcome === 'rate_limited') {
       // HARD STOP: Rate limited - no fallbacks
       console.log('[EXPEDIA] HARD STOP: Browserless rate limited (429)');
       browserlessWasRateLimited = true;
-      
-      updateTrace('browserless', { outcome: 'rate_limited', errorMessage: browserlessResult.error || 'HTTP 429' });
-      updateTrace('zyte', { reasonSkipped: 'Browserless rate-limited - no fallbacks per policy' });
-      updateTrace('firecrawl', { reasonSkipped: 'Browserless rate-limited - no fallbacks per policy' });
       
       result.status = 'blocked_rate_limit';
       result.error = 'Browserless rate limited (HTTP 429) - no fallback per anti-amplification policy';
@@ -1324,41 +1459,25 @@ async function extractFromExpedia(
       return result;
     }
     
-    if (browserlessResult.isBotBlocked) {
+    if (lastBrowserlessTrace?.outcome === 'bot_blocked') {
       browserlessWasBotBlocked = true;
-      updateTrace('browserless', { outcome: 'bot_blocked', errorMessage: browserlessResult.error, botBlockedFallbackToZyte: true });
       console.log('[EXPEDIA] Browserless bot-blocked - attempting Zyte fallback');
-    } else if (browserlessResult.error) {
-      updateTrace('browserless', { outcome: 'navigation_failed', errorMessage: browserlessResult.error });
-    } else if (browserlessResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
-      updateTrace('browserless', { outcome: 'success' });
-      bestContent = browserlessResult.content;
+    } else if (browserlessAttempt.content) {
+      bestContent = browserlessAttempt.content;
       successfulProvider = 'browserless';
-      updateTrace('zyte', { reasonSkipped: 'Browserless succeeded' });
-      updateTrace('firecrawl', { reasonSkipped: 'Browserless succeeded' });
-    } else {
-      updateTrace('browserless', { outcome: 'insufficient_content', errorMessage: `Only ${browserlessResult.content.length} chars` });
     }
     
     // Try Zyte if Browserless didn't succeed
     if (!successfulProvider && !browserlessWasRateLimited) {
       console.log('[EXPEDIA] Trying Zyte...');
-      const zyteStartTime = new Date().toISOString();
-      updateTrace('zyte', { attempted: true, startedAt: zyteStartTime });
+      const zyteAttempt = await attemptWithRetry('zyte', fetchWithZyte);
+      providerAttemptTrace.push(...zyteAttempt.traces);
       
-      const zyteResult = await fetchWithZyte(offersPageUrl);
+      const lastZyteTrace = zyteAttempt.traces[zyteAttempt.traces.length - 1];
       
-      updateTrace('zyte', { endedAt: new Date().toISOString(), contentLength: zyteResult.content.length });
-      
-      if (zyteResult.isRateLimited || zyteResult.isBotBlocked) {
-        updateTrace('zyte', {
-          outcome: zyteResult.isRateLimited ? 'rate_limited' : 'bot_blocked',
-          errorMessage: zyteResult.error,
-        });
-        
+      if (lastZyteTrace?.outcome === 'bot_blocked' || lastZyteTrace?.outcome === 'rate_limited') {
         if (browserlessWasBotBlocked) {
           // Both providers blocked - terminal
-          updateTrace('firecrawl', { reasonSkipped: 'Both Browserless and Zyte blocked - terminal' });
           result.status = 'expedia_access_blocked';
           result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
           result.providerAttemptTrace = providerAttemptTrace;
@@ -1366,39 +1485,21 @@ async function extractFromExpedia(
           result.durationMs = Date.now() - startTime;
           return result;
         }
-      } else if (zyteResult.error) {
-        updateTrace('zyte', { outcome: 'navigation_failed', errorMessage: zyteResult.error });
-      } else if (zyteResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
-        updateTrace('zyte', { outcome: 'success' });
-        bestContent = zyteResult.content;
+      } else if (zyteAttempt.content) {
+        bestContent = zyteAttempt.content;
         successfulProvider = 'zyte';
-        updateTrace('firecrawl', { reasonSkipped: 'Zyte succeeded' });
-      } else {
-        updateTrace('zyte', { outcome: 'insufficient_content', errorMessage: `Only ${zyteResult.content.length} chars` });
       }
     }
     
     // Try Firecrawl (only if Browserless wasn't bot-blocked)
     if (!successfulProvider && !browserlessWasBotBlocked) {
       console.log('[EXPEDIA] Trying Firecrawl...');
-      const firecrawlStartTime = new Date().toISOString();
-      updateTrace('firecrawl', { attempted: true, startedAt: firecrawlStartTime });
+      const firecrawlAttempt = await attemptWithRetry('firecrawl', fetchWithFirecrawl);
+      providerAttemptTrace.push(...firecrawlAttempt.traces);
       
-      const firecrawlResult = await fetchWithFirecrawl(offersPageUrl);
-      
-      updateTrace('firecrawl', { endedAt: new Date().toISOString(), contentLength: firecrawlResult.content.length });
-      
-      if (firecrawlResult.error) {
-        updateTrace('firecrawl', {
-          outcome: firecrawlResult.isRateLimited ? 'rate_limited' : firecrawlResult.isBotBlocked ? 'bot_blocked' : 'navigation_failed',
-          errorMessage: firecrawlResult.error,
-        });
-      } else if (firecrawlResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
-        updateTrace('firecrawl', { outcome: 'success' });
-        bestContent = firecrawlResult.content;
+      if (firecrawlAttempt.content) {
+        bestContent = firecrawlAttempt.content;
         successfulProvider = 'firecrawl';
-      } else {
-        updateTrace('firecrawl', { outcome: 'insufficient_content', errorMessage: `Only ${firecrawlResult.content.length} chars` });
       }
     }
     
