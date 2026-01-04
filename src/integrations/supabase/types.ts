@@ -598,6 +598,45 @@ export type Database = {
         }
         Relationships: []
       }
+      extraction_test_runs: {
+        Row: {
+          admin_email: string
+          airbnb_url: string
+          created_at: string
+          duration_ms: number | null
+          error_message: string | null
+          expedia_url: string | null
+          id: string
+          request_params: Json
+          results_json: Json | null
+          status: string
+        }
+        Insert: {
+          admin_email: string
+          airbnb_url: string
+          created_at?: string
+          duration_ms?: number | null
+          error_message?: string | null
+          expedia_url?: string | null
+          id?: string
+          request_params?: Json
+          results_json?: Json | null
+          status?: string
+        }
+        Update: {
+          admin_email?: string
+          airbnb_url?: string
+          created_at?: string
+          duration_ms?: number | null
+          error_message?: string | null
+          expedia_url?: string | null
+          id?: string
+          request_params?: Json
+          results_json?: Json | null
+          status?: string
+        }
+        Relationships: []
+      }
       launch_signups: {
         Row: {
           created_at: string

@@ -15,6 +15,7 @@ import {
   TestTube,
   ShieldCheck,
   Microscope,
+  FlaskConical,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -39,6 +40,7 @@ const navItems = [
   { title: 'Platform Coverage', url: '/admin/coverage', icon: Gauge },
   { title: 'Platform Reliability', url: '/admin/reliability', icon: ShieldCheck },
   { title: 'Extraction Diagnostics', url: '/admin/extraction-diagnostics', icon: Microscope },
+  { title: 'Extraction Test', url: '/admin/extraction-test', icon: FlaskConical },
   { title: 'Access Layer', url: '/admin/access-layer', icon: ShieldOff },
   { title: 'Pipeline Status', url: '/admin/pipeline', icon: Activity },
   { title: 'Extractions', url: '/admin/extractions', icon: Database },

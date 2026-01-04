@@ -2479,6 +2479,248 @@ Deno.serve(async (req) => {
       );
     }
 
+    // =====================================================
+    // EXTRACTION TEST HARNESS - Run Airbnb + Expedia extraction from pasted URLs
+    // =====================================================
+    if (action === 'extraction-test' && req.method === 'POST') {
+      console.log('[Admin Dashboard] Running extraction test');
+      const startTime = Date.now();
+      
+      let body: { airbnb_url: string; expedia_url?: string | null; skip_discovery?: boolean };
+      try {
+        body = await req.json();
+      } catch {
+        return new Response(
+          JSON.stringify({ error: 'Invalid request body' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const { airbnb_url, expedia_url, skip_discovery = true } = body;
+
+      if (!airbnb_url) {
+        return new Response(
+          JSON.stringify({ error: 'airbnb_url is required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Parse Airbnb URL to extract dates and guests
+      let check_in: string | null = null;
+      let check_out: string | null = null;
+      let adults = 2;
+      let guests = 1;
+      let currency: string | null = null;
+
+      try {
+        const airbnbUrlObj = new URL(airbnb_url);
+        check_in = airbnbUrlObj.searchParams.get('check_in');
+        check_out = airbnbUrlObj.searchParams.get('check_out');
+        const adultsParam = airbnbUrlObj.searchParams.get('adults');
+        const guestsParam = airbnbUrlObj.searchParams.get('guests');
+        currency = airbnbUrlObj.searchParams.get('guest_currency');
+        
+        if (adultsParam) adults = parseInt(adultsParam, 10) || 2;
+        if (guestsParam) guests = parseInt(guestsParam, 10) || 1;
+      } catch (e) {
+        console.error('[Extraction Test] Failed to parse Airbnb URL:', e);
+      }
+
+      if (!check_in || !check_out) {
+        return new Response(
+          JSON.stringify({ error: 'Airbnb URL must contain check_in and check_out dates' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const request_params = {
+        check_in,
+        check_out,
+        adults,
+        guests,
+        currency,
+        skip_discovery,
+      };
+
+      // Create test run record
+      const { data: testRun, error: insertError } = await supabase
+        .from('extraction_test_runs')
+        .insert({
+          admin_email: authResult.admin.email,
+          airbnb_url,
+          expedia_url: expedia_url || null,
+          request_params,
+          status: 'running',
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error('[Extraction Test] Failed to create test run:', insertError);
+        return new Response(
+          JSON.stringify({ error: 'Failed to create test run' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const results: {
+        airbnb?: any;
+        expedia?: any;
+        request_dates?: { check_in: string; check_out: string; adults: number };
+      } = {
+        request_dates: { check_in, check_out, adults },
+      };
+
+      let overallStatus = 'success';
+      let errorMessage: string | null = null;
+
+      // Run Airbnb baseline extraction
+      try {
+        console.log('[Extraction Test] Running Airbnb baseline extraction');
+        const airbnbResponse = await fetch(`${supabaseUrl}/functions/v1/airbnb-baseline-test`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseServiceKey}`,
+          },
+          body: JSON.stringify({ url: airbnb_url }),
+        });
+
+        const airbnbData = await airbnbResponse.json();
+        
+        results.airbnb = {
+          platform: 'airbnb',
+          status: airbnbData.success ? 'success' : 'failed',
+          terminal_status: airbnbData.terminalStatus || airbnbData.status,
+          extracted_price: airbnbData.extractedTotal || airbnbData.price,
+          currency: airbnbData.currency || 'USD',
+          includes_taxes_fees: airbnbData.includesTaxesFees ?? true,
+          provider_used: airbnbData.providerUsed || airbnbData.provider,
+          evidence_snippets: airbnbData.evidenceSnippets || airbnbData.evidence || [],
+          verification_status: airbnbData.verified ? 'verified' : 'unverified',
+          structural_proof: airbnbData.structuralProof || {},
+          error: airbnbData.error,
+        };
+
+        if (!airbnbData.success) {
+          overallStatus = 'partial';
+        }
+      } catch (err: any) {
+        console.error('[Extraction Test] Airbnb extraction failed:', err);
+        results.airbnb = {
+          platform: 'airbnb',
+          status: 'error',
+          error: err.message || 'Airbnb extraction failed',
+        };
+        overallStatus = 'partial';
+      }
+
+      // Run Expedia extraction if URL provided
+      if (expedia_url) {
+        try {
+          console.log('[Extraction Test] Running Expedia extraction');
+          const expediaResponse = await fetch(`${supabaseUrl}/functions/v1/extract-expedia`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${supabaseServiceKey}`,
+            },
+            body: JSON.stringify({
+              url: expedia_url,
+              check_in,
+              check_out,
+              adults,
+              guests,
+              airbnb_baseline_price: results.airbnb?.extracted_price,
+              currency: currency || 'USD',
+            }),
+          });
+
+          const expediaData = await expediaResponse.json();
+          
+          results.expedia = {
+            platform: 'expedia',
+            status: expediaData.success ? 'success' : 'failed',
+            terminal_status: expediaData.terminalStatus || expediaData.extraction_status,
+            extracted_price: expediaData.extractedPrice ?? expediaData.extracted_price,
+            currency: expediaData.currency || 'JPY',
+            converted_usd: expediaData.convertedUsd ?? expediaData.converted_usd,
+            includes_taxes_fees: expediaData.includesTaxesFees ?? expediaData.includes_taxes_fees,
+            provider_used: expediaData.providerUsed || expediaData.provider_used,
+            evidence_snippets: expediaData.evidenceSnippets || expediaData.evidence_snippets || [],
+            verification_status: expediaData.verified ? 'verified' : (expediaData.verificationStatus || 'unverified'),
+            structural_proof: expediaData.structuralProof || expediaData.structural_proof || {},
+            expedia_trace: expediaData.expediaTrace || expediaData.expedia_trace || {},
+            date_injection: expediaData.dateInjection || expediaData.date_injection || {},
+            error: expediaData.error || expediaData.extraction_error,
+          };
+
+          if (!expediaData.success) {
+            overallStatus = overallStatus === 'partial' ? 'failed' : 'partial';
+          }
+        } catch (err: any) {
+          console.error('[Extraction Test] Expedia extraction failed:', err);
+          results.expedia = {
+            platform: 'expedia',
+            status: 'error',
+            error: err.message || 'Expedia extraction failed',
+          };
+          overallStatus = overallStatus === 'partial' ? 'failed' : 'partial';
+        }
+      }
+
+      const durationMs = Date.now() - startTime;
+
+      // Update test run with results
+      const { error: updateError } = await supabase
+        .from('extraction_test_runs')
+        .update({
+          results_json: results,
+          status: overallStatus,
+          duration_ms: durationMs,
+          error_message: errorMessage,
+        })
+        .eq('id', testRun.id);
+
+      if (updateError) {
+        console.error('[Extraction Test] Failed to update test run:', updateError);
+      }
+
+      // Fetch the updated run
+      const { data: updatedRun } = await supabase
+        .from('extraction_test_runs')
+        .select('*')
+        .eq('id', testRun.id)
+        .single();
+
+      return new Response(
+        JSON.stringify({ run: updatedRun }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // EXTRACTION TEST HISTORY - Get recent test runs
+    if (action === 'extraction-test-history' && req.method === 'GET') {
+      const { data: runs, error } = await supabase
+        .from('extraction_test_runs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.error('[Extraction Test] Failed to fetch history:', error);
+        return new Response(
+          JSON.stringify({ error: 'Failed to fetch history' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({ runs }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
