@@ -487,6 +487,17 @@ interface ExtractionResult {
     requestedEndDate: string;
     requestedAdults: number;
   };
+  // Runtime instrumentation block (always persisted)
+  expediaTrace: {
+    discovered_property_url: string;
+    parsed_property_id: string | null;
+    constructed_offers_url: string | null;
+    provider_selected: string | null;
+    url_fetched_phase1: string | null;
+    url_fetched_phase2: string | null;
+    offers_page_reached: boolean;
+    reason_offers_not_reached: string | null;
+  };
 }
 
 // Configuration
@@ -1196,6 +1207,16 @@ async function extractFromExpedia(
       requestedEndDate: checkOut,
       requestedAdults: adults,
     },
+    expediaTrace: {
+      discovered_property_url: baseUrl,
+      parsed_property_id: null,
+      constructed_offers_url: null,
+      provider_selected: null,
+      url_fetched_phase1: null,
+      url_fetched_phase2: null,
+      offers_page_reached: false,
+      reason_offers_not_reached: null,
+    },
   };
   
   // Helper to update trace
@@ -1227,8 +1248,7 @@ async function extractFromExpedia(
     result.goldenPath.propertyIdSource = propertyIdResult.source;
     result.structuralProof.property_id = propertyIdResult.propertyId;
     result.structuralProof.property_id_source = propertyIdResult.source || undefined;
-    
-    console.log(`[EXPEDIA] Property ID: ${propertyIdResult.propertyId} (source: ${propertyIdResult.source})`);
+    result.expediaTrace.parsed_property_id = propertyIdResult.propertyId;
     
     // ==========================================================================
     // STEP 2: Build deterministic Hotel-Search offers page URL
@@ -1258,8 +1278,11 @@ async function extractFromExpedia(
     result.structuralProof.url_injected_endDate = checkOut;
     result.structuralProof.is_offers_page = true;
     result.structuralProof.offers_page_url = hotelSearchResult.url;
-    
+
     const offersPageUrl = hotelSearchResult.url;
+    result.expediaTrace.constructed_offers_url = offersPageUrl;
+    result.expediaTrace.url_fetched_phase1 = offersPageUrl;
+
     console.log(`[EXPEDIA] Hotel-Search URL: ${offersPageUrl}`);
     
     // ==========================================================================
@@ -1381,12 +1404,18 @@ async function extractFromExpedia(
     
     result.providerAttemptTrace = providerAttemptTrace;
     result.providerUsed = successfulProvider;
-    
+    result.expediaTrace.provider_selected = successfulProvider;
+    result.expediaTrace.url_fetched_phase2 = offersPageUrl;
+
     // No provider succeeded
     if (!bestContent || !successfulProvider) {
       const lastAttempted = providerAttemptTrace.filter(t => t.attempted).pop();
       result.providerUsed = lastAttempted?.provider || 'browserless';
-      
+      result.expediaTrace.provider_selected = result.providerUsed;
+      result.expediaTrace.reason_offers_not_reached = browserlessWasBotBlocked
+        ? 'blocked'
+        : 'navigation_failed_or_insufficient_content';
+
       if (browserlessWasBotBlocked) {
         result.status = 'expedia_access_blocked';
         result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
@@ -1397,35 +1426,57 @@ async function extractFromExpedia(
       result.durationMs = Date.now() - startTime;
       return result;
     }
-    
+
     // ==========================================================================
     // STEP 4: HARD PAGE-TYPE GATE (v5.1) - No price extraction without this
     // ==========================================================================
-    console.log('[EXPEDIA] HARD GATE Step: Validate offers page URL before ANY extraction');
-    
+    console.log('[EXPEDIA] HARD GATE Step: Validate offers page context before ANY extraction');
+
+    // NOTE: We cannot always observe the true final URL (provider APIs often proxy redirects).
+    // So we enforce BOTH:
+    // 1) constructed URL gate (params must match), AND
+    // 2) content must contain the same date + selected property invariants.
     const gateResult = validateOffersPageUrl(
-      offersPageUrl, 
-      result.goldenPath.propertyId!, 
-      checkIn, 
+      offersPageUrl,
+      result.goldenPath.propertyId!,
+      checkIn,
       checkOut
     );
-    
+
     // Update structural proof with gate diagnostics
     result.structuralProof.current_url_at_extraction = offersPageUrl;
-    result.structuralProof.offers_page_reached = true; // We navigated to it
+    result.structuralProof.offers_page_reached = true; // We attempted offers URL directly
     result.structuralProof.offers_page_gate_passed = gateResult.passed;
     result.structuralProof.property_id_used = result.goldenPath.propertyId || undefined;
     result.structuralProof.constructed_offers_url = offersPageUrl;
-    
-    if (!gateResult.passed) {
-      // HARD STOP: Gate failed - no price extraction allowed
-      console.log(`[EXPEDIA] HARD GATE FAILED: ${gateResult.rejectionReason}`);
+
+    // Content invariants (prevents property-page / intermediate-page fragments from ever being priced)
+    const requiredInContent = [
+      'hotel-search',
+      checkIn,
+      checkOut,
+      `selected=${result.goldenPath.propertyId}`,
+    ];
+    const contentLooksLikeOffers = requiredInContent.every((needle) =>
+      bestContent.toLowerCase().includes(String(needle).toLowerCase())
+    );
+
+    if (!gateResult.passed || !contentLooksLikeOffers) {
+      const reason = !gateResult.passed
+        ? gateResult.rejectionReason
+        : `Content missing required offers invariants: ${requiredInContent.filter(n => !bestContent.toLowerCase().includes(String(n).toLowerCase())).join(', ')}`;
+
+      console.log(`[EXPEDIA] HARD GATE FAILED: ${reason}`);
       result.status = 'expedia_offers_page_not_reached';
-      result.error = `Offers page gate failed: ${gateResult.rejectionReason}`;
+      result.error = `Offers page gate failed: ${reason}`;
+      result.expediaTrace.offers_page_reached = false;
+      result.expediaTrace.reason_offers_not_reached = reason;
       result.durationMs = Date.now() - startTime;
       return result;
     }
-    
+
+    result.expediaTrace.offers_page_reached = true;
+
     console.log('[EXPEDIA] HARD GATE PASSED: Proceeding to offers page content detection');
     
     // ==========================================================================
@@ -1612,31 +1663,53 @@ Deno.serve(async (req) => {
         if (supabaseUrl && supabaseKey) {
           const supabase = createClient(supabaseUrl, supabaseKey);
           
+          const traceLine = `TRACE offers_url=${extractionResult.expediaTrace.constructed_offers_url || 'null'} final_url=${extractionResult.expediaTrace.url_fetched_phase2 || 'null'} offers_reached=${extractionResult.expediaTrace.offers_page_reached} provider=${extractionResult.providerUsed || 'none'}`;
+
+          const proof = extractionResult.structuralProof;
+
           const updateData: Record<string, unknown> = {
-            extraction_status: extractionResult.success ? 'price_extracted' : extractionResult.status,
+            // IMPORTANT: Use terminal status directly (admin diagnostics expect it)
+            extraction_status: extractionResult.success ? 'success' : extractionResult.status,
             extraction_error: extractionResult.error,
             extraction_stage: 'golden_path_offers_page',
             provider_used: extractionResult.providerUsed,
             extraction_metadata: {
+              // Legacy compatibility: copy structural proof signals to top-level fields
+              breakdown_found: proof.breakdown_found,
+              total_label_found: proof.total_label_found,
+              rendered_dates_match: proof.rendered_dates_match,
+              extracted_from_breakdown_total: proof.extracted_from_breakdown_total,
+
               goldenPath: extractionResult.goldenPath,
               offersPage: extractionResult.offersPage,
-              structuralProof: extractionResult.structuralProof,
+              structuralProof: proof,
               providerAttemptTrace: extractionResult.providerAttemptTrace,
+              expedia_trace: extractionResult.expediaTrace,
               durationMs: extractionResult.durationMs,
-              proof_version: '2.0-golden-path',
+              proof_version: '3.0-hard-gate',
             },
+            // Always persist TRACE for undeniable runtime visibility
+            evidence_snippets: [traceLine],
+            // HARD INVARIANT: price fields are only set on success (and proof is fully true)
+            extracted_price: null,
+            currency: null,
+            includes_taxes_fees: null,
+            detected_checkin: null,
+            detected_checkout: null,
+            dates_validated: false,
           };
-          
+
           if (extractionResult.success && extractionResult.priceExtraction.totalPrice) {
             updateData.extracted_price = extractionResult.priceExtraction.totalPrice;
             updateData.currency = 'USD';
             updateData.includes_taxes_fees = extractionResult.priceExtraction.includesTaxesFees;
-            updateData.evidence_snippets = extractionResult.priceExtraction.evidenceSnippet 
-              ? [extractionResult.priceExtraction.evidenceSnippet]
-              : null;
             updateData.detected_checkin = checkIn;
             updateData.detected_checkout = checkOut;
             updateData.dates_validated = true;
+
+            if (extractionResult.priceExtraction.evidenceSnippet) {
+              updateData.evidence_snippets = [traceLine, extractionResult.priceExtraction.evidenceSnippet];
+            }
           }
           
           const { error: updateError } = await supabase

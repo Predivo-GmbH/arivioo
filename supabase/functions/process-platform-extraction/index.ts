@@ -91,13 +91,20 @@ const DEDICATED_EXTRACTOR_TIMEOUT = 90000; // 90s for dedicated extractors (they
 // Golden path platforms with dedicated extractors
 const GOLDEN_PATH_PLATFORMS: Record<string, string> = {
   'hotels.com': 'extract-hotelscom',
-  'expedia.com': 'extract-expedia',
+  // Expedia has multiple domains (.com, .co.jp, etc.) and UI often labels it as just "Expedia".
+  // We treat ANY Expedia platform label as Tier-A dedicated extractor.
+  'expedia': 'extract-expedia',
   'agoda.com': 'extract-agoda',
 };
 
 // Check if platform has a dedicated golden path extractor
 function getDedicatedExtractor(platformName: string): string | null {
-  const platformLower = platformName.toLowerCase();
+  const platformLower = (platformName || '').toLowerCase();
+
+  // Explicit Expedia catch-all to prevent routing through generic extract-prices (Firecrawl/Zyte)
+  // in manual search orchestration.
+  if (platformLower.includes('expedia')) return 'extract-expedia';
+
   for (const [domain, extractor] of Object.entries(GOLDEN_PATH_PLATFORMS)) {
     if (platformLower.includes(domain) || platformLower === domain.split('.')[0]) {
       return extractor;
