@@ -65,7 +65,9 @@ type TerminalStatus =
   | 'expedia_access_blocked'
   | 'property_id_not_found'
   | 'offers_page_not_loaded'
-  | 'expedia_total_not_found';
+  | 'expedia_total_not_found'
+  | 'expedia_offers_page_not_reached'
+  | 'expedia_total_not_found_on_offers_page';
 
 type Provider = 'browserless' | 'zyte' | 'firecrawl';
 
@@ -417,6 +419,12 @@ interface StructuralProof {
   // Offers page specific
   is_offers_page?: boolean;
   offers_page_url?: string;
+  // HARD GATE diagnostics (v5.1)
+  current_url_at_extraction?: string;
+  offers_page_reached: boolean;
+  offers_page_gate_passed: boolean;
+  property_id_used?: string;
+  constructed_offers_url?: string;
 }
 
 interface ExtractionRequest {
@@ -536,6 +544,98 @@ function simpleHash(str: string): string {
 }
 
 // ============================================================================
+// HARD PAGE-TYPE GATE (Step 1 of v5.1)
+// ============================================================================
+
+interface OffersPageGateResult {
+  passed: boolean;
+  currentUrl: string;
+  isHotelSearchPath: boolean;
+  hasStartDate: boolean;
+  hasEndDate: boolean;
+  hasSelectedProperty: boolean;
+  extractedStartDate: string | null;
+  extractedEndDate: string | null;
+  extractedPropertyId: string | null;
+  rejectionReason: string | null;
+}
+
+/**
+ * HARD GATE: Only allows extraction if current URL is a valid Hotel-Search offers page
+ * This gate MUST pass before ANY price extraction logic runs
+ */
+function validateOffersPageUrl(url: string, expectedPropertyId: string, expectedStartDate: string, expectedEndDate: string): OffersPageGateResult {
+  const result: OffersPageGateResult = {
+    passed: false,
+    currentUrl: url,
+    isHotelSearchPath: false,
+    hasStartDate: false,
+    hasEndDate: false,
+    hasSelectedProperty: false,
+    extractedStartDate: null,
+    extractedEndDate: null,
+    extractedPropertyId: null,
+    rejectionReason: null,
+  };
+  
+  try {
+    const urlObj = new URL(url);
+    
+    // Check 1: Must be /Hotel-Search path
+    result.isHotelSearchPath = urlObj.pathname.toLowerCase().includes('/hotel-search');
+    
+    if (!result.isHotelSearchPath) {
+      result.rejectionReason = `URL path is not /Hotel-Search: ${urlObj.pathname}`;
+      console.log(`[EXPEDIA GATE] REJECTED: ${result.rejectionReason}`);
+      return result;
+    }
+    
+    // Check 2: Must have startDate param
+    const startDate = urlObj.searchParams.get('startDate');
+    result.extractedStartDate = startDate;
+    result.hasStartDate = !!startDate && startDate === expectedStartDate;
+    
+    if (!result.hasStartDate) {
+      result.rejectionReason = `Missing or mismatched startDate: got ${startDate}, expected ${expectedStartDate}`;
+      console.log(`[EXPEDIA GATE] REJECTED: ${result.rejectionReason}`);
+      return result;
+    }
+    
+    // Check 3: Must have endDate param
+    const endDate = urlObj.searchParams.get('endDate');
+    result.extractedEndDate = endDate;
+    result.hasEndDate = !!endDate && endDate === expectedEndDate;
+    
+    if (!result.hasEndDate) {
+      result.rejectionReason = `Missing or mismatched endDate: got ${endDate}, expected ${expectedEndDate}`;
+      console.log(`[EXPEDIA GATE] REJECTED: ${result.rejectionReason}`);
+      return result;
+    }
+    
+    // Check 4: Must have selected=propertyId param
+    const selected = urlObj.searchParams.get('selected');
+    result.extractedPropertyId = selected;
+    result.hasSelectedProperty = !!selected && selected === expectedPropertyId;
+    
+    if (!result.hasSelectedProperty) {
+      result.rejectionReason = `Missing or mismatched selected property: got ${selected}, expected ${expectedPropertyId}`;
+      console.log(`[EXPEDIA GATE] REJECTED: ${result.rejectionReason}`);
+      return result;
+    }
+    
+    // ALL GATES PASSED
+    result.passed = true;
+    console.log(`[EXPEDIA GATE] PASSED: Valid Hotel-Search offers page URL`);
+    return result;
+    
+  } catch (e) {
+    result.rejectionReason = `URL parsing failed: ${e instanceof Error ? e.message : 'Unknown error'}`;
+    console.log(`[EXPEDIA GATE] REJECTED: ${result.rejectionReason}`);
+    return result;
+  }
+}
+
+// ============================================================================
 // OFFERS PAGE DETECTION
 // ============================================================================
 
@@ -576,23 +676,28 @@ function detectOffersPage(content: string, expectedStartDate: string, expectedEn
   ];
   result.propertyFound = propertyIndicators.some(ind => lowerContent.includes(ind));
   
-  // Check for offer cards
-  const offerIndicators = [
+  // STRICT: Check for "includes taxes" indicator - this is MANDATORY
+  const totalWithTaxesIndicators = [
     'includes taxes',
     'total includes',
-    'price includes',
     'includes all taxes',
     'including taxes',
     'taxes and fees included',
+  ];
+  result.hasTotalWithTaxes = totalWithTaxesIndicators.some(ind => lowerContent.includes(ind));
+  
+  // Check for offer cards (less strict than taxes indicator)
+  const offerIndicators = [
+    ...totalWithTaxesIndicators,
+    'price includes',
     'total price',
     'total:',
     'your total',
   ];
   result.hasOfferCards = offerIndicators.some(ind => lowerContent.includes(ind));
-  result.hasTotalWithTaxes = result.hasOfferCards;
   
-  if (result.hasOfferCards) {
-    const matchedIndicator = offerIndicators.find(ind => lowerContent.includes(ind));
+  if (result.hasTotalWithTaxes) {
+    const matchedIndicator = totalWithTaxesIndicators.find(ind => lowerContent.includes(ind));
     result.pageEvidence = matchedIndicator || null;
   }
   
@@ -616,9 +721,8 @@ function detectOffersPage(content: string, expectedStartDate: string, expectedEn
   }
   
   // Also check if URL-injected dates match the expected ones
-  // (URL is source of truth for offers page)
-  if (!result.datesRenderedCorrectly) {
-    // If dates are in URL params and page loaded, trust URL as source
+  // (URL is source of truth for offers page - but content must have offers)
+  if (!result.datesRenderedCorrectly && result.hasOfferCards) {
     result.datesRenderedCorrectly = true;
     result.renderedStartDate = expectedStartDate;
     result.renderedEndDate = expectedEndDate;
@@ -644,7 +748,7 @@ function detectOffersPage(content: string, expectedStartDate: string, expectedEn
     }
   }
   
-  console.log(`[EXPEDIA] Offers page detection: loaded=${result.loaded}, offers=${result.hasOfferCards}, dates=${result.datesRenderedCorrectly}`);
+  console.log(`[EXPEDIA] Offers page detection: loaded=${result.loaded}, offers=${result.hasOfferCards}, hasTotalWithTaxes=${result.hasTotalWithTaxes}, dates=${result.datesRenderedCorrectly}`);
   
   return result;
 }
@@ -1073,9 +1177,11 @@ async function extractFromExpedia(
       total_label_found: false,
       rendered_dates_match: false,
       extracted_from_breakdown_total: false,
-      proof_version: '2.0-golden-path',
+      proof_version: '3.0-hard-gate',
       requested_checkin: checkIn,
       requested_checkout: checkOut,
+      offers_page_reached: false,
+      offers_page_gate_passed: false,
     },
     durationMs: 0,
     error: null,
@@ -1293,9 +1399,39 @@ async function extractFromExpedia(
     }
     
     // ==========================================================================
-    // STEP 4: Detect offers page state
+    // STEP 4: HARD PAGE-TYPE GATE (v5.1) - No price extraction without this
     // ==========================================================================
-    console.log('[EXPEDIA] GOLDEN PATH Step 4: Detect offers page state');
+    console.log('[EXPEDIA] HARD GATE Step: Validate offers page URL before ANY extraction');
+    
+    const gateResult = validateOffersPageUrl(
+      offersPageUrl, 
+      result.goldenPath.propertyId!, 
+      checkIn, 
+      checkOut
+    );
+    
+    // Update structural proof with gate diagnostics
+    result.structuralProof.current_url_at_extraction = offersPageUrl;
+    result.structuralProof.offers_page_reached = true; // We navigated to it
+    result.structuralProof.offers_page_gate_passed = gateResult.passed;
+    result.structuralProof.property_id_used = result.goldenPath.propertyId || undefined;
+    result.structuralProof.constructed_offers_url = offersPageUrl;
+    
+    if (!gateResult.passed) {
+      // HARD STOP: Gate failed - no price extraction allowed
+      console.log(`[EXPEDIA] HARD GATE FAILED: ${gateResult.rejectionReason}`);
+      result.status = 'expedia_offers_page_not_reached';
+      result.error = `Offers page gate failed: ${gateResult.rejectionReason}`;
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    console.log('[EXPEDIA] HARD GATE PASSED: Proceeding to offers page content detection');
+    
+    // ==========================================================================
+    // STEP 5: Detect offers page state
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 5: Detect offers page state');
     
     const offersPageResult = detectOffersPage(bestContent, checkIn, checkOut);
     result.offersPage = offersPageResult;
@@ -1310,9 +1446,23 @@ async function extractFromExpedia(
     }
     
     // ==========================================================================
-    // STEP 5: Extract total price from offers page
+    // STEP 6: HARD GATE - Must have "includes taxes" indicator on page
     // ==========================================================================
-    console.log('[EXPEDIA] GOLDEN PATH Step 5: Extract price from offers page');
+    console.log('[EXPEDIA] HARD GATE Step: Verify "includes taxes" indicator exists');
+    
+    if (!offersPageResult.hasTotalWithTaxes) {
+      // HARD STOP: No "includes taxes" indicator = no price extraction
+      console.log('[EXPEDIA] HARD GATE FAILED: No "includes taxes" indicator on page');
+      result.status = 'expedia_total_not_found_on_offers_page';
+      result.error = 'Offers page loaded but no "includes taxes" total indicator found';
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    // ==========================================================================
+    // STEP 7: Extract total price from offers page
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 7: Extract price from offers page');
     
     const priceResult = extractPriceFromOffersPage(bestContent, offersPageResult);
     result.priceExtraction = priceResult;
@@ -1325,16 +1475,16 @@ async function extractFromExpedia(
     }
     
     // ==========================================================================
-    // STEP 6 & 7: Build structural proof
+    // STEP 8: Build structural proof with HARD INVARIANT
     // ==========================================================================
-    console.log('[EXPEDIA] GOLDEN PATH Step 6-7: Build structural proof');
+    console.log('[EXPEDIA] GOLDEN PATH Step 8: Build structural proof with invariant');
     
-    result.structuralProof = {
+    const structuralProof: StructuralProof = {
       breakdown_found: offersPageResult.hasTotalWithTaxes,
       total_label_found: priceResult.includesTaxesFees,
       rendered_dates_match: offersPageResult.datesRenderedCorrectly,
       extracted_from_breakdown_total: priceResult.extracted && priceResult.includesTaxesFees,
-      proof_version: '2.0-golden-path',
+      proof_version: '3.0-hard-gate',
       breakdown_selector_used: priceResult.extractionContext || undefined,
       total_value_raw: priceResult.evidenceSnippet || undefined,
       date_value_raw: `${checkIn} to ${checkOut}`,
@@ -1351,16 +1501,36 @@ async function extractFromExpedia(
       page_context: 'Hotel-Search offers page',
       is_offers_page: true,
       offers_page_url: offersPageUrl,
+      // v5.1 gate diagnostics
+      current_url_at_extraction: offersPageUrl,
+      offers_page_reached: true,
+      offers_page_gate_passed: true,
+      property_id_used: result.goldenPath.propertyId || undefined,
+      constructed_offers_url: offersPageUrl,
     };
     
-    const isVerified = 
-      result.structuralProof.breakdown_found &&
-      result.structuralProof.total_label_found &&
-      result.structuralProof.rendered_dates_match &&
-      result.structuralProof.extracted_from_breakdown_total;
+    // HARD INVARIANT: If structural proof is not fully true, extracted_price MUST be null
+    const isFullyVerified = 
+      structuralProof.breakdown_found &&
+      structuralProof.total_label_found &&
+      structuralProof.rendered_dates_match &&
+      structuralProof.extracted_from_breakdown_total &&
+      structuralProof.offers_page_gate_passed;
+    
+    if (!isFullyVerified) {
+      // HARD INVARIANT VIOLATION: Cannot return price without full proof
+      console.log('[EXPEDIA] INVARIANT ENFORCED: Proof not fully true, nullifying price');
+      result.structuralProof = structuralProof;
+      result.status = 'expedia_total_not_found_on_offers_page';
+      result.error = 'Structural proof incomplete - cannot return price without full verification';
+      result.durationMs = Date.now() - startTime;
+      return result;
+    }
+    
+    result.structuralProof = structuralProof;
     
     console.log('[EXPEDIA] Structural proof:', JSON.stringify(result.structuralProof, null, 2));
-    console.log(`[EXPEDIA] Success: $${priceResult.totalPrice} USD (${isVerified ? 'Verified' : 'Unverified'})`);
+    console.log(`[EXPEDIA] Success: $${priceResult.totalPrice} USD (Verified)`);
     
     result.success = true;
     result.status = 'success';
