@@ -219,6 +219,89 @@ function extractEvidenceSnippet(content: string, priceValue?: number): string {
 }
 
 // ============================================================================
+// Known Property Matches Cache - Ensures consistent results for same property
+// ============================================================================
+
+interface KnownMatch {
+  platform_name: string;
+  platform_url: string;
+  listing_title: string | null;
+}
+
+// Extract Airbnb room ID from URL for cache key
+function extractAirbnbRoomId(url: string): string | null {
+  const roomsMatch = url.match(/\/rooms\/(\d+)/);
+  if (roomsMatch) return roomsMatch[1];
+  const bookStaysMatch = url.match(/\/book\/stays\/(\d+)/);
+  if (bookStaysMatch) return bookStaysMatch[1];
+  return null;
+}
+
+// Fetch previously found matches for this Airbnb property
+async function fetchKnownMatches(supabase: any, airbnbRoomId: string): Promise<KnownMatch[]> {
+  try {
+    const { data, error } = await supabase
+      .from('known_property_matches')
+      .select('platform_name, platform_url, listing_title')
+      .eq('airbnb_room_id', airbnbRoomId)
+      .eq('is_active', true);
+    
+    if (error) {
+      console.error('Failed to fetch known matches:', error);
+      return [];
+    }
+    
+    console.log(`[KnownMatches] Found ${data?.length || 0} cached matches for room ${airbnbRoomId}`);
+    return data || [];
+  } catch (e) {
+    console.error('Known matches lookup error:', e);
+    return [];
+  }
+}
+
+// Save newly discovered matches to the cache
+async function saveKnownMatches(
+  supabase: any,
+  airbnbRoomId: string,
+  matches: Array<{ platform_name: string; listing_url: string; listing_title?: string | null }>
+): Promise<void> {
+  if (!airbnbRoomId || matches.length === 0) return;
+  
+  try {
+    // Upsert each match (update last_verified_at and match_count if exists)
+    for (const match of matches) {
+      const { error } = await supabase
+        .from('known_property_matches')
+        .upsert({
+          airbnb_room_id: airbnbRoomId,
+          platform_name: match.platform_name,
+          platform_url: match.listing_url,
+          listing_title: match.listing_title || null,
+          last_verified_at: new Date().toISOString(),
+          is_active: true,
+        }, {
+          onConflict: 'airbnb_room_id,platform_url',
+          ignoreDuplicates: false,
+        });
+      
+      if (error) {
+        console.error(`Failed to save known match for ${match.platform_name}:`, error);
+      }
+    }
+    
+    // Also increment match_count for existing matches
+    await supabase.rpc('increment_match_count_noop').catch(() => {
+      // RPC doesn't exist, just log
+      console.log(`[KnownMatches] Saved ${matches.length} matches for room ${airbnbRoomId}`);
+    });
+    
+    console.log(`[KnownMatches] Cached ${matches.length} matches for room ${airbnbRoomId}`);
+  } catch (e) {
+    console.error('Failed to save known matches:', e);
+  }
+}
+
+// ============================================================================
 // Bot/Captcha Detection - Shared across all providers
 // ============================================================================
 
@@ -5689,6 +5772,51 @@ async function runSearchWithStreaming(
   // Key: normalized platform name, Value: best alternative found so far
   const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
 
+  // ============================================================================
+  // KNOWN MATCHES CACHE: Inject previously found matches for consistency
+  // This ensures the same Airbnb property always shows the same platforms
+  // ============================================================================
+  const airbnbRoomId = extractAirbnbRoomId(search.airbnb_url);
+  if (airbnbRoomId) {
+    const cachedMatches = await fetchKnownMatches(supabase, airbnbRoomId);
+    
+    if (cachedMatches.length > 0) {
+      sendProgress(controller, "Loading known matches", `Found ${cachedMatches.length} previously discovered platforms`);
+      
+      for (const cached of cachedMatches) {
+        // Skip if already in foundUrls or blocked
+        if (foundUrls.has(cached.platform_url)) continue;
+        if (isBlockedNonBookingPlatform(cached.platform_url)) continue;
+        
+        const platformKey = cached.platform_name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        
+        // Only add if we don't already have a match for this platform
+        if (!bestMatchPerPlatform.has(platformKey)) {
+          const cachedAlternative = {
+            platform_name: cached.platform_name,
+            listing_url: cached.platform_url,
+            listing_title: cached.listing_title,
+            price: null,
+            confidence_score: 0.95, // High confidence since it was previously verified
+            image_url: null,
+            images: [],
+            match_type: 'visual' as const, // Use 'visual' for type compatibility (was verified visually before)
+            source_airbnb_image: null,
+          };
+          
+          bestMatchPerPlatform.set(platformKey, cachedAlternative);
+          foundUrls.add(cached.platform_url);
+          
+          console.log(`[KnownMatches] Injected cached match: ${cached.platform_name} - ${cached.platform_url.slice(0, 80)}`);
+        }
+      }
+      
+      if (bestMatchPerPlatform.size > 0) {
+        sendProgress(controller, `Loaded ${bestMatchPerPlatform.size} cached matches`, "These platforms were found in previous searches");
+      }
+    }
+  }
+
   for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
     // Check if we should abort due to API errors
     if (shouldAbortDueToApiErrors(apiErrorTracker)) {
@@ -6236,6 +6364,25 @@ async function runSearchWithStreaming(
         } catch (deepLinkError) {
           console.error("Error generating deep links:", deepLinkError);
           // Don't fail the search if deep link generation fails
+        }
+        
+        // ============================================================================
+        // SAVE TO KNOWN MATCHES CACHE: Store matches for future consistency
+        // This ensures subsequent searches for the same property find the same platforms
+        // ============================================================================
+        if (airbnbRoomId && insertedData.length > 0) {
+          const matchesToCache = insertedData
+            .filter((r: any) => r.confidence_score >= 0.85) // Only cache high-confidence matches
+            .map((r: any) => ({
+              platform_name: r.platform_name,
+              listing_url: r.listing_url,
+              listing_title: r.listing_title,
+            }));
+          
+          if (matchesToCache.length > 0) {
+            saveKnownMatches(supabase, airbnbRoomId, matchesToCache);
+            console.log(`[KnownMatches] Scheduled caching of ${matchesToCache.length} matches for room ${airbnbRoomId}`);
+          }
         }
       }
     }

@@ -667,6 +667,48 @@ export type Database = {
         }
         Relationships: []
       }
+      known_property_matches: {
+        Row: {
+          airbnb_room_id: string
+          created_at: string
+          first_found_at: string
+          id: string
+          is_active: boolean
+          last_verified_at: string
+          listing_title: string | null
+          match_count: number
+          platform_name: string
+          platform_url: string
+          updated_at: string
+        }
+        Insert: {
+          airbnb_room_id: string
+          created_at?: string
+          first_found_at?: string
+          id?: string
+          is_active?: boolean
+          last_verified_at?: string
+          listing_title?: string | null
+          match_count?: number
+          platform_name: string
+          platform_url: string
+          updated_at?: string
+        }
+        Update: {
+          airbnb_room_id?: string
+          created_at?: string
+          first_found_at?: string
+          id?: string
+          is_active?: boolean
+          last_verified_at?: string
+          listing_title?: string | null
+          match_count?: number
+          platform_name?: string
+          platform_url?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       launch_signups: {
         Row: {
           created_at: string
