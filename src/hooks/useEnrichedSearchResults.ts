@@ -259,6 +259,21 @@ export function useEnrichedSearchResults() {
           : [];
         const metadata = extraction.extraction_metadata as Record<string, any> | null;
         
+        // CRITICAL: Extract structural proof fields from nested locations
+        // The extract-expedia function stores these in multiple places for backwards compat
+        const structuralProof = metadata?.structuralProof || {};
+        const offersPage = metadata?.offersPage || {};
+        
+        // Normalize structural proof fields to top level for verifyPrice
+        const normalizedMetadata = metadata ? {
+          ...metadata,
+          // Extract from structuralProof or offersPage or top level
+          breakdown_found: metadata.breakdown_found ?? structuralProof.breakdown_found ?? offersPage.hasOfferCards ?? null,
+          total_label_found: metadata.total_label_found ?? structuralProof.total_label_found ?? offersPage.hasTotalWithTaxes ?? null,
+          rendered_dates_match: metadata.rendered_dates_match ?? structuralProof.rendered_dates_match ?? offersPage.datesRenderedCorrectly ?? null,
+          extracted_from_breakdown_total: metadata.extracted_from_breakdown_total ?? structuralProof.extracted_from_breakdown_total ?? null,
+        } : null;
+        
         verification = verifyPrice({
           extraction_status: extraction.extraction_status,
           dates_validated: extraction.dates_validated,
@@ -271,7 +286,7 @@ export function useEnrichedSearchResults() {
           extraction_stage: extraction.extraction_stage || metadata?.extraction_stage || null,
           extraction_path: metadata?.extraction_path || null,
           evidence_snippets: evidenceSnippets,
-          extraction_metadata: metadata,
+          extraction_metadata: normalizedMetadata,
         });
       } else if (result.price && result.price > 0) {
         // Price exists but no extraction record - scraped price
