@@ -794,21 +794,37 @@ function detectOffersPage(content: string, expectedStartDate: string, expectedEn
     console.log('[EXPEDIA] Trusting URL-injected dates as source of truth for offers page');
   }
   
-  // Unavailability detection
+  // Unavailability detection - comprehensive patterns for Expedia offers page
+  // Must detect when property has no availability for the requested dates
   const unavailabilityPatterns = [
+    // Primary Expedia patterns (en_US)
+    { pattern: /we(?:'re|'re|\s+are)\s+sorry,?\s+(?:we\s+)?(?:don'?t|do\s+not)\s+have\s+any\s+(?:properties?|rooms?|options?)\s+available/i, label: 'no properties available message' },
+    { pattern: /no\s+availability\s+for\s+(?:these|your|the(?:se)?)\s+dates/i, label: 'no availability for dates' },
     { pattern: /no\s+availability/i, label: 'no availability' },
+    { pattern: /no\s+rooms?\s+available/i, label: 'no rooms available' },
+    { pattern: /no\s+(?:matching\s+)?properties?\s+(?:available|found)/i, label: 'no properties available' },
     { pattern: /sold\s+out/i, label: 'sold out' },
+    { pattern: /not\s+available\s+(?:for\s+)?(?:these|your|the)\s+dates/i, label: 'not available for dates' },
     { pattern: /not\s+available/i, label: 'not available' },
     { pattern: /choose\s+different\s+dates/i, label: 'choose different dates' },
-    { pattern: /no\s+rooms?\s+available/i, label: 'no rooms available' },
+    { pattern: /change\s+your\s+dates/i, label: 'change your dates' },
+    { pattern: /try\s+(?:different|other)\s+dates/i, label: 'try different dates' },
     { pattern: /fully\s+booked/i, label: 'fully booked' },
     { pattern: /currently\s+unavailable/i, label: 'currently unavailable' },
+    { pattern: /no\s+offers?\s+(?:available|found)/i, label: 'no offers available' },
+    { pattern: /(?:0|zero)\s+results?/i, label: 'zero results' },
+    { pattern: /couldn'?t\s+find\s+any/i, label: 'could not find any' },
+    // Japanese equivalents (for expedia.co.jp fallback)
+    { pattern: /空室なし/i, label: '空室なし (no vacancy)' },
+    { pattern: /予約できません/i, label: '予約できません (cannot book)' },
+    { pattern: /ご利用いただけません/i, label: 'ご利用いただけません (not available)' },
   ];
   
   for (const { pattern, label } of unavailabilityPatterns) {
     if (pattern.test(content)) {
       result.unavailabilityDetected = true;
       result.unavailabilityMarker = label;
+      console.log(`[EXPEDIA] Unavailability detected: "${label}"`);
       break;
     }
   }
@@ -1794,11 +1810,61 @@ async function extractFromExpedia(
     const offersPageResult = detectOffersPage(bestContent, checkIn, checkOut);
     result.offersPage = offersPageResult;
     
-    // Check for unavailability
+    // Check for unavailability - terminal branch, no price extraction
     if (offersPageResult.unavailabilityDetected) {
+      console.log(`[EXPEDIA] DATES_UNAVAILABLE detected: ${offersPageResult.unavailabilityMarker}`);
+      
+      // Extract evidence snippet containing the unavailability message
+      let evidenceSnippet: string | null = null;
+      if (offersPageResult.unavailabilityMarker) {
+        // Find the actual text in content that matched
+        const searchTerm = offersPageResult.unavailabilityMarker.toLowerCase();
+        const lowerContent = bestContent.toLowerCase();
+        const matchIndex = lowerContent.indexOf(searchTerm.split(' ')[0]); // Find first word
+        if (matchIndex !== -1) {
+          // Extract 200 chars around the match for context
+          const start = Math.max(0, matchIndex - 50);
+          const end = Math.min(bestContent.length, matchIndex + 150);
+          evidenceSnippet = bestContent.slice(start, end).replace(/\s+/g, ' ').trim();
+        }
+      }
+      
       result.status = 'dates_unavailable';
       result.error = `Dates unavailable: ${offersPageResult.unavailabilityMarker}`;
-      result.structuralProof.unavailability_marker = offersPageResult.unavailabilityMarker || undefined;
+      
+      // Explicitly nullify all price-related fields
+      result.priceExtraction = {
+        extracted: false,
+        totalPrice: null,
+        currency: 'USD',
+        originalAmount: null,
+        originalCurrency: null,
+        conversionRate: null,
+        includesTaxesFees: false,
+        evidenceSnippet: evidenceSnippet,
+        extractionContext: 'dates_unavailable_terminal',
+        rejectionReason: `Property unavailable for requested dates: ${offersPageResult.unavailabilityMarker}`,
+        nightlyPrice: null,
+        nightlyCurrency: null,
+      };
+      
+      // Structural proof all false for unavailable dates
+      result.structuralProof = {
+        breakdown_found: false,
+        total_label_found: false,
+        rendered_dates_match: false,
+        extracted_from_breakdown_total: false,
+        proof_version: '3.0-dates-unavailable',
+        unavailability_marker: offersPageResult.unavailabilityMarker || undefined,
+        requested_checkin: checkIn,
+        requested_checkout: checkOut,
+        property_id: result.goldenPath.propertyId || undefined,
+        offers_page_reached: true,
+        offers_page_gate_passed: true, // We did reach the page, just no availability
+        current_url_at_extraction: currentOffersUrl,
+        constructed_offers_url: currentOffersUrl,
+      };
+      
       result.durationMs = Date.now() - startTime;
       return result;
     }
