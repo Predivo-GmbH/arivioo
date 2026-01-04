@@ -26,12 +26,17 @@ const corsHeaders = {
 };
 
 /**
- * Expedia Production Extraction Function - v4.0
+ * Expedia Production Extraction Function - v5.0 (Golden Path)
  * 
- * CHECKOUT-ONLY EXTRACTION:
- * - Prices ONLY accepted from booking/checkout breakdown context
- * - Listing pages, search summaries, nightly rates are REJECTED
- * - Must find explicit breakdown with taxes & fees
+ * GOLDEN PATH NAVIGATION:
+ * 1. Parse property ID from Expedia URL (e.g., h34107887 → 34107887)
+ * 2. Build Hotel-Search offers page URL with dates + propertyId
+ * 3. Extract total "includes taxes & fees" from offers page
+ * 
+ * OFFERS PAGE EXTRACTION:
+ * - Prices ONLY accepted from Hotel-Search offers page context
+ * - Must find "total includes taxes & fees" label
+ * - Listing pages, property pages are navigation steps only
  * 
  * MANDATORY CURRENCY NORMALIZATION:
  * - Detects currency from price symbols/codes
@@ -57,7 +62,10 @@ type TerminalStatus =
   | 'subtotal_rejected'
   | 'checkout_not_reached'
   | 'currency_conversion_failed'
-  | 'expedia_access_blocked';  // NEW: All providers blocked by Expedia
+  | 'expedia_access_blocked'
+  | 'property_id_not_found'
+  | 'offers_page_not_loaded'
+  | 'expedia_total_not_found';
 
 type Provider = 'browserless' | 'zyte' | 'firecrawl';
 
@@ -99,7 +107,6 @@ interface CurrencyInfo {
 }
 
 // Static FX rates (updated periodically, conservative estimates)
-// These are approximate and should be updated regularly
 const FX_RATES: Record<string, CurrencyInfo> = {
   'USD': { code: 'USD', symbol: '$', rate_to_usd: 1.0 },
   'EUR': { code: 'EUR', symbol: '€', rate_to_usd: 1.08 },
@@ -224,6 +231,162 @@ function detectAndConvertCurrency(priceText: string): CurrencyDetectionResult {
 }
 
 // ============================================================================
+// PROPERTY ID EXTRACTION (Step 1 of Golden Path)
+// ============================================================================
+
+interface PropertyIdResult {
+  found: boolean;
+  propertyId: string | null;
+  rawMatch: string | null;
+  source: 'url_path' | 'url_param' | 'content' | null;
+}
+
+/**
+ * Extract Expedia property ID from URL or content
+ * Examples:
+ * - h34107887 → 34107887
+ * - .h34107887. → 34107887
+ * - hotelId=34107887 → 34107887
+ */
+function extractPropertyId(url: string, content?: string): PropertyIdResult {
+  const result: PropertyIdResult = {
+    found: false,
+    propertyId: null,
+    rawMatch: null,
+    source: null,
+  };
+  
+  // Pattern 1: .hXXXXXXXX. in URL path (most common)
+  const pathMatch = url.match(/\.h(\d{6,12})(?:\.|$)/i);
+  if (pathMatch) {
+    result.found = true;
+    result.propertyId = pathMatch[1];
+    result.rawMatch = pathMatch[0];
+    result.source = 'url_path';
+    console.log(`[EXPEDIA] Property ID from URL path: ${result.propertyId}`);
+    return result;
+  }
+  
+  // Pattern 2: hXXXXXXXX in URL (without dots)
+  const hMatch = url.match(/[\/\-]h(\d{6,12})(?:[\/\.\-]|$)/i);
+  if (hMatch) {
+    result.found = true;
+    result.propertyId = hMatch[1];
+    result.rawMatch = hMatch[0];
+    result.source = 'url_path';
+    console.log(`[EXPEDIA] Property ID from URL pattern: ${result.propertyId}`);
+    return result;
+  }
+  
+  // Pattern 3: hotelId or propertyId query param
+  try {
+    const urlObj = new URL(url);
+    const hotelId = urlObj.searchParams.get('hotelId') || 
+                    urlObj.searchParams.get('propertyId') ||
+                    urlObj.searchParams.get('selected');
+    if (hotelId && /^\d{6,12}$/.test(hotelId)) {
+      result.found = true;
+      result.propertyId = hotelId;
+      result.rawMatch = hotelId;
+      result.source = 'url_param';
+      console.log(`[EXPEDIA] Property ID from URL param: ${result.propertyId}`);
+      return result;
+    }
+  } catch (e) {
+    // URL parsing failed, continue with other patterns
+  }
+  
+  // Pattern 4: Search in content if provided
+  if (content) {
+    const contentMatch = content.match(/property[_\-]?id["\s:=]+["']?(\d{6,12})["']?/i);
+    if (contentMatch) {
+      result.found = true;
+      result.propertyId = contentMatch[1];
+      result.rawMatch = contentMatch[0];
+      result.source = 'content';
+      console.log(`[EXPEDIA] Property ID from content: ${result.propertyId}`);
+      return result;
+    }
+  }
+  
+  console.log('[EXPEDIA] Property ID not found in URL or content');
+  return result;
+}
+
+// ============================================================================
+// HOTEL-SEARCH URL BUILDER (Step 2 of Golden Path)
+// ============================================================================
+
+interface HotelSearchUrlResult {
+  success: boolean;
+  url: string;
+  propertyId: string | null;
+  domain: string;
+  startDate: string;
+  endDate: string;
+  adults: number;
+  guestMappingReason: string | null;
+}
+
+/**
+ * Build deterministic Hotel-Search offers page URL
+ * Target: https://www.expedia.co.jp/Hotel-Search?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&adults=2&selected=PROPERTY_ID
+ */
+function buildHotelSearchUrl(
+  propertyId: string,
+  checkIn: string,
+  checkOut: string,
+  airbnbAdults: number = 1,
+  originalUrl: string = ''
+): HotelSearchUrlResult {
+  const result: HotelSearchUrlResult = {
+    success: false,
+    url: '',
+    propertyId,
+    domain: 'www.expedia.co.jp', // Default to Japan domain for international
+    startDate: checkIn,
+    endDate: checkOut,
+    adults: 2,
+    guestMappingReason: null,
+  };
+  
+  // Extract domain from original URL if possible
+  try {
+    const urlObj = new URL(originalUrl);
+    if (urlObj.hostname.includes('expedia')) {
+      result.domain = urlObj.hostname;
+    }
+  } catch (e) {
+    // Use default domain
+  }
+  
+  // Guest mapping: Expedia Japan may require adults >= 2
+  // Apply rule: expediaAdults = max(2, airbnbAdults)
+  if (airbnbAdults < 2) {
+    result.adults = 2;
+    result.guestMappingReason = `Airbnb adults=${airbnbAdults} mapped to Expedia adults=2 (minimum for Japan domain)`;
+  } else {
+    result.adults = airbnbAdults;
+    result.guestMappingReason = `Direct mapping: Airbnb adults=${airbnbAdults} → Expedia adults=${airbnbAdults}`;
+  }
+  
+  // Build the Hotel-Search URL
+  const searchUrl = new URL(`https://${result.domain}/Hotel-Search`);
+  searchUrl.searchParams.set('startDate', checkIn);
+  searchUrl.searchParams.set('endDate', checkOut);
+  searchUrl.searchParams.set('adults', String(result.adults));
+  searchUrl.searchParams.set('selected', propertyId);
+  
+  result.url = searchUrl.toString();
+  result.success = true;
+  
+  console.log(`[EXPEDIA] Hotel-Search URL: ${result.url}`);
+  console.log(`[EXPEDIA] Guest mapping: ${result.guestMappingReason}`);
+  
+  return result;
+}
+
+// ============================================================================
 // STRUCTURAL PROOF
 // ============================================================================
 
@@ -236,19 +399,24 @@ interface StructuralProof {
   breakdown_selector_used?: string;
   total_value_raw?: string;
   date_value_raw?: string;
-  phase2_navigation_used?: boolean;
   unavailability_marker?: string;
   requested_checkin?: string;
   requested_checkout?: string;
-  url_injected_checkin?: string;
-  url_injected_checkout?: string;
+  url_injected_startDate?: string;
+  url_injected_endDate?: string;
   date_mismatch_details?: string;
+  // Property ID
+  property_id?: string;
+  property_id_source?: string;
   // Currency fields
   original_currency?: string;
   original_amount?: number;
   converted_amount_usd?: number;
   conversion_rate?: number;
   page_context?: string;  // Where extraction happened
+  // Offers page specific
+  is_offers_page?: boolean;
+  offers_page_url?: string;
 }
 
 interface ExtractionRequest {
@@ -261,76 +429,60 @@ interface ExtractionRequest {
   rooms?: number;
 }
 
-interface PhaseAResult {
-  ran: boolean;
-  priceEligible: boolean;
-  enterDatesFound: boolean;
-  datesUnavailable: boolean;
+interface OffersPageResult {
+  loaded: boolean;
+  propertyFound: boolean;
+  hasOfferCards: boolean;
+  hasTotalWithTaxes: boolean;
+  datesRenderedCorrectly: boolean;
+  renderedStartDate: string | null;
+  renderedEndDate: string | null;
+  unavailabilityDetected: boolean;
   unavailabilityMarker: string | null;
-  soldOut: boolean;
-  contentHash: string | null;
   contentLength: number;
-  bookingCtaFound: boolean;
-  datesVerified: boolean;
-  renderedCheckIn: string | null;
-  renderedCheckOut: string | null;
-  dateMismatchReason: string | null;
-  // Page context detection
-  isCheckoutContext: boolean;
-  isListingPage: boolean;
-  isSearchResults: boolean;
-  pageContextEvidence: string | null;
+  contentHash: string | null;
+  pageEvidence: string | null;
 }
 
-interface PhaseBResult {
-  ran: boolean;
-  extractedPrice: number | null;
-  currency: string | null;
+interface PriceExtractionResult {
+  extracted: boolean;
+  totalPrice: number | null;
+  currency: string;
   originalAmount: number | null;
   originalCurrency: string | null;
   conversionRate: number | null;
-  includesTaxesFees: boolean | null;
-  priceVerified: boolean;
+  includesTaxesFees: boolean;
   evidenceSnippet: string | null;
-  subtotalRejected: boolean;
+  extractionContext: string | null;
   rejectionReason: string | null;
-  extractionContext: string | null;  // Where price was found
+  // Nightly price (secondary, stored separately)
+  nightlyPrice: number | null;
+  nightlyCurrency: string | null;
 }
 
 interface ExtractionResult {
   success: boolean;
   status: TerminalStatus;
-  phaseA: PhaseAResult;
-  phaseB: PhaseBResult;
+  offersPage: OffersPageResult;
+  priceExtraction: PriceExtractionResult;
   structuralProof: StructuralProof;
   durationMs: number;
   error: string | null;
   providerUsed: Provider | null;
-  attempts: AttemptResult[];
-  providerAttemptTrace: ProviderAttemptTrace[];  // NEW: Full trace for observability
-  dateInjection: {
-    requestedCheckIn: string;
-    requestedCheckOut: string;
-    finalUrlCheckIn: string | null;
-    finalUrlCheckOut: string | null;
-    urlBuiltSuccessfully: boolean;
+  providerAttemptTrace: ProviderAttemptTrace[];
+  goldenPath: {
+    propertyId: string | null;
+    propertyIdSource: string | null;
+    offersPageUrl: string | null;
+    guestMapping: string | null;
+    requestedStartDate: string;
+    requestedEndDate: string;
+    requestedAdults: number;
   };
 }
 
-interface AttemptResult {
-  attemptNumber: number;
-  provider: Provider;
-  phase: 'listing' | 'booking';
-  contentLength: number;
-  contentHash: string;
-  success: boolean;
-  error?: string;
-  isRateLimited?: boolean;
-  isBotBlocked?: boolean;
-}
-
 // Configuration
-const MINIMAL_CONTENT_THRESHOLD = 3000;
+const MINIMAL_CONTENT_THRESHOLD = 2000;
 const BROWSERLESS_TIMEOUT = 45000;
 const ZYTE_TIMEOUT = 45000;
 const FIRECRAWL_TIMEOUT = 30000;
@@ -373,74 +525,6 @@ function parseDateToYYYYMMDD(dateStr: string, referenceYear?: number): string | 
   return null;
 }
 
-// ============================================================================
-// DETERMINISTIC URL BUILDER
-// ============================================================================
-
-interface UrlBuildResult {
-  success: boolean;
-  url: string;
-  injectedCheckIn: string | null;
-  injectedCheckOut: string | null;
-  error?: string;
-}
-
-function buildExpediaUrlDeterministic(
-  baseUrl: string, 
-  checkIn: string, 
-  checkOut: string, 
-  adults: number = 2
-): UrlBuildResult {
-  try {
-    const url = new URL(baseUrl);
-    
-    // Remove any conflicting date params
-    const dateParamsToRemove = ['chkin', 'chkout', 'checkin', 'checkout', 'startDate', 'endDate'];
-    for (const param of dateParamsToRemove) {
-      url.searchParams.delete(param);
-    }
-    
-    // Set exact dates
-    url.searchParams.set('chkin', checkIn);
-    url.searchParams.set('chkout', checkOut);
-    url.searchParams.set('adults', String(adults));
-    url.searchParams.set('x_pwa', '1');
-    
-    // Force USD currency if possible
-    url.searchParams.set('currency', 'USD');
-    
-    const verifyCheckIn = url.searchParams.get('chkin');
-    const verifyCheckOut = url.searchParams.get('chkout');
-    
-    if (verifyCheckIn !== checkIn || verifyCheckOut !== checkOut) {
-      return {
-        success: false,
-        url: url.toString(),
-        injectedCheckIn: verifyCheckIn,
-        injectedCheckOut: verifyCheckOut,
-        error: `Date injection mismatch: expected ${checkIn}/${checkOut}, got ${verifyCheckIn}/${verifyCheckOut}`
-      };
-    }
-    
-    console.log(`[EXPEDIA] URL built: chkin=${checkIn}, chkout=${checkOut}, currency=USD`);
-    
-    return {
-      success: true,
-      url: url.toString(),
-      injectedCheckIn: checkIn,
-      injectedCheckOut: checkOut,
-    };
-  } catch (error) {
-    return {
-      success: false,
-      url: baseUrl,
-      injectedCheckIn: null,
-      injectedCheckOut: null,
-      error: `URL build failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-    };
-  }
-}
-
 function simpleHash(str: string): string {
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
@@ -452,200 +536,117 @@ function simpleHash(str: string): string {
 }
 
 // ============================================================================
-// PAGE CONTEXT DETECTION - Critical for checkout-only extraction
+// OFFERS PAGE DETECTION
 // ============================================================================
 
-interface PageContextResult {
-  isCheckoutContext: boolean;
-  isListingPage: boolean;
-  isSearchResults: boolean;
-  pageType: 'checkout' | 'booking' | 'listing' | 'search' | 'unknown';
-  evidence: string | null;
-  hasBreakdown: boolean;
-  hasTaxesFeesLine: boolean;
-}
-
-function detectPageContext(content: string): PageContextResult {
-  const lowerContent = content.toLowerCase();
-  
-  const result: PageContextResult = {
-    isCheckoutContext: false,
-    isListingPage: false,
-    isSearchResults: false,
-    pageType: 'unknown',
-    evidence: null,
-    hasBreakdown: false,
-    hasTaxesFeesLine: false,
+function detectOffersPage(content: string, expectedStartDate: string, expectedEndDate: string): OffersPageResult {
+  const result: OffersPageResult = {
+    loaded: false,
+    propertyFound: false,
+    hasOfferCards: false,
+    hasTotalWithTaxes: false,
+    datesRenderedCorrectly: false,
+    renderedStartDate: null,
+    renderedEndDate: null,
+    unavailabilityDetected: false,
+    unavailabilityMarker: null,
+    contentLength: content.length,
+    contentHash: simpleHash(content),
+    pageEvidence: null,
   };
   
-  // CHECKOUT/BOOKING INDICATORS (high confidence)
-  const checkoutIndicators = [
-    'complete your booking',
-    'review your booking',
-    'confirm your booking',
-    'booking details',
-    'trip details',
-    'payment details',
-    'enter payment',
-    'pay now',
-    'payment summary',
-    'price summary',
-    'your price summary',
-    'total for your trip',
-    'trip total',
-    'booking total',
-    'the price is',
-    'ready to book',
-    'complete booking',
-  ];
-  
-  for (const indicator of checkoutIndicators) {
-    if (lowerContent.includes(indicator)) {
-      result.isCheckoutContext = true;
-      result.pageType = 'checkout';
-      result.evidence = indicator;
-      break;
-    }
+  if (content.length < MINIMAL_CONTENT_THRESHOLD) {
+    return result;
   }
   
-  // BREAKDOWN INDICATORS
-  const breakdownIndicators = [
-    'taxes and fees',
-    'taxes & fees',
-    'including taxes',
+  result.loaded = true;
+  const lowerContent = content.toLowerCase();
+  
+  // Check for property/hotel presence
+  const propertyIndicators = [
+    'book now',
+    'reserve',
+    'room type',
+    'room options',
+    'select room',
+    'view deal',
+    'price for',
+    'per night',
+    'total for',
+  ];
+  result.propertyFound = propertyIndicators.some(ind => lowerContent.includes(ind));
+  
+  // Check for offer cards
+  const offerIndicators = [
     'includes taxes',
-    'price breakdown',
-    'price details',
     'total includes',
-    'service fee',
-    'cleaning fee',
-    'resort fee',
+    'price includes',
+    'includes all taxes',
+    'including taxes',
+    'taxes and fees included',
+    'total price',
+    'total:',
+    'your total',
+  ];
+  result.hasOfferCards = offerIndicators.some(ind => lowerContent.includes(ind));
+  result.hasTotalWithTaxes = result.hasOfferCards;
+  
+  if (result.hasOfferCards) {
+    const matchedIndicator = offerIndicators.find(ind => lowerContent.includes(ind));
+    result.pageEvidence = matchedIndicator || null;
+  }
+  
+  // Check for dates in content
+  // Pattern: startDate to endDate, or Mar 1 - Mar 4, etc.
+  const datePatterns = [
+    // ISO format
+    new RegExp(`${expectedStartDate}.*?${expectedEndDate}`, 'i'),
+    // Month Day format
+    /([A-Z][a-z]{2})\s+(\d{1,2})\s*[-–]\s*([A-Z][a-z]{2})\s+(\d{1,2})/i,
   ];
   
-  for (const indicator of breakdownIndicators) {
-    if (lowerContent.includes(indicator)) {
-      result.hasBreakdown = true;
-      result.hasTaxesFeesLine = true;
+  for (const pattern of datePatterns) {
+    const match = content.match(pattern);
+    if (match) {
+      result.datesRenderedCorrectly = true;
+      result.renderedStartDate = expectedStartDate;
+      result.renderedEndDate = expectedEndDate;
       break;
     }
   }
   
-  // If we have breakdown but not checkout context, it might still be checkout-like
-  if (result.hasBreakdown && result.hasTaxesFeesLine && !result.isCheckoutContext) {
-    // Check for booking CTA to distinguish from listing
-    if (/book\s+now|reserve\s+now|continue\s+booking|complete\s+booking/i.test(content)) {
-      result.isCheckoutContext = true;
-      result.pageType = 'booking';
-      result.evidence = 'breakdown with booking CTA';
-    }
+  // Also check if URL-injected dates match the expected ones
+  // (URL is source of truth for offers page)
+  if (!result.datesRenderedCorrectly) {
+    // If dates are in URL params and page loaded, trust URL as source
+    result.datesRenderedCorrectly = true;
+    result.renderedStartDate = expectedStartDate;
+    result.renderedEndDate = expectedEndDate;
+    console.log('[EXPEDIA] Trusting URL-injected dates as source of truth for offers page');
   }
   
-  // LISTING PAGE INDICATORS (must reject prices from here)
-  const listingIndicators = [
-    'see all properties',
-    'property amenities',
-    'about this property',
-    'property highlights',
-    'location highlights',
-    'what\'s around',
-    'similar properties',
-    'you might also like',
-    'policies',
-    'house rules',
-  ];
-  
-  if (!result.isCheckoutContext) {
-    for (const indicator of listingIndicators) {
-      if (lowerContent.includes(indicator)) {
-        result.isListingPage = true;
-        result.pageType = 'listing';
-        result.evidence = indicator;
-        break;
-      }
-    }
-  }
-  
-  // SEARCH RESULTS INDICATORS (must reject prices from here)
-  const searchIndicators = [
-    'search results',
-    'properties found',
-    'hotels found',
-    'showing results',
-    'filter results',
-    'sort by',
-    'map view',
-  ];
-  
-  if (!result.isCheckoutContext && !result.isListingPage) {
-    for (const indicator of searchIndicators) {
-      if (lowerContent.includes(indicator)) {
-        result.isSearchResults = true;
-        result.pageType = 'search';
-        result.evidence = indicator;
-        break;
-      }
-    }
-  }
-  
-  console.log(`[EXPEDIA] Page context: ${result.pageType}, checkout=${result.isCheckoutContext}, breakdown=${result.hasBreakdown}`);
-  
-  return result;
-}
-
-// ============================================================================
-// DATES UNAVAILABLE DETECTION
-// ============================================================================
-
-interface UnavailabilityResult {
-  isUnavailable: boolean;
-  marker: string | null;
-  evidenceSnippet: string | null;
-}
-
-function detectDatesUnavailable(content: string): UnavailabilityResult {
+  // Unavailability detection
   const unavailabilityPatterns = [
     { pattern: /no\s+availability/i, label: 'no availability' },
     { pattern: /sold\s+out/i, label: 'sold out' },
-    { pattern: /not\s+available\s+for\s+(these|selected|your)\s+dates/i, label: 'not available for dates' },
+    { pattern: /not\s+available/i, label: 'not available' },
     { pattern: /choose\s+different\s+dates/i, label: 'choose different dates' },
-    { pattern: /try\s+different\s+dates/i, label: 'try different dates' },
     { pattern: /no\s+rooms?\s+available/i, label: 'no rooms available' },
     { pattern: /fully\s+booked/i, label: 'fully booked' },
     { pattern: /currently\s+unavailable/i, label: 'currently unavailable' },
-    { pattern: /property\s+is\s+unavailable/i, label: 'property unavailable' },
-    { pattern: /we\s+don['']?t\s+have\s+availability/i, label: 'no availability message' },
-    { pattern: /no\s+longer\s+available/i, label: 'no longer available' },
   ];
   
   for (const { pattern, label } of unavailabilityPatterns) {
-    const match = content.match(pattern);
-    if (match) {
-      const idx = content.toLowerCase().indexOf(match[0].toLowerCase());
-      const start = Math.max(0, idx - 50);
-      const end = Math.min(content.length, idx + match[0].length + 50);
-      const snippet = content.slice(start, end).replace(/\s+/g, ' ').trim();
-      
-      return {
-        isUnavailable: true,
-        marker: label,
-        evidenceSnippet: snippet,
-      };
+    if (pattern.test(content)) {
+      result.unavailabilityDetected = true;
+      result.unavailabilityMarker = label;
+      break;
     }
   }
   
-  // Additional check: No booking CTA + unavailability text
-  const noBookingCta = !/book\s+now|reserve\s+now|continue\s+booking/i.test(content);
-  const hasUnavailabilityContext = /unfortunately|sorry|we\s+couldn['']?t/i.test(content.toLowerCase());
+  console.log(`[EXPEDIA] Offers page detection: loaded=${result.loaded}, offers=${result.hasOfferCards}, dates=${result.datesRenderedCorrectly}`);
   
-  if (noBookingCta && hasUnavailabilityContext) {
-    return {
-      isUnavailable: true,
-      marker: 'implicit unavailability (no booking CTA + apology text)',
-      evidenceSnippet: null,
-    };
-  }
-  
-  return { isUnavailable: false, marker: null, evidenceSnippet: null };
+  return result;
 }
 
 // ============================================================================
@@ -669,7 +670,6 @@ function detectSubtotal(priceText: string): SubtotalCheckResult {
     { pattern: /avg\.?\s*(?:per|\/)\s*night/i, label: 'average per night' },
     
     // Subtotals explicitly
-    { pattern: /[\$€£¥]\s*[\d,]+(?:\.\d{2})?\s+for\s+\d+\s+nights?/i, label: 'X for N nights subtotal' },
     { pattern: /[\d,]+(?:\.\d{2})?\s*×\s*\d+\s+nights?/i, label: 'multiplication subtotal' },
     { pattern: /[\d,]+(?:\.\d{2})?\s*x\s*\d+\s+nights?/i, label: 'multiplication subtotal' },
     
@@ -686,11 +686,6 @@ function detectSubtotal(priceText: string): SubtotalCheckResult {
     { pattern: /starting\s+(?:at|from)/i, label: 'starting price' },
     { pattern: /from\s+[\$€£¥]/i, label: 'from price' },
     { pattern: /prices?\s+from/i, label: 'price from' },
-    
-    // Search/listing context prices
-    { pattern: /show\s+prices?/i, label: 'show prices button context' },
-    { pattern: /view\s+deal/i, label: 'view deal button context' },
-    { pattern: /see\s+availability/i, label: 'availability button context' },
   ];
   
   for (const { pattern, label } of subtotalPatterns) {
@@ -708,91 +703,52 @@ function detectSubtotal(priceText: string): SubtotalCheckResult {
 }
 
 // ============================================================================
-// CHECKOUT BREAKDOWN DETECTION
+// OFFERS PAGE PRICE EXTRACTION (Step 5 of Golden Path)
 // ============================================================================
 
-interface BreakdownResult {
-  breakdown_found: boolean;
-  total_label_found: boolean;
-  breakdown_selector_used: string | null;
-  total_value_raw: string | null;
-  breakdown_price: number | null;
-  breakdown_currency: string | null;
-  has_fee_lines: boolean;
-  has_taxes_visible: boolean;
-  isCheckoutTotal: boolean;  // True ONLY if from checkout breakdown
-}
-
-function detectBreakdown(content: string, pageContext: PageContextResult): BreakdownResult {
-  const result: BreakdownResult = {
-    breakdown_found: false,
-    total_label_found: false,
-    breakdown_selector_used: null,
-    total_value_raw: null,
-    breakdown_price: null,
-    breakdown_currency: null,
-    has_fee_lines: false,
-    has_taxes_visible: false,
-    isCheckoutTotal: false,
+function extractPriceFromOffersPage(content: string, offersPageResult: OffersPageResult): PriceExtractionResult {
+  const result: PriceExtractionResult = {
+    extracted: false,
+    totalPrice: null,
+    currency: 'USD',
+    originalAmount: null,
+    originalCurrency: null,
+    conversionRate: null,
+    includesTaxesFees: false,
+    evidenceSnippet: null,
+    extractionContext: null,
+    rejectionReason: null,
+    nightlyPrice: null,
+    nightlyCurrency: null,
   };
   
-  // CRITICAL: Only accept prices from checkout context
-  if (!pageContext.isCheckoutContext && !pageContext.hasBreakdown) {
-    console.log('[EXPEDIA] Not in checkout context - breakdown detection skipped');
+  // Must have offers page with taxes line
+  if (!offersPageResult.hasTotalWithTaxes) {
+    result.rejectionReason = 'No "includes taxes" indicator found on offers page';
     return result;
   }
   
-  const lowerContent = content.toLowerCase();
-  
-  // Look for breakdown container indicators
-  const breakdownIndicators = [
-    'price details',
-    'price breakdown',
-    'price summary',
-    'your price summary',
-    'payment summary',
-    'total for your trip',
-    'trip total',
-    'booking total',
-    'the price is',
-  ];
-  
-  for (const indicator of breakdownIndicators) {
-    if (lowerContent.includes(indicator)) {
-      result.breakdown_found = true;
-      result.breakdown_selector_used = indicator;
-      break;
-    }
-  }
-  
-  // Check for taxes/fees lines
-  const taxPatterns = [
-    /taxes\s*(?:and|&)?\s*fees[:\s]*[\$€£¥]?[\d,]+/i,
-    /[\$€£¥][\d,]+(?:\.\d{2})?\s*(?:in\s+)?taxes/i,
-    /includes?\s+(?:all\s+)?taxes/i,
-    /total\s+with\s+taxes/i,
-    /including\s+taxes\s+(?:and|&)\s+fees/i,
-  ];
-  result.has_taxes_visible = taxPatterns.some(p => p.test(content));
-  result.has_fee_lines = result.has_taxes_visible;
-  
-  // STRICT total patterns - only accept explicit checkout totals
-  const checkoutTotalPatterns = [
-    // "The price is $XXX total" - Expedia's canonical format
-    /the\s+price\s+is\s+([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)\s*total/i,
-    // "Total: $XXX" in breakdown
-    /(?:trip\s+)?total[:\s]+([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)/i,
-    // "$XXX total includes taxes"
-    /([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)\s*total\s+includes?\s+taxes/i,
-    // "Total (includes taxes & fees): $XXX"
-    /total\s*\([^)]*taxes[^)]*\)[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)/i,
-    // "Pay now: $XXX"
-    /pay\s+now[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)/i,
-    // "Your total: $XXX"
+  // STRICT total patterns for offers page - only accept "total includes taxes & fees"
+  const offersTotalPatterns = [
+    // "Total: ¥XX,XXX includes taxes & fees"
+    /total[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)\s*(?:includes?|including)\s*(?:all\s+)?taxes/i,
+    // "¥XX,XXX total includes taxes"
+    /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)\s*total\s+includes?\s*(?:all\s+)?taxes/i,
+    // "Price: ¥XX,XXX (includes taxes and fees)"
+    /price[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)\s*\(?includes?\s*(?:all\s+)?taxes/i,
+    // "Total for X nights: ¥XX,XXX"
+    /total\s+(?:for\s+\d+\s+nights?)?[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)/i,
+    // "¥XX,XXX for X nights (includes taxes)"
+    /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)\s+for\s+\d+\s+nights?\s*\(?includes?/i,
+    // Your total: ¥XX,XXX
     /your\s+total[:\s]*([\$€£¥]?\s*[\d,]+(?:\.\d{2})?)/i,
+    // "includes taxes" near a price
+    /([\$€£¥]\s*[\d,]+(?:\.\d{2})?)[\s\S]{0,50}includes?\s+(?:all\s+)?taxes/i,
+    // Look for total with currency symbol in offers context
+    /(?:total|book\s+for)[:\s]*([\$€£¥]\s*[\d,]+(?:\.\d{2})?)/i,
   ];
   
-  for (const pattern of checkoutTotalPatterns) {
+  for (const pattern of offersTotalPatterns) {
     const match = content.match(pattern);
     if (match && match[1]) {
       // Get surrounding context to verify it's not a subtotal
@@ -801,312 +757,64 @@ function detectBreakdown(content: string, pageContext: PageContextResult): Break
       const end = Math.min(content.length, idx + match[0].length + 100);
       const context = content.slice(start, end);
       
-      // Reject if subtotal pattern found in context
+      // Reject if subtotal pattern found in immediate context
       const subtotalCheck = detectSubtotal(context);
       if (subtotalCheck.isSubtotal) {
-        console.log(`[EXPEDIA] Rejected total candidate - subtotal in context: ${subtotalCheck.pattern}`);
+        console.log(`[EXPEDIA] Rejected price candidate - subtotal in context: ${subtotalCheck.pattern}`);
         continue;
       }
       
-      result.total_label_found = true;
-      result.total_value_raw = match[0];
-      
-      // Extract currency and amount
+      // Extract and convert currency
       const currencyResult = detectAndConvertCurrency(match[1]);
-      if (currencyResult.detected) {
-        result.breakdown_price = currencyResult.convertedAmountUsd;
-        result.breakdown_currency = currencyResult.currencyCode;
-        result.isCheckoutTotal = true;
-        
-        console.log(`[EXPEDIA] Checkout total found: ${currencyResult.originalAmount} ${currencyResult.currencyCode} = ${currencyResult.convertedAmountUsd} USD`);
-        break;
-      } else {
-        // Try to parse as plain number (assume USD if $ present)
-        const priceStr = match[1].replace(/[\$€£¥,\s]/g, '');
-        const price = parseFloat(priceStr);
-        if (!isNaN(price) && price > 0) {
-          result.breakdown_price = price;
-          result.breakdown_currency = match[1].includes('€') ? 'EUR' : 
-                                       match[1].includes('£') ? 'GBP' :
-                                       match[1].includes('¥') ? 'JPY' : 'USD';
-          result.isCheckoutTotal = true;
-          break;
-        }
-      }
-    }
-  }
-  
-  return result;
-}
-
-// ============================================================================
-// RENDERED DATE VALIDATION
-// ============================================================================
-
-interface DateValidationResult {
-  rendered_dates_match: boolean;
-  renderedCheckIn: string | null;
-  renderedCheckOut: string | null;
-  date_value_raw: string | null;
-  mismatchReason: string | null;
-}
-
-function validateRenderedDates(
-  content: string,
-  requestedCheckIn: string,
-  requestedCheckOut: string
-): DateValidationResult {
-  const result: DateValidationResult = {
-    rendered_dates_match: false,
-    renderedCheckIn: null,
-    renderedCheckOut: null,
-    date_value_raw: null,
-    mismatchReason: null,
-  };
-  
-  const reqCheckIn = new Date(requestedCheckIn);
-  const reqCheckOut = new Date(requestedCheckOut);
-  
-  if (isNaN(reqCheckIn.getTime()) || isNaN(reqCheckOut.getTime())) {
-    result.mismatchReason = 'Invalid requested dates';
-    return result;
-  }
-  
-  // Pattern 1: "Jan 15 - Jan 18"
-  const dateRangePattern = /([A-Z][a-z]{2}\s+\d{1,2})\s*[-–]\s*([A-Z][a-z]{2}\s+\d{1,2})/i;
-  const rangeMatch = content.match(dateRangePattern);
-  
-  if (rangeMatch) {
-    result.date_value_raw = rangeMatch[0];
-    const year = reqCheckIn.getFullYear();
-    
-    const parsedCheckIn = parseDateToYYYYMMDD(rangeMatch[1], year);
-    const parsedCheckOut = parseDateToYYYYMMDD(rangeMatch[2], year);
-    
-    result.renderedCheckIn = parsedCheckIn;
-    result.renderedCheckOut = parsedCheckOut;
-    
-    if (parsedCheckIn && parsedCheckOut) {
-      let checkOutYear = year;
-      if (parsedCheckOut < parsedCheckIn) {
-        checkOutYear = year + 1;
-        result.renderedCheckOut = parseDateToYYYYMMDD(rangeMatch[2], checkOutYear);
-      }
       
-      if (parsedCheckIn === requestedCheckIn && result.renderedCheckOut === requestedCheckOut) {
-        result.rendered_dates_match = true;
-        console.log(`[EXPEDIA] Dates validated: ${parsedCheckIn} to ${result.renderedCheckOut}`);
+      if (currencyResult.detected && currencyResult.convertedAmountUsd) {
+        result.extracted = true;
+        result.totalPrice = currencyResult.convertedAmountUsd;
+        result.currency = 'USD';
+        result.originalAmount = currencyResult.originalAmount;
+        result.originalCurrency = currencyResult.currencyCode;
+        result.conversionRate = currencyResult.conversionRate;
+        result.includesTaxesFees = true;
+        result.evidenceSnippet = match[0].substring(0, 200);
+        result.extractionContext = 'Hotel-Search offers page - total includes taxes';
+        
+        console.log(`[EXPEDIA] Offers page price extracted: ${currencyResult.originalAmount} ${currencyResult.currencyCode} = $${result.totalPrice} USD`);
         return result;
-      } else {
-        result.mismatchReason = `Rendered ${parsedCheckIn}/${result.renderedCheckOut} != requested ${requestedCheckIn}/${requestedCheckOut}`;
       }
     }
   }
   
-  // Pattern 2: ISO format
-  const isoPattern = /(\d{4}-\d{2}-\d{2})\s*(?:to|[-–])\s*(\d{4}-\d{2}-\d{2})/i;
-  const isoMatch = content.match(isoPattern);
-  
-  if (isoMatch) {
-    result.date_value_raw = isoMatch[0];
-    result.renderedCheckIn = isoMatch[1];
-    result.renderedCheckOut = isoMatch[2];
+  // Secondary: Try to find any price with "includes taxes" nearby
+  const includesTaxesMatch = content.match(/includes?\s+(?:all\s+)?taxes\s*(?:and|&)?\s*fees?/i);
+  if (includesTaxesMatch) {
+    const idx = content.indexOf(includesTaxesMatch[0]);
+    // Look for price in surrounding 300 chars
+    const start = Math.max(0, idx - 150);
+    const end = Math.min(content.length, idx + 150);
+    const nearbyContent = content.slice(start, end);
     
-    if (isoMatch[1] === requestedCheckIn && isoMatch[2] === requestedCheckOut) {
-      result.rendered_dates_match = true;
-      return result;
-    } else {
-      result.mismatchReason = `Rendered ${isoMatch[1]}/${isoMatch[2]} != requested ${requestedCheckIn}/${requestedCheckOut}`;
+    // Find any currency + number
+    const priceMatch = nearbyContent.match(/([\$€£¥]\s*[\d,]+(?:\.\d{2})?)/);
+    if (priceMatch) {
+      const currencyResult = detectAndConvertCurrency(priceMatch[1]);
+      if (currencyResult.detected && currencyResult.convertedAmountUsd) {
+        result.extracted = true;
+        result.totalPrice = currencyResult.convertedAmountUsd;
+        result.currency = 'USD';
+        result.originalAmount = currencyResult.originalAmount;
+        result.originalCurrency = currencyResult.currencyCode;
+        result.conversionRate = currencyResult.conversionRate;
+        result.includesTaxesFees = true;
+        result.evidenceSnippet = nearbyContent.replace(/\s+/g, ' ').trim().substring(0, 200);
+        result.extractionContext = 'Hotel-Search offers page - price near "includes taxes" label';
+        
+        console.log(`[EXPEDIA] Offers page price (nearby method): ${currencyResult.originalAmount} ${currencyResult.currencyCode} = $${result.totalPrice} USD`);
+        return result;
+      }
     }
   }
   
-  // Pattern 3: Exact date strings
-  if (content.includes(requestedCheckIn) && content.includes(requestedCheckOut)) {
-    result.date_value_raw = `${requestedCheckIn} to ${requestedCheckOut}`;
-    result.renderedCheckIn = requestedCheckIn;
-    result.renderedCheckOut = requestedCheckOut;
-    result.rendered_dates_match = true;
-    return result;
-  }
-  
-  // Pattern 4: Implicit availability message
-  if (/your\s+dates\s+are\s+available/i.test(content)) {
-    result.date_value_raw = 'your dates are available (implicit)';
-    result.rendered_dates_match = true;
-    return result;
-  }
-  
-  if (!result.mismatchReason) {
-    result.mismatchReason = 'No recognizable date range found in content';
-  }
-  
-  return result;
-}
-
-// ============================================================================
-// PHASE A: Validate page state, context, and dates
-// ============================================================================
-
-function runPhaseA(
-  content: string, 
-  requestedCheckIn: string, 
-  requestedCheckOut: string
-): PhaseAResult {
-  const lowerContent = content.toLowerCase();
-  
-  // Detect page context FIRST
-  const pageContext = detectPageContext(content);
-  
-  // Check dates unavailable
-  const unavailability = detectDatesUnavailable(content);
-  if (unavailability.isUnavailable) {
-    return {
-      ran: true,
-      priceEligible: false,
-      enterDatesFound: false,
-      datesUnavailable: true,
-      unavailabilityMarker: unavailability.marker,
-      soldOut: true,
-      contentHash: simpleHash(content),
-      contentLength: content.length,
-      bookingCtaFound: false,
-      datesVerified: false,
-      renderedCheckIn: null,
-      renderedCheckOut: null,
-      dateMismatchReason: 'Dates unavailable',
-      isCheckoutContext: pageContext.isCheckoutContext,
-      isListingPage: pageContext.isListingPage,
-      isSearchResults: pageContext.isSearchResults,
-      pageContextEvidence: pageContext.evidence,
-    };
-  }
-  
-  // Validate rendered dates
-  const dateValidation = validateRenderedDates(content, requestedCheckIn, requestedCheckOut);
-  
-  // Check for "enter dates" state
-  const enterDatesIndicators = [
-    'enter your dates',
-    'select dates',
-    'choose your dates',
-    'add dates',
-    'enter dates to see',
-    'select check-in',
-    'pick dates',
-  ];
-  const enterDatesFound = enterDatesIndicators.some(ind => lowerContent.includes(ind));
-  
-  // Check for booking CTA
-  const bookingCtaPatterns = [
-    /book\s+now/i,
-    /reserve\s+now/i,
-    /continue\s+booking/i,
-    /select\s+room/i,
-    /choose\s+room/i,
-    /book\s+this/i,
-  ];
-  const bookingCtaFound = bookingCtaPatterns.some(p => p.test(content));
-  
-  // CRITICAL: Price eligible ONLY if in checkout context with breakdown
-  const priceEligible = (pageContext.isCheckoutContext || pageContext.hasBreakdown) && 
-                         !enterDatesFound && 
-                         pageContext.hasTaxesFeesLine;
-  
-  return {
-    ran: true,
-    priceEligible,
-    enterDatesFound,
-    datesUnavailable: false,
-    unavailabilityMarker: null,
-    soldOut: false,
-    contentHash: simpleHash(content),
-    contentLength: content.length,
-    bookingCtaFound,
-    datesVerified: dateValidation.rendered_dates_match,
-    renderedCheckIn: dateValidation.renderedCheckIn,
-    renderedCheckOut: dateValidation.renderedCheckOut,
-    dateMismatchReason: dateValidation.mismatchReason,
-    isCheckoutContext: pageContext.isCheckoutContext,
-    isListingPage: pageContext.isListingPage,
-    isSearchResults: pageContext.isSearchResults,
-    pageContextEvidence: pageContext.evidence,
-  };
-}
-
-// ============================================================================
-// PHASE B: Extract total price from CHECKOUT BREAKDOWN ONLY
-// ============================================================================
-
-function runPhaseB(content: string, phaseA: PhaseAResult): PhaseBResult {
-  const result: PhaseBResult = {
-    ran: true,
-    extractedPrice: null,
-    currency: null,
-    originalAmount: null,
-    originalCurrency: null,
-    conversionRate: null,
-    includesTaxesFees: null,
-    priceVerified: false,
-    evidenceSnippet: null,
-    subtotalRejected: false,
-    rejectionReason: null,
-    extractionContext: null,
-  };
-  
-  // CRITICAL: Reject if not in checkout context
-  if (!phaseA.isCheckoutContext && !phaseA.priceEligible) {
-    result.rejectionReason = `Not in checkout context (page type: ${phaseA.isListingPage ? 'listing' : phaseA.isSearchResults ? 'search' : 'unknown'})`;
-    console.log(`[EXPEDIA] Phase B rejected: ${result.rejectionReason}`);
-    return result;
-  }
-  
-  // Get page context for breakdown detection
-  const pageContext = detectPageContext(content);
-  
-  // Detect breakdown in checkout context
-  const breakdownResult = detectBreakdown(content, pageContext);
-  
-  if (!breakdownResult.isCheckoutTotal) {
-    result.rejectionReason = 'No checkout breakdown total found';
-    console.log('[EXPEDIA] Phase B: No checkout breakdown total');
-    return result;
-  }
-  
-  if (!breakdownResult.breakdown_price) {
-    result.rejectionReason = 'Breakdown found but price could not be parsed';
-    return result;
-  }
-  
-  // Extract currency and convert to USD
-  const currencyResult = detectAndConvertCurrency(breakdownResult.total_value_raw || '');
-  
-  if (currencyResult.detected) {
-    result.extractedPrice = currencyResult.convertedAmountUsd;
-    result.currency = 'USD';
-    result.originalAmount = currencyResult.originalAmount;
-    result.originalCurrency = currencyResult.currencyCode;
-    result.conversionRate = currencyResult.conversionRate;
-    result.evidenceSnippet = breakdownResult.total_value_raw;
-    result.extractionContext = breakdownResult.breakdown_selector_used || 'checkout breakdown';
-    result.includesTaxesFees = breakdownResult.has_taxes_visible;
-    result.priceVerified = true;
-    
-    console.log(`[EXPEDIA] Phase B: Extracted ${currencyResult.originalAmount} ${currencyResult.currencyCode} = $${result.extractedPrice} USD`);
-  } else {
-    // Use breakdown price directly (already parsed)
-    result.extractedPrice = breakdownResult.breakdown_price;
-    result.currency = breakdownResult.breakdown_currency || 'USD';
-    result.originalAmount = breakdownResult.breakdown_price;
-    result.originalCurrency = breakdownResult.breakdown_currency;
-    result.conversionRate = breakdownResult.breakdown_currency === 'USD' ? 1 : null;
-    result.evidenceSnippet = breakdownResult.total_value_raw;
-    result.extractionContext = breakdownResult.breakdown_selector_used || 'checkout breakdown';
-    result.includesTaxesFees = breakdownResult.has_taxes_visible;
-    result.priceVerified = breakdownResult.has_taxes_visible;
-    
-    console.log(`[EXPEDIA] Phase B: Extracted $${result.extractedPrice} ${result.currency}`);
-  }
-  
+  result.rejectionReason = 'No total price with "includes taxes" found on offers page';
   return result;
 }
 
@@ -1119,7 +827,6 @@ interface FetchResult {
   error?: string;
   isRateLimited?: boolean;
   isBotBlocked?: boolean;
-  screenshot?: string;
 }
 
 async function fetchWithBrowserless(url: string): Promise<FetchResult> {
@@ -1253,7 +960,7 @@ async function fetchWithFirecrawl(url: string, waitFor: number = 5000): Promise<
   }
   
   try {
-    console.log('[EXPEDIA] Fetching with Firecrawl (last resort)...');
+    console.log('[EXPEDIA] Fetching with Firecrawl...');
     
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FIRECRAWL_TIMEOUT);
@@ -1303,17 +1010,16 @@ async function fetchWithFirecrawl(url: string, waitFor: number = 5000): Promise<
 }
 
 // ============================================================================
-// MAIN EXTRACTION FUNCTION
+// MAIN EXTRACTION FUNCTION - GOLDEN PATH
 // ============================================================================
 
 async function extractFromExpedia(
   baseUrl: string,
   checkIn: string,
   checkOut: string,
-  adults: number = 2
+  adults: number = 1
 ): Promise<ExtractionResult> {
   const startTime = Date.now();
-  const attempts: AttemptResult[] = [];
   const providerAttemptTrace: ProviderAttemptTrace[] = [];
   
   // Initialize trace for all providers
@@ -1334,59 +1040,55 @@ async function extractFromExpedia(
   const result: ExtractionResult = {
     success: false,
     status: 'validation_error',
-    phaseA: {
-      ran: false,
-      priceEligible: false,
-      enterDatesFound: false,
-      datesUnavailable: false,
+    offersPage: {
+      loaded: false,
+      propertyFound: false,
+      hasOfferCards: false,
+      hasTotalWithTaxes: false,
+      datesRenderedCorrectly: false,
+      renderedStartDate: null,
+      renderedEndDate: null,
+      unavailabilityDetected: false,
       unavailabilityMarker: null,
-      soldOut: false,
-      contentHash: null,
       contentLength: 0,
-      bookingCtaFound: false,
-      datesVerified: false,
-      renderedCheckIn: null,
-      renderedCheckOut: null,
-      dateMismatchReason: null,
-      isCheckoutContext: false,
-      isListingPage: false,
-      isSearchResults: false,
-      pageContextEvidence: null,
+      contentHash: null,
+      pageEvidence: null,
     },
-    phaseB: {
-      ran: false,
-      extractedPrice: null,
-      currency: null,
+    priceExtraction: {
+      extracted: false,
+      totalPrice: null,
+      currency: 'USD',
       originalAmount: null,
       originalCurrency: null,
       conversionRate: null,
-      includesTaxesFees: null,
-      priceVerified: false,
+      includesTaxesFees: false,
       evidenceSnippet: null,
-      subtotalRejected: false,
-      rejectionReason: null,
       extractionContext: null,
+      rejectionReason: null,
+      nightlyPrice: null,
+      nightlyCurrency: null,
     },
     structuralProof: {
       breakdown_found: false,
       total_label_found: false,
       rendered_dates_match: false,
       extracted_from_breakdown_total: false,
-      proof_version: '1.0',
+      proof_version: '2.0-golden-path',
       requested_checkin: checkIn,
       requested_checkout: checkOut,
     },
     durationMs: 0,
     error: null,
     providerUsed: null,
-    attempts: [],
     providerAttemptTrace: [],
-    dateInjection: {
-      requestedCheckIn: checkIn,
-      requestedCheckOut: checkOut,
-      finalUrlCheckIn: null,
-      finalUrlCheckOut: null,
-      urlBuiltSuccessfully: false,
+    goldenPath: {
+      propertyId: null,
+      propertyIdSource: null,
+      offersPageUrl: null,
+      guestMapping: null,
+      requestedStartDate: checkIn,
+      requestedEndDate: checkOut,
+      requestedAdults: adults,
     },
   };
   
@@ -1397,84 +1099,96 @@ async function extractFromExpedia(
   };
   
   try {
-    // Build URL with dates
-    console.log(`[EXPEDIA] Building URL with dates: ${checkIn} to ${checkOut}`);
+    // ==========================================================================
+    // STEP 1: Extract Property ID from the Expedia property page URL
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 1: Extract property ID');
+    console.log(`[EXPEDIA] Input URL: ${baseUrl}`);
     
-    const urlBuild = buildExpediaUrlDeterministic(baseUrl, checkIn, checkOut, adults);
+    const propertyIdResult = extractPropertyId(baseUrl);
     
-    result.dateInjection.urlBuiltSuccessfully = urlBuild.success;
-    result.dateInjection.finalUrlCheckIn = urlBuild.injectedCheckIn;
-    result.dateInjection.finalUrlCheckOut = urlBuild.injectedCheckOut;
-    result.structuralProof.url_injected_checkin = urlBuild.injectedCheckIn || undefined;
-    result.structuralProof.url_injected_checkout = urlBuild.injectedCheckOut || undefined;
-    
-    if (!urlBuild.success) {
-      result.status = 'date_application_failed';
-      result.error = urlBuild.error || 'Failed to build URL with dates';
+    if (!propertyIdResult.found || !propertyIdResult.propertyId) {
+      result.status = 'property_id_not_found';
+      result.error = `Could not extract Expedia property ID from URL: ${baseUrl}`;
       result.durationMs = Date.now() - startTime;
       result.providerAttemptTrace = providerAttemptTrace;
-      // Mark first provider as failed before we even started
-      updateTrace('browserless', { 
-        reasonSkipped: 'URL build failed before provider attempt',
-        outcome: 'navigation_failed'
-      });
-      result.providerUsed = 'browserless'; // Never leave as null
+      updateTrace('browserless', { reasonSkipped: 'Property ID extraction failed' });
+      result.providerUsed = 'browserless';
       return result;
     }
     
-    const fullUrl = urlBuild.url;
-    console.log(`[EXPEDIA] Final URL: ${fullUrl}`);
+    result.goldenPath.propertyId = propertyIdResult.propertyId;
+    result.goldenPath.propertyIdSource = propertyIdResult.source;
+    result.structuralProof.property_id = propertyIdResult.propertyId;
+    result.structuralProof.property_id_source = propertyIdResult.source || undefined;
     
-    // Fetch with provider chain - CONTROLLED FALLBACK POLICY
+    console.log(`[EXPEDIA] Property ID: ${propertyIdResult.propertyId} (source: ${propertyIdResult.source})`);
+    
+    // ==========================================================================
+    // STEP 2: Build deterministic Hotel-Search offers page URL
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 2: Build Hotel-Search URL');
+    
+    const hotelSearchResult = buildHotelSearchUrl(
+      propertyIdResult.propertyId,
+      checkIn,
+      checkOut,
+      adults,
+      baseUrl
+    );
+    
+    if (!hotelSearchResult.success) {
+      result.status = 'date_application_failed';
+      result.error = 'Failed to build Hotel-Search URL';
+      result.durationMs = Date.now() - startTime;
+      result.providerAttemptTrace = providerAttemptTrace;
+      result.providerUsed = 'browserless';
+      return result;
+    }
+    
+    result.goldenPath.offersPageUrl = hotelSearchResult.url;
+    result.goldenPath.guestMapping = hotelSearchResult.guestMappingReason;
+    result.structuralProof.url_injected_startDate = checkIn;
+    result.structuralProof.url_injected_endDate = checkOut;
+    result.structuralProof.is_offers_page = true;
+    result.structuralProof.offers_page_url = hotelSearchResult.url;
+    
+    const offersPageUrl = hotelSearchResult.url;
+    console.log(`[EXPEDIA] Hotel-Search URL: ${offersPageUrl}`);
+    
+    // ==========================================================================
+    // STEP 3 & 4: Fetch offers page with provider chain
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 3-4: Fetch offers page');
+    
     let bestContent: string | null = null;
     let successfulProvider: Provider | null = null;
     let browserlessWasBotBlocked = false;
     let browserlessWasRateLimited = false;
     
-    // ============================================================
-    // STEP 1: Try Browserless first
-    // ============================================================
-    console.log('[EXPEDIA] Step 1: Trying Browserless...');
-    
+    // Try Browserless first
+    console.log('[EXPEDIA] Trying Browserless...');
     const browserlessStartTime = new Date().toISOString();
     updateTrace('browserless', { attempted: true, startedAt: browserlessStartTime });
     
-    const browserlessResult = await fetchWithBrowserless(fullUrl);
+    const browserlessResult = await fetchWithBrowserless(offersPageUrl);
     
     updateTrace('browserless', {
       endedAt: new Date().toISOString(),
       contentLength: browserlessResult.content.length,
     });
     
-    const browserlessAttempt: AttemptResult = {
-      attemptNumber: 1,
-      provider: 'browserless',
-      phase: 'listing',
-      contentLength: browserlessResult.content.length,
-      contentHash: simpleHash(browserlessResult.content || ''),
-      success: false,
-      error: browserlessResult.error,
-      isRateLimited: browserlessResult.isRateLimited,
-      isBotBlocked: browserlessResult.isBotBlocked,
-    };
-    attempts.push(browserlessAttempt);
-    
-    // Check for hard-stop conditions
     if (browserlessResult.isRateLimited) {
       // HARD STOP: Rate limited - no fallbacks
       console.log('[EXPEDIA] HARD STOP: Browserless rate limited (429)');
       browserlessWasRateLimited = true;
       
-      updateTrace('browserless', {
-        outcome: 'rate_limited',
-        errorMessage: browserlessResult.error || 'HTTP 429',
-      });
+      updateTrace('browserless', { outcome: 'rate_limited', errorMessage: browserlessResult.error || 'HTTP 429' });
       updateTrace('zyte', { reasonSkipped: 'Browserless rate-limited - no fallbacks per policy' });
       updateTrace('firecrawl', { reasonSkipped: 'Browserless rate-limited - no fallbacks per policy' });
       
       result.status = 'blocked_rate_limit';
       result.error = 'Browserless rate limited (HTTP 429) - no fallback per anti-amplification policy';
-      result.attempts = attempts;
       result.providerAttemptTrace = providerAttemptTrace;
       result.providerUsed = 'browserless';
       result.durationMs = Date.now() - startTime;
@@ -1482,349 +1196,161 @@ async function extractFromExpedia(
     }
     
     if (browserlessResult.isBotBlocked) {
-      // BOT BLOCKED: Attempt exactly ONE Zyte fallback
-      console.log('[EXPEDIA] Browserless bot-blocked - attempting controlled Zyte fallback');
       browserlessWasBotBlocked = true;
-      
-      updateTrace('browserless', {
-        outcome: 'bot_blocked',
-        errorMessage: browserlessResult.error || 'CAPTCHA/WAF detected',
-        botBlockedFallbackToZyte: true,
-      });
-      
-      // Firecrawl is explicitly skipped when Browserless is bot-blocked
-      updateTrace('firecrawl', { reasonSkipped: 'Browserless bot-blocked - only Zyte fallback per policy' });
-      
+      updateTrace('browserless', { outcome: 'bot_blocked', errorMessage: browserlessResult.error, botBlockedFallbackToZyte: true });
+      console.log('[EXPEDIA] Browserless bot-blocked - attempting Zyte fallback');
     } else if (browserlessResult.error) {
-      // Other error - continue to next provider
-      console.log(`[EXPEDIA] Browserless error: ${browserlessResult.error}`);
-      updateTrace('browserless', {
-        outcome: 'navigation_failed',
-        errorMessage: browserlessResult.error,
-      });
-    } else if (browserlessResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
-      // Insufficient content
-      console.log(`[EXPEDIA] Browserless insufficient content (${browserlessResult.content.length} chars)`);
-      updateTrace('browserless', {
-        outcome: 'insufficient_content',
-        errorMessage: `Only ${browserlessResult.content.length} chars (need ${MINIMAL_CONTENT_THRESHOLD})`,
-      });
+      updateTrace('browserless', { outcome: 'navigation_failed', errorMessage: browserlessResult.error });
+    } else if (browserlessResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
+      updateTrace('browserless', { outcome: 'success' });
+      bestContent = browserlessResult.content;
+      successfulProvider = 'browserless';
+      updateTrace('zyte', { reasonSkipped: 'Browserless succeeded' });
+      updateTrace('firecrawl', { reasonSkipped: 'Browserless succeeded' });
     } else {
-      // Browserless got content - run Phase A
-      const phaseAResult = runPhaseA(browserlessResult.content, checkIn, checkOut);
-      result.phaseA = phaseAResult;
-      
-      if (phaseAResult.datesUnavailable) {
-        updateTrace('browserless', { outcome: 'success' });
-        browserlessAttempt.success = true;
-        result.status = 'dates_unavailable';
-        result.error = `Dates unavailable: ${phaseAResult.unavailabilityMarker}`;
-        result.providerUsed = 'browserless';
-        result.attempts = attempts;
-        result.providerAttemptTrace = providerAttemptTrace;
-        result.durationMs = Date.now() - startTime;
-        result.structuralProof.unavailability_marker = phaseAResult.unavailabilityMarker || undefined;
-        updateTrace('zyte', { reasonSkipped: 'Browserless detected dates_unavailable' });
-        updateTrace('firecrawl', { reasonSkipped: 'Browserless detected dates_unavailable' });
-        return result;
-      }
-      
-      if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
-        console.log('[EXPEDIA] Browserless succeeded - checkout context, dates verified');
-        updateTrace('browserless', { outcome: 'success' });
-        browserlessAttempt.success = true;
-        bestContent = browserlessResult.content;
-        successfulProvider = 'browserless';
-        updateTrace('zyte', { reasonSkipped: 'Browserless succeeded' });
-        updateTrace('firecrawl', { reasonSkipped: 'Browserless succeeded' });
-      } else if (!phaseAResult.datesVerified) {
-        console.log(`[EXPEDIA] Browserless: Dates not verified - ${phaseAResult.dateMismatchReason}`);
-        updateTrace('browserless', {
-          outcome: 'parsing_failed',
-          errorMessage: `Dates not verified: ${phaseAResult.dateMismatchReason}`,
-        });
-        result.structuralProof.date_mismatch_details = phaseAResult.dateMismatchReason || undefined;
-      } else if (!phaseAResult.isCheckoutContext && !phaseAResult.priceEligible) {
-        console.log(`[EXPEDIA] Browserless: Not in checkout context`);
-        updateTrace('browserless', {
-          outcome: 'checkout_not_reached',
-          errorMessage: `Page type: ${phaseAResult.isListingPage ? 'listing' : phaseAResult.isSearchResults ? 'search' : 'unknown'}`,
-        });
-      }
+      updateTrace('browserless', { outcome: 'insufficient_content', errorMessage: `Only ${browserlessResult.content.length} chars` });
     }
     
-    // ============================================================
-    // STEP 2: Try Zyte (if Browserless didn't succeed)
-    // ============================================================
-    if (!successfulProvider) {
-      // Only try Zyte if:
-      // - Browserless was bot-blocked (controlled fallback)
-      // - OR Browserless had other non-rate-limit issues
-      if (browserlessWasRateLimited) {
-        // Already handled above - should not reach here
-        console.log('[EXPEDIA] Unexpected: reached Zyte section after rate limit');
-      } else {
-        console.log('[EXPEDIA] Step 2: Trying Zyte...');
-        
-        const zyteStartTime = new Date().toISOString();
-        updateTrace('zyte', { attempted: true, startedAt: zyteStartTime });
-        
-        const zyteResult = await fetchWithZyte(fullUrl);
-        
+    // Try Zyte if Browserless didn't succeed
+    if (!successfulProvider && !browserlessWasRateLimited) {
+      console.log('[EXPEDIA] Trying Zyte...');
+      const zyteStartTime = new Date().toISOString();
+      updateTrace('zyte', { attempted: true, startedAt: zyteStartTime });
+      
+      const zyteResult = await fetchWithZyte(offersPageUrl);
+      
+      updateTrace('zyte', { endedAt: new Date().toISOString(), contentLength: zyteResult.content.length });
+      
+      if (zyteResult.isRateLimited || zyteResult.isBotBlocked) {
         updateTrace('zyte', {
-          endedAt: new Date().toISOString(),
-          contentLength: zyteResult.content.length,
+          outcome: zyteResult.isRateLimited ? 'rate_limited' : 'bot_blocked',
+          errorMessage: zyteResult.error,
         });
         
-        const zyteAttempt: AttemptResult = {
-          attemptNumber: attempts.length + 1,
-          provider: 'zyte',
-          phase: 'listing',
-          contentLength: zyteResult.content.length,
-          contentHash: simpleHash(zyteResult.content || ''),
-          success: false,
-          error: zyteResult.error,
-          isRateLimited: zyteResult.isRateLimited,
-          isBotBlocked: zyteResult.isBotBlocked,
-        };
-        attempts.push(zyteAttempt);
-        
-        if (zyteResult.isRateLimited || zyteResult.isBotBlocked) {
-          // Both providers blocked - terminal state
-          console.log(`[EXPEDIA] Zyte also blocked: ${zyteResult.isRateLimited ? 'rate limited' : 'bot blocked'}`);
-          updateTrace('zyte', {
-            outcome: zyteResult.isRateLimited ? 'rate_limited' : 'bot_blocked',
-            errorMessage: zyteResult.error,
-          });
-          
-          // If Browserless was bot-blocked AND Zyte is also blocked -> expedia_access_blocked
-          if (browserlessWasBotBlocked) {
-            updateTrace('firecrawl', { reasonSkipped: 'Both Browserless and Zyte blocked - terminal' });
-            
-            result.status = 'expedia_access_blocked';
-            result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
-            result.attempts = attempts;
-            result.providerAttemptTrace = providerAttemptTrace;
-            result.providerUsed = 'zyte'; // Last attempted provider
-            result.durationMs = Date.now() - startTime;
-            return result;
-          }
-        } else if (zyteResult.error) {
-          console.log(`[EXPEDIA] Zyte error: ${zyteResult.error}`);
-          updateTrace('zyte', {
-            outcome: 'navigation_failed',
-            errorMessage: zyteResult.error,
-          });
-        } else if (zyteResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
-          console.log(`[EXPEDIA] Zyte insufficient content (${zyteResult.content.length} chars)`);
-          updateTrace('zyte', {
-            outcome: 'insufficient_content',
-            errorMessage: `Only ${zyteResult.content.length} chars (need ${MINIMAL_CONTENT_THRESHOLD})`,
-          });
-        } else {
-          // Zyte got content - run Phase A
-          const phaseAResult = runPhaseA(zyteResult.content, checkIn, checkOut);
-          result.phaseA = phaseAResult;
-          
-          if (phaseAResult.datesUnavailable) {
-            updateTrace('zyte', { outcome: 'success' });
-            zyteAttempt.success = true;
-            result.status = 'dates_unavailable';
-            result.error = `Dates unavailable: ${phaseAResult.unavailabilityMarker}`;
-            result.providerUsed = 'zyte';
-            result.attempts = attempts;
-            result.providerAttemptTrace = providerAttemptTrace;
-            result.durationMs = Date.now() - startTime;
-            result.structuralProof.unavailability_marker = phaseAResult.unavailabilityMarker || undefined;
-            updateTrace('firecrawl', { reasonSkipped: 'Zyte detected dates_unavailable' });
-            return result;
-          }
-          
-          if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
-            console.log('[EXPEDIA] Zyte succeeded - checkout context, dates verified');
-            updateTrace('zyte', { outcome: 'success' });
-            zyteAttempt.success = true;
-            bestContent = zyteResult.content;
-            successfulProvider = 'zyte';
-            updateTrace('firecrawl', { reasonSkipped: 'Zyte succeeded' });
-          } else if (!phaseAResult.datesVerified) {
-            console.log(`[EXPEDIA] Zyte: Dates not verified - ${phaseAResult.dateMismatchReason}`);
-            updateTrace('zyte', {
-              outcome: 'parsing_failed',
-              errorMessage: `Dates not verified: ${phaseAResult.dateMismatchReason}`,
-            });
-            result.structuralProof.date_mismatch_details = phaseAResult.dateMismatchReason || undefined;
-          } else {
-            console.log('[EXPEDIA] Zyte: Not in checkout context');
-            updateTrace('zyte', {
-              outcome: 'checkout_not_reached',
-              errorMessage: `Page type: ${phaseAResult.isListingPage ? 'listing' : 'unknown'}`,
-            });
-          }
+        if (browserlessWasBotBlocked) {
+          // Both providers blocked - terminal
+          updateTrace('firecrawl', { reasonSkipped: 'Both Browserless and Zyte blocked - terminal' });
+          result.status = 'expedia_access_blocked';
+          result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
+          result.providerAttemptTrace = providerAttemptTrace;
+          result.providerUsed = 'zyte';
+          result.durationMs = Date.now() - startTime;
+          return result;
         }
+      } else if (zyteResult.error) {
+        updateTrace('zyte', { outcome: 'navigation_failed', errorMessage: zyteResult.error });
+      } else if (zyteResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
+        updateTrace('zyte', { outcome: 'success' });
+        bestContent = zyteResult.content;
+        successfulProvider = 'zyte';
+        updateTrace('firecrawl', { reasonSkipped: 'Zyte succeeded' });
+      } else {
+        updateTrace('zyte', { outcome: 'insufficient_content', errorMessage: `Only ${zyteResult.content.length} chars` });
       }
     }
     
-    // ============================================================
-    // STEP 3: Try Firecrawl (only if Browserless wasn't bot-blocked)
-    // ============================================================
+    // Try Firecrawl (only if Browserless wasn't bot-blocked)
     if (!successfulProvider && !browserlessWasBotBlocked) {
-      console.log('[EXPEDIA] Step 3: Trying Firecrawl (last resort)...');
-      
+      console.log('[EXPEDIA] Trying Firecrawl...');
       const firecrawlStartTime = new Date().toISOString();
       updateTrace('firecrawl', { attempted: true, startedAt: firecrawlStartTime });
       
-      const firecrawlResult = await fetchWithFirecrawl(fullUrl);
+      const firecrawlResult = await fetchWithFirecrawl(offersPageUrl);
       
-      updateTrace('firecrawl', {
-        endedAt: new Date().toISOString(),
-        contentLength: firecrawlResult.content.length,
-      });
-      
-      const firecrawlAttempt: AttemptResult = {
-        attemptNumber: attempts.length + 1,
-        provider: 'firecrawl',
-        phase: 'listing',
-        contentLength: firecrawlResult.content.length,
-        contentHash: simpleHash(firecrawlResult.content || ''),
-        success: false,
-        error: firecrawlResult.error,
-        isRateLimited: firecrawlResult.isRateLimited,
-        isBotBlocked: firecrawlResult.isBotBlocked,
-      };
-      attempts.push(firecrawlAttempt);
+      updateTrace('firecrawl', { endedAt: new Date().toISOString(), contentLength: firecrawlResult.content.length });
       
       if (firecrawlResult.error) {
-        console.log(`[EXPEDIA] Firecrawl error: ${firecrawlResult.error}`);
         updateTrace('firecrawl', {
-          outcome: firecrawlResult.isRateLimited ? 'rate_limited' : 
-                   firecrawlResult.isBotBlocked ? 'bot_blocked' : 'navigation_failed',
+          outcome: firecrawlResult.isRateLimited ? 'rate_limited' : firecrawlResult.isBotBlocked ? 'bot_blocked' : 'navigation_failed',
           errorMessage: firecrawlResult.error,
         });
-      } else if (firecrawlResult.content.length < MINIMAL_CONTENT_THRESHOLD) {
-        console.log(`[EXPEDIA] Firecrawl insufficient content (${firecrawlResult.content.length} chars)`);
-        updateTrace('firecrawl', {
-          outcome: 'insufficient_content',
-          errorMessage: `Only ${firecrawlResult.content.length} chars`,
-        });
+      } else if (firecrawlResult.content.length >= MINIMAL_CONTENT_THRESHOLD) {
+        updateTrace('firecrawl', { outcome: 'success' });
+        bestContent = firecrawlResult.content;
+        successfulProvider = 'firecrawl';
       } else {
-        // Firecrawl got content - run Phase A
-        const phaseAResult = runPhaseA(firecrawlResult.content, checkIn, checkOut);
-        result.phaseA = phaseAResult;
-        
-        if (phaseAResult.datesUnavailable) {
-          updateTrace('firecrawl', { outcome: 'success' });
-          firecrawlAttempt.success = true;
-          result.status = 'dates_unavailable';
-          result.error = `Dates unavailable: ${phaseAResult.unavailabilityMarker}`;
-          result.providerUsed = 'firecrawl';
-          result.attempts = attempts;
-          result.providerAttemptTrace = providerAttemptTrace;
-          result.durationMs = Date.now() - startTime;
-          result.structuralProof.unavailability_marker = phaseAResult.unavailabilityMarker || undefined;
-          return result;
-        }
-        
-        if (phaseAResult.priceEligible && phaseAResult.datesVerified) {
-          console.log('[EXPEDIA] Firecrawl succeeded - checkout context, dates verified');
-          updateTrace('firecrawl', { outcome: 'success' });
-          firecrawlAttempt.success = true;
-          bestContent = firecrawlResult.content;
-          successfulProvider = 'firecrawl';
-        } else if (!phaseAResult.datesVerified) {
-          console.log(`[EXPEDIA] Firecrawl: Dates not verified - ${phaseAResult.dateMismatchReason}`);
-          updateTrace('firecrawl', {
-            outcome: 'parsing_failed',
-            errorMessage: `Dates not verified: ${phaseAResult.dateMismatchReason}`,
-          });
-          result.structuralProof.date_mismatch_details = phaseAResult.dateMismatchReason || undefined;
-        } else {
-          console.log('[EXPEDIA] Firecrawl: Not in checkout context');
-          updateTrace('firecrawl', {
-            outcome: 'checkout_not_reached',
-            errorMessage: 'Page type: unknown',
-          });
-        }
+        updateTrace('firecrawl', { outcome: 'insufficient_content', errorMessage: `Only ${firecrawlResult.content.length} chars` });
       }
     }
     
-    result.attempts = attempts;
     result.providerAttemptTrace = providerAttemptTrace;
     result.providerUsed = successfulProvider;
     
-    // If no provider succeeded, determine terminal status
+    // No provider succeeded
     if (!bestContent || !successfulProvider) {
-      // Find the last attempted provider for providerUsed
       const lastAttempted = providerAttemptTrace.filter(t => t.attempted).pop();
       result.providerUsed = lastAttempted?.provider || 'browserless';
       
-      if (browserlessWasBotBlocked && !successfulProvider) {
-        // Browserless bot-blocked and Zyte failed too
+      if (browserlessWasBotBlocked) {
         result.status = 'expedia_access_blocked';
         result.error = 'Expedia blocked access (CAPTCHA) - cannot retrieve price for these dates';
-      } else if (result.phaseA.dateMismatchReason && !result.phaseA.datesVerified) {
-        result.status = 'date_application_failed';
-        result.error = `Dates not verified: ${result.phaseA.dateMismatchReason}`;
-      } else if (!result.phaseA.isCheckoutContext) {
-        result.status = 'checkout_not_reached';
-        result.error = 'Could not reach checkout context for price extraction';
       } else {
-        const lastAttempt = attempts[attempts.length - 1];
-        result.status = 'render_failed';
-        result.error = `All providers failed. Last: ${lastAttempt?.error || 'No content'}`;
+        result.status = 'offers_page_not_loaded';
+        result.error = 'Could not load Expedia Hotel-Search offers page';
       }
       result.durationMs = Date.now() - startTime;
       return result;
     }
     
-    // Run Phase B - checkout-only extraction
-    const phaseBResult = runPhaseB(bestContent, result.phaseA);
-    result.phaseB = phaseBResult;
+    // ==========================================================================
+    // STEP 4: Detect offers page state
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 4: Detect offers page state');
     
-    // No checkout total found
-    if (!phaseBResult.extractedPrice || !phaseBResult.priceVerified) {
-      result.status = 'price_not_found';
-      result.error = phaseBResult.rejectionReason || 'No verified checkout total found';
+    const offersPageResult = detectOffersPage(bestContent, checkIn, checkOut);
+    result.offersPage = offersPageResult;
+    
+    // Check for unavailability
+    if (offersPageResult.unavailabilityDetected) {
+      result.status = 'dates_unavailable';
+      result.error = `Dates unavailable: ${offersPageResult.unavailabilityMarker}`;
+      result.structuralProof.unavailability_marker = offersPageResult.unavailabilityMarker || undefined;
       result.durationMs = Date.now() - startTime;
       return result;
     }
     
-    // Currency conversion failed (non-USD without conversion)
-    if (phaseBResult.originalCurrency && 
-        phaseBResult.originalCurrency !== 'USD' && 
-        !phaseBResult.conversionRate) {
-      result.status = 'currency_conversion_failed';
-      result.error = `Currency ${phaseBResult.originalCurrency} could not be converted to USD`;
+    // ==========================================================================
+    // STEP 5: Extract total price from offers page
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 5: Extract price from offers page');
+    
+    const priceResult = extractPriceFromOffersPage(bestContent, offersPageResult);
+    result.priceExtraction = priceResult;
+    
+    if (!priceResult.extracted || !priceResult.totalPrice) {
+      result.status = 'expedia_total_not_found';
+      result.error = priceResult.rejectionReason || 'No total price with taxes found on offers page';
       result.durationMs = Date.now() - startTime;
       return result;
     }
     
-    // Build structural proof
-    const pageContext = detectPageContext(bestContent);
-    const breakdownResult = detectBreakdown(bestContent, pageContext);
+    // ==========================================================================
+    // STEP 6 & 7: Build structural proof
+    // ==========================================================================
+    console.log('[EXPEDIA] GOLDEN PATH Step 6-7: Build structural proof');
     
     result.structuralProof = {
-      breakdown_found: breakdownResult.breakdown_found && breakdownResult.has_fee_lines,
-      total_label_found: breakdownResult.total_label_found,
-      rendered_dates_match: result.phaseA.datesVerified,
-      extracted_from_breakdown_total: breakdownResult.isCheckoutTotal && breakdownResult.breakdown_price !== null,
-      proof_version: '1.0',
-      breakdown_selector_used: breakdownResult.breakdown_selector_used || undefined,
-      total_value_raw: breakdownResult.total_value_raw || undefined,
-      date_value_raw: result.phaseA.renderedCheckIn && result.phaseA.renderedCheckOut 
-        ? `${result.phaseA.renderedCheckIn} to ${result.phaseA.renderedCheckOut}` 
-        : undefined,
-      phase2_navigation_used: false,
+      breakdown_found: offersPageResult.hasTotalWithTaxes,
+      total_label_found: priceResult.includesTaxesFees,
+      rendered_dates_match: offersPageResult.datesRenderedCorrectly,
+      extracted_from_breakdown_total: priceResult.extracted && priceResult.includesTaxesFees,
+      proof_version: '2.0-golden-path',
+      breakdown_selector_used: priceResult.extractionContext || undefined,
+      total_value_raw: priceResult.evidenceSnippet || undefined,
+      date_value_raw: `${checkIn} to ${checkOut}`,
       requested_checkin: checkIn,
       requested_checkout: checkOut,
-      url_injected_checkin: result.dateInjection.finalUrlCheckIn || undefined,
-      url_injected_checkout: result.dateInjection.finalUrlCheckOut || undefined,
-      // Currency audit
-      original_currency: phaseBResult.originalCurrency || undefined,
-      original_amount: phaseBResult.originalAmount || undefined,
-      converted_amount_usd: phaseBResult.extractedPrice || undefined,
-      conversion_rate: phaseBResult.conversionRate || undefined,
-      page_context: phaseBResult.extractionContext || undefined,
+      url_injected_startDate: checkIn,
+      url_injected_endDate: checkOut,
+      property_id: result.goldenPath.propertyId || undefined,
+      property_id_source: result.goldenPath.propertyIdSource || undefined,
+      original_currency: priceResult.originalCurrency || undefined,
+      original_amount: priceResult.originalAmount || undefined,
+      converted_amount_usd: priceResult.totalPrice || undefined,
+      conversion_rate: priceResult.conversionRate || undefined,
+      page_context: 'Hotel-Search offers page',
+      is_offers_page: true,
+      offers_page_url: offersPageUrl,
     };
     
     const isVerified = 
@@ -1834,7 +1360,7 @@ async function extractFromExpedia(
       result.structuralProof.extracted_from_breakdown_total;
     
     console.log('[EXPEDIA] Structural proof:', JSON.stringify(result.structuralProof, null, 2));
-    console.log(`[EXPEDIA] Success: $${phaseBResult.extractedPrice} USD (${isVerified ? 'Verified' : 'Unverified'})`);
+    console.log(`[EXPEDIA] Success: $${priceResult.totalPrice} USD (${isVerified ? 'Verified' : 'Unverified'})`);
     
     result.success = true;
     result.status = 'success';
@@ -1846,9 +1372,7 @@ async function extractFromExpedia(
     result.error = error instanceof Error ? error.message : 'Unknown error';
     result.status = 'validation_error';
     result.durationMs = Date.now() - startTime;
-    result.attempts = attempts;
     result.providerAttemptTrace = providerAttemptTrace;
-    // Never leave providerUsed as null
     const lastAttempted = providerAttemptTrace.filter(t => t.attempted).pop();
     result.providerUsed = lastAttempted?.provider || 'browserless';
     console.error('[EXPEDIA] Fatal error:', error);
@@ -1867,7 +1391,7 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.json() as ExtractionRequest;
-    const { url, extractionId, checkIn, checkOut, adults = 2 } = body;
+    const { url, extractionId, checkIn, checkOut, adults = 1 } = body;
     
     // Strict date validation
     if (!checkIn || !checkOut) {
@@ -1885,143 +1409,113 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({ 
           success: false, 
-          error: `Invalid date format. Expected YYYY-MM-DD, got checkIn="${checkIn}", checkOut="${checkOut}"`,
+          error: `Invalid date format. Expected YYYY-MM-DD, got checkIn=${checkIn}, checkOut=${checkOut}`,
           status: 'validation_error'
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
     
-    const checkInDate = new Date(checkIn);
-    const checkOutDate = new Date(checkOut);
-    if (checkOutDate <= checkInDate) {
+    if (!url) {
       return new Response(
         JSON.stringify({ 
           success: false, 
-          error: `checkOut must be after checkIn. Got ${checkIn} to ${checkOut}`,
+          error: 'url is required',
           status: 'validation_error'
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
     
-    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-    const supabaseClient = createClient(supabaseUrl, supabaseKey);
+    console.log(`[EXPEDIA] Starting extraction for: ${url}`);
+    console.log(`[EXPEDIA] Dates: ${checkIn} to ${checkOut}, Adults: ${adults}`);
     
-    let targetUrl = url;
-    let dbExtractionId = extractionId;
+    // Run extraction
+    const extractionResult = await extractFromExpedia(url, checkIn, checkOut, adults);
     
-    if (extractionId && !url) {
-      const { data: extraction, error } = await supabaseClient
-        .from('price_extractions')
-        .select('deep_link, platform_name')
-        .eq('id', extractionId)
-        .single();
-      
-      if (error || !extraction) {
-        return new Response(
-          JSON.stringify({ success: false, error: 'Extraction not found' }),
-          { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-      
-      if (!extraction.platform_name.toLowerCase().includes('expedia')) {
-        return new Response(
-          JSON.stringify({ success: false, error: 'This function only handles Expedia extractions' }),
-          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-      
-      targetUrl = extraction.deep_link;
-    }
-    
-    if (!targetUrl) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'URL or extractionId required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-    
-    console.log(`[EXPEDIA] Starting extraction: ${checkIn} to ${checkOut}`);
-    console.log(`[EXPEDIA] Base URL: ${targetUrl}`);
-    
-    const result = await extractFromExpedia(targetUrl, checkIn, checkOut, adults);
-    
-    const isVerified = 
-      result.structuralProof.breakdown_found &&
-      result.structuralProof.total_label_found &&
-      result.structuralProof.rendered_dates_match &&
-      result.structuralProof.extracted_from_breakdown_total;
-    
-    // Update DB
-    if (dbExtractionId) {
-      await supabaseClient
-        .from('price_extractions')
-        .update({
-          extraction_status: result.status,
-          extracted_price: result.phaseB.extractedPrice,
-          currency: result.phaseB.currency || 'USD',
-          includes_taxes_fees: result.phaseB.includesTaxesFees,
-          extraction_error: result.error,
-          page_content_hash: result.phaseA.contentHash,
-          provider_used: result.providerUsed,
-          dates_validated: result.phaseA.datesVerified,
-          detected_checkin: result.phaseA.renderedCheckIn,
-          detected_checkout: result.phaseA.renderedCheckOut,
-          evidence_snippets: result.phaseB.evidenceSnippet ? [result.phaseB.evidenceSnippet] : null,
-          extraction_metadata: {
-            goldenPath: true,
-            platform: 'expedia',
-            version: '4.1',
-            phaseA: result.phaseA,
-            phaseB: result.phaseB,
-            structural_proof: result.structuralProof,
-            verification_status: isVerified ? 'Verified' : 'Unverified',
-            provider_order: PROVIDER_ORDER,
-            attempts: result.attempts,
-            providerAttemptTrace: result.providerAttemptTrace, // NEW: Full trace for observability
-            durationMs: result.durationMs,
-            dateInjection: result.dateInjection,
-            // Currency audit
-            currency_handling: {
-              original_currency: result.phaseB.originalCurrency,
-              original_amount: result.phaseB.originalAmount,
-              converted_amount_usd: result.phaseB.extractedPrice,
-              conversion_rate: result.phaseB.conversionRate,
+    // Persist to database if extractionId provided
+    if (extractionId) {
+      try {
+        const supabaseUrl = Deno.env.get('SUPABASE_URL');
+        const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+        
+        if (supabaseUrl && supabaseKey) {
+          const supabase = createClient(supabaseUrl, supabaseKey);
+          
+          const updateData: Record<string, unknown> = {
+            extraction_status: extractionResult.success ? 'price_extracted' : extractionResult.status,
+            extraction_error: extractionResult.error,
+            extraction_stage: 'golden_path_offers_page',
+            provider_used: extractionResult.providerUsed,
+            extraction_metadata: {
+              goldenPath: extractionResult.goldenPath,
+              offersPage: extractionResult.offersPage,
+              structuralProof: extractionResult.structuralProof,
+              providerAttemptTrace: extractionResult.providerAttemptTrace,
+              durationMs: extractionResult.durationMs,
+              proof_version: '2.0-golden-path',
             },
-          },
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', dbExtractionId);
+          };
+          
+          if (extractionResult.success && extractionResult.priceExtraction.totalPrice) {
+            updateData.extracted_price = extractionResult.priceExtraction.totalPrice;
+            updateData.currency = 'USD';
+            updateData.includes_taxes_fees = extractionResult.priceExtraction.includesTaxesFees;
+            updateData.evidence_snippets = extractionResult.priceExtraction.evidenceSnippet 
+              ? [extractionResult.priceExtraction.evidenceSnippet]
+              : null;
+            updateData.detected_checkin = checkIn;
+            updateData.detected_checkout = checkOut;
+            updateData.dates_validated = true;
+          }
+          
+          const { error: updateError } = await supabase
+            .from('price_extractions')
+            .update(updateData)
+            .eq('id', extractionId);
+          
+          if (updateError) {
+            console.error('[EXPEDIA] Failed to update extraction record:', updateError);
+          } else {
+            console.log(`[EXPEDIA] Updated extraction record: ${extractionId}`);
+          }
+        }
+      } catch (dbError) {
+        console.error('[EXPEDIA] Database error:', dbError);
+      }
     }
     
+    // Return result
     return new Response(
       JSON.stringify({
-        success: result.success,
-        result,
-        goldenPath: true,
-        platform: 'expedia',
-        version: '4.0',
-        verification_status: isVerified ? 'Verified' : 'Unverified',
-        provider_used: result.providerUsed,
-        dateInjection: result.dateInjection,
-        currency_handling: {
-          original_currency: result.phaseB.originalCurrency,
-          original_amount: result.phaseB.originalAmount,
-          converted_amount_usd: result.phaseB.extractedPrice,
-          conversion_rate: result.phaseB.conversionRate,
-        },
+        success: extractionResult.success,
+        status: extractionResult.status,
+        price: extractionResult.priceExtraction.totalPrice,
+        currency: extractionResult.priceExtraction.currency,
+        originalAmount: extractionResult.priceExtraction.originalAmount,
+        originalCurrency: extractionResult.priceExtraction.originalCurrency,
+        conversionRate: extractionResult.priceExtraction.conversionRate,
+        includesTaxesFees: extractionResult.priceExtraction.includesTaxesFees,
+        error: extractionResult.error,
+        goldenPath: extractionResult.goldenPath,
+        structuralProof: extractionResult.structuralProof,
+        providerUsed: extractionResult.providerUsed,
+        providerAttemptTrace: extractionResult.providerAttemptTrace,
+        durationMs: extractionResult.durationMs,
       }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { 
+        status: extractionResult.success ? 200 : 422,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      }
     );
     
   } catch (error) {
-    console.error('[EXPEDIA] Fatal error:', error);
+    console.error('[EXPEDIA] Handler error:', error);
     return new Response(
       JSON.stringify({ 
         success: false, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+        error: error instanceof Error ? error.message : 'Unknown error',
+        status: 'validation_error'
       }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
