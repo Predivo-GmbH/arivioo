@@ -54,6 +54,11 @@ async function verifyAdminSession(supabase: any, token: string): Promise<{ valid
   return { valid: true, admin: session.admin_users };
 }
 
+// Escape ILIKE special characters to prevent pattern injection
+function escapeLikePattern(str: string): string {
+  return str.replace(/[%_\\]/g, '\\$&');
+}
+
 Deno.serve(async (req) => {
   const origin = req.headers.get('origin');
   const corsHeaders = getCorsHeaders(origin);
@@ -1599,7 +1604,9 @@ Deno.serve(async (req) => {
         searchQuery = searchQuery.eq('id', searchId);
       } else {
         // Match by URL (partial match for flexibility)
-        searchQuery = searchQuery.ilike('airbnb_url', `%${airbnbUrl}%`);
+        // Escape ILIKE wildcards to prevent pattern injection
+        const sanitizedUrl = escapeLikePattern(airbnbUrl);
+        searchQuery = searchQuery.ilike('airbnb_url', `%${sanitizedUrl}%`);
       }
       
       const { data: searches, error: searchError } = await searchQuery

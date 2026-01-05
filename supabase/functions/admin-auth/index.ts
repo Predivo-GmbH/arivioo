@@ -46,6 +46,11 @@ const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 
+// Dummy hash for constant-time authentication (PBKDF2 with 100,000 iterations)
+// This ensures password verification always runs with the same iteration count
+// whether or not the user exists, preventing timing-based user enumeration
+const DUMMY_HASH = 'pbkdf2:00000000-0000-0000-0000-000000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+
 // Simple timing-safe comparison for strings
 function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) {
@@ -354,58 +359,57 @@ Deno.serve(async (req) => {
         .eq('email', email.toLowerCase())
         .single();
 
-      if (adminError || !admin) {
-        // Log failed attempt
+      // CONSTANT-TIME AUTHENTICATION: Always perform password verification
+      // to prevent timing-based user enumeration attacks.
+      // If user doesn't exist, we verify against a dummy hash with the same
+      // iteration count, ensuring consistent timing regardless of user existence.
+      const hashToVerify = admin?.password_hash || DUMMY_HASH;
+      const passwordValid = await verifyPassword(password, hashToVerify);
+
+      // Now check user existence and password validity AFTER timing-critical operation
+      if (adminError || !admin || !passwordValid) {
+        // Log failed attempt (don't reveal whether user exists or password was wrong)
         await logLoginAttempt(supabase, ip, false, email, userAgent);
         console.log(`[Admin Auth] Login failed from IP: ${ip}`);
+        
+        // If admin exists and password was wrong, increment failed attempts
+        if (admin && !passwordValid) {
+          const newAttempts = admin.failed_login_attempts + 1;
+          const lockUntil = newAttempts >= 5 ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null;
+          
+          await supabase
+            .from('admin_users')
+            .update({ 
+              failed_login_attempts: newAttempts,
+              locked_until: lockUntil
+            })
+            .eq('id', admin.id);
+        }
+
+        // Add random jitter (50-150ms) to further mask any timing variations
+        const jitter = 50 + Math.random() * 100;
+        await new Promise(resolve => setTimeout(resolve, jitter));
+        
         return new Response(
           JSON.stringify({ error: 'Invalid credentials' }),
           { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
 
-      // Check if account is locked
+      // Check if account is locked (after password verification to maintain constant time)
       if (admin.locked_until && new Date(admin.locked_until) > new Date()) {
-        // Log failed attempt
         await logLoginAttempt(supabase, ip, false, email, userAgent);
         console.log(`[Admin Auth] Account locked, attempt from IP: ${ip}`);
         return new Response(
-          JSON.stringify({ error: 'Account is locked. Please try again later.' }),
-          { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          JSON.stringify({ error: 'Invalid credentials' }),
+          { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
 
-      // Check if account is active
+      // Check if account is active (after password verification to maintain constant time)
       if (!admin.is_active) {
-        // Log failed attempt
         await logLoginAttempt(supabase, ip, false, email, userAgent);
         console.log(`[Admin Auth] Account inactive, attempt from IP: ${ip}`);
-        return new Response(
-          JSON.stringify({ error: 'Account is disabled' }),
-          { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-
-      // Verify password
-      const passwordValid = await verifyPassword(password, admin.password_hash);
-      
-      if (!passwordValid) {
-        // Log failed attempt to persistent storage
-        await logLoginAttempt(supabase, ip, false, email, userAgent);
-        console.log(`[Admin Auth] Invalid password from IP: ${ip}`);
-        
-        // Increment failed attempts on admin account
-        const newAttempts = admin.failed_login_attempts + 1;
-        const lockUntil = newAttempts >= 5 ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null;
-        
-        await supabase
-          .from('admin_users')
-          .update({ 
-            failed_login_attempts: newAttempts,
-            locked_until: lockUntil
-          })
-          .eq('id', admin.id);
-
         return new Response(
           JSON.stringify({ error: 'Invalid credentials' }),
           { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
