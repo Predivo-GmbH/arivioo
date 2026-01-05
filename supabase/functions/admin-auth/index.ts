@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 // Allowed origins for CORS - restrict to Lovable app domains
 const ALLOWED_ORIGINS = [
@@ -41,11 +41,10 @@ function getCorsHeaders(request: Request): Record<string, string> {
   };
 }
 
-// Rate limiting store (in-memory, resets on function restart)
-const loginAttempts: Map<string, { count: number; firstAttempt: number }> = new Map();
-const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
+// Persistent rate limiting configuration
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_ATTEMPTS = 5;
-const LOCKOUT_DURATION = 30 * 60 * 1000; // 30 minutes
+const LOCKOUT_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 
 // Simple timing-safe comparison for strings
 function timingSafeEqual(a: string, b: string): boolean {
@@ -192,34 +191,85 @@ function generateSessionToken(): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
-  const now = Date.now();
-  const attempt = loginAttempts.get(ip);
+// Persistent rate limiting using database
+async function checkRateLimitPersistent(
+  supabase: SupabaseClient,
+  ip: string
+): Promise<{ allowed: boolean; retryAfter?: number }> {
+  const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString();
   
-  if (!attempt) {
-    loginAttempts.set(ip, { count: 1, firstAttempt: now });
-    return { allowed: true };
-  }
-  
-  // Reset if window has passed
-  if (now - attempt.firstAttempt > RATE_LIMIT_WINDOW) {
-    loginAttempts.set(ip, { count: 1, firstAttempt: now });
-    return { allowed: true };
-  }
-  
-  // Check if locked out
-  if (attempt.count >= MAX_ATTEMPTS) {
-    const lockoutEnd = attempt.firstAttempt + LOCKOUT_DURATION;
-    if (now < lockoutEnd) {
-      return { allowed: false, retryAfter: Math.ceil((lockoutEnd - now) / 1000) };
+  try {
+    // Count recent failed attempts from this IP
+    const { count, error } = await supabase
+      .from('admin_login_attempts')
+      .select('*', { count: 'exact', head: true })
+      .eq('ip_address', ip)
+      .eq('was_successful', false)
+      .gte('attempted_at', windowStart);
+    
+    if (error) {
+      console.error('[Admin Auth] Rate limit check error:', error);
+      // Fail open but log the issue - don't block legitimate users due to DB issues
+      return { allowed: true };
     }
-    // Lockout expired, reset
-    loginAttempts.set(ip, { count: 1, firstAttempt: now });
+    
+    const attemptCount = count || 0;
+    
+    if (attemptCount >= MAX_ATTEMPTS) {
+      // Check when the oldest attempt in window was made to calculate retry time
+      const { data: oldestAttempt } = await supabase
+        .from('admin_login_attempts')
+        .select('attempted_at')
+        .eq('ip_address', ip)
+        .eq('was_successful', false)
+        .gte('attempted_at', windowStart)
+        .order('attempted_at', { ascending: true })
+        .limit(1)
+        .single();
+      
+      if (oldestAttempt && oldestAttempt.attempted_at) {
+        const oldestTime = new Date(oldestAttempt.attempted_at).getTime();
+        const unlockTime = oldestTime + LOCKOUT_DURATION_MS;
+        const retryAfter = Math.max(0, Math.ceil((unlockTime - Date.now()) / 1000));
+        return { allowed: false, retryAfter: Math.max(retryAfter, 60) }; // Minimum 60 seconds
+      }
+      
+      return { allowed: false, retryAfter: Math.ceil(LOCKOUT_DURATION_MS / 1000) };
+    }
+    
+    return { allowed: true };
+  } catch (err) {
+    console.error('[Admin Auth] Rate limit check exception:', err);
+    // Fail open on unexpected errors
     return { allowed: true };
   }
-  
-  attempt.count++;
-  return { allowed: true };
+}
+
+// Log login attempt to database for persistent tracking
+async function logLoginAttempt(
+  supabase: SupabaseClient,
+  ip: string,
+  wasSuccessful: boolean,
+  emailAttempted: string | null,
+  userAgent: string | null
+): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('admin_login_attempts')
+      .insert({
+        ip_address: ip,
+        was_successful: wasSuccessful,
+        email_attempted: emailAttempted?.toLowerCase().substring(0, 255) || null,
+        user_agent: userAgent?.substring(0, 500) || null,
+        attempted_at: new Date().toISOString()
+      });
+    
+    if (error) {
+      console.error('[Admin Auth] Failed to log login attempt:', error);
+    }
+  } catch (err) {
+    console.error('[Admin Auth] Exception logging login attempt:', err);
+  }
 }
 
 Deno.serve(async (req) => {
@@ -276,9 +326,10 @@ Deno.serve(async (req) => {
   try {
     // LOGIN
     if (action === 'login' && req.method === 'POST') {
-      const rateCheck = checkRateLimit(ip);
+      // Check persistent rate limit
+      const rateCheck = await checkRateLimitPersistent(supabase, ip);
       if (!rateCheck.allowed) {
-        console.log(`[Admin Auth] Rate limited: ${ip}`);
+        console.log(`[Admin Auth] Persistent rate limited: ${ip}`);
         return new Response(
           JSON.stringify({ error: 'Too many login attempts. Please try again later.', retryAfter: rateCheck.retryAfter }),
           { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(rateCheck.retryAfter) } }
@@ -294,7 +345,7 @@ Deno.serve(async (req) => {
         );
       }
 
-      console.log(`[Admin Auth] Login attempt for: ${email}`);
+      console.log(`[Admin Auth] Login attempt from IP: ${ip}`);
 
       // Get admin user
       const { data: admin, error: adminError } = await supabase
@@ -304,7 +355,9 @@ Deno.serve(async (req) => {
         .single();
 
       if (adminError || !admin) {
-        console.log(`[Admin Auth] Admin not found: ${email}`);
+        // Log failed attempt
+        await logLoginAttempt(supabase, ip, false, email, userAgent);
+        console.log(`[Admin Auth] Login failed from IP: ${ip}`);
         return new Response(
           JSON.stringify({ error: 'Invalid credentials' }),
           { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -313,7 +366,9 @@ Deno.serve(async (req) => {
 
       // Check if account is locked
       if (admin.locked_until && new Date(admin.locked_until) > new Date()) {
-        console.log(`[Admin Auth] Account locked: ${email}`);
+        // Log failed attempt
+        await logLoginAttempt(supabase, ip, false, email, userAgent);
+        console.log(`[Admin Auth] Account locked, attempt from IP: ${ip}`);
         return new Response(
           JSON.stringify({ error: 'Account is locked. Please try again later.' }),
           { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -322,7 +377,9 @@ Deno.serve(async (req) => {
 
       // Check if account is active
       if (!admin.is_active) {
-        console.log(`[Admin Auth] Account inactive: ${email}`);
+        // Log failed attempt
+        await logLoginAttempt(supabase, ip, false, email, userAgent);
+        console.log(`[Admin Auth] Account inactive, attempt from IP: ${ip}`);
         return new Response(
           JSON.stringify({ error: 'Account is disabled' }),
           { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -333,9 +390,11 @@ Deno.serve(async (req) => {
       const passwordValid = await verifyPassword(password, admin.password_hash);
       
       if (!passwordValid) {
-        console.log(`[Admin Auth] Invalid password for: ${email}`);
+        // Log failed attempt to persistent storage
+        await logLoginAttempt(supabase, ip, false, email, userAgent);
+        console.log(`[Admin Auth] Invalid password from IP: ${ip}`);
         
-        // Increment failed attempts
+        // Increment failed attempts on admin account
         const newAttempts = admin.failed_login_attempts + 1;
         const lockUntil = newAttempts >= 5 ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null;
         
@@ -362,6 +421,9 @@ Deno.serve(async (req) => {
           last_login_at: new Date().toISOString()
         })
         .eq('id', admin.id);
+
+      // Log successful login attempt
+      await logLoginAttempt(supabase, ip, true, email, userAgent);
 
       // Create session
       const sessionToken = generateSessionToken();
@@ -395,10 +457,7 @@ Deno.serve(async (req) => {
         user_agent: userAgent
       });
 
-      // Clear rate limit on successful login
-      loginAttempts.delete(ip);
-
-      console.log(`[Admin Auth] Login successful: ${email}`);
+      console.log(`[Admin Auth] Login successful from IP: ${ip}`);
 
       return new Response(
         JSON.stringify({
@@ -584,7 +643,7 @@ Deno.serve(async (req) => {
         user_agent: userAgent
       });
 
-      console.log(`[Admin Auth] Password changed for: ${admin.email}`);
+      console.log(`[Admin Auth] Password changed from IP: ${ip}`);
 
       return new Response(
         JSON.stringify({ success: true }),
