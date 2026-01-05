@@ -28,12 +28,79 @@ const getFirstImage = (json: Json | null | undefined): string | null => {
   return null;
 };
 
+// Comprehensive list of valid Airbnb domains
+const VALID_AIRBNB_DOMAINS = [
+  'airbnb.com',
+  'airbnb.co.uk',
+  'airbnb.ca',
+  'airbnb.com.au',
+  'airbnb.de',
+  'airbnb.es',
+  'airbnb.fr',
+  'airbnb.it',
+  'airbnb.nl',
+  'airbnb.pt',
+  'airbnb.ie',
+  'airbnb.co.nz',
+  'airbnb.at',
+  'airbnb.be',
+  'airbnb.ch',
+  'airbnb.dk',
+  'airbnb.fi',
+  'airbnb.gr',
+  'airbnb.no',
+  'airbnb.pl',
+  'airbnb.se',
+  'airbnb.com.br',
+  'airbnb.com.mx',
+  'airbnb.com.ar',
+  'airbnb.cl',
+  'airbnb.co',
+  'airbnb.com.co',
+  'airbnb.com.sg',
+  'airbnb.com.hk',
+  'airbnb.co.kr',
+  'airbnb.jp',
+  'airbnb.co.in',
+  'airbnb.com.my',
+  'airbnb.com.ph',
+  'airbnb.co.th',
+  'airbnb.com.tw',
+  'airbnb.ae',
+  'airbnb.co.za',
+];
+
+// Helper to check if hostname is a valid Airbnb domain
+const isValidAirbnbDomain = (hostname: string): boolean => {
+  // Remove www. prefix if present
+  const cleanHost = hostname.replace(/^www\./, '');
+  return VALID_AIRBNB_DOMAINS.includes(cleanHost);
+};
+
+// Helper to extract room ID from URL path
+const extractRoomId = (pathname: string): string | null => {
+  // Match /rooms/<id> or /book/stays/<id>
+  const roomsMatch = pathname.match(/\/rooms\/(\d+)/);
+  if (roomsMatch) return roomsMatch[1];
+  const bookStaysMatch = pathname.match(/\/book\/stays\/(\d+)/);
+  if (bookStaysMatch) return bookStaysMatch[1];
+  return null;
+};
+
+// Helper to validate date format (YYYY-MM-DD)
+const isValidDateFormat = (dateStr: string): boolean => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return false;
+  const date = new Date(dateStr + 'T00:00:00Z');
+  return !isNaN(date.getTime());
+};
+
 // Helper to check if URL contains dates
 const extractDatesFromUrl = (url: string): { checkIn: string | null; checkOut: string | null } => {
   try {
     const urlObj = new URL(url);
-    const checkIn = urlObj.searchParams.get("check_in");
-    const checkOut = urlObj.searchParams.get("check_out");
+    // Support both check_in/check_out and checkin/checkout formats
+    const checkIn = urlObj.searchParams.get("check_in") || urlObj.searchParams.get("checkin");
+    const checkOut = urlObj.searchParams.get("check_out") || urlObj.searchParams.get("checkout");
     return { checkIn, checkOut };
   } catch {
     return { checkIn: null, checkOut: null };
@@ -41,22 +108,65 @@ const extractDatesFromUrl = (url: string): { checkIn: string | null; checkOut: s
 };
 
 const validateAirbnbUrl = (url: string): { valid: boolean; error?: string } => {
-  if (!url.trim()) {
+  const trimmedUrl = url.trim();
+  
+  if (!trimmedUrl) {
     return { valid: false, error: "Please enter an Airbnb URL" };
   }
   
-  // Check if it's an Airbnb URL
-  if (!url.includes("airbnb.")) {
+  // Parse URL with proper URL constructor - catches malformed URLs
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(trimmedUrl);
+  } catch {
+    return { valid: false, error: "Please enter a valid URL" };
+  }
+  
+  // Validate protocol (only http/https allowed)
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
     return { valid: false, error: "Please enter a valid Airbnb URL" };
   }
   
+  // Validate domain against allowlist
+  if (!isValidAirbnbDomain(parsedUrl.hostname)) {
+    return { valid: false, error: "Please enter a valid Airbnb URL" };
+  }
+  
+  // Validate room ID format (/rooms/<id> or /book/stays/<id>)
+  const roomId = extractRoomId(parsedUrl.pathname);
+  if (!roomId) {
+    return { valid: false, error: "Please enter a URL to a specific Airbnb listing (should contain /rooms/ in the URL)" };
+  }
+  
+  // Validate room ID is a reasonable number (Airbnb uses numeric IDs)
+  if (!/^\d{1,20}$/.test(roomId)) {
+    return { valid: false, error: "Invalid Airbnb listing URL" };
+  }
+  
   // Check for dates
-  const { checkIn, checkOut } = extractDatesFromUrl(url);
+  const { checkIn, checkOut } = extractDatesFromUrl(trimmedUrl);
   if (!checkIn || !checkOut) {
     return { 
       valid: false, 
       error: "Please include dates in your Airbnb URL. Select your dates on Airbnb first, then copy the full URL (it should contain check_in and check_out parameters)." 
     };
+  }
+  
+  // Validate date format
+  if (!isValidDateFormat(checkIn) || !isValidDateFormat(checkOut)) {
+    return { valid: false, error: "Invalid date format in URL. Dates should be in YYYY-MM-DD format." };
+  }
+  
+  // Validate checkout is after checkin
+  const checkInDate = new Date(checkIn + 'T00:00:00Z');
+  const checkOutDate = new Date(checkOut + 'T00:00:00Z');
+  if (checkOutDate <= checkInDate) {
+    return { valid: false, error: "Check-out date must be after check-in date" };
+  }
+  
+  // URL length limit (SSRF protection)
+  if (trimmedUrl.length > 2048) {
+    return { valid: false, error: "URL is too long. Please use a shorter Airbnb URL." };
   }
   
   return { valid: true };
