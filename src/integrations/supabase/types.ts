@@ -88,6 +88,36 @@ export type Database = {
           },
         ]
       }
+      admin_login_attempts: {
+        Row: {
+          attempted_at: string
+          created_at: string
+          email_attempted: string | null
+          id: string
+          ip_address: string
+          user_agent: string | null
+          was_successful: boolean
+        }
+        Insert: {
+          attempted_at?: string
+          created_at?: string
+          email_attempted?: string | null
+          id?: string
+          ip_address: string
+          user_agent?: string | null
+          was_successful?: boolean
+        }
+        Update: {
+          attempted_at?: string
+          created_at?: string
+          email_attempted?: string | null
+          id?: string
+          ip_address?: string
+          user_agent?: string | null
+          was_successful?: boolean
+        }
+        Relationships: []
+      }
       admin_sessions: {
         Row: {
           admin_user_id: string
