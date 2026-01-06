@@ -1,61 +1,182 @@
-import { useEffect } from "react";
-import { useNavigate, useSearchParams, Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Loader2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useToast } from "@/hooks/use-toast";
+
+const getSafeRedirectPath = (raw: string | null): string => {
+  const fallback = "/dashboard";
+  if (!raw) return fallback;
+
+  // Only allow app-internal paths. Prevents open redirects.
+  if (!raw.startsWith("/")) return fallback;
+  if (raw.startsWith("//")) return fallback;
+  if (raw.includes("\n") || raw.includes("\r")) return fallback;
+
+  return raw;
+};
 
 export default function Auth() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const redirectTo = searchParams.get("redirect") || "/dashboard";
+  const redirectTo = useMemo(
+    () => getSafeRedirectPath(searchParams.get("redirect")),
+    [searchParams]
+  );
   const urlParam = searchParams.get("url");
 
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const finalRedirect = useMemo(() => {
+    return urlParam
+      ? `${redirectTo}?url=${encodeURIComponent(urlParam)}`
+      : redirectTo;
+  }, [redirectTo, urlParam]);
+
   useEffect(() => {
-    const autoLogin = async () => {
-      // Check if already logged in
-      const { data: { session } } = await supabase.auth.getSession();
-      
+    const checkExistingSession = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
       if (session?.user) {
-        const finalRedirect = urlParam ? `${redirectTo}?url=${encodeURIComponent(urlParam)}` : redirectTo;
-        navigate(finalRedirect);
+        navigate(finalRedirect, { replace: true });
+      }
+    };
+
+    checkExistingSession();
+  }, [navigate, finalRedirect]);
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !password) return;
+
+    setSubmitting(true);
+    try {
+      if (mode === "login") {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+        if (error) throw error;
+
+        navigate(finalRedirect, { replace: true });
         return;
       }
 
-      // Auto sign in anonymously for demo purposes
-      const { error } = await supabase.auth.signInAnonymously();
-      
-      if (error) {
-        console.error("Auto-login error:", error);
-        // Still redirect even if there's an error
-      }
-      
-      const finalRedirect = urlParam ? `${redirectTo}?url=${encodeURIComponent(urlParam)}` : redirectTo;
-      navigate(finalRedirect);
-    };
+      const { error } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+      });
+      if (error) throw error;
 
-    autoLogin();
-  }, [navigate, redirectTo, urlParam]);
+      toast({
+        title: "Account created",
+        description: "You're now signed in.",
+      });
+
+      navigate(finalRedirect, { replace: true });
+    } catch (err: any) {
+      toast({
+        title: "Authentication error",
+        description: err?.message || "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-warm flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        <Link to="/" className="inline-flex items-center gap-2 text-muted-foreground hover:text-foreground mb-8 transition-colors">
+        <Link
+          to="/"
+          className="inline-flex items-center gap-2 text-muted-foreground hover:text-foreground mb-8 transition-colors"
+        >
           <ArrowLeft className="w-4 h-4" />
           Back to home
         </Link>
 
-        <div className="bg-card rounded-2xl shadow-large border border-border p-8 text-center">
+        <div className="bg-card rounded-2xl shadow-large border border-border p-8">
           <div className="w-12 h-12 bg-gradient-primary rounded-xl flex items-center justify-center mx-auto mb-4">
             <span className="text-white font-bold text-xl">A</span>
           </div>
-          
-          <Loader2 className="w-8 h-8 animate-spin text-primary mx-auto mb-4" />
-          
-          <h1 className="text-xl font-semibold text-foreground mb-2">
-            Setting up your session...
+
+          <h1 className="text-xl font-semibold text-foreground text-center mb-2">
+            {mode === "login" ? "Sign in" : "Create your account"}
           </h1>
-          <p className="text-muted-foreground">
-            You'll be redirected automatically
+          <p className="text-muted-foreground text-center mb-6">
+            {mode === "login"
+              ? "Sign in to access your dashboard."
+              : "Create an account to save searches and view results."}
+          </p>
+
+          <div className="grid grid-cols-2 gap-2 mb-6">
+            <Button
+              type="button"
+              variant={mode === "login" ? "default" : "outline"}
+              onClick={() => setMode("login")}
+              disabled={submitting}
+            >
+              Sign in
+            </Button>
+            <Button
+              type="button"
+              variant={mode === "signup" ? "default" : "outline"}
+              onClick={() => setMode("signup")}
+              disabled={submitting}
+            >
+              Sign up
+            </Button>
+          </div>
+
+          <form onSubmit={onSubmit} className="space-y-3">
+            <Input
+              type="email"
+              autoComplete="email"
+              placeholder="Email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+            <Input
+              type="password"
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={8}
+            />
+
+            <Button
+              type="submit"
+              className="w-full bg-gradient-primary hover:opacity-90"
+              disabled={submitting}
+            >
+              {submitting ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Please wait
+                </span>
+              ) : mode === "login" ? (
+                "Sign in"
+              ) : (
+                "Sign up"
+              )}
+            </Button>
+          </form>
+
+          <p className="text-xs text-muted-foreground mt-4">
+            Passwords must be at least 8 characters.
           </p>
         </div>
       </div>
