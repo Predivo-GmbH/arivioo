@@ -897,27 +897,28 @@ export default function ExtractionDiagnostics() {
                         <Button variant="ghost" size="sm" title="View diagnostics">
                           <Eye className="h-4 w-4" />
                         </Button>
-                        {search.has_activity_log && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="text-blue-500 hover:text-blue-600"
-                                onClick={(e) => {
-                                  e.stopPropagation();
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className={search.has_activity_log ? "text-blue-500 hover:text-blue-600" : "text-muted-foreground/50"}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (search.has_activity_log) {
                                   fetchDiagnostics(search.id);
-                                }}
-                                title="View Activity Log"
-                              >
-                                <FileText className="h-4 w-4" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <span>Activity Log Available</span>
-                            </TooltipContent>
-                          </Tooltip>
-                        )}
+                                }
+                              }}
+                              title={search.has_activity_log ? "View Activity Log" : "No Activity Log"}
+                              disabled={!search.has_activity_log}
+                            >
+                              <FileText className="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <span>{search.has_activity_log ? "Activity Log Available" : "No Activity Log"}</span>
+                          </TooltipContent>
+                        </Tooltip>
                       </div>
                     </TableCell>
                   </TableRow>
