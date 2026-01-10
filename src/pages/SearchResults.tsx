@@ -409,12 +409,22 @@ export default function SearchResults() {
         return;
       }
 
-      // If search is already completed, fetch enriched results
+      // If search is already completed, fetch results (never block UI on enrichment failures)
       if (searchRecord.status === "completed") {
-        const enrichedResults = await fetchEnrichedResults(searchId);
-        setResults(enrichedResults as unknown as SearchResult[]);
-        setSearchPhase("done");
-        setLoading(false);
+        try {
+          const enrichedResults = await fetchEnrichedResults(searchId);
+          setResults(enrichedResults as unknown as SearchResult[]);
+        } catch (e) {
+          console.error("Failed to fetch enriched results (initial load):", e);
+          toast({
+            title: "Showing partial results",
+            description: "We couldn't load all comparison details, but your search finished successfully.",
+          });
+          setResults([]);
+        } finally {
+          setSearchPhase("done");
+          setLoading(false);
+        }
         return;
       }
 
@@ -762,17 +772,26 @@ export default function SearchResults() {
                return;
              }
 
-             const enrichedResults = await fetchEnrichedResults(searchId);
+              try {
+                const enrichedResults = await fetchEnrichedResults(searchId);
+                setResults(enrichedResults as unknown as SearchResult[]);
+              } catch (e) {
+                console.error("Failed to fetch enriched results (stream ended):", e);
+                toast({
+                  title: "Showing partial results",
+                  description: "We couldn't load all comparison details, but your search finished successfully.",
+                });
+                setResults([]);
+              }
 
-             // Close any open modals since search is complete
-             setShowConfirmationModal(false);
-             setSubtotalInfo(null);
-             
-             setSearch(updatedSearch as SearchData);
-             setResults(enrichedResults as unknown as SearchResult[]);
-             actualDurationRef.current = Date.now() - startedAt;
-             setSearchPhase("done");
-             setLoading(false);
+              // Close any open modals since search is complete
+              setShowConfirmationModal(false);
+              setSubtotalInfo(null);
+
+              setSearch(updatedSearch as SearchData);
+              actualDurationRef.current = Date.now() - startedAt;
+              setSearchPhase("done");
+              setLoading(false);
            }
         } catch (error: any) {
           // Cancel/skip via AbortController
@@ -988,18 +1007,27 @@ export default function SearchResults() {
 
         // If search is done, update state
         if (["completed", "price_unavailable", "dates_required"].includes(data.status)) {
-          // Fetch final results
-          const enrichedResults = await fetchEnrichedResults(searchId);
+          try {
+            // Fetch final results
+            const enrichedResults = await fetchEnrichedResults(searchId);
+            setResults(enrichedResults as unknown as SearchResult[]);
+          } catch (e) {
+            console.error("Failed to fetch enriched results (heartbeat):", e);
+            toast({
+              title: "Showing partial results",
+              description: "We couldn't load all comparison details, but your search finished successfully.",
+            });
+            setResults([]);
+          }
 
           // CRITICAL: Update search state with latest data before transitioning
           // This ensures the UI sees the correct status and closes any modals
           setSearch(data as SearchData);
-          setResults(enrichedResults as unknown as SearchResult[]);
-          
+
           // Close any open modals since search is complete
           setShowConfirmationModal(false);
           setSubtotalInfo(null);
-          
+
           actualDurationRef.current = Date.now() - (searchStartTimeRef.current || Date.now());
           setSearchPhase("done");
           setLoading(false);
