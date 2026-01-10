@@ -506,20 +506,25 @@ export function PipelineProgress({
           {/* Activity feed */}
           {activityFeed.length > 0 && (
             <div className="mt-4 rounded-lg border border-border bg-card/60">
-              <ScrollArea className="h-24">
+              <ScrollArea className="max-h-48">
                 <div className="p-3 space-y-2">
                   {activityFeed
                     .slice()
                     .reverse()
-                    .map((item) => (
+                    .map((item, index) => (
                       <div 
                         key={item.id} 
-                        className="text-xs animate-in fade-in slide-in-from-top-2 duration-300"
+                        className="text-xs animate-in fade-in slide-in-from-top-2 duration-300 flex gap-2"
                       >
-                        <p className="text-foreground/90">{item.message}</p>
-                        {item.detail && (
-                          <p className="text-muted-foreground mt-0.5">{item.detail}</p>
-                        )}
+                        <span className="text-muted-foreground/50 font-mono w-5 flex-shrink-0 text-right">
+                          {activityFeed.length - index}.
+                        </span>
+                        <div className="flex-1">
+                          <p className="text-foreground/90">{item.message}</p>
+                          {item.detail && (
+                            <p className="text-muted-foreground mt-0.5">{item.detail}</p>
+                          )}
+                        </div>
                       </div>
                     ))}
                 </div>

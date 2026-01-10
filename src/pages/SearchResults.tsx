@@ -558,7 +558,7 @@ export default function SearchResults() {
                           detail: data.detail,
                           id: `activity-${activityIdCounterRef.current}`,
                         };
-                        setActivityFeed((prev) => [...prev, newItem].slice(-12));
+                        setActivityFeed((prev) => [...prev, newItem]);
                       }
                     } else if (eventType === "status_update") {
                       // Dedicated status update event with monotonic stage guard
@@ -1112,7 +1112,7 @@ export default function SearchResults() {
       detail: activity.detail,
       id: `activity-${activityIdCounterRef.current}`
     };
-    setActivityFeed((prev) => [...prev, newItem].slice(-8));
+    setActivityFeed((prev) => [...prev, newItem]);
   }, [loading, search?.status]);
 
   // Celebrate when results are shown
