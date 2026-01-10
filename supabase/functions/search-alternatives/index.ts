@@ -2458,49 +2458,51 @@ async function extractOcrVisualReference(
   }
 
   try {
-    // Updated prompt to handle BOTH rooms page and book/stays checkout page
-    const prompt = `You are analyzing a screenshot of an Airbnb page. This could be either:
-A) A ROOMS page with a booking card on the right
-B) A BOOK/STAYS checkout page with payment summary
+    // Enhanced prompt with explicit patterns and fallback logic for book/stays checkout pages
+    // CRITICAL FIX: The OCR must reliably extract "Pay $X now" or "Total (USD) $X" patterns
+    const prompt = `You are analyzing a screenshot of an Airbnb page. Identify the page type and extract prices accordingly.
 
-Extract ALL visible price information exactly as shown.
+PAGE TYPES:
+A) BOOK/STAYS CHECKOUT PAGE (URL contains "/book/stays/") - shows "Confirm and pay" title
+B) ROOMS PAGE - shows property info with booking card on right
 
-TASK: Read and extract these prices VERBATIM from the screenshot:
+CRITICAL EXTRACTION RULES FOR BOOK/STAYS CHECKOUT PAGES:
 
-1. BOOKING CARD / HEADLINE PRICE:
-   - Look for "$X for Y nights" or "$X × Y nights" format
-   - Extract the exact text, numeric amount, and nights
+1. The FINAL TOTAL is shown near the bottom of the payment summary. Look for:
+   - "Pay $X now" (most common - the X is the all-in total)
+   - "Total (USD) $X" or "Total USD $X"
+   - "Total $X" (near bottom of price breakdown)
+   - "Due today $X"
+   - "Amount due $X"
 
-2. CHECKOUT / PAYMENT SUMMARY (MOST IMPORTANT for book/stays pages):
-   - Look for these patterns which indicate the FINAL TOTAL:
-     * "Pay $X now" or "Pay now $X"
-     * "Total (USD) $X" or "Total USD $X"  
-     * "Due today $X"
-     * "Amount due $X"
-     * "Trip total $X"
-     * "Total $X" (at bottom of price summary)
-   - This is the ALL-IN price including taxes and fees
-   - Also extract any visible breakdown items
+2. IMPORTANT: The checkout page shows BOTH:
+   - A subtotal like "$1,482 for 3 nights" (this is NOT the final total)
+   - A final total like "Pay $1,658.94 now" (this IS the final total with taxes)
+   
+3. ALWAYS prefer the "Pay now" or "Total" amount over the "for X nights" subtotal
 
-3. For book/stays checkout pages, the "Pay $X now" or "Total (USD)" line IS the breakdown total
+FOR ROOMS PAGES:
+- Look for "$X for Y nights" in the booking card on the right
+- This is a subtotal (not including taxes), record it as bookingCardAmount
 
-CRITICAL RULES:
-- Return EXACTLY what you see - do not calculate
-- Include currency symbols as shown  
-- For book/stays pages: "Pay now" or "Total (USD)" = breakdownTotalAmountValue
-- The largest "total" or "pay" amount is usually the correct final price
+EXTRACTION TASK:
+1. bookingCardAmount: The "$X for Y nights" subtotal (without taxes)
+2. breakdownTotalAmount: The FINAL "Pay now" or "Total (USD)" amount (with taxes)
 
-Return ONLY valid JSON:
+Return ONLY valid JSON with no markdown formatting:
 {
-  "bookingCardAmountRaw": "<exact text like '$2,214' or null>",
-  "bookingCardAmountValue": <number or null>,
-  "bookingCardNights": <number or null>,
-  "bookingCardSnippet": "<full text like '$2,214 for 4 nights' or null>",
-  "breakdownTotalAmountRaw": "<exact text like 'Pay $2,213.34 now' or 'Total (USD) $2,213.34' or null>",
-  "breakdownTotalAmountValue": <number or null - THIS IS THE KEY FIELD FOR FINAL PRICE>,
-  "breakdownTotalSnippet": "<the full total line text or null>",
-  "breakdownTaxesAmountValue": <number or null if taxes line visible>
-}`;
+  "bookingCardAmountRaw": "<exact subtotal text like '$1,482' or null>",
+  "bookingCardAmountValue": <subtotal number or null>,
+  "bookingCardNights": <nights number or null>,
+  "bookingCardSnippet": "<full text like '$1,482 for 3 nights' or null>",
+  "breakdownTotalAmountRaw": "<exact final total text like '$1,658.94' or 'Pay $1,658.94 now' or null>",
+  "breakdownTotalAmountValue": <final total number WITH taxes/fees - THIS IS CRITICAL>,
+  "breakdownTotalSnippet": "<the full 'Pay X now' or 'Total USD X' line or null>",
+  "breakdownTaxesAmountValue": <taxes amount if visible separately, or null>
+}
+
+IMPORTANT: If you see "Pay $X now" anywhere, that X value MUST go in breakdownTotalAmountValue.
+If you see "Total (USD) $X" or "Total $X" near payment info, that X MUST go in breakdownTotalAmountValue.`;
 
     const imageUrl = `data:image/png;base64,${screenshotBase64}`;
 
@@ -5763,6 +5765,15 @@ async function runSearchWithStreaming(
     }
   }
 
+  // ============================================================================
+  // CRITICAL FIX: Cached matches must NOT skip discovery entirely
+  // Even when cached matches exist, we MUST attempt at least one discovery pass
+  // to find new platforms that may have been added since the last search.
+  // The skip can only be claimed AFTER at least one discovery attempt.
+  // ============================================================================
+  let discoveryAttempted = false;
+  const cachedMatchCount = bestMatchPerPlatform.size;
+  
   for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
     // Check if we should abort due to API errors
     if (shouldAbortDueToApiErrors(apiErrorTracker)) {
@@ -5780,13 +5791,20 @@ async function runSearchWithStreaming(
       break;
     }
 
-    if (await claimSkipNow()) {
-      console.log("SKIP requested - skipping remaining visual search");
-      sendProgress(controller, "Skipped current step", "Skipping remaining image search and continuing", { skipped: true });
+    // CRITICAL: Only allow skip AFTER at least one discovery attempt
+    // This ensures cached matches never cause us to skip discovery entirely
+    if (discoveryAttempted && await claimSkipNow()) {
+      console.log("SKIP requested - skipping remaining visual search (after at least one attempt)");
+      sendProgress(controller, "Skipped remaining discovery", "Continuing with discovered and cached platforms", { 
+        skipped: true,
+        discoveryAttempted: true,
+        cachedMatchCount 
+      });
       break;
     }
 
     await heartbeat();
+    discoveryAttempted = true; // Mark that we've started at least one discovery attempt
     const imageUrl = imageUrls[idx];
     sendProgress(controller, `Searching image ${idx + 1} of ${imageUrls.length}`, "Running AI reverse image search on Booking.com, Vrbo, TripAdvisor...", { imageIndex: idx + 1, totalImages: imageUrls.length });
     await supabase.from("searches").update({ status: `searching_platforms_lens_${idx + 1}_of_${imageUrls.length}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
@@ -5887,8 +5905,25 @@ async function runSearchWithStreaming(
   // After all verification, collect best matches into alternatives array
   alternatives.push(...bestMatchPerPlatform.values());
 
+  // ============================================================================
+  // DISCOVERY MERGE LOGGING: Show what was discovered vs cached
+  // ============================================================================
   const visualCount = bestMatchPerPlatform.size;
-  sendProgress(controller, `Found ${visualCount} verified platforms`, "Each platform verified once - now collecting prices");
+  const newlyDiscovered = visualCount - cachedMatchCount;
+  
+  if (discoveryAttempted) {
+    console.log(`[Discovery Complete] Total: ${visualCount}, Cached: ${cachedMatchCount}, Newly discovered: ${newlyDiscovered}`);
+    if (newlyDiscovered > 0) {
+      sendProgress(controller, `Found ${visualCount} platforms`, `${newlyDiscovered} new + ${cachedMatchCount} cached - now collecting prices`);
+    } else if (cachedMatchCount > 0) {
+      sendProgress(controller, `Found ${visualCount} platforms`, `${cachedMatchCount} cached, no new discoveries - now collecting prices`);
+    } else {
+      sendProgress(controller, `Found ${visualCount} verified platforms`, "Each platform verified once - now collecting prices");
+    }
+  } else {
+    console.log(`[Discovery] Skipped entirely (should not happen) - using ${cachedMatchCount} cached matches only`);
+    sendProgress(controller, `Found ${visualCount} verified platforms`, "Each platform verified once - now collecting prices");
+  }
 
   // If we got no visual matches, run a targeted text search across likely platforms
   if (visualCount === 0) {
