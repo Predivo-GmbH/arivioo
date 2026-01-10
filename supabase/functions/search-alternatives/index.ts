@@ -5875,14 +5875,21 @@ async function runSearchWithStreaming(
       break;
     }
 
-    // CRITICAL: Only allow skip AFTER at least one discovery attempt
-    // This ensures cached matches never cause us to skip discovery entirely
+    // ============================================================================
+    // DISCOVERY SKIP POLICY: User-requested skip allowed only for explicit user action
+    // Cached matches must NEVER influence whether discovery continues.
+    // Skip is ONLY allowed if:
+    // 1. User explicitly clicked "skip" button, AND
+    // 2. At least one full image discovery pass completed
+    // ============================================================================
     if (discoveryAttempted && await claimSkipNow()) {
-      console.log("SKIP requested - skipping remaining visual search (after at least one attempt)");
-      sendProgress(controller, "Skipped remaining discovery", "Continuing with discovered and cached platforms", { 
+      console.log(`[DiscoverySkip] User-requested skip after image ${idx}. cachedMatchCount=${cachedMatchCount} (not used in decision)`);
+      sendProgress(controller, "User skipped remaining discovery", `Completed ${idx} of ${imageUrls.length} images`, { 
         skipped: true,
-        discoveryAttempted: true,
-        cachedMatchCount 
+        imagesCompleted: idx,
+        totalImages: imageUrls.length,
+        // Log cached count for debugging but it does NOT affect the skip decision
+        cachedMatchCountForDebug: cachedMatchCount 
       });
       break;
     }
@@ -5920,23 +5927,21 @@ async function runSearchWithStreaming(
 
     let matchesThisImage = 0;
     for (const match of visualMatches) {
-      // CRITICAL FIX: Skip inside match verification loop should NOT be triggered just by cached matches
-      // Only allow skip if we have BOTH cached AND newly discovered matches, or if user explicitly requested
-      const hasNewDiscoveredMatches = bestMatchPerPlatform.size > cachedMatchCount;
-      const canSkipVerification = hasNewDiscoveredMatches || cachedMatchCount === 0;
-      
-      if (canSkipVerification && await claimSkipNow()) {
-        console.log("SKIP requested - stopping match verification (has new matches or no cached)");
-        sendProgress(controller, "Skipped verification step", "Continuing with discovered platforms", { 
-          skipped: true,
-          hasNewMatches: hasNewDiscoveredMatches,
-          totalMatches: bestMatchPerPlatform.size
-        });
-        matchesThisImage = 999;
+      // ============================================================================
+      // CRITICAL: No cache-influenced skip logic here
+      // Match verification must complete for all candidates found in the CURRENT run.
+      // Cached matches are supplemental fallback only and must never affect whether
+      // we continue verifying current-run discoveries.
+      // The only allowed early stops are:
+      // 1. aiCount >= MAX_AI (deterministic AI call cap)
+      // 2. matchesThisImage >= 8 (deterministic per-image cap)
+      // 3. Time exceeded (deterministic time cap)
+      // ============================================================================
+
+      if (aiCount >= MAX_AI || matchesThisImage >= 8) {
+        console.log(`[VerificationCap] Reached cap: aiCount=${aiCount}/${MAX_AI}, matchesThisImage=${matchesThisImage}/8`);
         break;
       }
-
-      if (aiCount >= MAX_AI || matchesThisImage >= 8) break;
       if (Date.now() - searchStartTime > MAX_TIME) break;
 
       const matchUrl = match.link;

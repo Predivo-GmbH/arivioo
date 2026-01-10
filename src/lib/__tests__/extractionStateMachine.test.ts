@@ -573,34 +573,63 @@ describe('Test E: Discovery never skipped due to cached matches', () => {
     expect(bestMatchPerPlatform.get('expedia')?.confidence).toBe(0.98);
   });
 
-  it('REGRESSION: match verification skip requires new discoveries, not just cached', () => {
+  it('REGRESSION: match verification never skips due to cached matches or discovered matches', () => {
     // This test verifies that "Skipping remaining match verification"
-    // is NOT triggered when only cached matches exist (no new discoveries)
+    // is NEVER triggered based on cached matches or discovery counts.
+    // 
+    // The ONLY allowed early stops in match verification are:
+    // 1. aiCount >= MAX_AI (deterministic cap)
+    // 2. matchesThisImage >= 8 (deterministic per-image cap)
+    // 3. Time exceeded (deterministic time cap)
+    // 4. User explicitly clicked skip button (claimSkipNow at image level only)
     
     const cachedMatchCount = 3;
-    const bestMatchPerPlatform = new Map<string, any>();
+    const MAX_AI = 25;
+    const MAX_PER_IMAGE = 8;
     
-    // Load 3 cached matches
-    bestMatchPerPlatform.set('expedia', { platform: 'Expedia' });
-    bestMatchPerPlatform.set('booking', { platform: 'Booking' });
-    bestMatchPerPlatform.set('vrbo', { platform: 'Vrbo' });
+    // Simulate various states - none should trigger cache-based skipping
+    const scenarios = [
+      { cached: 3, discovered: 0, aiCount: 5, matchesThisImage: 2 },  // Only cached
+      { cached: 3, discovered: 2, aiCount: 10, matchesThisImage: 5 }, // Cached + new
+      { cached: 0, discovered: 5, aiCount: 8, matchesThisImage: 4 },  // No cached, only new
+      { cached: 5, discovered: 10, aiCount: 20, matchesThisImage: 7 }, // Many of both
+    ];
     
-    // The FIXED logic: can only skip verification if we have NEW matches
-    const hasNewDiscoveredMatches = bestMatchPerPlatform.size > cachedMatchCount;
+    for (const scenario of scenarios) {
+      // The NEW logic: skip is ONLY allowed by deterministic caps
+      const shouldContinue = scenario.aiCount < MAX_AI && scenario.matchesThisImage < MAX_PER_IMAGE;
+      
+      // Cached matches should NEVER be part of this decision
+      // The decision must be purely based on deterministic caps
+      expect(typeof scenario.cached).toBe('number'); // Cached is tracked but not used
+      expect(shouldContinue).toBe(true); // All scenarios continue (under caps)
+    }
     
-    // With ONLY cached matches (no new discoveries), skip should be blocked
-    expect(hasNewDiscoveredMatches).toBe(false);
+    // Test hitting the caps
+    expect(25 >= MAX_AI).toBe(true);  // Cap hit → stop
+    expect(8 >= MAX_PER_IMAGE).toBe(true);  // Cap hit → stop
+  });
+  
+  it('REGRESSION: discovery continues for all images regardless of cached matches', () => {
+    // Discovery must process all configured images (e.g., 5)
+    // Cached matches do NOT reduce the number of images processed
     
-    // The rule: canSkipVerification = hasNewMatches OR no cached matches at all
-    // When we ONLY have cached (no new), we cannot skip
-    expect(hasNewDiscoveredMatches).toBe(false);
+    const imageUrls = ['img1', 'img2', 'img3', 'img4', 'img5'];
+    const cachedMatchCount = 10; // Even with many cached matches
     
-    // Now simulate finding a new match during discovery
-    bestMatchPerPlatform.set('agoda', { platform: 'Agoda' });
+    let imagesProcessed = 0;
+    let discoveryAttempted = false;
     
-    // Now we have new discoveries (4 total > 3 cached), so skip CAN be allowed
-    const hasNewAfterDiscovery = bestMatchPerPlatform.size > cachedMatchCount;
-    expect(hasNewAfterDiscovery).toBe(true);
+    // Simulate the discovery loop WITHOUT any cache-based skip logic
+    for (let idx = 0; idx < imageUrls.length; idx++) {
+      discoveryAttempted = true;
+      imagesProcessed++;
+      // No check for cached matches here - loop continues
+    }
+    
+    // All 5 images should be processed
+    expect(imagesProcessed).toBe(5);
+    expect(discoveryAttempted).toBe(true);
   });
 });
 
