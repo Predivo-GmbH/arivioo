@@ -746,16 +746,23 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
 
            // CRITICAL FIX: Extract "Pay $X now" pattern directly from visible text
            // This is more reliable than OCR for the total
+           // NOTE: Regex patterns use double-escaped backslashes (\\s, \\d, etc.) because
+           // this code is a string that gets sent to Browserless and parsed - single backslashes
+           // would be stripped during JSON serialization, causing "Invalid regex" errors.
            const payNowExtraction = await page.evaluate(() => {
              const text = document.body?.innerText || '';
              
              // Look for "Pay $X now" pattern - this is the all-in total
-             const payNowMatch = text.match(/Pay\s*\$\s*([\d,]+(?:\.\d{2})?)\s*now/i);
-             const totalUsdMatch = text.match(/Total\s*\(?\s*USD\s*\)?\s*\$\s*([\d,]+(?:\.\d{2})?)/i);
-             const dueTodayMatch = text.match(/Due\s+today\s*\$\s*([\d,]+(?:\.\d{2})?)/i);
+             // Using string-based regex construction to ensure backslashes survive serialization
+             const payNowRe = new RegExp('Pay\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s*now', 'i');
+             const totalUsdRe = new RegExp('Total\\s*\\(?\\s*USD\\s*\\)?\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)', 'i');
+             const dueTodayRe = new RegExp('Due\\s+today\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)', 'i');
+             const subtotalRe = new RegExp('\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s+for\\s+(\\d+)\\s+nights?', 'i');
              
-             // Look for "$X for N nights" pattern - this is the subtotal
-             const subtotalMatch = text.match(/\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s+nights?/i);
+             const payNowMatch = text.match(payNowRe);
+             const totalUsdMatch = text.match(totalUsdRe);
+             const dueTodayMatch = text.match(dueTodayRe);
+             const subtotalMatch = text.match(subtotalRe);
              
              let payNowAmount = null;
              let payNowSnippet = null;
@@ -5955,6 +5962,15 @@ async function runSearchWithStreaming(
         }
       }
     }
+    
+    // Log per-image verification completion for clarity
+    console.log(`[Image ${idx + 1}/${imageUrls.length}] Finished verification: ${matchesThisImage} candidates checked, ${bestMatchPerPlatform.size} platforms discovered so far`);
+    sendProgress(controller, `Finished verification for image ${idx + 1}`, `Checked ${matchesThisImage} candidates this image`, { 
+      imageIndex: idx + 1, 
+      totalImages: imageUrls.length,
+      candidatesCheckedThisImage: matchesThisImage,
+      totalPlatformsDiscovered: bestMatchPerPlatform.size,
+    });
   }
 
   // After all verification, collect best matches into alternatives array

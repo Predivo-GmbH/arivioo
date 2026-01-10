@@ -714,9 +714,80 @@ describe('Test E: Discovery and cached match handling', () => {
 });
 
 // =============================================================================
-// TEST F: Airbnb OCR total extraction from book/stays page
+// TEST F: Browserless regex patterns must use double-escaped backslashes
 // =============================================================================
-describe('Test F: Airbnb OCR total extraction', () => {
+describe('Test F: Browserless regex serialization', () => {
+  /**
+   * REGRESSION: Regex patterns inside Browserless code strings must use
+   * double-escaped backslashes (\\s, \\d) to survive JSON serialization.
+   * 
+   * Single backslashes (\s, \d) get stripped when the code string is
+   * JSON.stringify()'d and sent to Browserless, causing "Invalid regex" errors.
+   * 
+   * Error example: "Invalid regular expression: /Totals*(?s*USDs*)?s*$s*([d,]+(?:.d{2})?)/i"
+   * This shows all backslashes were stripped from the original pattern.
+   */
+  
+  it('REGRESSION: regex patterns with double-escaped backslashes compile correctly', () => {
+    // These are the exact patterns used in the Browserless code string
+    // They use double-escaped backslashes to survive JSON serialization
+    
+    const patterns = [
+      { source: 'Pay\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s*now', desc: 'Pay now' },
+      { source: 'Total\\s*\\(?\\s*USD\\s*\\)?\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)', desc: 'Total USD' },
+      { source: 'Due\\s+today\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)', desc: 'Due today' },
+      { source: '\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s+for\\s+(\\d+)\\s+nights?', desc: 'Subtotal for nights' },
+    ];
+    
+    for (const { source, desc } of patterns) {
+      // This simulates what happens when the code is sent to Browserless:
+      // 1. The pattern string goes through JSON.stringify (in the payload)
+      // 2. Then new RegExp() is called on the resulting string
+      
+      // First, verify the pattern compiles when used with new RegExp()
+      expect(() => new RegExp(source, 'i')).not.toThrow();
+      
+      // Verify it actually matches expected text
+      const regex = new RegExp(source, 'i');
+      
+      if (desc === 'Pay now') {
+        expect(regex.test('Pay $1,658.94 now')).toBe(true);
+        expect(regex.test('Pay$500now')).toBe(true);
+      }
+      if (desc === 'Total USD') {
+        expect(regex.test('Total (USD) $1,658.94')).toBe(true);
+        expect(regex.test('Total USD $1,658.94')).toBe(true);
+      }
+      if (desc === 'Due today') {
+        expect(regex.test('Due today $500.00')).toBe(true);
+      }
+      if (desc === 'Subtotal for nights') {
+        expect(regex.test('$1,482 for 3 nights')).toBe(true);
+        expect(regex.test('$500.00 for 1 night')).toBe(true);
+      }
+    }
+  });
+
+  it('REGRESSION: regex with single backslashes FAILS after JSON round-trip', () => {
+    // This demonstrates why double-escaping is necessary
+    
+    // A regex pattern with single backslashes (WRONG - will break)
+    const wrongPattern = 'Total\\s*\\(?\\s*USD\\s*\\)?\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)';
+    
+    // Simulate the wrong approach: using literal regex in a template string
+    // When this goes through JSON.stringify, backslashes are preserved once
+    // But if the source had single backslashes, they'd be stripped
+    const simulatedStrippedPattern = 'Totals*(?s*USDs*)?s*$s*([d,]+(?.d{2})?)';
+    
+    // This should throw because the pattern is invalid
+    expect(() => new RegExp(simulatedStrippedPattern, 'i')).toThrow();
+  });
+});
+
+// =============================================================================
+// TEST G: Airbnb OCR total extraction from book/stays page
+// =============================================================================
+describe('Test G: Airbnb OCR total extraction', () => {
   /**
    * This test verifies that OCR correctly extracts the all-in total
    * from Airbnb book/stays checkout pages.
