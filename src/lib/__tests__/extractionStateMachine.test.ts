@@ -83,6 +83,68 @@ describe('Test A: Airbnb subtotal never finalized', () => {
     expect(mixedResult.price_status).toBe('verified');
     expect(mixedResult.structural_total_verified).toBe(true);
   });
+
+  it('REGRESSION: book/stays page subtotal must NOT be promoted to total', () => {
+    // This test prevents regression of the bug where "$X for N nights" on book/stays
+    // page was incorrectly treated as the final total including taxes.
+    // Real example: $1,482 for 3 nights (subtotal) vs $1,658.94 (actual total with taxes)
+    
+    // Simulate what happens when OCR finds subtotal but no breakdown total
+    const bookStaysSubtotalOnly = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: false, // Key: subtotal does NOT include taxes
+      confidence_score: 0.80,
+      extracted_price: 1482.00, // The subtotal
+      extraction_metadata: {
+        breakdown_found: false, // No breakdown total found
+        total_label_found: false, // No "Total (USD)" label found
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: false,
+        // Simulate the book/stays scenario
+        booking_card_amount: 1482.00,
+        booking_card_nights: 3,
+        ocr_accepted_via: null, // NOT accepted
+        subtotal_for_nights_pattern_detected: true,
+      },
+    });
+
+    // MUST be unverified - cannot promote subtotal to total
+    expect(bookStaysSubtotalOnly.price_status).toBe('unverified');
+    expect(bookStaysSubtotalOnly.eligible_for_comparison).toBe(false);
+    expect(bookStaysSubtotalOnly.verification_failures).toContain('taxes_fees_not_included');
+    expect(bookStaysSubtotalOnly.verification_failures).toContain('no_structural_total_proof');
+    
+    // The system should require user confirmation, not silently accept subtotal
+    expect(bookStaysSubtotalOnly.structural_total_verified).toBe(false);
+  });
+
+  it('REGRESSION: only breakdown total from book/stays page should be verified', () => {
+    // When OCR successfully extracts "Total (USD) $1,658.94" from book/stays page
+    const bookStaysWithBreakdownTotal = verifyPrice({
+      extraction_status: 'success',
+      dates_validated: true,
+      includes_taxes_fees: true, // Key: breakdown total INCLUDES taxes
+      confidence_score: 0.95,
+      extracted_price: 1658.94, // The actual total with taxes
+      extraction_metadata: {
+        breakdown_found: true,
+        total_label_found: true, // "Total (USD)" label found
+        rendered_dates_match: true,
+        extracted_from_breakdown_total: true,
+        booking_card_amount: 1482.00, // Subtotal also visible
+        booking_card_nights: 3,
+        breakdown_total_amount: 1658.94, // The correct total
+        ocr_accepted_via: 'breakdown_match',
+      },
+    });
+
+    // This SHOULD be verified - we have structural proof of the actual total
+    expect(bookStaysWithBreakdownTotal.price_status).toBe('verified');
+    expect(bookStaysWithBreakdownTotal.eligible_for_comparison).toBe(true);
+    expect(bookStaysWithBreakdownTotal.structural_total_verified).toBe(true);
+    expect(bookStaysWithBreakdownTotal.verification_failures).toHaveLength(0);
+  });
 });
 
 // =============================================================================
