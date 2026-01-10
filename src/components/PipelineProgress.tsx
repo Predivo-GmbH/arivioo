@@ -506,7 +506,7 @@ export function PipelineProgress({
           {/* Activity feed */}
           {activityFeed.length > 0 && (
             <div className="mt-4 rounded-lg border border-border bg-card/60">
-              <ScrollArea className="max-h-48">
+              <ScrollArea className="max-h-[50vh]">
                 <div className="p-3 space-y-2">
                   {activityFeed
                     .slice()
