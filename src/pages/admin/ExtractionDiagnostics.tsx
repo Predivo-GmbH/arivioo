@@ -18,6 +18,7 @@ import {
   Calendar,
   Copy,
   Check,
+  FileText,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -104,6 +105,7 @@ interface SearchSummary {
     failed: number;
     pending: number;
   };
+  has_activity_log?: boolean;
 }
 
 interface SystemicIssues {
@@ -895,6 +897,27 @@ export default function ExtractionDiagnostics() {
                         <Button variant="ghost" size="sm" title="View diagnostics">
                           <Eye className="h-4 w-4" />
                         </Button>
+                        {search.has_activity_log && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-blue-500 hover:text-blue-600"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  fetchDiagnostics(search.id);
+                                }}
+                                title="View Activity Log"
+                              >
+                                <FileText className="h-4 w-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              <span>Activity Log Available</span>
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
