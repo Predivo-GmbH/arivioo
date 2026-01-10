@@ -283,6 +283,18 @@ export default function SearchResults() {
   const [priceExtractionTotal, setPriceExtractionTotal] = useState(0);
   const [priceExtractionCompleted, setPriceExtractionCompleted] = useState(0);
   
+  const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+    let timeoutId: number | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(() => reject(new Error(`timeout:${label}`)), ms);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timeoutId) window.clearTimeout(timeoutId);
+    }
+  };
+
   // Monotonic stage tracking - prevents UI from jumping backwards
   const [highestStageIndex, setHighestStageIndex] = useState(-1);
   
@@ -412,7 +424,7 @@ export default function SearchResults() {
       // If search is already completed, fetch results (never block UI on enrichment failures)
       if (searchRecord.status === "completed") {
         try {
-          const enrichedResults = await fetchEnrichedResults(searchId);
+          const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:initial');
           setResults(enrichedResults as unknown as SearchResult[]);
         } catch (e) {
           console.error("Failed to fetch enriched results (initial load):", e);
@@ -689,7 +701,7 @@ export default function SearchResults() {
                         .eq("id", searchId)
                         .single();
 
-                      const enrichedResults = await fetchEnrichedResults(searchId);
+                      const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:complete');
 
                       setSearch(updatedSearch as SearchData);
                       setResults(enrichedResults as unknown as SearchResult[]);
@@ -768,17 +780,17 @@ export default function SearchResults() {
                return;
              }
 
-              try {
-                const enrichedResults = await fetchEnrichedResults(searchId);
-                setResults(enrichedResults as unknown as SearchResult[]);
-              } catch (e) {
-                console.error("Failed to fetch enriched results (stream ended):", e);
-                toast({
-                  title: "Showing partial results",
-                  description: "We couldn't load all comparison details, but your search finished successfully.",
-                });
-                setResults([]);
-              }
+               try {
+                 const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:streamEnded');
+                 setResults(enrichedResults as unknown as SearchResult[]);
+               } catch (e) {
+                 console.error("Failed to fetch enriched results (stream ended):", e);
+                 toast({
+                   title: "Showing partial results",
+                   description: "We couldn't load all comparison details, but your search finished successfully.",
+                 });
+                 setResults([]);
+               }
 
               // Close any open modals since search is complete
               setShowConfirmationModal(false);
@@ -1004,8 +1016,8 @@ export default function SearchResults() {
         // If search is done, update state
         if (["completed", "price_unavailable", "dates_required"].includes(data.status)) {
           try {
-            // Fetch final results
-            const enrichedResults = await fetchEnrichedResults(searchId);
+            // Fetch final results (bounded so UI never hangs on "Finalizing")
+            const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:heartbeat');
             setResults(enrichedResults as unknown as SearchResult[]);
           } catch (e) {
             console.error("Failed to fetch enriched results (heartbeat):", e);
@@ -1055,7 +1067,7 @@ export default function SearchResults() {
         heartbeatIntervalRef.current = null;
       }
     };
-  }, [loading, searchPhase, searchId]);
+  }, [loading, searchPhase, searchId, fetchEnrichedResults, navigate, toast]);
 
   // Stream connection indicator (UI only)
   useEffect(() => {
