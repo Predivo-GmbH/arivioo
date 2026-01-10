@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Check, Sparkles, Camera, Globe, Calendar, DollarSign, CheckCircle, Clock, AlertCircle } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -77,6 +77,9 @@ export function PipelineProgress({
   const [elapsedMs, setElapsedMs] = useState(0);
   const { timings, getTimingForStage } = useStageTimings({ refreshIntervalMs: 60000 });
   
+  // Ref to auto-scroll activity feed to top (newest first)
+  const activityScrollRef = useRef<HTMLDivElement | null>(null);
+  
   // Internal monotonic stage tracking
   const [highestStageIndex, setHighestStageIndex] = useState(-1);
   const prevIsCompleteRef = React.useRef(isComplete);
@@ -91,6 +94,13 @@ export function PipelineProgress({
     
     return () => clearInterval(interval);
   }, [startTime, isComplete]);
+
+  // Auto-scroll activity feed to top when new items arrive
+  useEffect(() => {
+    if (activityScrollRef.current) {
+      activityScrollRef.current.scrollTop = 0;
+    }
+  }, [activityFeed.length]);
   
   // Reset highest stage index when a new search starts (isComplete goes from true to false)
   useEffect(() => {
@@ -505,30 +515,31 @@ export function PipelineProgress({
 
           {/* Activity feed */}
           {activityFeed.length > 0 && (
-            <div className="mt-4 rounded-lg border border-border bg-card/60">
-              <ScrollArea className="h-24">
-                <div className="p-3 space-y-2">
-                  {activityFeed
-                    .slice()
-                    .reverse()
-                    .map((item, index) => (
-                      <div 
-                        key={item.id} 
-                        className="text-xs animate-in fade-in slide-in-from-top-2 duration-300 flex gap-2"
-                      >
-                        <span className="text-muted-foreground/50 font-mono w-5 flex-shrink-0 text-right">
-                          {activityFeed.length - index}.
-                        </span>
-                        <div className="flex-1">
-                          <p className="text-foreground/90">{item.message}</p>
-                          {item.detail && (
-                            <p className="text-muted-foreground mt-0.5">{item.detail}</p>
-                          )}
-                        </div>
+            <div 
+              ref={activityScrollRef}
+              className="mt-4 rounded-lg border border-border bg-card/60 h-24 overflow-y-auto"
+            >
+              <div className="p-3 space-y-2">
+                {activityFeed
+                  .slice()
+                  .reverse()
+                  .map((item, index) => (
+                    <div 
+                      key={item.id} 
+                      className="text-xs animate-in fade-in slide-in-from-top-2 duration-300 flex gap-2"
+                    >
+                      <span className="text-muted-foreground/50 font-mono w-5 flex-shrink-0 text-right">
+                        {activityFeed.length - index}.
+                      </span>
+                      <div className="flex-1">
+                        <p className="text-foreground/90">{item.message}</p>
+                        {item.detail && (
+                          <p className="text-muted-foreground mt-0.5">{item.detail}</p>
+                        )}
                       </div>
-                    ))}
-                </div>
-              </ScrollArea>
+                    </div>
+                  ))}
+              </div>
             </div>
           )}
         </div>
