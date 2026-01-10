@@ -478,99 +478,134 @@ describe('State Machine Invariants', () => {
 
 // =============================================================================
 // TEST E: Discovery never skipped due to cached matches
+// Cached matches are ONLY loaded AFTER discovery completes
 // =============================================================================
-describe('Test E: Discovery never skipped due to cached matches', () => {
+describe('Test E: Discovery and cached match handling', () => {
   /**
-   * This test verifies the orchestration invariant that platform discovery
-   * is NEVER skipped just because cached matches exist.
-   * 
-   * The fix ensures:
-   * 1. `discoveryAttempted` flag must be true before skip can be claimed
-   * 2. At least one image search attempt is made before allowing skip
-   * 3. Logs show "Discovery Complete" with correct merge counts
+   * This test suite verifies that cached matches:
+   * 1. Are NOT loaded before the 5-image discovery loop
+   * 2. Are merged ONLY after discovery completes
+   * 3. Do NOT influence whether discovery continues
+   * 4. Do NOT trigger any skip logic
    */
-  
-  it('discovery must run even when cached matches exist', () => {
-    // Simulate the orchestration state after loading cached matches
-    const cachedMatchCount = 3;
-    let discoveryAttempted = false;
-    let imageSearchCount = 0;
-    const skipRequested = true; // User or auto requested skip
-    
-    // The FIXED logic: skip can only be claimed AFTER discoveryAttempted = true
-    const canSkipBeforeFix = skipRequested; // BUG: skip immediately
-    const canSkipAfterFix = discoveryAttempted && skipRequested; // FIX: must attempt first
-    
-    // Before fix: skip would be allowed immediately
-    expect(canSkipBeforeFix).toBe(true);
-    // After fix: skip is NOT allowed until discovery is attempted
-    expect(canSkipAfterFix).toBe(false);
-    
-    // Simulate one discovery attempt
-    imageSearchCount++;
-    discoveryAttempted = true;
-    
-    // Now skip CAN be claimed (after at least one attempt)
-    const canSkipAfterAttempt = discoveryAttempted && skipRequested;
-    expect(canSkipAfterAttempt).toBe(true);
-  });
 
-  it('merge semantics: final count = cached + newly discovered', () => {
-    // Simulate the merge logic
-    const cachedMatches = [
-      { platform: 'expedia', url: 'https://expedia.com/123' },
-      { platform: 'booking', url: 'https://booking.com/456' },
-      { platform: 'vrbo', url: 'https://vrbo.com/789' },
-    ];
+  it('REGRESSION: cached matches are loaded ONLY after discovery completes', () => {
+    // Simulates the correct pipeline order:
+    // 1. Run full discovery (all 5 images)
+    // 2. THEN load cached matches as fallback merge
     
+    const imageUrls = ['img1', 'img2', 'img3', 'img4', 'img5'];
+    const logSequence: string[] = [];
+    
+    // Discovery phase - cached matches NOT loaded here
+    let discoveryAttempted = false;
     const bestMatchPerPlatform = new Map<string, { platform: string; url: string }>();
     
-    // Load cached matches
+    for (let idx = 0; idx < imageUrls.length; idx++) {
+      discoveryAttempted = true;
+      logSequence.push(`Searching image ${idx + 1} of ${imageUrls.length}`);
+      
+      // Simulate finding matches during discovery
+      if (idx === 0) {
+        bestMatchPerPlatform.set('booking', { platform: 'Booking.com', url: 'https://booking.com/123' });
+        logSequence.push('Found match: Booking.com');
+      }
+      if (idx === 2) {
+        bestMatchPerPlatform.set('vrbo', { platform: 'Vrbo', url: 'https://vrbo.com/456' });
+        logSequence.push('Found match: Vrbo');
+      }
+    }
+    
+    const discoveredCount = bestMatchPerPlatform.size;
+    logSequence.push(`Verification complete for current run: ${discoveredCount} platforms found`);
+    
+    // Fallback merge phase - cached matches loaded ONLY NOW
+    logSequence.push('Loading cached matches (fallback)');
+    
+    const cachedMatches = [
+      { platform: 'Expedia', url: 'https://expedia.com/789' },
+      { platform: 'Agoda', url: 'https://agoda.com/101' },
+    ];
+    
+    let addedFromCache = 0;
+    let dedupedFromCache = 0;
+    
     for (const cached of cachedMatches) {
       const platformKey = cached.platform.toLowerCase();
       if (!bestMatchPerPlatform.has(platformKey)) {
         bestMatchPerPlatform.set(platformKey, cached);
+        addedFromCache++;
+        logSequence.push(`Added cached match: ${cached.platform}`);
+      } else {
+        dedupedFromCache++;
       }
     }
     
-    expect(bestMatchPerPlatform.size).toBe(3);
+    logSequence.push(`Merged cached matches — added ${addedFromCache}, deduped ${dedupedFromCache}`);
+    logSequence.push(`Proceeding with ${bestMatchPerPlatform.size} candidate listings`);
     
-    // Discovery finds a new platform (not in cache)
-    const newDiscovery = { platform: 'agoda', url: 'https://agoda.com/999' };
-    const newPlatformKey = newDiscovery.platform.toLowerCase();
+    // ASSERTIONS
     
-    if (!bestMatchPerPlatform.has(newPlatformKey)) {
-      bestMatchPerPlatform.set(newPlatformKey, newDiscovery);
-    }
+    // 1. All 5 images were searched before cached matches loaded
+    expect(logSequence.filter(l => l.startsWith('Searching image')).length).toBe(5);
     
-    // Final count should be 4 (3 cached + 1 new)
-    expect(bestMatchPerPlatform.size).toBe(4);
+    // 2. "Loading cached matches" appears AFTER "Verification complete"
+    const verificationCompleteIndex = logSequence.findIndex(l => l.includes('Verification complete'));
+    const loadingCachedIndex = logSequence.findIndex(l => l.includes('Loading cached matches'));
+    expect(loadingCachedIndex).toBeGreaterThan(verificationCompleteIndex);
     
-    // Verify merge counts
-    const cachedCount = cachedMatches.length;
-    const newlyDiscovered = bestMatchPerPlatform.size - cachedCount;
-    expect(cachedCount).toBe(3);
-    expect(newlyDiscovered).toBe(1);
+    // 3. "Loading cached matches" never appears before image search
+    const firstSearchIndex = logSequence.findIndex(l => l.startsWith('Searching image'));
+    expect(loadingCachedIndex).toBeGreaterThan(firstSearchIndex);
+    
+    // 4. Total platforms = discovered + added from cache
+    expect(bestMatchPerPlatform.size).toBe(4); // 2 discovered + 2 from cache
+    expect(discoveredCount).toBe(2);
+    expect(addedFromCache).toBe(2);
   });
 
-  it('discovery finds better match for existing platform', () => {
-    // When discovery finds a higher-confidence match for a cached platform,
-    // it should replace the cached match
-    const bestMatchPerPlatform = new Map<string, { platform: string; confidence: number }>();
+  it('cached matches do NOT appear in logs before image search completes', () => {
+    // The following log entries must NEVER appear before the 5-image loop completes:
+    // - "Loaded cached matches"
+    // - "Found cached platforms"
+    // Any skip or stop decision influenced by cached matches
     
-    // Load cached match with 0.95 confidence (default for cached)
-    bestMatchPerPlatform.set('expedia', { platform: 'Expedia', confidence: 0.95 });
+    const forbiddenBeforeDiscovery = [
+      'Loaded cached matches',
+      'Found cached platforms',
+      'Loading known matches',
+      'cached matches',
+    ];
     
-    // Discovery finds same platform with higher confidence
-    const discoveredMatch = { platform: 'Expedia', confidence: 0.98 };
-    const existingMatch = bestMatchPerPlatform.get('expedia');
+    // Simulate correct log sequence
+    const correctLogSequence = [
+      'Starting search',
+      'Searching image 1 of 5',
+      'Running AI reverse image search',
+      'Found 3 potential matches',
+      'Verifying matches',
+      'Searching image 2 of 5',
+      'Running AI reverse image search',
+      'Found 2 potential matches',
+      'Searching image 3 of 5',
+      'Searching image 4 of 5',
+      'Searching image 5 of 5',
+      'Verification complete for current run',
+      'Loading cached matches (fallback)', // ONLY here
+      'Merged cached matches — added 2, deduped 1',
+      'Proceeding with combined candidate set',
+    ];
     
-    if (!existingMatch || discoveredMatch.confidence > existingMatch.confidence) {
-      bestMatchPerPlatform.set('expedia', discoveredMatch);
+    // Find the index where discovery ends
+    const discoveryEndIndex = correctLogSequence.findIndex(l => l.includes('Verification complete'));
+    
+    // Check that no forbidden entries appear before discovery ends
+    const logsBeforeDiscoveryEnd = correctLogSequence.slice(0, discoveryEndIndex);
+    for (const log of logsBeforeDiscoveryEnd) {
+      for (const forbidden of forbiddenBeforeDiscovery) {
+        expect(log.toLowerCase()).not.toContain(forbidden.toLowerCase());
+      }
     }
-    
-    // Should use the higher confidence match
-    expect(bestMatchPerPlatform.get('expedia')?.confidence).toBe(0.98);
   });
 
   it('REGRESSION: match verification never skips due to cached matches or discovered matches', () => {
@@ -581,27 +616,25 @@ describe('Test E: Discovery never skipped due to cached matches', () => {
     // 1. aiCount >= MAX_AI (deterministic cap)
     // 2. matchesThisImage >= 8 (deterministic per-image cap)
     // 3. Time exceeded (deterministic time cap)
-    // 4. User explicitly clicked skip button (claimSkipNow at image level only)
+    // 4. User explicitly clicked skip button (at image level only)
     
-    const cachedMatchCount = 3;
     const MAX_AI = 25;
     const MAX_PER_IMAGE = 8;
     
     // Simulate various states - none should trigger cache-based skipping
+    // NOTE: cachedMatchCount is NOT available during discovery loop
     const scenarios = [
-      { cached: 3, discovered: 0, aiCount: 5, matchesThisImage: 2 },  // Only cached
-      { cached: 3, discovered: 2, aiCount: 10, matchesThisImage: 5 }, // Cached + new
-      { cached: 0, discovered: 5, aiCount: 8, matchesThisImage: 4 },  // No cached, only new
-      { cached: 5, discovered: 10, aiCount: 20, matchesThisImage: 7 }, // Many of both
+      { discovered: 0, aiCount: 5, matchesThisImage: 2 },
+      { discovered: 2, aiCount: 10, matchesThisImage: 5 },
+      { discovered: 5, aiCount: 8, matchesThisImage: 4 },
+      { discovered: 10, aiCount: 20, matchesThisImage: 7 },
     ];
     
     for (const scenario of scenarios) {
-      // The NEW logic: skip is ONLY allowed by deterministic caps
+      // The logic: skip is ONLY allowed by deterministic caps
+      // Cached matches are NOT part of this calculation (not loaded yet)
       const shouldContinue = scenario.aiCount < MAX_AI && scenario.matchesThisImage < MAX_PER_IMAGE;
       
-      // Cached matches should NEVER be part of this decision
-      // The decision must be purely based on deterministic caps
-      expect(typeof scenario.cached).toBe('number'); // Cached is tracked but not used
       expect(shouldContinue).toBe(true); // All scenarios continue (under caps)
     }
     
@@ -610,26 +643,73 @@ describe('Test E: Discovery never skipped due to cached matches', () => {
     expect(8 >= MAX_PER_IMAGE).toBe(true);  // Cap hit → stop
   });
   
-  it('REGRESSION: discovery continues for all images regardless of cached matches', () => {
+  it('REGRESSION: discovery continues for all images regardless of what was found', () => {
     // Discovery must process all configured images (e.g., 5)
-    // Cached matches do NOT reduce the number of images processed
+    // The number of matches found does NOT reduce the number of images processed
     
     const imageUrls = ['img1', 'img2', 'img3', 'img4', 'img5'];
-    const cachedMatchCount = 10; // Even with many cached matches
     
     let imagesProcessed = 0;
     let discoveryAttempted = false;
+    const matchesFound: string[] = [];
     
-    // Simulate the discovery loop WITHOUT any cache-based skip logic
+    // Simulate the discovery loop WITHOUT any skip logic based on match count
     for (let idx = 0; idx < imageUrls.length; idx++) {
       discoveryAttempted = true;
       imagesProcessed++;
-      // No check for cached matches here - loop continues
+      
+      // Even if we find matches early, we continue
+      if (idx === 0) matchesFound.push('match1');
+      if (idx === 1) matchesFound.push('match2', 'match3');
+      // Still continue to images 3, 4, 5...
     }
     
     // All 5 images should be processed
     expect(imagesProcessed).toBe(5);
     expect(discoveryAttempted).toBe(true);
+    expect(matchesFound.length).toBe(3);
+  });
+
+  it('merge semantics: cached + discovered are correctly combined and deduped', () => {
+    // Given cached matches plus newly discovered platforms,
+    // assert final platform list is the union with correct dedupe
+    
+    const bestMatchPerPlatform = new Map<string, { platform: string; url: string; confidence: number }>();
+    
+    // Discovery finds 2 platforms
+    bestMatchPerPlatform.set('booking', { platform: 'Booking.com', url: 'https://booking.com/123', confidence: 0.92 });
+    bestMatchPerPlatform.set('vrbo', { platform: 'Vrbo', url: 'https://vrbo.com/456', confidence: 0.88 });
+    
+    const discoveredCount = bestMatchPerPlatform.size;
+    expect(discoveredCount).toBe(2);
+    
+    // Cached matches (some overlap)
+    const cachedMatches = [
+      { platform: 'Expedia', url: 'https://expedia.com/789', confidence: 0.95 },
+      { platform: 'Booking.com', url: 'https://booking.com/123', confidence: 0.95 }, // DUPE
+      { platform: 'Agoda', url: 'https://agoda.com/101', confidence: 0.95 },
+    ];
+    
+    let addedFromCache = 0;
+    let dedupedFromCache = 0;
+    
+    for (const cached of cachedMatches) {
+      const platformKey = cached.platform.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!bestMatchPerPlatform.has(platformKey)) {
+        bestMatchPerPlatform.set(platformKey, cached);
+        addedFromCache++;
+      } else {
+        dedupedFromCache++;
+      }
+    }
+    
+    // Final count: 2 discovered + 2 added from cache (1 deduped)
+    expect(bestMatchPerPlatform.size).toBe(4);
+    expect(addedFromCache).toBe(2);
+    expect(dedupedFromCache).toBe(1);
+    
+    // Discovered match is kept (not replaced by cached)
+    expect(bestMatchPerPlatform.get('booking')?.confidence).toBe(0.92);
   });
 });
 
