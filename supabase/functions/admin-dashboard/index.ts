@@ -2164,10 +2164,10 @@ Deno.serve(async (req) => {
       
       // If searchId provided, get diagnostics for that search
       if (searchId) {
-        // Get search details
+        // Get search details including activity_log
         const { data: search } = await supabase
           .from('searches')
-          .select('id, airbnb_url, airbnb_title, airbnb_price, check_in_date, check_out_date, status, created_at')
+          .select('id, airbnb_url, airbnb_title, airbnb_price, check_in_date, check_out_date, status, created_at, activity_log')
           .eq('id', searchId)
           .single();
 
