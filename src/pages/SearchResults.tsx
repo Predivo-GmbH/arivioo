@@ -557,19 +557,15 @@ export default function SearchResults() {
                         }
                       }
 
-                      // Add to activity feed with dedup
-                      const key = `${data.step}__${data.detail ?? ""}`;
-                      if (!seenActivityKeysRef.current.has(key)) {
-                        seenActivityKeysRef.current.add(key);
-                        activityIdCounterRef.current += 1;
-                        const newItem = {
-                          ts: data.timestamp || Date.now(),
-                          message: data.step,
-                          detail: data.detail,
-                          id: `activity-${activityIdCounterRef.current}`,
-                        };
-                        setActivityFeed((prev) => [...prev, newItem]);
-                      }
+                      // Add to activity feed (append-only; do not dedupe)
+                      activityIdCounterRef.current += 1;
+                      const newItem = {
+                        ts: data.timestamp || Date.now(),
+                        message: data.step,
+                        detail: data.detail,
+                        id: `activity-${activityIdCounterRef.current}`,
+                      };
+                      setActivityFeed((prev) => [...prev, newItem]);
                     } else if (eventType === "status_update") {
                       // Dedicated status update event with monotonic stage guard
                       if (data.status) {
@@ -1129,16 +1125,12 @@ export default function SearchResults() {
     if (!loading || !search?.status) return;
 
     const activity = getActivityMessage(search.status);
-    const key = `${activity.message}__${activity.detail ?? ""}`;
-    if (seenActivityKeysRef.current.has(key)) return;
-
-    seenActivityKeysRef.current.add(key);
     activityIdCounterRef.current += 1;
-    const newItem = { 
-      ts: Date.now(), 
-      message: activity.message, 
+    const newItem = {
+      ts: Date.now(),
+      message: activity.message,
       detail: activity.detail,
-      id: `activity-${activityIdCounterRef.current}`
+      id: `activity-${activityIdCounterRef.current}`,
     };
     setActivityFeed((prev) => [...prev, newItem]);
   }, [loading, search?.status]);
