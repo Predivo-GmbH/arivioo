@@ -701,6 +701,19 @@ export default function SearchResults() {
                         .eq("id", searchId)
                         .single();
 
+                      // Persist activity log for admin diagnostics
+                      const currentFeed = activityFeed.map(item => ({
+                        ts: item.ts,
+                        message: item.message,
+                        detail: item.detail,
+                      }));
+                      if (currentFeed.length > 0) {
+                        await supabase
+                          .from("searches")
+                          .update({ activity_log: currentFeed })
+                          .eq("id", searchId);
+                      }
+
                       const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:complete');
 
                       setSearch(updatedSearch as SearchData);
@@ -779,6 +792,19 @@ export default function SearchResults() {
                setSearchPhase("thinking");
                return;
              }
+
+               // Persist activity log for admin diagnostics (stream ended path)
+               const currentFeed = activityFeed.map(item => ({
+                 ts: item.ts,
+                 message: item.message,
+                 detail: item.detail,
+               }));
+               if (currentFeed.length > 0) {
+                 await supabase
+                   .from("searches")
+                   .update({ activity_log: currentFeed })
+                   .eq("id", searchId);
+               }
 
                try {
                  const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:streamEnded');

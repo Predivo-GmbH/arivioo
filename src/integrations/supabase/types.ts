@@ -1442,6 +1442,7 @@ export type Database = {
       }
       searches: {
         Row: {
+          activity_log: Json | null
           airbnb_currency: string | null
           airbnb_image_url: string | null
           airbnb_images: Json | null
@@ -1469,6 +1470,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          activity_log?: Json | null
           airbnb_currency?: string | null
           airbnb_image_url?: string | null
           airbnb_images?: Json | null
@@ -1496,6 +1498,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          activity_log?: Json | null
           airbnb_currency?: string | null
           airbnb_image_url?: string | null
           airbnb_images?: Json | null

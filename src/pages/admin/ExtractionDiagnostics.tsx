@@ -697,6 +697,46 @@ export default function ExtractionDiagnostics() {
           </div>
         )}
 
+        {/* Activity Log from frontend SSE events */}
+        {selectedSearch?.activity_log && Array.isArray(selectedSearch.activity_log) && selectedSearch.activity_log.length > 0 && (
+          <Collapsible>
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="text-base">Activity Log</CardTitle>
+                    <CardDescription>
+                      {selectedSearch.activity_log.length} events captured during search
+                    </CardDescription>
+                  </div>
+                  <CollapsibleTrigger asChild>
+                    <Button variant="ghost" size="sm">
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </CollapsibleTrigger>
+                </div>
+              </CardHeader>
+              <CollapsibleContent>
+                <CardContent className="pt-0">
+                  <div className="max-h-64 overflow-y-auto space-y-1 font-mono text-xs">
+                    {selectedSearch.activity_log.map((item: { ts: number; message: string; detail?: string }, idx: number) => (
+                      <div key={idx} className="flex gap-2 py-1 border-b border-border/50 last:border-0">
+                        <span className="text-muted-foreground w-5 text-right flex-shrink-0">{idx + 1}.</span>
+                        <div className="flex-1">
+                          <span className="text-foreground">{item.message}</span>
+                          {item.detail && (
+                            <span className="text-muted-foreground ml-2">— {item.detail}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </CollapsibleContent>
+            </Card>
+          </Collapsible>
+        )}
+
         {error && (
           <Card className="border-destructive">
             <CardContent className="pt-6">
