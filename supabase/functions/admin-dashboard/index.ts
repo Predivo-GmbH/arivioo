@@ -2448,7 +2448,7 @@ Deno.serve(async (req) => {
       // No searchId - return recent searches for selection
       const { data: recentSearches, count } = await supabase
         .from('searches')
-        .select('id, airbnb_url, airbnb_title, status, created_at, check_in_date, check_out_date', { count: 'exact' })
+        .select('id, airbnb_url, airbnb_title, status, created_at, check_in_date, check_out_date, activity_log', { count: 'exact' })
         .order('created_at', { ascending: false })
         .limit(50);
 
@@ -2470,8 +2470,15 @@ Deno.serve(async (req) => {
       });
 
       const searchesWithStats = (recentSearches || []).map(s => ({
-        ...s,
+        id: s.id,
+        airbnb_url: s.airbnb_url,
+        airbnb_title: s.airbnb_title,
+        status: s.status,
+        created_at: s.created_at,
+        check_in_date: s.check_in_date,
+        check_out_date: s.check_out_date,
         extraction_stats: statsMap.get(s.id) || { total: 0, success: 0, failed: 0, pending: 0 },
+        has_activity_log: Array.isArray(s.activity_log) && s.activity_log.length > 0,
       }));
 
       return new Response(
