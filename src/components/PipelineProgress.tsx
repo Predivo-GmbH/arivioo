@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Check, Sparkles, Camera, Globe, Calendar, DollarSign, CheckCircle, Clock, AlertCircle } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -76,7 +76,10 @@ export function PipelineProgress({
 }: PipelineProgressProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const { timings, getTimingForStage } = useStageTimings({ refreshIntervalMs: 60000 });
-  
+
+  // Keep the activity feed scrolled to the latest item (bottom)
+  const activityBottomRef = useRef<HTMLDivElement | null>(null);
+
   // Internal monotonic stage tracking
   const [highestStageIndex, setHighestStageIndex] = useState(-1);
   const prevIsCompleteRef = React.useRef(isComplete);
@@ -84,13 +87,18 @@ export function PipelineProgress({
   // Update elapsed time every 250ms
   useEffect(() => {
     if (isComplete) return;
-    
+
     const interval = setInterval(() => {
       setElapsedMs(Date.now() - startTime);
     }, 250);
-    
+
     return () => clearInterval(interval);
   }, [startTime, isComplete]);
+
+  // Auto-scroll the activity feed to the latest entry
+  useEffect(() => {
+    activityBottomRef.current?.scrollIntoView({ block: "end" });
+  }, [activityFeed.length]);
   
   // Reset highest stage index when a new search starts (isComplete goes from true to false)
   useEffect(() => {
@@ -508,25 +516,23 @@ export function PipelineProgress({
             <div className="mt-4 rounded-lg border border-border bg-card/60">
               <ScrollArea className="h-24">
                 <div className="p-3 space-y-2">
-                  {activityFeed
-                    .slice()
-                    .reverse()
-                    .map((item, index) => (
-                      <div 
-                        key={item.id} 
-                        className="text-xs animate-in fade-in slide-in-from-top-2 duration-300 flex gap-2"
-                      >
-                        <span className="text-muted-foreground/50 font-mono w-5 flex-shrink-0 text-right">
-                          {activityFeed.length - index}.
-                        </span>
-                        <div className="flex-1">
-                          <p className="text-foreground/90">{item.message}</p>
-                          {item.detail && (
-                            <p className="text-muted-foreground mt-0.5">{item.detail}</p>
-                          )}
-                        </div>
+                  {activityFeed.map((item, index) => (
+                    <div
+                      key={item.id}
+                      className="text-xs animate-in fade-in slide-in-from-top-2 duration-300 flex gap-2"
+                    >
+                      <span className="text-muted-foreground/50 font-mono w-5 flex-shrink-0 text-right">
+                        {index + 1}.
+                      </span>
+                      <div className="flex-1">
+                        <p className="text-foreground/90">{item.message}</p>
+                        {item.detail && (
+                          <p className="text-muted-foreground mt-0.5">{item.detail}</p>
+                        )}
                       </div>
-                    ))}
+                    </div>
+                  ))}
+                  <div ref={activityBottomRef} />
                 </div>
               </ScrollArea>
             </div>
