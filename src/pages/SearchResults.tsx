@@ -327,6 +327,7 @@ export default function SearchResults() {
   const activityIdCounterRef = useRef(0);
   const heartbeatIntervalRef = useRef<number | null>(null);
   const highestStageIndexRef = useRef(-1); // Ref for use in SSE handler
+  const activityFeedRef = useRef<Array<{ ts: number; message: string; detail?: string; id: string }>>([]); // Ref for persistence
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -449,6 +450,7 @@ export default function SearchResults() {
           setStepProgress(0);
           setThinkingElapsedMs(0);
           setActivityFeed([]);
+          activityFeedRef.current = []; // Reset ref too
           seenActivityKeysRef.current.clear();
           activityIdCounterRef.current = 0;
           lastProgressAtRef.current = Date.now();
@@ -577,7 +579,11 @@ export default function SearchResults() {
                         detail: data.detail,
                         id: `activity-${activityIdCounterRef.current}`,
                       };
-                      setActivityFeed((prev) => [...prev, newItem]);
+                      setActivityFeed((prev) => {
+                        const updated = [...prev, newItem];
+                        activityFeedRef.current = updated; // Keep ref in sync for persistence
+                        return updated;
+                      });
                     } else if (eventType === "status_update") {
                       // Dedicated status update event with monotonic stage guard
                       if (data.status) {
@@ -701,13 +707,14 @@ export default function SearchResults() {
                         .eq("id", searchId)
                         .single();
 
-                      // Persist activity log for admin diagnostics
-                      const currentFeed = activityFeed.map(item => ({
+                      // Persist activity log for admin diagnostics (use ref for current value)
+                      const currentFeed = activityFeedRef.current.map(item => ({
                         ts: item.ts,
                         message: item.message,
                         detail: item.detail,
                       }));
                       if (currentFeed.length > 0) {
+                        console.log('[ActivityLog] Persisting', currentFeed.length, 'events to search', searchId);
                         await supabase
                           .from("searches")
                           .update({ activity_log: currentFeed })
@@ -793,13 +800,14 @@ export default function SearchResults() {
                return;
              }
 
-               // Persist activity log for admin diagnostics (stream ended path)
-               const currentFeed = activityFeed.map(item => ({
+               // Persist activity log for admin diagnostics (stream ended path, use ref)
+               const currentFeed = activityFeedRef.current.map(item => ({
                  ts: item.ts,
                  message: item.message,
                  detail: item.detail,
                }));
                if (currentFeed.length > 0) {
+                 console.log('[ActivityLog] Persisting (stream ended)', currentFeed.length, 'events to search', searchId);
                  await supabase
                    .from("searches")
                    .update({ activity_log: currentFeed })
@@ -1170,7 +1178,11 @@ export default function SearchResults() {
       detail: activity.detail,
       id: `activity-${activityIdCounterRef.current}`,
     };
-    setActivityFeed((prev) => [...prev, newItem]);
+    setActivityFeed((prev) => {
+      const updated = [...prev, newItem];
+      activityFeedRef.current = updated; // Keep ref in sync for persistence
+      return updated;
+    });
   }, [loading, search?.status]);
 
   // Celebrate when results are shown
