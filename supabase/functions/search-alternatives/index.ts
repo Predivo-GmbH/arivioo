@@ -735,19 +735,65 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
               checkoutHtml = truncateHtml(await safeContent());
             }
 
-           // Capture screenshot from checkout/price page
+           // CRITICAL FIX: Capture screenshot from checkout/price page with FULL PAGE to get the total
+           // The "Pay $X now" button is often near the bottom of the page
            await page.evaluate(() => window.scrollTo(0, 0));
-           await sleep(300);
-           const screenshot = await page.screenshot({ encoding: 'base64', type: 'jpeg', quality: 70, fullPage: false });
+           await sleep(500);
+           // Use fullPage: true to capture the entire page including the payment total at the bottom
+           const screenshot = await page.screenshot({ encoding: 'base64', type: 'jpeg', quality: 75, fullPage: true });
 
            const html = (checkoutHtml && checkoutHtml.length > 200) ? checkoutHtml : roomsHtml;
+
+           // CRITICAL FIX: Extract "Pay $X now" pattern directly from visible text
+           // This is more reliable than OCR for the total
+           const payNowExtraction = await page.evaluate(() => {
+             const text = document.body?.innerText || '';
+             
+             // Look for "Pay $X now" pattern - this is the all-in total
+             const payNowMatch = text.match(/Pay\s*\$\s*([\d,]+(?:\.\d{2})?)\s*now/i);
+             const totalUsdMatch = text.match(/Total\s*\(?\s*USD\s*\)?\s*\$\s*([\d,]+(?:\.\d{2})?)/i);
+             const dueTodayMatch = text.match(/Due\s+today\s*\$\s*([\d,]+(?:\.\d{2})?)/i);
+             
+             // Look for "$X for N nights" pattern - this is the subtotal
+             const subtotalMatch = text.match(/\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+(\d+)\s+nights?/i);
+             
+             let payNowAmount = null;
+             let payNowSnippet = null;
+             if (payNowMatch) {
+               payNowAmount = parseFloat(payNowMatch[1].replace(/,/g, ''));
+               payNowSnippet = payNowMatch[0];
+             } else if (totalUsdMatch) {
+               payNowAmount = parseFloat(totalUsdMatch[1].replace(/,/g, ''));
+               payNowSnippet = totalUsdMatch[0];
+             } else if (dueTodayMatch) {
+               payNowAmount = parseFloat(dueTodayMatch[1].replace(/,/g, ''));
+               payNowSnippet = dueTodayMatch[0];
+             }
+             
+             let subtotalAmount = null;
+             let subtotalNights = null;
+             let subtotalSnippet = null;
+             if (subtotalMatch) {
+               subtotalAmount = parseFloat(subtotalMatch[1].replace(/,/g, ''));
+               subtotalNights = parseInt(subtotalMatch[2], 10);
+               subtotalSnippet = subtotalMatch[0];
+             }
+             
+             return {
+               payNowAmount,
+               payNowSnippet,
+               subtotalAmount,
+               subtotalNights,
+               subtotalSnippet,
+             };
+           });
 
            // Debug: return a snippet around "total" or "Pay"
            const totalSnippet = await page.evaluate(() => {
              const text = document.body?.innerText || '';
              const lower = text.toLowerCase();
-             let idx = lower.indexOf('total');
-             if (idx === -1) idx = lower.indexOf('pay ');
+             let idx = lower.indexOf('pay ');
+             if (idx === -1) idx = lower.indexOf('total');
              if (idx === -1) return text.slice(0, 800);
              const start = Math.max(0, idx - 200);
              const end = Math.min(text.length, idx + 600);
@@ -766,6 +812,8 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
              totalSnippet: (totalSnippet || '').slice(0, 1200),
              bookingCardScreenshot: screenshot,
              breakdownScreenshot: breakdownOpened ? screenshot : null,
+             // CRITICAL: Include direct text extraction for Pay Now total
+             payNowExtraction: payNowExtraction || null,
            };
         }
       `,
@@ -2460,49 +2508,46 @@ async function extractOcrVisualReference(
   try {
     // Enhanced prompt with explicit patterns and fallback logic for book/stays checkout pages
     // CRITICAL FIX: The OCR must reliably extract "Pay $X now" or "Total (USD) $X" patterns
-    const prompt = `You are analyzing a screenshot of an Airbnb page. Identify the page type and extract prices accordingly.
+    // v2.2: More explicit about scanning ENTIRE page, especially bottom sections for totals
+    const prompt = `You are analyzing a screenshot of an Airbnb checkout page ("/book/stays/").
 
-PAGE TYPES:
-A) BOOK/STAYS CHECKOUT PAGE (URL contains "/book/stays/") - shows "Confirm and pay" title
-B) ROOMS PAGE - shows property info with booking card on right
+CRITICAL: This is a CHECKOUT page with "Confirm and pay" title. The FINAL TOTAL is what we need.
 
-CRITICAL EXTRACTION RULES FOR BOOK/STAYS CHECKOUT PAGES:
+STEP 1 - SCAN THE ENTIRE PAGE for these patterns (especially bottom half):
+- "Pay $X.XX now" (MOST IMPORTANT - this is the all-in total including taxes/fees)
+- "Total (USD) $X.XX" or "Total USD $X.XX" 
+- "Total $X.XX" near payment/checkout sections
+- "Due today $X.XX"
+- "Amount due $X.XX"
 
-1. The FINAL TOTAL is shown near the bottom of the payment summary. Look for:
-   - "Pay $X now" (most common - the X is the all-in total)
-   - "Total (USD) $X" or "Total USD $X"
-   - "Total $X" (near bottom of price breakdown)
-   - "Due today $X"
-   - "Amount due $X"
+STEP 2 - ALSO find the subtotal:
+- "$X.XX for N nights" (this is the SUBTOTAL, not including taxes/fees)
 
-2. IMPORTANT: The checkout page shows BOTH:
-   - A subtotal like "$1,482 for 3 nights" (this is NOT the final total)
-   - A final total like "Pay $1,658.94 now" (this IS the final total with taxes)
-   
-3. ALWAYS prefer the "Pay now" or "Total" amount over the "for X nights" subtotal
+EXAMPLE:
+If you see "$1,482 for 3 nights" and "Pay $1,658.94 now":
+- bookingCardAmountValue = 1482 (the subtotal)
+- breakdownTotalAmountValue = 1658.94 (the PAY NOW total - THIS IS WHAT WE NEED)
 
-FOR ROOMS PAGES:
-- Look for "$X for Y nights" in the booking card on the right
-- This is a subtotal (not including taxes), record it as bookingCardAmount
+CRITICAL RULES:
+1. The "Pay $X now" amount is ALWAYS larger than "$X for N nights" because it includes taxes
+2. If you see ANY "Pay $X now" pattern, that X MUST go in breakdownTotalAmountValue
+3. Look at the ENTIRE screenshot - the total is often near the bottom
+4. The difference between subtotal and total = taxes and fees
 
-EXTRACTION TASK:
-1. bookingCardAmount: The "$X for Y nights" subtotal (without taxes)
-2. breakdownTotalAmount: The FINAL "Pay now" or "Total (USD)" amount (with taxes)
-
-Return ONLY valid JSON with no markdown formatting:
+Return ONLY valid JSON (no markdown):
 {
   "bookingCardAmountRaw": "<exact subtotal text like '$1,482' or null>",
   "bookingCardAmountValue": <subtotal number or null>,
   "bookingCardNights": <nights number or null>,
   "bookingCardSnippet": "<full text like '$1,482 for 3 nights' or null>",
-  "breakdownTotalAmountRaw": "<exact final total text like '$1,658.94' or 'Pay $1,658.94 now' or null>",
-  "breakdownTotalAmountValue": <final total number WITH taxes/fees - THIS IS CRITICAL>,
-  "breakdownTotalSnippet": "<the full 'Pay X now' or 'Total USD X' line or null>",
-  "breakdownTaxesAmountValue": <taxes amount if visible separately, or null>
+  "breakdownTotalAmountRaw": "<exact PAY NOW text like 'Pay $1,658.94 now' or 'Total (USD) $1,658.94' or null>",
+  "breakdownTotalAmountValue": <the PAY NOW / TOTAL number including taxes - THIS IS CRITICAL>,
+  "breakdownTotalSnippet": "<the full line containing the total>",
+  "breakdownTaxesAmountValue": <taxes amount if shown separately, or null>
 }
 
-IMPORTANT: If you see "Pay $X now" anywhere, that X value MUST go in breakdownTotalAmountValue.
-If you see "Total (USD) $X" or "Total $X" near payment info, that X MUST go in breakdownTotalAmountValue.`;
+REMEMBER: breakdownTotalAmountValue should be LARGER than bookingCardAmountValue because it includes taxes.
+If you only find "$X for N nights" without a "Pay now" or "Total" line, set breakdownTotalAmountValue to null.`;
 
     const imageUrl = `data:image/png;base64,${screenshotBase64}`;
 
@@ -5010,20 +5055,57 @@ async function runSearchWithStreaming(
           }));
         }
 
-        // ============ CRITICAL FIX: Use OCR breakdown total as primary source ============
-        // The book/stays page has the all-in total visible. OCR extracts it directly.
-        // Regex extraction doesn't work well on book/stays pages, so prioritize OCR.
+        // ============ CRITICAL FIX v2: Use direct text extraction as PRIMARY source ============
+        // The book/stays page has "Pay $X now" visible. Direct text extraction is more reliable than OCR.
+        // Priority: 1) Direct text extraction, 2) OCR, 3) Regex fallback
         
         let finalBaseline: AirbnbBaselineExtraction;
         let ocrValidation: OcrValidationResult | null = null;
         
-        // If OCR found a breakdown total (from book/stays "Pay now" or "Total USD"), use it directly
-        if (ocrRef?.breakdownTotalAmountValue && ocrRef.breakdownTotalAmountValue > 0) {
-          console.log(`Browserless: Using OCR breakdown total directly: $${ocrRef.breakdownTotalAmountValue}`);
+        // Extract payNowExtraction from browserless result (if available)
+        const payNowData = (browserlessResult as any).payNowExtraction as {
+          payNowAmount: number | null;
+          payNowSnippet: string | null;
+          subtotalAmount: number | null;
+          subtotalNights: number | null;
+          subtotalSnippet: string | null;
+        } | null;
+        
+        // PRIORITY 1: Use direct text extraction if "Pay $X now" was found
+        if (payNowData?.payNowAmount && payNowData.payNowAmount > 0) {
+          console.log(`Browserless: Using direct text extraction "Pay now" total: $${payNowData.payNowAmount}`);
+          finalBaseline = {
+            status: 'total_price_including_taxes_and_fees',
+            price: payNowData.payNowAmount,
+            currency: 'USD',
+            includes_taxes_fees: true,
+            evidence_snippet: payNowData.payNowSnippet || `Pay $${payNowData.payNowAmount} now`,
+            subtotal_nights_only: payNowData.subtotalAmount || undefined,
+            subtotal_nights_count: payNowData.subtotalNights || undefined,
+            debug: {
+              provider: 'Browserless',
+              content_hash: hashContent(browserlessResult.html),
+              candidates: [],
+            },
+          };
+          ocrValidation = {
+            accepted: true,
+            status: 'total_price_including_taxes_and_fees',
+            includesTaxesFees: true,
+            acceptedVia: 'breakdown_match', // Direct text extraction treated as breakdown match
+            mismatchReason: null,
+            evidenceSnippet: payNowData.payNowSnippet || `Pay $${payNowData.payNowAmount} now`,
+            validatedPrice: payNowData.payNowAmount,
+          };
+          console.log(`Browserless: Direct text extraction succeeded (treated as breakdown_match)`);
+        }
+        // PRIORITY 2: Use OCR breakdown total if available
+        else if (ocrRef?.breakdownTotalAmountValue && ocrRef.breakdownTotalAmountValue > 0) {
+          console.log(`Browserless: Using OCR breakdown total: $${ocrRef.breakdownTotalAmountValue}`);
           finalBaseline = {
             status: 'total_price_including_taxes_and_fees',
             price: ocrRef.breakdownTotalAmountValue,
-            currency: 'USD', // OCR captures from page, default USD
+            currency: 'USD',
             includes_taxes_fees: true,
             evidence_snippet: ocrRef.breakdownTotalSnippet || ocrRef.breakdownTotalAmountRaw || `OCR: $${ocrRef.breakdownTotalAmountValue}`,
             debug: {
@@ -5036,12 +5118,14 @@ async function runSearchWithStreaming(
             accepted: true,
             status: 'total_price_including_taxes_and_fees',
             includesTaxesFees: true,
-            acceptedVia: 'breakdown_match',
+            acceptedVia: 'breakdown_match', // OCR breakdown treated as breakdown match
             mismatchReason: null,
             evidenceSnippet: ocrRef.breakdownTotalSnippet || `OCR: $${ocrRef.breakdownTotalAmountValue}`,
             validatedPrice: ocrRef.breakdownTotalAmountValue,
           };
-        } else {
+        }
+        // PRIORITY 3: Fallback to regex extraction + OCR validation
+        else {
           // Fallback to regex extraction + OCR validation
           const baseline = extractBaselineFromContent(browserlessResult.html, browserlessResult.markdown, 'Browserless');
           
@@ -5836,9 +5920,18 @@ async function runSearchWithStreaming(
 
     let matchesThisImage = 0;
     for (const match of visualMatches) {
-      if (await claimSkipNow()) {
-        console.log("SKIP requested - stopping match verification for this image");
-        sendProgress(controller, "Skipped current step", "Skipping remaining match verification", { skipped: true });
+      // CRITICAL FIX: Skip inside match verification loop should NOT be triggered just by cached matches
+      // Only allow skip if we have BOTH cached AND newly discovered matches, or if user explicitly requested
+      const hasNewDiscoveredMatches = bestMatchPerPlatform.size > cachedMatchCount;
+      const canSkipVerification = hasNewDiscoveredMatches || cachedMatchCount === 0;
+      
+      if (canSkipVerification && await claimSkipNow()) {
+        console.log("SKIP requested - stopping match verification (has new matches or no cached)");
+        sendProgress(controller, "Skipped verification step", "Continuing with discovered platforms", { 
+          skipped: true,
+          hasNewMatches: hasNewDiscoveredMatches,
+          totalMatches: bestMatchPerPlatform.size
+        });
         matchesThisImage = 999;
         break;
       }

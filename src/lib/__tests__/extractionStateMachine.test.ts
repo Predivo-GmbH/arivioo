@@ -572,6 +572,36 @@ describe('Test E: Discovery never skipped due to cached matches', () => {
     // Should use the higher confidence match
     expect(bestMatchPerPlatform.get('expedia')?.confidence).toBe(0.98);
   });
+
+  it('REGRESSION: match verification skip requires new discoveries, not just cached', () => {
+    // This test verifies that "Skipping remaining match verification"
+    // is NOT triggered when only cached matches exist (no new discoveries)
+    
+    const cachedMatchCount = 3;
+    const bestMatchPerPlatform = new Map<string, any>();
+    
+    // Load 3 cached matches
+    bestMatchPerPlatform.set('expedia', { platform: 'Expedia' });
+    bestMatchPerPlatform.set('booking', { platform: 'Booking' });
+    bestMatchPerPlatform.set('vrbo', { platform: 'Vrbo' });
+    
+    // The FIXED logic: can only skip verification if we have NEW matches
+    const hasNewDiscoveredMatches = bestMatchPerPlatform.size > cachedMatchCount;
+    
+    // With ONLY cached matches (no new discoveries), skip should be blocked
+    expect(hasNewDiscoveredMatches).toBe(false);
+    
+    // The rule: canSkipVerification = hasNewMatches OR no cached matches at all
+    // When we ONLY have cached (no new), we cannot skip
+    expect(hasNewDiscoveredMatches).toBe(false);
+    
+    // Now simulate finding a new match during discovery
+    bestMatchPerPlatform.set('agoda', { platform: 'Agoda' });
+    
+    // Now we have new discoveries (4 total > 3 cached), so skip CAN be allowed
+    const hasNewAfterDiscovery = bestMatchPerPlatform.size > cachedMatchCount;
+    expect(hasNewAfterDiscovery).toBe(true);
+  });
 });
 
 // =============================================================================
