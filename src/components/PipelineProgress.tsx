@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Check, Sparkles, Camera, Globe, Calendar, DollarSign, CheckCircle, Clock, AlertCircle } from "lucide-react";
+import { Check, Sparkles, Camera, Globe, Calendar, DollarSign, CheckCircle, Clock, AlertCircle, ChevronsDown, List } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useStageTimings } from "@/hooks/useStageTimings";
 import { 
@@ -515,32 +522,95 @@ export function PipelineProgress({
 
           {/* Activity feed */}
           {activityFeed.length > 0 && (
-            <div 
-              ref={activityScrollRef}
-              className="mt-4 rounded-lg border border-border bg-card/60 h-24 overflow-y-auto"
-            >
-              <div className="p-3 space-y-2">
-                {activityFeed
-                  .slice()
-                  .reverse()
-                  .map((item, index) => (
-                    <div 
-                      key={item.id} 
-                      className="text-xs animate-in fade-in slide-in-from-top-2 duration-300 flex gap-2"
-                    >
-                      <span className="text-muted-foreground/50 font-mono w-5 flex-shrink-0 text-right">
-                        {activityFeed.length - index}.
-                      </span>
-                      <div className="flex-1">
-                        <p className="text-foreground/90">{item.message}</p>
-                        {item.detail && (
-                          <p className="text-muted-foreground mt-0.5">{item.detail}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+            <>
+              {/* Activity header with counter and actions */}
+              <div className="mt-4 flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">
+                  Activity ({activityFeed.length})
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (activityScrollRef.current) {
+                        activityScrollRef.current.scrollTop = activityScrollRef.current.scrollHeight;
+                      }
+                    }}
+                    className="text-xs text-primary hover:underline flex items-center gap-1"
+                  >
+                    <ChevronsDown className="h-3 w-3" />
+                    Jump to oldest
+                  </button>
+                  <Dialog>
+                    <DialogTrigger asChild>
+                      <button
+                        type="button"
+                        className="text-xs text-primary hover:underline flex items-center gap-1"
+                      >
+                        <List className="h-3 w-3" />
+                        View all
+                      </button>
+                    </DialogTrigger>
+                    <DialogContent className="max-w-lg max-h-[80vh]">
+                      <DialogHeader>
+                        <DialogTitle>Activity Log ({activityFeed.length})</DialogTitle>
+                      </DialogHeader>
+                      <ScrollArea className="h-[60vh] pr-4">
+                        <div className="space-y-3">
+                          {activityFeed
+                            .slice()
+                            .reverse()
+                            .map((item, index) => (
+                              <div 
+                                key={item.id} 
+                                className="text-sm flex gap-3 pb-3 border-b border-border last:border-0"
+                              >
+                                <span className="text-muted-foreground/50 font-mono w-6 flex-shrink-0 text-right">
+                                  {activityFeed.length - index}.
+                                </span>
+                                <div className="flex-1">
+                                  <p className="text-foreground">{item.message}</p>
+                                  {item.detail && (
+                                    <p className="text-muted-foreground mt-1">{item.detail}</p>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </ScrollArea>
+                    </DialogContent>
+                  </Dialog>
+                </div>
               </div>
-            </div>
+
+              {/* Inline activity feed (h-24) */}
+              <div 
+                ref={activityScrollRef}
+                className="mt-2 rounded-lg border border-border bg-card/60 h-24 overflow-y-auto"
+              >
+                <div className="p-3 space-y-2">
+                  {activityFeed
+                    .slice()
+                    .reverse()
+                    .map((item, index) => (
+                      <div 
+                        key={item.id} 
+                        className="text-xs animate-in fade-in slide-in-from-top-2 duration-300 flex gap-2"
+                      >
+                        <span className="text-muted-foreground/50 font-mono w-5 flex-shrink-0 text-right">
+                          {activityFeed.length - index}.
+                        </span>
+                        <div className="flex-1">
+                          <p className="text-foreground/90">{item.message}</p>
+                          {item.detail && (
+                            <p className="text-muted-foreground mt-0.5">{item.detail}</p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            </>
           )}
         </div>
       )}
