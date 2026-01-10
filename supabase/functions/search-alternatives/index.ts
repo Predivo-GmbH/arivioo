@@ -5179,9 +5179,9 @@ async function runSearchWithStreaming(
         ];
 
     // ========================================================================
-    // ACCESS FAILURE CLASSIFICATION - Hard stop on rate limiting/bot blocking
-    // When RATE_LIMITED or BOT_BLOCKED is detected, abort the entire fallback
-    // chain. No other providers should be attempted.
+    // ACCESS FAILURE CLASSIFICATION - Handle rate limiting and bot blocking
+    // RATE_LIMITED: Log and continue to fallback providers (each has separate quotas)
+    // BOT_BLOCKED: Hard stop - likely affects all providers for same target domain
     // ========================================================================
     let accessLayerAbort: { failureClass: 'RATE_LIMITED' | 'BOT_BLOCKED'; provider: string; evidence: string[] } | null = null;
     
@@ -5192,18 +5192,13 @@ async function runSearchWithStreaming(
       const r = await step.run();
       providerResults.push(r);
       
-      // ============ ACCESS FAILURE HARD STOP CHECK ============
-      // Check if this provider hit rate limiting or bot blocking
-      // If so, abort immediately - do NOT try fallback providers
+      // ============ RATE LIMIT CHECK - Continue to fallbacks ============
+      // Rate limits are provider-specific (each has separate quotas)
+      // Log for telemetry but continue trying other providers
       if (r.isRateLimited) {
-        accessLayerAbort = {
-          failureClass: 'RATE_LIMITED',
-          provider: r.provider,
-          evidence: ['HTTP 429 or rate limit detected'],
-        };
-        console.log(`[ACCESS ABORT] ${r.provider} hit rate limit - aborting fallback chain`);
+        console.log(`[RATE LIMITED] ${r.provider} hit rate limit - trying fallback providers`);
         
-        // Persist abort record for diagnostics
+        // Persist rate limit record for diagnostics
         try {
           await supabase.from('airbnb_baseline_debug').insert({
             run_id: debugRunId,
@@ -5211,12 +5206,12 @@ async function runSearchWithStreaming(
             run_number: 1,
             provider: r.provider,
             provider_order: fallbackChain.findIndex(s => s.provider === r.provider) + 1,
-            status: 'rate_limited_abort',
+            status: 'rate_limited',
             duration_ms: r.durationMs || 0,
             extracted_price: null,
             currency: null,
             includes_taxes_fees: null,
-            evidence_snippet: 'ACCESS LAYER ABORT: Rate limited - no fallbacks attempted',
+            evidence_snippet: 'RATE LIMITED: Continuing to fallback providers',
             rejected_reason: 'rate_limited',
             airbnb_url: search.airbnb_url,
             check_in_date: checkIn,
@@ -5224,28 +5219,28 @@ async function runSearchWithStreaming(
             nights_count: nights,
           });
         } catch (e) {
-          console.error('Failed to persist rate limit abort record:', e);
+          console.error('Failed to persist rate limit record:', e);
         }
         
-        // Telemetry for access-layer abort
+        // Telemetry for rate limit
         await logProviderRequest({
           supabase,
           provider: r.provider as ProviderLogName,
-          endpointType: 'access_layer_abort',
+          endpointType: 'rate_limited',
           searchId,
           success: false,
           httpStatus: 429,
           durationMs: r.durationMs || 0,
-          errorMessage: `ACCESS_ABORT:RATE_LIMITED - aborted_before_fallbacks=true`,
+          errorMessage: `RATE_LIMITED - trying fallbacks`,
         });
         
-        sendProgress(controller, `${label} RATE LIMITED`, 'Access layer hard stop - no fallbacks', {
+        sendProgress(controller, `${label} RATE LIMITED`, 'Trying next provider...', {
           provider: r.provider,
           failureClass: 'RATE_LIMITED',
-          aborted_before_fallbacks: true,
+          continuing_fallbacks: true,
         });
         
-        break; // HARD STOP - do not try other providers
+        continue; // TRY NEXT PROVIDER
       }
       
       // Check for bot blocking indicators
@@ -5618,13 +5613,13 @@ async function runSearchWithStreaming(
           failureMessage = "This property is no longer available for your selected dates.";
           userMessage = "The dates you selected are not available for this property. Please try different dates or a different listing.";
         }
-        // Check if any provider got rate limited (second priority)
+        // Check if ALL providers were rate limited (none succeeded)
         else {
-          const wasRateLimited = providerResults.some(r => r.isRateLimited);
-          if (wasRateLimited) {
+          const allRateLimited = providerResults.length > 0 && providerResults.every(r => r.isRateLimited);
+          if (allRateLimited) {
             failureCode = 'rate_limited';
-            failureMessage = "Airbnb is temporarily rate limiting requests (HTTP 429).";
-            userMessage = "We can't retrieve the price from Airbnb right now due to temporary rate limiting. Please try again in a few minutes.";
+            failureMessage = "All extraction providers were temporarily rate limited (HTTP 429).";
+            userMessage = "We can't retrieve the price from Airbnb right now due to temporary rate limiting on all providers. Please try again in a few minutes.";
           } else {
             // Check what content we got to determine failure reason
             const hasContent = lastScrapedContent.markdown.length > 100 || lastScrapedContent.html.length > 100;
