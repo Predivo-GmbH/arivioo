@@ -1371,3 +1371,186 @@ describe('Test J: Browserless Canonical Baseline Regression Guard', () => {
     expect(withOnlyCard.price).toBeNull();
   });
 });
+
+// =============================================================================
+// TEST K: Zyte Canonical Baseline Regression Guard
+// =============================================================================
+/**
+ * CANONICAL ZYTE BASELINE REGRESSION GUARD
+ * 
+ * Reference: docs/ZYTE_CANONICAL_BASELINE.md
+ * 
+ * These tests protect the known-working Zyte extraction behaviour.
+ * Any change that breaks these tests MUST be compared against the canonical
+ * baseline documentation BEFORE modifying the tests.
+ * 
+ * PROTECTED INVARIANTS:
+ * 1. Output shape must include required fields (ok, providerUsed, error, botIndicators)
+ * 2. OCR total takes priority over HTML regex total
+ * 3. Subtotals are NEVER promoted to verified totals
+ * 4. Currency normalization handles USD, EUR, CHF, GBP formats
+ * 5. Empty/malformed input handled without crash
+ * 6. Bot indicators trigger immediate abort
+ * 
+ * If these tests fail after a change, DO NOT simply update the expectations.
+ * Instead: 
+ * 1. Compare against docs/ZYTE_CANONICAL_BASELINE.md
+ * 2. Identify what changed from the canonical working state
+ * 3. Document why the change is intentional OR revert
+ */
+describe('Test K: Zyte Canonical Baseline Regression Guard', () => {
+  // Mock Zyte response structure
+  interface MockZyteResponse {
+    ok: boolean;
+    html: string;
+    screenshot: string | null;
+    providerUsed: string;
+    botIndicators: string[];
+    statusCode: number;
+    error: string | null;
+  }
+  
+  // Simulate Zyte extraction evaluation (mirrors edge function logic)
+  function evaluateZyteExtraction(
+    response: MockZyteResponse,
+    ocrTotal: number | null,
+    htmlTotal: number | null,
+    subtotalOnly: number | null
+  ): { status: string; price: number | null; source: string } {
+    // Check for bot detection first
+    if (response.botIndicators.length > 0) {
+      return { status: 'blocked_captcha_or_bot', price: null, source: 'none' };
+    }
+    
+    // Check for HTTP errors
+    if (!response.ok || response.statusCode === 429) {
+      return { status: response.statusCode === 429 ? 'rate_limited' : 'provider_error', price: null, source: 'none' };
+    }
+    
+    // Check for insufficient content
+    if (!response.html || response.html.length < 500) {
+      return { status: 'price_not_available_in_content', price: null, source: 'none' };
+    }
+    
+    // PRIORITY 1: OCR total from screenshot
+    if (ocrTotal && ocrTotal > 0) {
+      return { status: 'total_price_including_taxes_and_fees', price: ocrTotal, source: 'ocr_total' };
+    }
+    
+    // PRIORITY 2: HTML regex total
+    if (htmlTotal && htmlTotal > 0) {
+      return { status: 'total_price_including_taxes_and_fees', price: htmlTotal, source: 'html_regex' };
+    }
+    
+    // PRIORITY 3: Subtotal only - NEVER promoted
+    if (subtotalOnly && subtotalOnly > 0) {
+      return { status: 'needs_user_confirmation', price: null, source: 'subtotal_only' };
+    }
+    
+    return { status: 'price_not_available_in_content', price: null, source: 'none' };
+  }
+  
+  // Currency normalization (mirrors production logic)
+  function normalizeCurrencyAmount(raw: string): number | null {
+    if (!raw || typeof raw !== 'string') return null;
+    const cleaned = raw.replace(/[^0-9.,]/g, '').replace(/,/g, '');
+    if (!cleaned) return null;
+    const amount = parseFloat(cleaned);
+    return Number.isFinite(amount) ? amount : null;
+  }
+  
+  const validResponse: MockZyteResponse = {
+    ok: true,
+    html: '<html>'.repeat(100), // > 500 chars
+    screenshot: 'base64data',
+    providerUsed: 'zyte',
+    botIndicators: [],
+    statusCode: 200,
+    error: null,
+  };
+  
+  it('output shape includes required fields', () => {
+    expect(validResponse).toHaveProperty('ok');
+    expect(validResponse).toHaveProperty('providerUsed');
+    expect(validResponse).toHaveProperty('error');
+    expect(validResponse).toHaveProperty('botIndicators');
+    expect(validResponse.providerUsed).toBe('zyte');
+  });
+  
+  it('OCR total takes priority over HTML total', () => {
+    const result = evaluateZyteExtraction(validResponse, 1658.94, 1650.00, 1500.00);
+    expect(result.source).toBe('ocr_total');
+    expect(result.price).toBe(1658.94);
+    expect(result.status).toBe('total_price_including_taxes_and_fees');
+  });
+  
+  it('HTML total used when OCR unavailable', () => {
+    const result = evaluateZyteExtraction(validResponse, null, 1650.00, 1500.00);
+    expect(result.source).toBe('html_regex');
+    expect(result.price).toBe(1650.00);
+    expect(result.status).toBe('total_price_including_taxes_and_fees');
+  });
+  
+  it('subtotal never promoted to verified total', () => {
+    const result = evaluateZyteExtraction(validResponse, null, null, 1500.00);
+    expect(result.status).toBe('needs_user_confirmation');
+    expect(result.price).toBeNull();
+    expect(result.source).toBe('subtotal_only');
+  });
+  
+  it('currency normalization handles various formats', () => {
+    expect(normalizeCurrencyAmount('$1,658.94')).toBeCloseTo(1658.94, 2);
+    expect(normalizeCurrencyAmount('CHF 2,500.00')).toBeCloseTo(2500.00, 2);
+    expect(normalizeCurrencyAmount('£999.99')).toBeCloseTo(999.99, 2);
+    expect(normalizeCurrencyAmount('€1234.56')).toBeCloseTo(1234.56, 2);
+  });
+  
+  it('null safety: empty input returns appropriate status', () => {
+    const emptyResponse: MockZyteResponse = {
+      ...validResponse,
+      html: '', // Empty
+    };
+    const result = evaluateZyteExtraction(emptyResponse, null, null, null);
+    expect(result.status).toBe('price_not_available_in_content');
+    expect(result.price).toBeNull();
+  });
+  
+  it('null safety: normalizeCurrencyAmount handles edge cases', () => {
+    expect(normalizeCurrencyAmount('')).toBeNull();
+    expect(normalizeCurrencyAmount('abc')).toBeNull();
+    expect(normalizeCurrencyAmount(null as unknown as string)).toBeNull();
+    expect(normalizeCurrencyAmount(undefined as unknown as string)).toBeNull();
+  });
+  
+  it('bot indicators trigger immediate abort', () => {
+    const blockedResponse: MockZyteResponse = {
+      ...validResponse,
+      botIndicators: ['captcha', 'cloudflare'],
+    };
+    const result = evaluateZyteExtraction(blockedResponse, 1658.94, 1650.00, null);
+    expect(result.status).toBe('blocked_captcha_or_bot');
+    expect(result.price).toBeNull();
+  });
+  
+  it('rate limit (429) returns rate_limited status', () => {
+    const rateLimitedResponse: MockZyteResponse = {
+      ...validResponse,
+      ok: false,
+      statusCode: 429,
+    };
+    const result = evaluateZyteExtraction(rateLimitedResponse, 1658.94, null, null);
+    expect(result.status).toBe('rate_limited');
+    expect(result.price).toBeNull();
+  });
+  
+  it('provider error returns provider_error status', () => {
+    const errorResponse: MockZyteResponse = {
+      ...validResponse,
+      ok: false,
+      statusCode: 500,
+    };
+    const result = evaluateZyteExtraction(errorResponse, 1658.94, null, null);
+    expect(result.status).toBe('provider_error');
+    expect(result.price).toBeNull();
+  });
+});

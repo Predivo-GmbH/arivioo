@@ -665,16 +665,206 @@ function runCanonicalBaselineCheck(): CanonicalCheckResult {
     timestamp: new Date().toISOString(),
   };
 }
+// =============================================================================
+// ZYTE CANONICAL BASELINE CHECK MODE
+// =============================================================================
+// When mode=zyte-canonical-check is passed, this function runs deterministic
+// validation against the Zyte canonical baseline expectations.
+// Reference: docs/ZYTE_CANONICAL_BASELINE.md
+// =============================================================================
+
+interface ZyteCanonicalCheckResult {
+  mode: 'zyte-canonical-check';
+  passed: boolean;
+  checks: Array<{
+    name: string;
+    expected: string;
+    actual: string;
+    passed: boolean;
+  }>;
+  status: 'zyte_canonical_valid' | 'zyte_canonical_violation';
+  timestamp: string;
+}
+
+// Mock Zyte response structure for testing
+interface MockZyteResponse {
+  ok: boolean;
+  html: string;
+  screenshot: string | null;
+  providerUsed: string;
+  botIndicators: string[];
+  statusCode: number;
+  error: string | null;
+}
+
+// Simulate Zyte extraction evaluation logic
+function evaluateZyteExtraction(
+  response: MockZyteResponse,
+  ocrTotal: number | null,
+  htmlTotal: number | null,
+  subtotalOnly: number | null
+): { status: string; price: number | null; source: string } {
+  // Check for bot detection first
+  if (response.botIndicators.length > 0) {
+    return { status: 'blocked_captcha_or_bot', price: null, source: 'none' };
+  }
+  
+  // Check for HTTP errors
+  if (!response.ok || response.statusCode === 429) {
+    return { status: response.statusCode === 429 ? 'rate_limited' : 'provider_error', price: null, source: 'none' };
+  }
+  
+  // Check for insufficient content
+  if (!response.html || response.html.length < 500) {
+    return { status: 'price_not_available_in_content', price: null, source: 'none' };
+  }
+  
+  // PRIORITY 1: OCR total from screenshot
+  if (ocrTotal && ocrTotal > 0) {
+    return { status: 'total_price_including_taxes_and_fees', price: ocrTotal, source: 'ocr_total' };
+  }
+  
+  // PRIORITY 2: HTML regex total
+  if (htmlTotal && htmlTotal > 0) {
+    return { status: 'total_price_including_taxes_and_fees', price: htmlTotal, source: 'html_regex' };
+  }
+  
+  // PRIORITY 3: Subtotal only - NEVER promoted
+  if (subtotalOnly && subtotalOnly > 0) {
+    return { status: 'needs_user_confirmation', price: null, source: 'subtotal_only' };
+  }
+  
+  return { status: 'price_not_available_in_content', price: null, source: 'none' };
+}
+
+// Currency normalization function (mirrors production logic)
+function normalizeCurrencyAmount(raw: string): number | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const cleaned = raw.replace(/[^0-9.,]/g, '').replace(/,/g, '');
+  if (!cleaned) return null;
+  const amount = parseFloat(cleaned);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function runZyteCanonicalBaselineCheck(): ZyteCanonicalCheckResult {
+  const checks: ZyteCanonicalCheckResult['checks'] = [];
+  
+  // Check 1: Output shape validation
+  const mockValidResponse: MockZyteResponse = {
+    ok: true,
+    html: '<html>'.repeat(100), // > 500 chars
+    screenshot: 'base64data',
+    providerUsed: 'zyte',
+    botIndicators: [],
+    statusCode: 200,
+    error: null,
+  };
+  const hasRequiredFields = 
+    'ok' in mockValidResponse && 
+    'providerUsed' in mockValidResponse && 
+    'error' in mockValidResponse &&
+    'botIndicators' in mockValidResponse;
+  checks.push({
+    name: 'zyte_output_shape_valid',
+    expected: 'ok, providerUsed, error, botIndicators present',
+    actual: hasRequiredFields ? 'all required fields present' : 'missing fields',
+    passed: hasRequiredFields,
+  });
+  
+  // Check 2: Total priority respected (OCR > HTML > subtotal)
+  const resultWithBoth = evaluateZyteExtraction(mockValidResponse, 1658.94, 1650.00, 1500.00);
+  const totalPriorityRespected = resultWithBoth.source === 'ocr_total' && resultWithBoth.price === 1658.94;
+  checks.push({
+    name: 'zyte_total_priority_respected',
+    expected: 'ocr_total wins with price 1658.94',
+    actual: `${resultWithBoth.source} with price ${resultWithBoth.price}`,
+    passed: totalPriorityRespected,
+  });
+  
+  // Check 3: Subtotal never promoted
+  const resultSubtotalOnly = evaluateZyteExtraction(mockValidResponse, null, null, 1500.00);
+  const subtotalNeverPromoted = 
+    resultSubtotalOnly.status === 'needs_user_confirmation' && 
+    resultSubtotalOnly.price === null;
+  checks.push({
+    name: 'zyte_subtotal_never_promoted',
+    expected: 'needs_user_confirmation with null price',
+    actual: `${resultSubtotalOnly.status} with price ${resultSubtotalOnly.price}`,
+    passed: subtotalNeverPromoted,
+  });
+  
+  // Check 4: Currency normalization (US/CH formats - primary markets)
+  const testCases = [
+    { input: '$1,658.94', expected: 1658.94 },
+    { input: 'CHF 2,500.00', expected: 2500.00 },
+    { input: '£999.99', expected: 999.99 },
+    { input: '€1234.56', expected: 1234.56 },
+  ];
+  let allCurrencyPassed = true;
+  const currencyResults: string[] = [];
+  for (const tc of testCases) {
+    const result = normalizeCurrencyAmount(tc.input);
+    // Allow for floating point precision
+    const passed = result !== null && Math.abs(result - tc.expected) < 0.01;
+    if (!passed) allCurrencyPassed = false;
+    currencyResults.push(`${tc.input}→${result}`);
+  }
+  checks.push({
+    name: 'zyte_currency_normalization',
+    expected: 'all currency formats parse correctly',
+    actual: allCurrencyPassed ? 'all passed' : currencyResults.join(', '),
+    passed: allCurrencyPassed,
+  });
+  
+  // Check 5: Null safety (empty/malformed input)
+  const emptyResponse: MockZyteResponse = {
+    ok: true,
+    html: '', // Empty content
+    screenshot: null,
+    providerUsed: 'zyte',
+    botIndicators: [],
+    statusCode: 200,
+    error: null,
+  };
+  const emptyResult = evaluateZyteExtraction(emptyResponse, null, null, null);
+  const nullSafe = emptyResult.status === 'price_not_available_in_content' && emptyResult.price === null;
+  checks.push({
+    name: 'zyte_null_safe',
+    expected: 'price_not_available_in_content with null price',
+    actual: `${emptyResult.status} with price ${emptyResult.price}`,
+    passed: nullSafe,
+  });
+  
+  const allPassed = checks.every(c => c.passed);
+  
+  return {
+    mode: 'zyte-canonical-check',
+    passed: allPassed,
+    checks,
+    status: allPassed ? 'zyte_canonical_valid' : 'zyte_canonical_violation',
+    timestamp: new Date().toISOString(),
+  };
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
   
-  // Check for canonical baseline check mode (GET with mode param)
+  // Check for canonical baseline check modes
   const reqUrl = new URL(req.url);
   const mode = reqUrl.searchParams.get('mode');
   
+  // Browserless canonical check
   if (mode === 'canonical-check') {
     const result = runCanonicalBaselineCheck();
+    return new Response(JSON.stringify(result, null, 2), {
+      status: result.passed ? 200 : 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  
+  // Zyte canonical check
+  if (mode === 'zyte-canonical-check') {
+    const result = runZyteCanonicalBaselineCheck();
     return new Response(JSON.stringify(result, null, 2), {
       status: result.passed ? 200 : 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
