@@ -151,29 +151,36 @@ function classifyFailure(extractionStatus: string | null, extractionError: strin
 
 export function useEnrichedSearchResults() {
   const fetchEnrichedResults = useCallback(async (searchId: string): Promise<EnrichedSearchResult[]> => {
-    // Fetch search_results
-    const { data: resultsData, error: resultsError } = await supabase
-      .from('search_results')
-      .select('*')
-      .eq('search_id', searchId)
-      .order('savings_percentage', { ascending: false, nullsFirst: false });
+    // Run all 3 queries in parallel for faster finalization
+    const [resultsResponse, extractionsResponse, adaptersResponse] = await Promise.all([
+      // Fetch search_results
+      supabase
+        .from('search_results')
+        .select('*')
+        .eq('search_id', searchId)
+        .order('savings_percentage', { ascending: false, nullsFirst: false }),
+      
+      // Fetch price_extractions for this search - include verification fields
+      supabase
+        .from('price_extractions')
+        .select('id, search_result_id, platform_name, extraction_status, extraction_error, extracted_price, extraction_metadata, includes_taxes_fees, dates_validated, confidence_score, updated_at, evidence_snippets, extraction_stage, price_type')
+        .eq('search_id', searchId),
+      
+      // Fetch platform_adapters for tier info
+      supabase
+        .from('platform_adapters')
+        .select('platform_domain, coverage_tier, coverage_status')
+    ]);
+
+    const { data: resultsData, error: resultsError } = resultsResponse;
+    const { data: extractionsData } = extractionsResponse;
+    const { data: adaptersData } = adaptersResponse;
 
     if (resultsError || !resultsData) {
       console.error('Failed to fetch search results:', resultsError);
       return [];
     }
-
-    // Fetch price_extractions for this search - include verification fields
-    const { data: extractionsData } = await supabase
-      .from('price_extractions')
-      .select('id, search_result_id, platform_name, extraction_status, extraction_error, extracted_price, extraction_metadata, includes_taxes_fees, dates_validated, confidence_score, updated_at, evidence_snippets, extraction_stage, price_type')
-      .eq('search_id', searchId);
-
-    // Fetch platform_adapters for tier info
-    const { data: adaptersData } = await supabase
-      .from('platform_adapters')
-      .select('platform_domain, coverage_tier, coverage_status');
-
+    
     // Create lookup maps
     const extractionByResultId = new Map<string, any>();
     const extractionByPlatform = new Map<string, any>();
