@@ -61,6 +61,12 @@ interface SearchResult {
   is_tier_c_blocked?: boolean;
   failure_category?: string | null;
   failure_reason?: string | null;
+  // Extraction info
+  extraction_status?: string | null;
+  extraction_error?: string | null;
+  // Outcome taxonomy
+  outcome_category?: string | null;
+  outcome_label?: string | null;
   // Price verification metadata
   price_status?: 'verified' | 'unverified' | 'unavailable';
   price_source?: 'extracted' | 'scraped' | 'none';
@@ -281,6 +287,7 @@ export default function SearchResults() {
   const [showUnverifiedPrices, setShowUnverifiedPrices] = useState(false);
   const [showBlockedPlatforms, setShowBlockedPlatforms] = useState(false);
   const [showFailedExtractions, setShowFailedExtractions] = useState(false);
+  const [showSoldOutPlatforms, setShowSoldOutPlatforms] = useState(false);
   const [streamDisconnected, setStreamDisconnected] = useState(false);
   const [extractingPrices, setExtractingPrices] = useState(false);
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
@@ -1475,12 +1482,20 @@ export default function SearchResults() {
     r.eligible_for_comparison !== true
   );
   
-  // Categorize unverified results by extraction outcome
-  const categorizeResult = (r: SearchResult): 'price_unverified' | 'blocked' | 'failed' => {
+  // Categorize unverified results by extraction outcome using canonical taxonomy
+  const categorizeResult = (r: SearchResult): 'price_unverified' | 'blocked' | 'sold_out' | 'failed' => {
     // Check if blocked by platform (Tier C or blocked status)
-    if (r.is_tier_c_blocked || r.failure_category === 'blocked_captcha_or_bot' || 
-        r.failure_category === 'rate_limited_abort' || r.failure_category === 'bot_blocked_abort') {
+    if (r.is_tier_c_blocked || r.failure_category === 'blocked' || 
+        r.outcome_category === 'access_blocked') {
       return 'blocked';
+    }
+    // Check if sold out / dates unavailable (NOT an error)
+    if (r.failure_category === 'sold_out' || 
+        r.outcome_category === 'unavailable_for_dates' ||
+        r.extraction_status === 'dates_unavailable' ||
+        r.extraction_status === 'sold_out' ||
+        r.extraction_status === 'expedia_dates_unavailable_for_target') {
+      return 'sold_out';
     }
     // Has a price but it's unverified
     if (r.price && r.price > 0 && r.price_status === 'unverified') {
@@ -1492,6 +1507,7 @@ export default function SearchResults() {
   
   const unverifiedWithPrice = unverifiedResults.filter(r => categorizeResult(r) === 'price_unverified');
   const blockedResults = unverifiedResults.filter(r => categorizeResult(r) === 'blocked');
+  const soldOutResults = unverifiedResults.filter(r => categorizeResult(r) === 'sold_out');
   const failedResults = unverifiedResults.filter(r => categorizeResult(r) === 'failed');
   
   // For backward compatibility: resultsWithPrices = verified only now
@@ -1620,45 +1636,57 @@ export default function SearchResults() {
     return differences.length > 0 ? differences : ["Verify booking terms on site"];
   };
 
-  // Get human-readable failure reason for display
-  // Updated to include verification failure reasons
-  const getFailureDisplay = (result: SearchResult): { text: string; isTierC: boolean; isTierA: boolean; isUnverified: boolean } => {
+  // Get human-readable failure reason for display using canonical taxonomy
+  // Returns user-friendly text based on outcome_category and outcome_label
+  const getFailureDisplay = (result: SearchResult): { text: string; isTierC: boolean; isTierA: boolean; isUnverified: boolean; isSoldOut: boolean } => {
     const isTierC = result.is_tier_c_blocked === true;
     const isTierA = result.coverage_tier === 'A';
     const isUnverified = result.price_status === 'unverified';
+    const isSoldOut = result.failure_category === 'sold_out' || 
+                      result.extraction_status === 'dates_unavailable' ||
+                      result.extraction_status === 'sold_out' ||
+                      result.extraction_status === 'expedia_dates_unavailable_for_target';
     
     if (isTierC) {
-      return { text: 'Platform not supported', isTierC: true, isTierA: false, isUnverified: false };
+      return { text: 'Platform not supported', isTierC: true, isTierA: false, isUnverified: false, isSoldOut: false };
+    }
+    
+    // Sold out / dates unavailable - this is NOT an error
+    if (isSoldOut) {
+      return { text: 'Not available for these dates', isTierC: false, isTierA, isUnverified: false, isSoldOut: true };
     }
     
     // If we have a price but it's unverified, show why
     if (isUnverified && result.price && result.price > 0) {
       const failures = result.verification_failures || [];
       if (failures.includes('scraped_not_extracted')) {
-        return { text: 'Price not verified for dates', isTierC: false, isTierA, isUnverified: true };
+        return { text: 'Manual check recommended', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
       }
       if (failures.includes('dates_not_validated')) {
-        return { text: 'Dates could not be confirmed', isTierC: false, isTierA, isUnverified: true };
+        return { text: 'Dates could not be confirmed', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
       }
       if (failures.includes('taxes_fees_not_included')) {
-        return { text: 'May not include all fees', isTierC: false, isTierA, isUnverified: true };
+        return { text: 'May not include all fees', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
       }
       if (failures.includes('low_confidence')) {
-        return { text: 'Low extraction confidence', isTierC: false, isTierA, isUnverified: true };
+        return { text: 'Low extraction confidence', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
       }
-      return { text: 'Price not verified', isTierC: false, isTierA, isUnverified: true };
+      return { text: 'Manual check recommended', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
     }
     
+    // Use the outcome label from taxonomy if available
     if (result.failure_reason) {
       return { 
-        text: FAILURE_CATEGORY_LABELS[result.failure_category || ''] || result.failure_reason, 
+        text: result.failure_reason, 
         isTierC: false, 
         isTierA,
-        isUnverified: false
+        isUnverified: false,
+        isSoldOut: false
       };
     }
     
-    return { text: 'Price unavailable', isTierC: false, isTierA, isUnverified: false };
+    // Fallback
+    return { text: 'Price unavailable', isTierC: false, isTierA, isUnverified: false, isSoldOut: false };
   };
 
   return (
@@ -2386,7 +2414,72 @@ export default function SearchResults() {
                           </div>
                         )}
                         
-                        {/* Category 3: Extraction failed */}
+                        {/* Category 3: Sold out / Unavailable for dates (NOT an error) */}
+                        {soldOutResults.length > 0 && (
+                          <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 overflow-hidden">
+                            <button
+                              onClick={() => setShowSoldOutPlatforms(!showSoldOutPlatforms)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-orange-500/10 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-orange-500" />
+                                <Calendar className="w-4 h-4 text-orange-500" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {soldOutResults.length} platform{soldOutResults.length !== 1 ? 's' : ''} unavailable for these dates
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Sold out or dates not available</span>
+                                {showSoldOutPlatforms ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showSoldOutPlatforms && (
+                              <div className="border-t border-orange-500/20">
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {soldOutResults.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const failureDisplay = getFailureDisplay(result);
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-orange-500" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-orange-500/10 text-orange-600 text-xs font-medium">
+                                                <Calendar className="w-3 h-3" />
+                                                Unavailable
+                                              </span>
+                                            </td>
+                                            <td className="py-4 px-4 text-right text-muted-foreground">
+                                              <span className="text-sm text-orange-600">{failureDisplay.text}</span>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <Button variant="outline" size="sm" asChild>
+                                                <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                  View <ExternalLink className="w-3 h-3 ml-1" />
+                                                </a>
+                                              </Button>
+                                            </td>
+                                          </tr>
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Category 4: Extraction failed */}
                         {failedResults.length > 0 && (
                           <div className="rounded-xl border border-border bg-muted/30 overflow-hidden">
                             <button

@@ -14,6 +14,12 @@ import {
   type PriceType,
   type ExtractionInput,
 } from '@/lib/canonicalPrice';
+import {
+  classifyOutcome,
+  getOutcomeUserLabel,
+  FAILURE_CATEGORY_LABELS as TAXONOMY_FAILURE_LABELS,
+  type OutcomeCategory,
+} from '@/lib/extractionOutcomeTaxonomy';
 
 export interface EnrichedSearchResult {
   id: string;
@@ -40,6 +46,9 @@ export interface EnrichedSearchResult {
   failure_category: string | null;
   failure_reason: string | null;
   is_tier_c_blocked: boolean;
+  // NEW: Outcome taxonomy
+  outcome_category: OutcomeCategory | null;
+  outcome_label: string | null;
   // Price verification metadata (legacy)
   price_status: PriceStatus;
   price_source: PriceSource;
@@ -53,111 +62,44 @@ export interface EnrichedSearchResult {
   is_total_price: boolean;
 }
 
-// Maps extraction errors to human-readable failure categories
-function classifyFailure(extractionStatus: string | null, extractionError: string | null, coverageTier: string | null): { category: string | null; reason: string | null } {
+// Maps extraction errors to human-readable failure categories using canonical taxonomy
+function classifyFailure(
+  extractionStatus: string | null, 
+  extractionError: string | null, 
+  coverageTier: string | null,
+  metadata?: { unavailabilityMarker?: string; priceStatus?: 'verified' | 'unverified' | 'unavailable'; hasPrice?: boolean }
+): { category: string | null; reason: string | null; outcomeCategory: OutcomeCategory | null } {
   if (!extractionStatus || extractionStatus === 'success' || extractionStatus === 'pending') {
-    return { category: null, reason: null };
+    return { category: null, reason: null, outcomeCategory: null };
   }
 
-  const error = extractionError || '';
-  const status = extractionStatus;
+  // Use canonical taxonomy for classification
+  const outcome = classifyOutcome(extractionStatus, extractionError, {
+    coverageTier,
+    unavailabilityMarker: metadata?.unavailabilityMarker,
+    priceStatus: metadata?.priceStatus,
+    hasPrice: metadata?.hasPrice,
+  });
 
-  // ========== EXPEDIA-SPECIFIC TERMINAL STATUSES (v6.3 target card anchoring) ==========
-  // These must be checked first as they are the canonical Expedia statuses
+  const outcomeLabel = getOutcomeUserLabel(outcome);
   
-  // Target property card not found on offers page
-  if (status === 'expedia_target_offer_not_found') {
-    return { category: 'price_not_visible', reason: 'Property not found on Expedia' };
-  }
-  
-  // Target property card title doesn't match (wrong property)
-  if (status === 'expedia_target_offer_mismatch') {
-    return { category: 'price_not_visible', reason: 'Property mismatch on Expedia' };
-  }
-  
-  // Target property card shows unavailability (e.g., "Minimum stay not met")
-  if (status === 'expedia_dates_unavailable_for_target' || status === 'dates_unavailable') {
-    return { category: 'sold_out', reason: 'Not available for these dates on Expedia' };
-  }
-  
-  // Target card found but couldn't extract total price
-  if (status === 'expedia_target_total_not_found') {
-    return { category: 'price_not_visible', reason: 'Total price not visible on Expedia' };
-  }
-  
-  // Offers page not reached
-  if (status === 'expedia_offers_page_not_reached' || status === 'expedia_total_not_found_on_offers_page') {
-    return { category: 'render_failed', reason: 'Expedia offers page not loaded' };
-  }
-  
-  // Expedia blocked access (CAPTCHA/bot detection)
-  if (status === 'expedia_access_blocked') {
-    return { category: 'blocked', reason: 'Blocked by Expedia' };
-  }
-  
-  // Property ID not found in URL
-  if (status === 'property_id_not_found') {
-    return { category: 'price_not_visible', reason: 'Property not found on Expedia' };
-  }
+  // Map outcome category to legacy category for backwards compatibility
+  const legacyCategoryMap: Record<OutcomeCategory, string> = {
+    'price_verified': 'success',
+    'price_unverified': 'unverified',
+    'unavailable_for_dates': 'sold_out',
+    'requires_action': 'dates_not_applied',
+    'access_blocked': 'blocked',
+    'price_not_found': 'price_not_visible',
+    'service_error': 'provider_error',
+    'platform_unsupported': 'unsupported',
+  };
 
-  // ========== GENERIC PROVIDER ERRORS ==========
-  
-  // Provider errors
-  if (error.includes('Zyte error: 400') || error.includes('Zyte 400')) {
-    return { category: 'provider_error', reason: 'Provider rejected request' };
-  }
-  if (error.includes('Zyte timeout') || error.includes('Zyte error: 5')) {
-    return { category: 'provider_error', reason: 'Provider timeout' };
-  }
-  if (error.includes('Firecrawl error: 403') || error.includes('403')) {
-    return { category: 'blocked', reason: 'Blocked by platform' };
-  }
-  if (error.includes('Firecrawl error: 5') || error.includes('Firecrawl timeout')) {
-    return { category: 'provider_error', reason: 'Service timeout' };
-  }
-
-  // Bot/CAPTCHA
-  if (status === 'blocked_captcha_or_bot' || status === 'blocked_captcha' || error.toLowerCase().includes('captcha') || error.toLowerCase().includes('bot')) {
-    return { category: 'blocked', reason: 'Blocked by CAPTCHA' };
-  }
-
-  // Rate limiting / access abort
-  if (status === 'blocked_rate_limit' || status === 'rate_limited_abort') {
-    return { category: 'rate_limited', reason: 'Rate limited by platform' };
-  }
-
-  // Bot block abort (hard stop)
-  if (status === 'bot_blocked_abort') {
-    return { category: 'blocked', reason: 'Blocked by platform (stopped)' };
-  }
-
-  // Dates not applied
-  if (status === 'dates_not_applied') {
-    return { category: 'dates_not_applied', reason: 'Could not apply dates' };
-  }
-
-  // Sold out / unavailable
-  if (status === 'sold_out' || status === 'no_availability_for_dates') {
-    return { category: 'sold_out', reason: 'Not available for these dates' };
-  }
-
-  // Tier C / unsupported
-  if (status === 'platform_unsupported' || coverageTier === 'C') {
-    return { category: 'unsupported', reason: 'Platform not supported' };
-  }
-
-  // Render failed
-  if (status === 'render_failed') {
-    return { category: 'render_failed', reason: 'Page failed to load' };
-  }
-
-  // Price not found
-  if (status === 'price_not_found' || status === 'price_not_found_after_dates_applied') {
-    return { category: 'price_not_visible', reason: 'Price not visible on page' };
-  }
-
-  // Default
-  return { category: 'unknown', reason: error || 'Unknown error' };
+  return { 
+    category: legacyCategoryMap[outcome.category] || 'unknown', 
+    reason: outcomeLabel,
+    outcomeCategory: outcome.category,
+  };
 }
 
 export function useEnrichedSearchResults() {
@@ -249,9 +191,15 @@ export function useEnrichedSearchResults() {
       // Get extraction info
       const extractionStatus = extraction?.extraction_status || null;
       const extractionError = extraction?.extraction_error || null;
+      const extractionMetadata = extraction?.extraction_metadata as Record<string, any> | null;
 
-      // Classify failure
-      const { category, reason } = classifyFailure(extractionStatus, extractionError, coverageTier);
+      // Classify failure using canonical taxonomy
+      const { category, reason, outcomeCategory } = classifyFailure(
+        extractionStatus, 
+        extractionError, 
+        coverageTier,
+        { unavailabilityMarker: extractionMetadata?.unavailability_marker }
+      );
 
       // FRONTEND GUARD: Additional defense-in-depth
       // Even if a price somehow exists in data for Tier C, forcefully null it
@@ -414,8 +362,11 @@ export function useEnrichedSearchResults() {
         extraction_status: extractionStatus,
         extraction_error: extractionError,
         failure_category: isTierCBlocked ? 'unsupported' : category,
-        failure_reason: isTierCBlocked ? 'Platform blocked (Tier C)' : reason,
+        failure_reason: isTierCBlocked ? 'Platform not supported' : reason,
         is_tier_c_blocked: isTierCBlocked,
+        // NEW: Outcome taxonomy
+        outcome_category: isTierCBlocked ? 'platform_unsupported' as OutcomeCategory : outcomeCategory,
+        outcome_label: isTierCBlocked ? 'Platform not supported' : reason,
         // Price verification metadata (legacy)
         price_status: verification.price_status,
         price_source: verification.price_source,
@@ -436,15 +387,5 @@ export function useEnrichedSearchResults() {
   return { fetchEnrichedResults };
 }
 
-// Human-readable labels for failure categories
-export const FAILURE_CATEGORY_LABELS: Record<string, string> = {
-  'provider_error': 'Service unavailable',
-  'blocked': 'Platform blocked access',
-  'rate_limited': 'Rate limited (stopped)',
-  'dates_not_applied': 'Dates could not be applied',
-  'sold_out': 'Not available for dates',
-  'unsupported': 'Platform not supported',
-  'render_failed': 'Page failed to load',
-  'price_not_visible': 'Price not visible',
-  'unknown': 'Check failed',
-};
+// Re-export FAILURE_CATEGORY_LABELS from taxonomy for backwards compatibility
+export { TAXONOMY_FAILURE_LABELS as FAILURE_CATEGORY_LABELS };
