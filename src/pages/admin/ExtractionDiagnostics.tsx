@@ -127,12 +127,37 @@ interface SystemicIssues {
 const STATUS_CONFIG: Record<string, { icon: any; color: string; label: string }> = {
   success: { icon: CheckCircle2, color: 'text-green-500', label: 'Success' },
   blocked: { icon: Ban, color: 'text-red-500', label: 'Blocked' },
+  blocked_captcha_or_bot: { icon: Ban, color: 'text-red-500', label: 'Bot Blocked' },
+  blocked_rate_limit: { icon: Ban, color: 'text-red-500', label: 'Rate Limited' },
   render_failed: { icon: XCircle, color: 'text-orange-500', label: 'Render Failed' },
   timeout: { icon: Clock, color: 'text-yellow-500', label: 'Timeout' },
   price_not_found: { icon: HelpCircle, color: 'text-muted-foreground', label: 'Price Not Found' },
   pending: { icon: Loader2, color: 'text-blue-500', label: 'Pending' },
   not_attempted: { icon: XCircle, color: 'text-muted-foreground', label: 'Not Attempted' },
   internal_error: { icon: AlertTriangle, color: 'text-red-600', label: 'Internal Error' },
+  // Availability statuses
+  dates_unavailable: { icon: Calendar, color: 'text-orange-500', label: 'Dates Unavailable' },
+  sold_out: { icon: Calendar, color: 'text-orange-500', label: 'Sold Out' },
+  no_availability_for_dates: { icon: Calendar, color: 'text-orange-500', label: 'No Availability' },
+  // Date application failures
+  dates_not_applied: { icon: Calendar, color: 'text-yellow-500', label: 'Dates Not Applied' },
+  date_application_failed: { icon: Calendar, color: 'text-yellow-500', label: 'Date Application Failed' },
+  // Expedia-specific statuses (golden path)
+  expedia_target_offer_not_found: { icon: HelpCircle, color: 'text-orange-500', label: 'Expedia: Offer Not Found' },
+  expedia_target_offer_mismatch: { icon: AlertTriangle, color: 'text-orange-500', label: 'Expedia: Offer Mismatch' },
+  expedia_dates_unavailable_for_target: { icon: Calendar, color: 'text-orange-500', label: 'Expedia: Dates Unavailable' },
+  expedia_target_total_not_found: { icon: HelpCircle, color: 'text-orange-500', label: 'Expedia: Total Not Found' },
+  expedia_offers_page_not_reached: { icon: XCircle, color: 'text-orange-500', label: 'Expedia: Page Not Reached' },
+  expedia_total_not_found: { icon: HelpCircle, color: 'text-orange-500', label: 'Expedia: Total Not Found' },
+  expedia_total_not_found_on_offers_page: { icon: HelpCircle, color: 'text-orange-500', label: 'Expedia: Total Not Found' },
+  expedia_access_blocked: { icon: Ban, color: 'text-red-500', label: 'Expedia: Blocked' },
+  property_id_not_found: { icon: HelpCircle, color: 'text-orange-500', label: 'Property ID Not Found' },
+  offers_page_not_loaded: { icon: XCircle, color: 'text-orange-500', label: 'Offers Page Failed' },
+  // Other terminal statuses
+  subtotal_rejected: { icon: AlertTriangle, color: 'text-yellow-500', label: 'Subtotal Rejected' },
+  checkout_not_reached: { icon: XCircle, color: 'text-orange-500', label: 'Checkout Not Reached' },
+  currency_conversion_failed: { icon: AlertTriangle, color: 'text-yellow-500', label: 'Currency Failed' },
+  validation_error: { icon: AlertTriangle, color: 'text-red-500', label: 'Validation Error' },
 };
 
 const PRICE_STATUS_CONFIG: Record<string, { icon: any; color: string; bgColor: string }> = {

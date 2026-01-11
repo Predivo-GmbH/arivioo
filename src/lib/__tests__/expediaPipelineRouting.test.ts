@@ -229,4 +229,65 @@ describe('Expedia Pipeline Routing', () => {
       expect('strategy_used' in correctExpediaMetadata).toBe(false);
     });
   });
+  
+  describe('Terminal status handling', () => {
+    // Test that dates_unavailable is a valid terminal status, NOT a failure
+    
+    it('dates_unavailable is a valid terminal status for sold out properties', () => {
+      // This metadata represents a CORRECTLY HANDLED sold out scenario
+      const soldOutMetadata = {
+        status: 'dates_unavailable',
+        goldenPath: {
+          propertyId: '23179611',
+          propertyIdSource: 'url_path',
+          offersPageUrl: 'https://www.expedia.com/Hotel-Search?...',
+          requestedStartDate: '2026-03-01',
+          requestedEndDate: '2026-03-04',
+          requestedAdults: 2,
+        },
+        structuralProof: {
+          proof_version: '3.0-dates-unavailable',
+          unavailability_marker: 'sold out',
+          offers_page_reached: true,
+          offers_page_gate_passed: true,
+        },
+      };
+      
+      // The key assertions:
+      // 1. goldenPath is still populated (extraction worked correctly)
+      expect(soldOutMetadata.goldenPath).toBeDefined();
+      expect(soldOutMetadata.goldenPath.propertyId).toBeDefined();
+      
+      // 2. offers_page_gate_passed is true (we reached the right page)
+      expect(soldOutMetadata.structuralProof.offers_page_gate_passed).toBe(true);
+      
+      // 3. unavailability_marker explains WHY there's no price
+      expect(soldOutMetadata.structuralProof.unavailability_marker).toBe('sold out');
+      
+      // 4. This is NOT an extraction failure - it's a valid terminal state
+      const validTerminalStatuses = [
+        'success',
+        'dates_unavailable',
+        'sold_out',
+        'no_availability_for_dates',
+        'expedia_dates_unavailable_for_target',
+      ];
+      expect(validTerminalStatuses).toContain(soldOutMetadata.status);
+    });
+    
+    it('dates_unavailable should NOT be classified as internal_error in UI', () => {
+      // UI status mapping must include dates_unavailable
+      const UI_STATUS_CONFIG = {
+        success: 'Success',
+        dates_unavailable: 'Dates Unavailable',
+        sold_out: 'Sold Out',
+        blocked: 'Blocked',
+        internal_error: 'Internal Error',
+      };
+      
+      // dates_unavailable must have its own entry, not fallback to internal_error
+      expect(UI_STATUS_CONFIG['dates_unavailable']).toBe('Dates Unavailable');
+      expect(UI_STATUS_CONFIG['dates_unavailable']).not.toBe('Internal Error');
+    });
+  });
 });

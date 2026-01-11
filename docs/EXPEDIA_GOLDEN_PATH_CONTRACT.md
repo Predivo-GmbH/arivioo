@@ -61,6 +61,8 @@ An Expedia extraction is successful if:
 | Status | Meaning | Retryable |
 |--------|---------|-----------|
 | `success` | Total price extracted with full proof | No |
+| `dates_unavailable` | Property sold out or unavailable for dates (detected via "sold out" text) | No |
+| `sold_out` | Property explicitly sold out | No |
 | `expedia_target_offer_not_found` | Property card not on offers page | No |
 | `expedia_target_offer_mismatch` | Property card found but title mismatch | No |
 | `expedia_dates_unavailable_for_target` | Property unavailable for dates | No |
@@ -68,6 +70,8 @@ An Expedia extraction is successful if:
 | `expedia_offers_page_not_reached` | Could not navigate to offers page | Yes |
 | `blocked_captcha_or_bot` | All providers blocked | Yes |
 | `property_id_not_found` | Cannot extract property ID from URL | No |
+
+Note: `dates_unavailable` is a **legitimate terminal status** indicating the property genuinely isn't available on Expedia for the requested dates. This is NOT an extraction failure - the golden path correctly detected unavailability.
 
 ## USD-First Strategy
 
