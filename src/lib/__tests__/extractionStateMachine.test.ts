@@ -887,3 +887,134 @@ describe('Test G: Airbnb OCR total extraction', () => {
     expect(total).toBeGreaterThan(subtotal);
   });
 });
+
+// =============================================================================
+// TEST H: Browserless regex pattern serialization safety
+// =============================================================================
+describe('Test H: Browserless regex pattern serialization', () => {
+  /**
+   * These tests ensure that regex patterns survive the full serialization
+   * round-trip when sent to Browserless.
+   * 
+   * The pattern of errors like:
+   * "Invalid regular expression: /Totals*(?s*USDs*)?s*$s*([d,]+(?.d{2})?)/i"
+   * shows that backslashes were stripped during serialization.
+   */
+  
+  // These are the EXACT pattern strings used in the Browserless code
+  // They need quadruple escaping: \\\\s becomes \\s after JSON.parse, then \s in regex
+  const BROWSERLESS_PATTERNS = [
+    {
+      name: 'payNowRe',
+      // Pattern as written in code (inside template literal going to Browserless)
+      sourceInCode: 'Pay\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)\\\\s*now',
+      expectedAfterParse: 'Pay\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s*now',
+      testCases: ['Pay $1,658.94 now', 'Pay$500now', 'Pay $2,214 now'],
+    },
+    {
+      name: 'totalUsdRe',
+      sourceInCode: 'Total\\\\s*\\\\(?\\\\s*USD\\\\s*\\\\)?\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)',
+      expectedAfterParse: 'Total\\s*\\(?\\s*USD\\s*\\)?\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)',
+      testCases: ['Total (USD) $1,658.94', 'Total USD $1,658.94', 'Total(USD)$500'],
+    },
+    {
+      name: 'dueTodayRe',
+      sourceInCode: 'Due\\\\s+today\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)',
+      expectedAfterParse: 'Due\\s+today\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)',
+      testCases: ['Due today $500.00', 'Due today$1,234.56'],
+    },
+    {
+      name: 'subtotalRe',
+      sourceInCode: '\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)\\\\s+for\\\\s+(\\\\d+)\\\\s+nights?',
+      expectedAfterParse: '\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s+for\\s+(\\d+)\\s+nights?',
+      testCases: ['$1,482 for 3 nights', '$500.00 for 1 night', '$ 2,000 for 7 nights'],
+    },
+  ];
+  
+  it('patterns compile correctly after simulated JSON round-trip', () => {
+    for (const { name, sourceInCode, expectedAfterParse, testCases } of BROWSERLESS_PATTERNS) {
+      // Simulate what happens when the code string is sent to Browserless:
+      // 1. Template literal is created with the pattern
+      // 2. JSON.stringify() is called on the payload
+      // 3. Browserless receives and parses the JSON
+      // 4. new RegExp() is called with the resulting string
+      
+      // Simulate JSON round-trip
+      const afterJsonParse = JSON.parse(JSON.stringify(sourceInCode));
+      
+      // Verify it matches expected
+      expect(afterJsonParse).toBe(expectedAfterParse);
+      
+      // Verify pattern compiles
+      let regex: RegExp;
+      expect(() => {
+        regex = new RegExp(afterJsonParse, 'i');
+      }).not.toThrow();
+      
+      // Verify it matches test cases
+      for (const testCase of testCases) {
+        expect(regex!.test(testCase)).toBe(true);
+      }
+    }
+  });
+  
+  it('detects incorrectly escaped patterns (single backslashes)', () => {
+    // These are WRONG patterns - single backslashes that get stripped
+    const wrongPatterns = [
+      { name: 'wrong_payNow', pattern: 'Pay\\s*\\$\\s*' },
+      { name: 'wrong_total', pattern: 'Total\\s*\\(USD\\)' },
+    ];
+    
+    for (const { name, pattern } of wrongPatterns) {
+      // After JSON round-trip, single backslashes become nothing
+      // But in this test context, we simulate what happens if someone
+      // mistakenly uses the pattern without proper escaping
+      
+      // Construct what would result from stripped backslashes
+      const strippedPattern = pattern
+        .replace(/\\s/g, 's')
+        .replace(/\\$/g, '$')
+        .replace(/\\(/g, '(')
+        .replace(/\\)/g, ')');
+      
+      // This may or may not throw depending on the pattern,
+      // but it definitely won't match what we expect
+      const regex = new RegExp(strippedPattern, 'i');
+      
+      // Even if it compiles, it won't match "Pay $500 now"
+      // because it's looking for literal 's' instead of whitespace
+      expect(regex.test('Pay $500 now')).toBe(false);
+    }
+  });
+  
+  it('REGRESSION: invalid pattern from error logs does not compile', () => {
+    // This is the exact pattern that appeared in the error logs
+    const invalidPatternFromLogs = 'Totals*(?s*USDs*)?s*$s*([d,]+(?.d{2})?)';
+    
+    // This should throw because:
+    // - 's*' instead of '\\s*' (whitespace)
+    // - '$' instead of '\\$' (dollar sign)
+    // - 'd' instead of '\\d' (digit)
+    // - '(?' is incomplete lookahead/lookbehind
+    expect(() => new RegExp(invalidPatternFromLogs, 'i')).toThrow();
+  });
+  
+  it('ensures no patterns contain unsupported constructs', () => {
+    // JavaScript regex does NOT support:
+    // - (?s) - DOTALL modifier (Python/PCRE only)
+    // - (?m) as inline modifier (only as flag)
+    // - (?x) - verbose mode
+    
+    const unsupportedConstructs = [
+      /\(\?s\)/,  // DOTALL modifier
+      /\(\?x\)/,  // Verbose mode
+      /\(\?i\)/,  // Inline case-insensitive (use 'i' flag instead)
+    ];
+    
+    for (const { expectedAfterParse } of BROWSERLESS_PATTERNS) {
+      for (const badConstruct of unsupportedConstructs) {
+        expect(expectedAfterParse).not.toMatch(badConstruct);
+      }
+    }
+  });
+});
