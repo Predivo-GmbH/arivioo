@@ -1018,3 +1018,124 @@ describe('Test H: Browserless regex pattern serialization', () => {
     }
   });
 });
+
+// =============================================================================
+// TEST I: Browserless-only debug mode state machine
+// =============================================================================
+describe('Test I: Browserless-only debug mode behavior', () => {
+  /**
+   * These tests verify the state machine logic for BROWSERLESS_ONLY_BASELINE mode.
+   * When enabled, the pipeline should HARD STOP on any non-success state.
+   */
+  
+  // Define all possible baseline status values
+  type BaselineStatus = 
+    | 'total_price_including_taxes_and_fees'      // SUCCESS - only this continues
+    | 'total_price_excluding_taxes_and_fees'      // STOP - not final total
+    | 'needs_user_confirmation'                    // STOP - subtotal only
+    | 'price_not_available_in_content';           // STOP - no price found
+  
+  // Helper to simulate the debug mode decision logic
+  function shouldStopInDebugMode(
+    browserlessOnlyMode: boolean,
+    airbnbPrice: number | null,
+    airbnbCurrency: string | null,
+    baselineStatus: BaselineStatus
+  ): { shouldStop: boolean; reason: string | null } {
+    if (!browserlessOnlyMode) {
+      return { shouldStop: false, reason: null };
+    }
+    
+    const hasVerifiedTotal = airbnbPrice && airbnbCurrency && 
+      baselineStatus === 'total_price_including_taxes_and_fees';
+    
+    if (!hasVerifiedTotal) {
+      let reason: string;
+      if (baselineStatus === 'needs_user_confirmation') {
+        reason = 'needs_user_confirmation (subtotal only, no verified total)';
+      } else if (baselineStatus === 'price_not_available_in_content') {
+        reason = 'price_not_available_in_content (no price found)';
+      } else if (baselineStatus === 'total_price_excluding_taxes_and_fees') {
+        reason = 'total_price_excluding_taxes_and_fees (not final total)';
+      } else {
+        reason = `${baselineStatus} (non-success state)`;
+      }
+      return { shouldStop: true, reason };
+    }
+    
+    return { shouldStop: false, reason: null };
+  }
+  
+  it('when debug mode OFF, never stops regardless of status', () => {
+    const statuses: BaselineStatus[] = [
+      'total_price_including_taxes_and_fees',
+      'total_price_excluding_taxes_and_fees',
+      'needs_user_confirmation',
+      'price_not_available_in_content',
+    ];
+    
+    for (const status of statuses) {
+      const result = shouldStopInDebugMode(false, null, null, status);
+      expect(result.shouldStop).toBe(false);
+      expect(result.reason).toBeNull();
+    }
+  });
+  
+  it('when debug mode ON with verified total, continues normally', () => {
+    const result = shouldStopInDebugMode(
+      true, 
+      1658.94, 
+      'USD', 
+      'total_price_including_taxes_and_fees'
+    );
+    expect(result.shouldStop).toBe(false);
+    expect(result.reason).toBeNull();
+  });
+  
+  it('when debug mode ON with needs_user_confirmation, STOPS', () => {
+    const result = shouldStopInDebugMode(
+      true,
+      null,
+      null,
+      'needs_user_confirmation'
+    );
+    expect(result.shouldStop).toBe(true);
+    expect(result.reason).toContain('needs_user_confirmation');
+  });
+  
+  it('when debug mode ON with price_not_available_in_content, STOPS', () => {
+    const result = shouldStopInDebugMode(
+      true,
+      null,
+      null,
+      'price_not_available_in_content'
+    );
+    expect(result.shouldStop).toBe(true);
+    expect(result.reason).toContain('price_not_available_in_content');
+  });
+  
+  it('when debug mode ON with total_price_excluding_taxes_and_fees, STOPS', () => {
+    // Even if we have a price, if it's not the verified total, we stop
+    const result = shouldStopInDebugMode(
+      true,
+      1500.00,
+      'USD',
+      'total_price_excluding_taxes_and_fees'
+    );
+    expect(result.shouldStop).toBe(true);
+    expect(result.reason).toContain('total_price_excluding_taxes_and_fees');
+  });
+  
+  it('REGRESSION: needs_user_confirmation with subtotal price still stops', () => {
+    // This was the bug: we had a price (subtotal) but not verified total
+    // The old code only checked !airbnbPrice which was false
+    const result = shouldStopInDebugMode(
+      true,
+      1482.00, // subtotal price present!
+      'USD',
+      'needs_user_confirmation' // but status says not verified
+    );
+    expect(result.shouldStop).toBe(true);
+    expect(result.reason).toContain('needs_user_confirmation');
+  });
+});
