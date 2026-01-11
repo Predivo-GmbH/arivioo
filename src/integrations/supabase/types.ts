@@ -1277,6 +1277,63 @@ export type Database = {
         }
         Relationships: []
       }
+      provider_canary_checks: {
+        Row: {
+          canary_url: string
+          check_in_date: string
+          check_out_date: string
+          checked_at: string
+          checks_detail: Json | null
+          created_at: string
+          currency: string | null
+          duration_ms: number | null
+          evidence_snippet: string | null
+          extracted_price: number | null
+          extraction_status: string | null
+          failure_reason: string | null
+          id: string
+          nights_count: number
+          passed: boolean
+          provider: string
+        }
+        Insert: {
+          canary_url: string
+          check_in_date: string
+          check_out_date: string
+          checked_at?: string
+          checks_detail?: Json | null
+          created_at?: string
+          currency?: string | null
+          duration_ms?: number | null
+          evidence_snippet?: string | null
+          extracted_price?: number | null
+          extraction_status?: string | null
+          failure_reason?: string | null
+          id?: string
+          nights_count: number
+          passed: boolean
+          provider: string
+        }
+        Update: {
+          canary_url?: string
+          check_in_date?: string
+          check_out_date?: string
+          checked_at?: string
+          checks_detail?: Json | null
+          created_at?: string
+          currency?: string | null
+          duration_ms?: number | null
+          evidence_snippet?: string | null
+          extracted_price?: number | null
+          extraction_status?: string | null
+          failure_reason?: string | null
+          id?: string
+          nights_count?: number
+          passed?: boolean
+          provider?: string
+        }
+        Relationships: []
+      }
       search_results: {
         Row: {
           confidence_score: number | null

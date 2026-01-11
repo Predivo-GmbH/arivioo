@@ -60,12 +60,6 @@ interface CanaryCheckResult {
   }>;
 }
 
-type CheckResult = CanonicalCheckResult | CanaryCheckResult;
-
-function isCanaryResult(result: CheckResult): result is CanaryCheckResult {
-  return 'provider' in result && 'canary_url' in result;
-}
-
 export function BaselineInfoPanel() {
   const { getToken } = useAdminAuth();
   const [baseline, setBaseline] = useState<BaselineData | null>(null);
@@ -74,10 +68,18 @@ export function BaselineInfoPanel() {
   const [showExpectations, setShowExpectations] = useState(false);
   const [showLogicChecks, setShowLogicChecks] = useState(false);
   
-  // Browserless CANARY check (live capability)
+  // Provider CANARY checks (live capability)
   const [browserlessCanary, setBrowserlessCanary] = useState<CanaryCheckResult | null>(null);
   const [checkingBrowserlessCanary, setCheckingBrowserlessCanary] = useState(false);
   const [browserlessCanaryError, setBrowserlessCanaryError] = useState<string | null>(null);
+  
+  const [zyteCanary, setZyteCanary] = useState<CanaryCheckResult | null>(null);
+  const [checkingZyteCanary, setCheckingZyteCanary] = useState(false);
+  const [zyteCanaryError, setZyteCanaryError] = useState<string | null>(null);
+  
+  const [firecrawlCanary, setFirecrawlCanary] = useState<CanaryCheckResult | null>(null);
+  const [checkingFirecrawlCanary, setCheckingFirecrawlCanary] = useState(false);
+  const [firecrawlCanaryError, setFirecrawlCanaryError] = useState<string | null>(null);
   
   // Logic validation checks (deterministic)
   const [browserlessLogic, setBrowserlessLogic] = useState<CanonicalCheckResult | null>(null);
@@ -121,6 +123,54 @@ export function BaselineInfoPanel() {
     } finally {
       if (!signal?.aborted) {
         setCheckingBrowserlessCanary(false);
+      }
+    }
+  }, []);
+  
+  // Run Zyte CANARY check
+  const runZyteCanary = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
+    setCheckingZyteCanary(true);
+    setZyteCanaryError(null);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=zyte-canary', {
+        method: 'GET',
+      });
+      
+      if (signal?.aborted) return;
+      if (invokeError) throw invokeError;
+      setZyteCanary(data as CanaryCheckResult);
+    } catch (err: any) {
+      if (signal?.aborted) return;
+      console.error('Zyte canary check failed:', err);
+      setZyteCanaryError(err?.message || 'Failed to run check');
+    } finally {
+      if (!signal?.aborted) {
+        setCheckingZyteCanary(false);
+      }
+    }
+  }, []);
+  
+  // Run Firecrawl CANARY check
+  const runFirecrawlCanary = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
+    setCheckingFirecrawlCanary(true);
+    setFirecrawlCanaryError(null);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=firecrawl-canary', {
+        method: 'GET',
+      });
+      
+      if (signal?.aborted) return;
+      if (invokeError) throw invokeError;
+      setFirecrawlCanary(data as CanaryCheckResult);
+    } catch (err: any) {
+      if (signal?.aborted) return;
+      console.error('Firecrawl canary check failed:', err);
+      setFirecrawlCanaryError(err?.message || 'Failed to run check');
+    } finally {
+      if (!signal?.aborted) {
+        setCheckingFirecrawlCanary(false);
       }
     }
   }, []);
@@ -234,6 +284,8 @@ export function BaselineInfoPanel() {
     // Run canary + logic checks in parallel
     Promise.all([
       runBrowserlessCanary(signal),
+      runZyteCanary(signal),
+      runFirecrawlCanary(signal),
       runBrowserlessLogic(signal),
       runZyteLogic(signal),
       runFirecrawlLogic(signal),
@@ -241,7 +293,7 @@ export function BaselineInfoPanel() {
     ]).finally(() => {
       isRunningRef.current = false;
     });
-  }, [runBrowserlessCanary, runBrowserlessLogic, runZyteLogic, runFirecrawlLogic, runChainLogic]);
+  }, [runBrowserlessCanary, runZyteCanary, runFirecrawlCanary, runBrowserlessLogic, runZyteLogic, runFirecrawlLogic, runChainLogic]);
   
   // Handler for user-initiated "Check All" button
   const handleCheckAll = useCallback(() => {
@@ -257,6 +309,14 @@ export function BaselineInfoPanel() {
   const handleBrowserlessCanaryRefresh = useCallback(() => {
     runBrowserlessCanary();
   }, [runBrowserlessCanary]);
+  
+  const handleZyteCanaryRefresh = useCallback(() => {
+    runZyteCanary();
+  }, [runZyteCanary]);
+  
+  const handleFirecrawlCanaryRefresh = useCallback(() => {
+    runFirecrawlCanary();
+  }, [runFirecrawlCanary]);
 
   // Fetch baseline data on mount (once only)
   useEffect(() => {
@@ -330,125 +390,103 @@ export function BaselineInfoPanel() {
   };
   
   // Check if any checks are running
-  const isAnyCheckRunning = checkingBrowserlessCanary || checkingBrowserlessLogic || checkingZyteLogic || checkingFirecrawlLogic || checkingChainLogic;
+  const isAnyCheckRunning = checkingBrowserlessCanary || checkingZyteCanary || checkingFirecrawlCanary || 
+    checkingBrowserlessLogic || checkingZyteLogic || checkingFirecrawlLogic || checkingChainLogic;
   
-  // Helper to render the Browserless canary indicator (main provider capability check)
-  const renderBrowserlessCanaryIndicator = () => {
-    const check = browserlessCanary;
-    const checking = checkingBrowserlessCanary;
-    const error = browserlessCanaryError;
-    
-    return (
-      <div className={`p-3 rounded-lg border ${
-        check?.passed 
-          ? 'bg-green-500/10 border-green-500/30' 
-          : error || (check && !check.passed)
-            ? 'bg-destructive/10 border-destructive/30'
-            : 'bg-muted/50 border-border'
-      }`}>
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            {checking ? (
-              <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
-            ) : check?.passed ? (
-              <ShieldCheck className="h-4 w-4 text-green-500" />
-            ) : error || (check && !check.passed) ? (
-              <ShieldAlert className="h-4 w-4 text-destructive" />
-            ) : (
-              <Shield className="h-4 w-4 text-muted-foreground" />
-            )}
-            <span className="text-sm font-medium">
-              Browserless Canary
-            </span>
-            <Badge variant={check?.passed ? 'default' : 'destructive'} className="text-[10px] px-1.5 py-0">
-              {checking 
-                ? 'Running...' 
-                : check?.passed 
-                  ? 'PASSING' 
-                  : error 
-                    ? 'ERROR' 
-                    : check 
-                      ? 'FAILING' 
-                      : '—'}
-            </Badge>
-          </div>
-          <Button 
-            variant="ghost" 
-            size="sm" 
-            onClick={handleBrowserlessCanaryRefresh}
-            disabled={checking}
-            className="h-6 w-6 p-0"
+  // Helper to render a provider canary indicator (compact card)
+  const renderCanaryIndicator = (
+    label: string,
+    check: CanaryCheckResult | null,
+    checking: boolean,
+    error: string | null,
+    onRefresh: () => void
+  ) => (
+    <div className={`p-2.5 rounded-lg border ${
+      check?.passed 
+        ? 'bg-green-500/10 border-green-500/30' 
+        : error || (check && !check.passed)
+          ? 'bg-destructive/10 border-destructive/30'
+          : 'bg-muted/50 border-border'
+    }`}>
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-1.5">
+          {checking ? (
+            <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
+          ) : check?.passed ? (
+            <ShieldCheck className="h-3 w-3 text-green-500" />
+          ) : error || (check && !check.passed) ? (
+            <ShieldAlert className="h-3 w-3 text-destructive" />
+          ) : (
+            <Shield className="h-3 w-3 text-muted-foreground" />
+          )}
+          <span className="text-xs font-medium">{label}</span>
+          <Badge 
+            variant={check?.passed ? 'default' : 'destructive'} 
+            className="text-[9px] px-1 py-0 h-4"
           >
-            <RefreshCw className={`h-3 w-3 ${checking ? 'animate-spin' : ''}`} />
-          </Button>
+            {checking 
+              ? '...' 
+              : check?.passed 
+                ? 'PASS' 
+                : error 
+                  ? 'ERR' 
+                  : check 
+                    ? 'FAIL' 
+                    : '—'}
+          </Badge>
         </div>
-        
-        {/* Canary scenario info */}
-        {check && (
-          <div className="space-y-1.5 text-xs">
-            <div className="flex items-center gap-1.5 text-muted-foreground">
-              <Clock className="h-3 w-3" />
-              <span>Checked: {formatTimestamp(check.timestamp)}</span>
-              {check.duration_ms && (
-                <span className="text-muted-foreground/70">({(check.duration_ms / 1000).toFixed(1)}s)</span>
-              )}
-            </div>
-            
-            <div className="text-muted-foreground">
-              Canary: {check.canary_dates.nights} nights ({check.canary_dates.check_in} → {check.canary_dates.check_out})
-            </div>
-            
-            {/* Extraction result */}
-            {check.extraction_result && (
-              <div className={`p-2 rounded mt-1.5 ${
-                check.extraction_result.status === 'total_price_including_taxes_and_fees'
-                  ? 'bg-green-500/10'
-                  : 'bg-amber-500/10'
-              }`}>
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">
-                    Status: <code className="text-[10px]">{check.extraction_result.status}</code>
-                  </span>
-                  {check.extraction_result.price && (
-                    <span className="font-mono">
-                      {check.extraction_result.currency} {check.extraction_result.price.toLocaleString()}
-                    </span>
-                  )}
-                </div>
-                {check.extraction_result.evidence_snippet && (
-                  <div className="mt-1 text-[10px] text-muted-foreground truncate">
-                    Evidence: "{check.extraction_result.evidence_snippet}"
-                  </div>
-                )}
-              </div>
-            )}
-            
-            {/* Failure reason */}
-            {check.failure_reason && (
-              <div className="p-2 rounded bg-destructive/10 text-destructive text-[11px] mt-1.5">
-                <strong>Failure:</strong> {check.failure_reason}
-              </div>
-            )}
-            
-            {/* Failed checks */}
-            {check.checks.filter(c => !c.passed).length > 0 && (
-              <div className="mt-1.5 space-y-0.5">
-                {check.checks.filter(c => !c.passed).slice(0, 3).map((c, i) => (
-                  <div key={i} className="text-[10px] text-destructive">
-                    ✗ {c.name}: expected "{c.expected}", got "{c.actual}"
-                  </div>
-                ))}
-              </div>
+        <Button 
+          variant="ghost" 
+          size="sm" 
+          onClick={onRefresh}
+          disabled={checking}
+          className="h-5 w-5 p-0"
+        >
+          <RefreshCw className={`h-2.5 w-2.5 ${checking ? 'animate-spin' : ''}`} />
+        </Button>
+      </div>
+      
+      {check && (
+        <div className="space-y-1 text-[10px]">
+          {/* Status and price */}
+          <div className="flex items-center justify-between">
+            <code className={`px-1 py-0.5 rounded ${
+              check.extraction_result?.status === 'total_price_including_taxes_and_fees'
+                ? 'bg-green-500/20 text-green-700'
+                : 'bg-amber-500/20 text-amber-700'
+            }`}>
+              {check.extraction_result?.status?.replace(/_/g, ' ').slice(0, 25) || 'no result'}
+            </code>
+            {check.extraction_result?.price && (
+              <span className="font-mono text-[10px]">
+                ${check.extraction_result.price.toLocaleString()}
+              </span>
             )}
           </div>
-        )}
-        
-        {error && (
-          <div className="mt-1.5 text-xs text-destructive">{error}</div>
-        )}
-      </div>
-    );
-  };
+          
+          {/* Timestamp and duration */}
+          <div className="flex items-center gap-1 text-muted-foreground">
+            <Clock className="h-2.5 w-2.5" />
+            <span>{formatTimestamp(check.timestamp)}</span>
+            {check.duration_ms && (
+              <span>({(check.duration_ms / 1000).toFixed(1)}s)</span>
+            )}
+          </div>
+          
+          {/* Failure reason */}
+          {check.failure_reason && (
+            <div className="text-destructive truncate" title={check.failure_reason}>
+              ✗ {check.failure_reason}
+            </div>
+          )}
+        </div>
+      )}
+      
+      {error && (
+        <div className="text-[10px] text-destructive truncate">{error}</div>
+      )}
+    </div>
+  );
   
   // Helper to render a compact logic check indicator
   const renderLogicCheckIndicator = (
@@ -460,7 +498,7 @@ export function BaselineInfoPanel() {
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          <div className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs ${
+          <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
             check?.passed 
               ? 'bg-green-500/10 text-green-600' 
               : error || (check && !check.passed)
@@ -468,20 +506,20 @@ export function BaselineInfoPanel() {
                 : 'bg-muted/50 text-muted-foreground'
           }`}>
             {checking ? (
-              <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+              <RefreshCw className="h-2 w-2 animate-spin" />
             ) : check?.passed ? (
-              <CheckCircle2 className="h-2.5 w-2.5" />
+              <CheckCircle2 className="h-2 w-2" />
             ) : error || (check && !check.passed) ? (
-              <AlertCircle className="h-2.5 w-2.5" />
+              <AlertCircle className="h-2 w-2" />
             ) : (
-              <Activity className="h-2.5 w-2.5" />
+              <Activity className="h-2 w-2" />
             )}
             <span>{label}</span>
           </div>
         </TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-xs">
           <div className="text-xs">
-            <strong>{label} Logic Validation</strong>
+            <strong>{label} Logic</strong>
             {check && (
               <div className="mt-1">
                 {check.passed ? (
@@ -581,12 +619,12 @@ export function BaselineInfoPanel() {
       </CardHeader>
       <CardContent className="space-y-4">
         
-        {/* Provider Capability Guard (Live Canary) */}
+        {/* Provider Capability Guards (Live Canary) */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Zap className="h-3.5 w-3.5 text-amber-500" />
-              <span className="text-xs font-medium">Provider Capability Guard</span>
+              <span className="text-xs font-medium">Provider Canary Checks</span>
             </div>
             <Button 
               variant="ghost" 
@@ -600,11 +638,15 @@ export function BaselineInfoPanel() {
             </Button>
           </div>
           
-          {/* Browserless Canary - Primary capability indicator */}
-          {renderBrowserlessCanaryIndicator()}
+          {/* Three provider canary cards */}
+          <div className="grid grid-cols-1 gap-2">
+            {renderCanaryIndicator('Browserless', browserlessCanary, checkingBrowserlessCanary, browserlessCanaryError, handleBrowserlessCanaryRefresh)}
+            {renderCanaryIndicator('Zyte', zyteCanary, checkingZyteCanary, zyteCanaryError, handleZyteCanaryRefresh)}
+            {renderCanaryIndicator('Firecrawl', firecrawlCanary, checkingFirecrawlCanary, firecrawlCanaryError, handleFirecrawlCanaryRefresh)}
+          </div>
           
-          <div className="text-[10px] text-muted-foreground mt-1">
-            Live test against fixed canary URL. If Browserless fails to extract a grounded total, it indicates a regression.
+          <div className="text-[10px] text-muted-foreground">
+            Live tests against canary URL. Failures indicate provider regressions.
           </div>
         </div>
         
@@ -614,27 +656,26 @@ export function BaselineInfoPanel() {
             <Button variant="ghost" size="sm" className="w-full justify-between px-2 py-1 h-auto">
               <div className="flex items-center gap-2">
                 <Activity className="h-3 w-3 text-muted-foreground" />
-                <span className="text-xs text-muted-foreground">Logic Validation Guards</span>
+                <span className="text-xs text-muted-foreground">Logic Validation</span>
               </div>
               <div className="flex items-center gap-1">
-                <div className="flex items-center gap-1">
-                  {renderLogicCheckIndicator('Browserless', browserlessLogic, checkingBrowserlessLogic, browserlessLogicError)}
-                  {renderLogicCheckIndicator('Zyte', zyteLogic, checkingZyteLogic, zyteLogicError)}
-                  {renderLogicCheckIndicator('Firecrawl', firecrawlLogic, checkingFirecrawlLogic, firecrawlLogicError)}
-                  {renderLogicCheckIndicator('Chain', chainLogic, checkingChainLogic, chainLogicError)}
+                <div className="flex items-center gap-0.5">
+                  {renderLogicCheckIndicator('B', browserlessLogic, checkingBrowserlessLogic, browserlessLogicError)}
+                  {renderLogicCheckIndicator('Z', zyteLogic, checkingZyteLogic, zyteLogicError)}
+                  {renderLogicCheckIndicator('F', firecrawlLogic, checkingFirecrawlLogic, firecrawlLogicError)}
+                  {renderLogicCheckIndicator('C', chainLogic, checkingChainLogic, chainLogicError)}
                 </div>
                 {showLogicChecks ? (
-                  <ChevronDown className="h-3 w-3 ml-2" />
+                  <ChevronDown className="h-3 w-3 ml-1" />
                 ) : (
-                  <ChevronRight className="h-3 w-3 ml-2" />
+                  <ChevronRight className="h-3 w-3 ml-1" />
                 )}
               </div>
             </Button>
           </CollapsibleTrigger>
           <CollapsibleContent className="mt-2">
             <div className="text-[10px] text-muted-foreground p-2 bg-muted/30 rounded">
-              Deterministic unit tests validating extraction logic, priority rules, and orchestration behavior with mock data.
-              These verify the code is correct. Canary checks verify providers work in production.
+              Deterministic unit tests (B=Browserless, Z=Zyte, F=Firecrawl, C=Chain) validating extraction logic with mock data.
             </div>
           </CollapsibleContent>
         </Collapsible>

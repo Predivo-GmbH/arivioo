@@ -1536,8 +1536,442 @@ async function runBrowserlessCanaryCheck(): Promise<CanaryCheckResult> {
   }
 }
 
+// =============================================================================
+// ZYTE CANARY CHECK - Live provider capability test
+// =============================================================================
+async function runZyteCanaryCheck(): Promise<CanaryCheckResult> {
+  const startTime = Date.now();
+  const canaryUrl = buildCanaryUrl();
+  const checks: CanaryCheckResult['checks'] = [];
+  const VERIFIED_STATUS = 'total_price_including_taxes_and_fees';
+  
+  try {
+    const zyteApiKey = Deno.env.get('ZYTE_API_KEY');
+    if (!zyteApiKey) {
+      return {
+        mode: 'zyte-canary',
+        passed: false,
+        provider: 'zyte',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: null,
+        failure_reason: 'ZYTE_API_KEY not configured',
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'provider_configured', expected: 'true', actual: 'false', passed: false }],
+      };
+    }
+    
+    // Build book/stays URL for canary
+    const bookStaysParams = buildBookStaysUrl(canaryUrl, CANARY_CONFIG.guestCurrency);
+    if (!bookStaysParams) {
+      return {
+        mode: 'zyte-canary',
+        passed: false,
+        provider: 'zyte',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: null,
+        failure_reason: 'Failed to parse canary URL',
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'url_parse', expected: 'valid', actual: 'invalid', passed: false }],
+      };
+    }
+    
+    // Call Zyte API
+    const zytePayload = {
+      url: bookStaysParams.book_stays_url,
+      browserHtml: true,
+      screenshot: true,
+      javascript: true,
+      actions: [
+        { action: 'waitForTimeout', timeout: 5000 },
+      ],
+    };
+    
+    const zyteResponse = await fetchWithTimeout('https://api.zyte.com/v1/extract', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${btoa(zyteApiKey + ':')}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(zytePayload),
+    }, 60000);
+    
+    if (!zyteResponse.ok) {
+      const errorText = await zyteResponse.text().catch(() => '');
+      return {
+        mode: 'zyte-canary',
+        passed: false,
+        provider: 'zyte',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: { status: `http_${zyteResponse.status}`, price: null, currency: 'USD', evidence_snippet: null },
+        failure_reason: `Zyte API returned ${zyteResponse.status}: ${safeSnippet(errorText, 100)}`,
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'api_success', expected: '200', actual: String(zyteResponse.status), passed: false }],
+      };
+    }
+    
+    const zyteData = await zyteResponse.json();
+    const html = zyteData.browserHtml || '';
+    const screenshotBase64 = zyteData.screenshot || null;
+    
+    checks.push({
+      name: 'api_success',
+      expected: '200',
+      actual: '200',
+      passed: true,
+    });
+    
+    checks.push({
+      name: 'html_received',
+      expected: '>1000 chars',
+      actual: `${html.length} chars`,
+      passed: html.length > 1000,
+    });
+    
+    // Try OCR if we have a screenshot
+    let extractedPrice: number | null = null;
+    let extractedCurrency = 'USD';
+    let evidenceSnippet: string | null = null;
+    let finalStatus = 'price_not_available_in_content';
+    
+    if (screenshotBase64) {
+      try {
+        const ocrText = await ocrImageToText(screenshotBase64);
+        const extraction = extractAllInTotalFromOcr(ocrText, CANARY_CONFIG.nightsCount);
+        extractedPrice = extraction.all_in_total_amount_value;
+        extractedCurrency = extraction.currency;
+        evidenceSnippet = extraction.evidence_snippet;
+        
+        if (extractedPrice && extractedPrice > 0) {
+          const hasPayNowPattern = /pay\s*\$?\s*[\d,]+/i.test(ocrText);
+          const hasTotalPattern = /total\s*\(?[A-Z]{3}\)?\s*\$?\s*[\d,]+/i.test(ocrText);
+          if (hasPayNowPattern || hasTotalPattern) {
+            finalStatus = VERIFIED_STATUS;
+          } else {
+            finalStatus = 'needs_user_confirmation';
+          }
+        }
+        
+        checks.push({ name: 'ocr_extraction', expected: 'price found', actual: extractedPrice ? `${extractedPrice}` : 'null', passed: !!extractedPrice });
+      } catch (ocrErr) {
+        checks.push({ name: 'ocr_extraction', expected: 'success', actual: 'ocr_failed', passed: false });
+      }
+    } else {
+      // Fallback to HTML regex extraction
+      const htmlExtraction = extractAllInTotalFromOcr(html, CANARY_CONFIG.nightsCount);
+      extractedPrice = htmlExtraction.all_in_total_amount_value;
+      extractedCurrency = htmlExtraction.currency;
+      evidenceSnippet = htmlExtraction.evidence_snippet;
+      
+      if (extractedPrice && extractedPrice > 0) {
+        finalStatus = VERIFIED_STATUS;
+      }
+      
+      checks.push({ name: 'html_extraction', expected: 'price found', actual: extractedPrice ? `${extractedPrice}` : 'null', passed: !!extractedPrice });
+    }
+    
+    checks.push({
+      name: 'extraction_status',
+      expected: VERIFIED_STATUS,
+      actual: finalStatus,
+      passed: finalStatus === VERIFIED_STATUS,
+    });
+    
+    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0;
+    let failureReason: string | null = null;
+    if (!isPassed) {
+      if (finalStatus === 'needs_user_confirmation') {
+        failureReason = extractedPrice 
+          ? `Only subtotal found (${extractedPrice}), no grounded total pattern`
+          : 'No price extracted from content';
+      } else {
+        failureReason = `Status ${finalStatus} is not verified`;
+      }
+    }
+    
+    return {
+      mode: 'zyte-canary',
+      passed: isPassed,
+      provider: 'zyte',
+      canary_url: canaryUrl,
+      canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+      extraction_result: {
+        status: finalStatus,
+        price: extractedPrice,
+        currency: extractedCurrency,
+        evidence_snippet: evidenceSnippet ? safeSnippet(evidenceSnippet, 200) : null,
+      },
+      failure_reason: failureReason,
+      expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      checks,
+    };
+  } catch (err) {
+    return {
+      mode: 'zyte-canary',
+      passed: false,
+      provider: 'zyte',
+      canary_url: canaryUrl,
+      canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+      extraction_result: null,
+      failure_reason: `Exception: ${err instanceof Error ? err.message : String(err)}`,
+      expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      checks: [{ name: 'execution_success', expected: 'no exception', actual: 'exception thrown', passed: false }],
+    };
+  }
+}
+
+// =============================================================================
+// FIRECRAWL CANARY CHECK - Live provider capability test
+// =============================================================================
+async function runFirecrawlCanaryCheck(): Promise<CanaryCheckResult> {
+  const startTime = Date.now();
+  const canaryUrl = buildCanaryUrl();
+  const checks: CanaryCheckResult['checks'] = [];
+  const VERIFIED_STATUS = 'total_price_including_taxes_and_fees';
+  
+  try {
+    const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY');
+    if (!firecrawlApiKey) {
+      return {
+        mode: 'firecrawl-canary',
+        passed: false,
+        provider: 'firecrawl',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: null,
+        failure_reason: 'FIRECRAWL_API_KEY not configured',
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'provider_configured', expected: 'true', actual: 'false', passed: false }],
+      };
+    }
+    
+    // Build book/stays URL for canary
+    const bookStaysParams = buildBookStaysUrl(canaryUrl, CANARY_CONFIG.guestCurrency);
+    if (!bookStaysParams) {
+      return {
+        mode: 'firecrawl-canary',
+        passed: false,
+        provider: 'firecrawl',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: null,
+        failure_reason: 'Failed to parse canary URL',
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'url_parse', expected: 'valid', actual: 'invalid', passed: false }],
+      };
+    }
+    
+    // Call Firecrawl API with waitFor for dynamic content
+    const waitForMs = 10000;
+    const timeoutMs = Math.max(waitForMs * 2.5, 30000);
+    
+    const firecrawlResponse = await fetchWithTimeout('https://api.firecrawl.dev/v1/scrape', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: bookStaysParams.book_stays_url,
+        formats: ['markdown', 'html', 'screenshot'],
+        waitFor: waitForMs,
+        timeout: timeoutMs,
+      }),
+    }, 90000);
+    
+    if (!firecrawlResponse.ok) {
+      const errorText = await firecrawlResponse.text().catch(() => '');
+      return {
+        mode: 'firecrawl-canary',
+        passed: false,
+        provider: 'firecrawl',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: { status: `http_${firecrawlResponse.status}`, price: null, currency: 'USD', evidence_snippet: null },
+        failure_reason: `Firecrawl API returned ${firecrawlResponse.status}: ${safeSnippet(errorText, 100)}`,
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'api_success', expected: '200', actual: String(firecrawlResponse.status), passed: false }],
+      };
+    }
+    
+    const firecrawlData = await firecrawlResponse.json();
+    const markdown = firecrawlData.data?.markdown || firecrawlData.markdown || '';
+    const html = firecrawlData.data?.html || firecrawlData.html || '';
+    const screenshotBase64 = firecrawlData.data?.screenshot || firecrawlData.screenshot || null;
+    
+    checks.push({
+      name: 'api_success',
+      expected: '200',
+      actual: '200',
+      passed: true,
+    });
+    
+    checks.push({
+      name: 'content_received',
+      expected: 'markdown or html',
+      actual: `markdown:${markdown.length}, html:${html.length}`,
+      passed: markdown.length > 100 || html.length > 500,
+    });
+    
+    // Try extraction from different sources
+    let extractedPrice: number | null = null;
+    let extractedCurrency = 'USD';
+    let evidenceSnippet: string | null = null;
+    let finalStatus = 'price_not_available_in_content';
+    
+    // Priority 1: OCR from screenshot
+    if (screenshotBase64) {
+      try {
+        const ocrText = await ocrImageToText(screenshotBase64);
+        const extraction = extractAllInTotalFromOcr(ocrText, CANARY_CONFIG.nightsCount);
+        if (extraction.all_in_total_amount_value && extraction.all_in_total_amount_value > 0) {
+          extractedPrice = extraction.all_in_total_amount_value;
+          extractedCurrency = extraction.currency;
+          evidenceSnippet = extraction.evidence_snippet;
+          
+          const hasPayNowPattern = /pay\s*\$?\s*[\d,]+/i.test(ocrText);
+          const hasTotalPattern = /total\s*\(?[A-Z]{3}\)?\s*\$?\s*[\d,]+/i.test(ocrText);
+          if (hasPayNowPattern || hasTotalPattern) {
+            finalStatus = VERIFIED_STATUS;
+          } else {
+            finalStatus = 'needs_user_confirmation';
+          }
+        }
+        checks.push({ name: 'ocr_extraction', expected: 'price found', actual: extractedPrice ? `${extractedPrice}` : 'null', passed: !!extractedPrice });
+      } catch {
+        checks.push({ name: 'ocr_extraction', expected: 'success', actual: 'ocr_failed', passed: false });
+      }
+    }
+    
+    // Priority 2: Markdown extraction
+    if (!extractedPrice && markdown.length > 100) {
+      const mdExtraction = extractAllInTotalFromOcr(markdown, CANARY_CONFIG.nightsCount);
+      if (mdExtraction.all_in_total_amount_value && mdExtraction.all_in_total_amount_value > 0) {
+        extractedPrice = mdExtraction.all_in_total_amount_value;
+        extractedCurrency = mdExtraction.currency;
+        evidenceSnippet = mdExtraction.evidence_snippet;
+        finalStatus = VERIFIED_STATUS;
+      }
+      checks.push({ name: 'markdown_extraction', expected: 'price found', actual: extractedPrice ? `${extractedPrice}` : 'null', passed: !!extractedPrice });
+    }
+    
+    // Priority 3: HTML extraction
+    if (!extractedPrice && html.length > 500) {
+      const htmlExtraction = extractAllInTotalFromOcr(html, CANARY_CONFIG.nightsCount);
+      if (htmlExtraction.all_in_total_amount_value && htmlExtraction.all_in_total_amount_value > 0) {
+        extractedPrice = htmlExtraction.all_in_total_amount_value;
+        extractedCurrency = htmlExtraction.currency;
+        evidenceSnippet = htmlExtraction.evidence_snippet;
+        finalStatus = VERIFIED_STATUS;
+      }
+      checks.push({ name: 'html_extraction', expected: 'price found', actual: extractedPrice ? `${extractedPrice}` : 'null', passed: !!extractedPrice });
+    }
+    
+    checks.push({
+      name: 'extraction_status',
+      expected: VERIFIED_STATUS,
+      actual: finalStatus,
+      passed: finalStatus === VERIFIED_STATUS,
+    });
+    
+    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0;
+    let failureReason: string | null = null;
+    if (!isPassed) {
+      if (finalStatus === 'needs_user_confirmation') {
+        failureReason = extractedPrice 
+          ? `Only subtotal found (${extractedPrice}), no grounded total pattern`
+          : 'No price extracted from content';
+      } else {
+        failureReason = `Status ${finalStatus} is not verified`;
+      }
+    }
+    
+    return {
+      mode: 'firecrawl-canary',
+      passed: isPassed,
+      provider: 'firecrawl',
+      canary_url: canaryUrl,
+      canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+      extraction_result: {
+        status: finalStatus,
+        price: extractedPrice,
+        currency: extractedCurrency,
+        evidence_snippet: evidenceSnippet ? safeSnippet(evidenceSnippet, 200) : null,
+      },
+      failure_reason: failureReason,
+      expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      checks,
+    };
+  } catch (err) {
+    return {
+      mode: 'firecrawl-canary',
+      passed: false,
+      provider: 'firecrawl',
+      canary_url: canaryUrl,
+      canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+      extraction_result: null,
+      failure_reason: `Exception: ${err instanceof Error ? err.message : String(err)}`,
+      expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      checks: [{ name: 'execution_success', expected: 'no exception', actual: 'exception thrown', passed: false }],
+    };
+  }
+}
+
+// =============================================================================
+// PERSIST CANARY RESULT TO DATABASE
+// =============================================================================
+async function persistCanaryResult(result: CanaryCheckResult, supabase: any): Promise<void> {
+  try {
+    await supabase.from('provider_canary_checks').insert({
+      provider: result.provider,
+      canary_url: result.canary_url,
+      check_in_date: result.canary_dates.check_in,
+      check_out_date: result.canary_dates.check_out,
+      nights_count: result.canary_dates.nights,
+      passed: result.passed,
+      extraction_status: result.extraction_result?.status || null,
+      extracted_price: result.extraction_result?.price || null,
+      currency: result.extraction_result?.currency || 'USD',
+      evidence_snippet: result.extraction_result?.evidence_snippet || null,
+      failure_reason: result.failure_reason,
+      duration_ms: result.duration_ms,
+      checks_detail: result.checks,
+      checked_at: result.timestamp,
+    });
+  } catch (err) {
+    console.error('Failed to persist canary result:', err);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+  
+  const supabaseForCanary = createClient(
+    Deno.env.get('SUPABASE_URL')!, 
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  );
   
   // Check for canonical baseline check modes
   const reqUrl = new URL(req.url);
@@ -1550,6 +1984,27 @@ Deno.serve(async (req) => {
   // Browserless live canary check
   if (mode === 'browserless-canary') {
     const result = await runBrowserlessCanaryCheck();
+    await persistCanaryResult(result, supabaseForCanary);
+    return new Response(JSON.stringify(result, null, 2), {
+      status: result.passed ? 200 : 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  
+  // Zyte live canary check
+  if (mode === 'zyte-canary') {
+    const result = await runZyteCanaryCheck();
+    await persistCanaryResult(result, supabaseForCanary);
+    return new Response(JSON.stringify(result, null, 2), {
+      status: result.passed ? 200 : 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  
+  // Firecrawl live canary check
+  if (mode === 'firecrawl-canary') {
+    const result = await runFirecrawlCanaryCheck();
+    await persistCanaryResult(result, supabaseForCanary);
     return new Response(JSON.stringify(result, null, 2), {
       status: result.passed ? 200 : 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
