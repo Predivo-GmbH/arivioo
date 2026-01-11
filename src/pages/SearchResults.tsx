@@ -1185,14 +1185,20 @@ export default function SearchResults() {
     });
   }, [loading, search?.status]);
 
-  // Celebrate when results are shown
+  // Celebrate when results page is actually shown (searchPhase === 'done' and not showing pipeline)
   useEffect(() => {
-    if (!loading && results.length > 0 && !hasCelebrated) {
+    // Only celebrate when:
+    // 1. Not loading AND not extracting prices (pipeline view is hidden)
+    // 2. searchPhase is 'done' (finalization complete)
+    // 3. We have results to celebrate
+    // 4. Haven't celebrated yet
+    const pipelineHidden = !loading && !extractingPrices;
+    if (pipelineHidden && searchPhase === 'done' && results.length > 0 && !hasCelebrated) {
       setHasCelebrated(true);
       // Small delay for UX
       setTimeout(() => quickCelebration(), 300);
     }
-  }, [loading, results.length, hasCelebrated]);
+  }, [loading, extractingPrices, searchPhase, results.length, hasCelebrated]);
 
   // Poll for price extraction status - runs when extractingPrices is true OR after search completes
   useEffect(() => {
