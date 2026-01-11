@@ -4652,28 +4652,26 @@ async function runSearchWithStreaming(
 
   try {
     // ========================================================================
-    // BROWSERLESS-ONLY DEBUG MODE
+    // BROWSERLESS-ONLY DEBUG MODE (disabled by default)
     // When BROWSERLESS_ONLY_BASELINE=true, run only Browserless and stop
     // immediately if it fails. No Zyte fallback, no platform discovery.
+    // For normal runs, this is OFF and the full fallback chain is used.
     // ========================================================================
     const browserlessOnlyEnvValue = Deno.env.get("BROWSERLESS_ONLY_BASELINE");
     const browserlessOnlyMode = browserlessOnlyEnvValue === "true";
     
-    // ALWAYS log the resolved value for proof (even when false)
-    console.log("==========================================");
-    console.log(`BROWSERLESS_ONLY_BASELINE env check:`);
-    console.log(`  Raw env value: "${browserlessOnlyEnvValue ?? 'undefined'}"`);
-    console.log(`  Resolved to: ${browserlessOnlyMode}`);
-    console.log("==========================================");
-    
+    // Only log debug mode status when explicitly enabled (avoid log spam in normal runs)
     if (browserlessOnlyMode) {
-      console.log("⚠️ BROWSERLESS ONLY MODE ACTIVE");
+      console.log("==========================================");
+      console.log("⚠️ BROWSERLESS ONLY DEBUG MODE ACTIVE");
+      console.log(`  Env value: "${browserlessOnlyEnvValue}"`);
       console.log("Will stop run if Browserless fails with ANY non-success state:");
       console.log("  - needs_user_confirmation");
       console.log("  - price_not_available_in_content");
       console.log("  - total_price_excluding_taxes_and_fees");
       console.log("  - any error");
       console.log("No Zyte fallback, no platform discovery");
+      console.log("==========================================");
       sendProgress(controller, "DEBUG MODE", "Browserless-only baseline mode enabled — stopping on ANY non-success", {
         browserless_only_mode: true,
         env_value: browserlessOnlyEnvValue,
