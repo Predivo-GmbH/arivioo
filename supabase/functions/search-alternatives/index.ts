@@ -151,6 +151,17 @@ interface AirbnbScrapeResult {
   isDatesUnavailable?: boolean; // True if Airbnb shows "dates unavailable" interstitial
   // OCR reference data (captured via screenshot + AI OCR)
   ocrReference?: OcrVisualReference | null;
+  // Direct text extraction for Pay Now total (more reliable than OCR)
+  payNowExtraction?: {
+    payNowAmount: number | null;
+    payNowSnippet: string | null;
+    payNowCurrencySymbol: string | null;
+    subtotalAmount: number | null;
+    subtotalNights: number | null;
+    subtotalSnippet: string | null;
+    subtotalCurrencySymbol: string | null;
+    regexCompilationErrors: string[] | null;
+  } | null;
 }
 
 // OCR Visual Reference - ground truth from what's visually displayed
@@ -952,6 +963,15 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
         result.roomsHtml = roomsHtml;
         result.roomsTitle = fnJson?.roomsTitle || '';
         result.screenshot = screenshotForOcr;
+        
+        // CRITICAL: Store payNowExtraction even when HTML is insufficient
+        if (fnJson?.payNowExtraction) {
+          result.payNowExtraction = fnJson.payNowExtraction;
+          console.log(`Browserless attempt ${attemptNum} (html_insufficient): payNowExtraction captured:`, JSON.stringify({
+            payNowAmount: fnJson.payNowExtraction.payNowAmount,
+            payNowSnippet: fnJson.payNowExtraction.payNowSnippet?.slice(0, 50),
+          }));
+        }
 
         // Run OCR even when HTML is insufficient (often the only way to get the checkout total)
         const breakdownOpened = typeof fnJson?.breakdownOpened === 'boolean' ? fnJson.breakdownOpened : false;
@@ -1041,6 +1061,20 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
 
     // Store screenshot for OCR
     result.screenshot = screenshotForOcr;
+    
+    // CRITICAL: Store payNowExtraction from Browserless response for direct text extraction
+    // This is the PRIMARY source of truth for the checkout total
+    if (fnJson?.payNowExtraction) {
+      result.payNowExtraction = fnJson.payNowExtraction;
+      console.log(`Browserless attempt ${attemptNum}: payNowExtraction captured:`, JSON.stringify({
+        payNowAmount: fnJson.payNowExtraction.payNowAmount,
+        payNowSnippet: fnJson.payNowExtraction.payNowSnippet?.slice(0, 50),
+        subtotalAmount: fnJson.payNowExtraction.subtotalAmount,
+        regexCompilationErrors: fnJson.payNowExtraction.regexCompilationErrors,
+      }));
+    } else {
+      console.log(`Browserless attempt ${attemptNum}: payNowExtraction is null/undefined`);
+    }
 
     // Run OCR extraction on the screenshot
     if (screenshotForOcr) {
@@ -1056,7 +1090,7 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
       .replace(/\s+/g, " ")
       .trim();
 
-    console.log(`Browserless attempt ${attemptNum} successful. HTML length:`, html.length, "roomsHtml length:", result.roomsHtml?.length || 0, "Duration:", Date.now() - startTime, "ms", "Has OCR:", !!result.ocrReference);
+    console.log(`Browserless attempt ${attemptNum} successful. HTML length:`, html.length, "roomsHtml length:", result.roomsHtml?.length || 0, "Duration:", Date.now() - startTime, "ms", "Has OCR:", !!result.ocrReference, "Has payNowExtraction:", !!result.payNowExtraction);
 
     return result;
   } catch (e) {
@@ -5151,17 +5185,17 @@ async function runSearchWithStreaming(
         let finalBaseline: AirbnbBaselineExtraction;
         let ocrValidation: OcrValidationResult | null = null;
         
-        // Extract payNowExtraction from browserless result (if available)
-        const payNowData = (browserlessResult as any).payNowExtraction as {
-          payNowAmount: number | null;
-          payNowSnippet: string | null;
-          payNowCurrencySymbol?: string | null;
-          subtotalAmount: number | null;
-          subtotalNights: number | null;
-          subtotalSnippet: string | null;
-          subtotalCurrencySymbol?: string | null;
-          regexCompilationErrors?: string[] | null;
-        } | null;
+        // Extract payNowExtraction from browserless result (now properly typed in interface)
+        const payNowData = browserlessResult.payNowExtraction || null;
+        
+        // DEBUG: Log what we received from Browserless
+        console.log('Browserless payNowData received:', JSON.stringify({
+          hasPayNowData: !!payNowData,
+          payNowAmount: payNowData?.payNowAmount,
+          payNowSnippet: payNowData?.payNowSnippet?.slice(0, 50),
+          subtotalAmount: payNowData?.subtotalAmount,
+          regexCompilationErrors: payNowData?.regexCompilationErrors,
+        }));
         
         const currencyFromSymbol = (symbol?: string | null): string => {
           if (symbol === '€') return 'EUR';
@@ -5173,7 +5207,7 @@ async function runSearchWithStreaming(
         // PRIORITY 1: Use direct text extraction if "Pay $X now" was found
         if (payNowData?.payNowAmount && payNowData.payNowAmount > 0) {
           const currency = currencyFromSymbol(payNowData.payNowCurrencySymbol ?? '$');
-          console.log(`Browserless: Using direct text extraction total: ${currency} ${payNowData.payNowAmount}`);
+          console.log(`Browserless: Using direct text extraction total: ${currency} ${payNowData.payNowAmount} (snippet: ${payNowData.payNowSnippet})`);
           finalBaseline = {
             status: 'total_price_including_taxes_and_fees',
             price: payNowData.payNowAmount,
