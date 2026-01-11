@@ -21,7 +21,7 @@ interface BaselineData {
 }
 
 interface CanonicalCheckResult {
-  mode: 'canonical-check';
+  mode: 'canonical-check' | 'zyte-canonical-check';
   passed: boolean;
   checks: Array<{
     name: string;
@@ -29,7 +29,7 @@ interface CanonicalCheckResult {
     actual: string;
     passed: boolean;
   }>;
-  status: 'canonical_baseline_valid' | 'canonical_baseline_violation';
+  status: string;
   timestamp: string;
 }
 
@@ -40,28 +40,58 @@ export function BaselineInfoPanel() {
   const [error, setError] = useState<string | null>(null);
   const [showExpectations, setShowExpectations] = useState(false);
   
-  // Canonical baseline check state
-  const [canonicalCheck, setCanonicalCheck] = useState<CanonicalCheckResult | null>(null);
-  const [checkingCanonical, setCheckingCanonical] = useState(false);
-  const [canonicalError, setCanonicalError] = useState<string | null>(null);
+  // Browserless canonical baseline check state
+  const [browserlessCheck, setBrowserlessCheck] = useState<CanonicalCheckResult | null>(null);
+  const [checkingBrowserless, setCheckingBrowserless] = useState(false);
+  const [browserlessError, setBrowserlessError] = useState<string | null>(null);
+  
+  // Zyte canonical baseline check state
+  const [zyteCheck, setZyteCheck] = useState<CanonicalCheckResult | null>(null);
+  const [checkingZyte, setCheckingZyte] = useState(false);
+  const [zyteError, setZyteError] = useState<string | null>(null);
 
-  // Fetch canonical baseline check on mount
-  const runCanonicalCheck = async () => {
-    setCheckingCanonical(true);
-    setCanonicalError(null);
+  // Fetch Browserless canonical check
+  const runBrowserlessCheck = async () => {
+    setCheckingBrowserless(true);
+    setBrowserlessError(null);
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=canonical-check', {
         method: 'GET',
       });
       
       if (invokeError) throw invokeError;
-      setCanonicalCheck(data as CanonicalCheckResult);
+      setBrowserlessCheck(data as CanonicalCheckResult);
     } catch (err: any) {
-      console.error('Canonical check failed:', err);
-      setCanonicalError(err?.message || 'Failed to run canonical check');
+      console.error('Browserless canonical check failed:', err);
+      setBrowserlessError(err?.message || 'Failed to run check');
     } finally {
-      setCheckingCanonical(false);
+      setCheckingBrowserless(false);
     }
+  };
+  
+  // Fetch Zyte canonical check
+  const runZyteCheck = async () => {
+    setCheckingZyte(true);
+    setZyteError(null);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=zyte-canonical-check', {
+        method: 'GET',
+      });
+      
+      if (invokeError) throw invokeError;
+      setZyteCheck(data as CanonicalCheckResult);
+    } catch (err: any) {
+      console.error('Zyte canonical check failed:', err);
+      setZyteError(err?.message || 'Failed to run check');
+    } finally {
+      setCheckingZyte(false);
+    }
+  };
+  
+  // Run both checks
+  const runAllChecks = () => {
+    runBrowserlessCheck();
+    runZyteCheck();
   };
 
   useEffect(() => {
@@ -90,10 +120,73 @@ export function BaselineInfoPanel() {
     }
 
     fetchBaseline();
-    runCanonicalCheck(); // Run on mount
+    runAllChecks(); // Run both Browserless and Zyte checks on mount
   }, [getToken]);
 
   const expectationsByCategory = getExpectationsByCategory();
+  
+  // Helper to render a canonical check indicator
+  const renderCanonicalCheckIndicator = (
+    label: string,
+    check: CanonicalCheckResult | null,
+    checking: boolean,
+    error: string | null,
+    onRefresh: () => void
+  ) => (
+    <div className={`p-2 rounded-lg border ${
+      check?.passed 
+        ? 'bg-green-500/10 border-green-500/30' 
+        : error || (check && !check.passed)
+          ? 'bg-destructive/10 border-destructive/30'
+          : 'bg-muted/50 border-border'
+    }`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {checking ? (
+            <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
+          ) : check?.passed ? (
+            <ShieldCheck className="h-3 w-3 text-green-500" />
+          ) : error || (check && !check.passed) ? (
+            <ShieldAlert className="h-3 w-3 text-destructive" />
+          ) : (
+            <Shield className="h-3 w-3 text-muted-foreground" />
+          )}
+          <span className="text-xs font-medium">
+            {label}: {checking 
+              ? 'Checking...' 
+              : check?.passed 
+                ? 'Valid' 
+                : error 
+                  ? 'Error' 
+                  : check 
+                    ? 'Violation!' 
+                    : '—'}
+          </span>
+        </div>
+        <Button 
+          variant="ghost" 
+          size="sm" 
+          onClick={onRefresh}
+          disabled={checking}
+          className="h-5 w-5 p-0"
+        >
+          <RefreshCw className={`h-2.5 w-2.5 ${checking ? 'animate-spin' : ''}`} />
+        </Button>
+      </div>
+      {check && !check.passed && (
+        <div className="mt-1.5 space-y-0.5">
+          {check.checks.filter(c => !c.passed).slice(0, 2).map((c, i) => (
+            <div key={i} className="text-[10px] text-destructive truncate">
+              ✗ {c.name}
+            </div>
+          ))}
+        </div>
+      )}
+      {error && (
+        <div className="mt-1 text-[10px] text-destructive truncate">{error}</div>
+      )}
+    </div>
+  );
 
   if (loading) {
     return (
@@ -173,59 +266,25 @@ export function BaselineInfoPanel() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Canonical Baseline Runtime Check */}
-        <div className={`p-3 rounded-lg border ${
-          canonicalCheck?.passed 
-            ? 'bg-green-500/10 border-green-500/30' 
-            : canonicalError || (canonicalCheck && !canonicalCheck.passed)
-              ? 'bg-destructive/10 border-destructive/30'
-              : 'bg-muted/50 border-border'
-        }`}>
+        {/* Canonical Baseline Runtime Checks */}
+        <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              {checkingCanonical ? (
-                <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
-              ) : canonicalCheck?.passed ? (
-                <ShieldCheck className="h-4 w-4 text-green-500" />
-              ) : canonicalError || (canonicalCheck && !canonicalCheck.passed) ? (
-                <ShieldAlert className="h-4 w-4 text-destructive" />
-              ) : (
-                <Shield className="h-4 w-4 text-muted-foreground" />
-              )}
-              <span className="text-sm font-medium">
-                {checkingCanonical 
-                  ? 'Checking...' 
-                  : canonicalCheck?.passed 
-                    ? 'Canonical Baseline Valid' 
-                    : canonicalError 
-                      ? 'Check Failed' 
-                      : canonicalCheck 
-                        ? 'Baseline Violation!' 
-                        : 'Not Checked'}
-              </span>
-            </div>
+            <span className="text-xs font-medium text-muted-foreground">Canonical Baseline Guards</span>
             <Button 
               variant="ghost" 
               size="sm" 
-              onClick={runCanonicalCheck}
-              disabled={checkingCanonical}
-              className="h-7 px-2"
+              onClick={runAllChecks}
+              disabled={checkingBrowserless || checkingZyte}
+              className="h-6 px-2 text-xs"
             >
-              <RefreshCw className={`h-3 w-3 ${checkingCanonical ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-3 w-3 mr-1 ${(checkingBrowserless || checkingZyte) ? 'animate-spin' : ''}`} />
+              Check All
             </Button>
           </div>
-          {canonicalCheck && !canonicalCheck.passed && (
-            <div className="mt-2 space-y-1">
-              {canonicalCheck.checks.filter(c => !c.passed).map((check, i) => (
-                <div key={i} className="text-xs text-destructive">
-                  ✗ {check.name}: expected {check.expected}, got {check.actual}
-                </div>
-              ))}
-            </div>
-          )}
-          {canonicalError && (
-            <div className="mt-2 text-xs text-destructive">{canonicalError}</div>
-          )}
+          <div className="grid grid-cols-2 gap-2">
+            {renderCanonicalCheckIndicator('Browserless', browserlessCheck, checkingBrowserless, browserlessError, runBrowserlessCheck)}
+            {renderCanonicalCheckIndicator('Zyte', zyteCheck, checkingZyte, zyteError, runZyteCheck)}
+          </div>
         </div>
 
         {/* Baseline Identity */}
