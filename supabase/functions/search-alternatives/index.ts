@@ -5889,7 +5889,24 @@ async function runSearchWithStreaming(
     const visualMatches = lensData?.visual_matches || [];
     sendProgress(controller, `Found ${visualMatches.length} potential matches`, "Verifying with AI comparison", { matchCount: visualMatches.length });
 
+    // ============================================================================
+    // PER-IMAGE VERIFICATION SUMMARY TRACKING
+    // Track filtering reasons for transparent logging
+    // ============================================================================
     let matchesThisImage = 0;
+    const filterStats = {
+      total_candidates: visualMatches.length,
+      filtered_no_url: 0,
+      filtered_airbnb: 0,
+      filtered_deduped: 0,
+      filtered_blocked_platform: 0,
+      filtered_non_booking_domain: 0,
+      filtered_already_high_confidence: 0,
+      filtered_cap_reached: 0,
+      filtered_time_exceeded: 0,
+      sent_to_verification: 0,
+    };
+    
     for (const match of visualMatches) {
       // ============================================================================
       // CRITICAL: No cache-influenced skip logic here
@@ -5904,14 +5921,35 @@ async function runSearchWithStreaming(
 
       if (aiCount >= MAX_AI || matchesThisImage >= 8) {
         console.log(`[VerificationCap] Reached cap: aiCount=${aiCount}/${MAX_AI}, matchesThisImage=${matchesThisImage}/8`);
+        filterStats.filtered_cap_reached++;
         break;
       }
-      if (Date.now() - searchStartTime > MAX_TIME) break;
+      if (Date.now() - searchStartTime > MAX_TIME) {
+        filterStats.filtered_time_exceeded++;
+        break;
+      }
 
       const matchUrl = match.link;
-      if (!matchUrl || matchUrl.toLowerCase().includes("airbnb.") || foundUrls.has(matchUrl)) continue;
-      if (isBlockedNonBookingPlatform(matchUrl)) continue;
-      if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) continue;
+      if (!matchUrl) {
+        filterStats.filtered_no_url++;
+        continue;
+      }
+      if (matchUrl.toLowerCase().includes("airbnb.")) {
+        filterStats.filtered_airbnb++;
+        continue;
+      }
+      if (foundUrls.has(matchUrl)) {
+        filterStats.filtered_deduped++;
+        continue;
+      }
+      if (isBlockedNonBookingPlatform(matchUrl)) {
+        filterStats.filtered_blocked_platform++;
+        continue;
+      }
+      if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) {
+        filterStats.filtered_non_booking_domain++;
+        continue;
+      }
       
       const platformName = getPlatformName(matchUrl);
       const platformKey = platformName.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -5921,9 +5959,11 @@ async function runSearchWithStreaming(
       if (existingMatch && existingMatch.confidence_score && existingMatch.confidence_score >= 0.98) {
         // Already have an excellent match for this platform, skip
         console.log(`Skipping ${platformName} verification - already have 98%+ match`);
+        filterStats.filtered_already_high_confidence++;
         continue;
       }
 
+      filterStats.sent_to_verification++;
       sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
       sendStatusUpdate(controller, `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`);
       await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
@@ -5963,12 +6003,39 @@ async function runSearchWithStreaming(
       }
     }
     
-    // Log per-image verification completion for clarity
-    console.log(`[Image ${idx + 1}/${imageUrls.length}] Finished verification: ${matchesThisImage} candidates checked, ${bestMatchPerPlatform.size} platforms discovered so far`);
-    sendProgress(controller, `Finished verification for image ${idx + 1}`, `Checked ${matchesThisImage} candidates this image`, { 
+    // ============================================================================
+    // PER-IMAGE VERIFICATION SUMMARY LOG (explicit counts + reasons)
+    // This log makes verification behaviour unambiguous and self-explanatory
+    // ============================================================================
+    const filteredTotal = filterStats.total_candidates - filterStats.sent_to_verification;
+    const filterBreakdown = [
+      filterStats.filtered_no_url > 0 ? `no_url: ${filterStats.filtered_no_url}` : null,
+      filterStats.filtered_airbnb > 0 ? `airbnb: ${filterStats.filtered_airbnb}` : null,
+      filterStats.filtered_deduped > 0 ? `deduped: ${filterStats.filtered_deduped}` : null,
+      filterStats.filtered_blocked_platform > 0 ? `blocked: ${filterStats.filtered_blocked_platform}` : null,
+      filterStats.filtered_non_booking_domain > 0 ? `non_booking: ${filterStats.filtered_non_booking_domain}` : null,
+      filterStats.filtered_already_high_confidence > 0 ? `already_verified: ${filterStats.filtered_already_high_confidence}` : null,
+      filterStats.filtered_cap_reached > 0 ? `cap_reached: ${filterStats.filtered_cap_reached}` : null,
+      filterStats.filtered_time_exceeded > 0 ? `time_exceeded: ${filterStats.filtered_time_exceeded}` : null,
+    ].filter(Boolean).join(', ');
+    
+    console.log(`[Image ${idx + 1}/${imageUrls.length}] Verification summary: ${filterStats.total_candidates} candidates → ${filterStats.sent_to_verification} verified, ${filteredTotal} filtered [${filterBreakdown || 'none'}]`);
+    
+    // Build human-readable detail for the activity log
+    let summaryDetail: string;
+    if (filterStats.sent_to_verification === 0 && filterStats.total_candidates > 0) {
+      // No verification ran - explain why
+      summaryDetail = `All ${filterStats.total_candidates} filtered: ${filterBreakdown}`;
+    } else if (filterStats.sent_to_verification > 0) {
+      summaryDetail = `Verified ${filterStats.sent_to_verification}, filtered ${filteredTotal}${filterBreakdown ? ` (${filterBreakdown})` : ''}`;
+    } else {
+      summaryDetail = "No candidates found";
+    }
+    
+    sendProgress(controller, `Finished verification for image ${idx + 1}`, summaryDetail, { 
       imageIndex: idx + 1, 
       totalImages: imageUrls.length,
-      candidatesCheckedThisImage: matchesThisImage,
+      verificationSummary: filterStats,
       totalPlatformsDiscovered: bestMatchPerPlatform.size,
     });
   }
