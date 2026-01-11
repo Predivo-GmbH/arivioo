@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -59,9 +59,15 @@ export function BaselineInfoPanel() {
   const [chainCheck, setChainCheck] = useState<CanonicalCheckResult | null>(null);
   const [checkingChain, setCheckingChain] = useState(false);
   const [chainError, setChainError] = useState<string | null>(null);
+  
+  // Guards to prevent duplicate runs and handle cleanup
+  const hasRunInitialChecks = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isRunningRef = useRef(false);
 
   // Fetch Browserless canonical check
-  const runBrowserlessCheck = async () => {
+  const runBrowserlessCheck = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     setCheckingBrowserless(true);
     setBrowserlessError(null);
     try {
@@ -69,18 +75,23 @@ export function BaselineInfoPanel() {
         method: 'GET',
       });
       
+      if (signal?.aborted) return;
       if (invokeError) throw invokeError;
       setBrowserlessCheck(data as CanonicalCheckResult);
     } catch (err: any) {
+      if (signal?.aborted) return;
       console.error('Browserless canonical check failed:', err);
       setBrowserlessError(err?.message || 'Failed to run check');
     } finally {
-      setCheckingBrowserless(false);
+      if (!signal?.aborted) {
+        setCheckingBrowserless(false);
+      }
     }
-  };
+  }, []);
   
   // Fetch Zyte canonical check
-  const runZyteCheck = async () => {
+  const runZyteCheck = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     setCheckingZyte(true);
     setZyteError(null);
     try {
@@ -88,18 +99,23 @@ export function BaselineInfoPanel() {
         method: 'GET',
       });
       
+      if (signal?.aborted) return;
       if (invokeError) throw invokeError;
       setZyteCheck(data as CanonicalCheckResult);
     } catch (err: any) {
+      if (signal?.aborted) return;
       console.error('Zyte canonical check failed:', err);
       setZyteError(err?.message || 'Failed to run check');
     } finally {
-      setCheckingZyte(false);
+      if (!signal?.aborted) {
+        setCheckingZyte(false);
+      }
     }
-  };
+  }, []);
   
   // Fetch Firecrawl canonical check
-  const runFirecrawlCheck = async () => {
+  const runFirecrawlCheck = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     setCheckingFirecrawl(true);
     setFirecrawlError(null);
     try {
@@ -107,18 +123,23 @@ export function BaselineInfoPanel() {
         method: 'GET',
       });
       
+      if (signal?.aborted) return;
       if (invokeError) throw invokeError;
       setFirecrawlCheck(data as CanonicalCheckResult);
     } catch (err: any) {
+      if (signal?.aborted) return;
       console.error('Firecrawl canonical check failed:', err);
       setFirecrawlError(err?.message || 'Failed to run check');
     } finally {
-      setCheckingFirecrawl(false);
+      if (!signal?.aborted) {
+        setCheckingFirecrawl(false);
+      }
     }
-  };
+  }, []);
   
   // Fetch Baseline Chain canonical check (orchestration)
-  const runChainCheck = async () => {
+  const runChainCheck = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     setCheckingChain(true);
     setChainError(null);
     try {
@@ -126,30 +147,77 @@ export function BaselineInfoPanel() {
         method: 'GET',
       });
       
+      if (signal?.aborted) return;
       if (invokeError) throw invokeError;
       setChainCheck(data as CanonicalCheckResult);
     } catch (err: any) {
+      if (signal?.aborted) return;
       console.error('Baseline Chain canonical check failed:', err);
       setChainError(err?.message || 'Failed to run check');
     } finally {
-      setCheckingChain(false);
+      if (!signal?.aborted) {
+        setCheckingChain(false);
+      }
     }
-  };
+  }, []);
   
-  // Run all checks
-  const runAllChecks = () => {
+  // Run all checks with re-entrancy guard
+  const runAllChecks = useCallback((signal?: AbortSignal) => {
+    // Prevent overlapping runs
+    if (isRunningRef.current) {
+      console.log('Canonical checks already running, skipping');
+      return;
+    }
+    
+    isRunningRef.current = true;
+    
+    // Run all checks in parallel
+    Promise.all([
+      runBrowserlessCheck(signal),
+      runZyteCheck(signal),
+      runFirecrawlCheck(signal),
+      runChainCheck(signal),
+    ]).finally(() => {
+      isRunningRef.current = false;
+    });
+  }, [runBrowserlessCheck, runZyteCheck, runFirecrawlCheck, runChainCheck]);
+  
+  // Handler for user-initiated "Check All" button
+  const handleCheckAll = useCallback(() => {
+    // Cancel any previous in-flight requests
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    runAllChecks(abortControllerRef.current.signal);
+  }, [runAllChecks]);
+  
+  // Individual refresh handlers for button callbacks (no signal needed - user initiated)
+  const handleBrowserlessRefresh = useCallback(() => {
     runBrowserlessCheck();
+  }, [runBrowserlessCheck]);
+  
+  const handleZyteRefresh = useCallback(() => {
     runZyteCheck();
+  }, [runZyteCheck]);
+  
+  const handleFirecrawlRefresh = useCallback(() => {
     runFirecrawlCheck();
+  }, [runFirecrawlCheck]);
+  
+  const handleChainRefresh = useCallback(() => {
     runChainCheck();
-  };
+  }, [runChainCheck]);
 
+  // Fetch baseline data on mount (once only)
   useEffect(() => {
+    let cancelled = false;
+    
     async function fetchBaseline() {
       try {
         const token = getToken();
         if (!token) {
-          setError('Not authenticated');
+          if (!cancelled) setError('Not authenticated');
           return;
         }
 
@@ -158,20 +226,47 @@ export function BaselineInfoPanel() {
           method: 'GET',
         });
 
+        if (cancelled) return;
         if (invokeError) throw invokeError;
         setBaseline(data);
         setError(null);
       } catch (err: any) {
+        if (cancelled) return;
         console.error('Failed to fetch baseline:', err);
         setError(err?.message || 'Failed to fetch baseline');
       } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 
     fetchBaseline();
-    runAllChecks(); // Run all canonical checks on mount
-  }, [getToken]);
+    
+    return () => {
+      cancelled = true;
+    };
+  }, []); // Empty deps - run once on mount only
+  
+  // Run canonical checks exactly once on mount
+  useEffect(() => {
+    // Strict guard: only run once ever per component instance
+    if (hasRunInitialChecks.current) {
+      return;
+    }
+    hasRunInitialChecks.current = true;
+    
+    // Create abort controller for cleanup
+    abortControllerRef.current = new AbortController();
+    runAllChecks(abortControllerRef.current.signal);
+    
+    // Cleanup: abort in-flight requests on unmount
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, [runAllChecks]);
 
   const expectationsByCategory = getExpectationsByCategory();
   
@@ -323,7 +418,7 @@ export function BaselineInfoPanel() {
             <Button 
               variant="ghost" 
               size="sm" 
-              onClick={runAllChecks}
+              onClick={handleCheckAll}
               disabled={checkingBrowserless || checkingZyte || checkingFirecrawl || checkingChain}
               className="h-6 px-2 text-xs"
             >
@@ -332,10 +427,10 @@ export function BaselineInfoPanel() {
             </Button>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            {renderCanonicalCheckIndicator('Browserless', browserlessCheck, checkingBrowserless, browserlessError, runBrowserlessCheck)}
-            {renderCanonicalCheckIndicator('Zyte', zyteCheck, checkingZyte, zyteError, runZyteCheck)}
-            {renderCanonicalCheckIndicator('Firecrawl', firecrawlCheck, checkingFirecrawl, firecrawlError, runFirecrawlCheck)}
-            {renderCanonicalCheckIndicator('Chain', chainCheck, checkingChain, chainError, runChainCheck)}
+            {renderCanonicalCheckIndicator('Browserless', browserlessCheck, checkingBrowserless, browserlessError, handleBrowserlessRefresh)}
+            {renderCanonicalCheckIndicator('Zyte', zyteCheck, checkingZyte, zyteError, handleZyteRefresh)}
+            {renderCanonicalCheckIndicator('Firecrawl', firecrawlCheck, checkingFirecrawl, firecrawlError, handleFirecrawlRefresh)}
+            {renderCanonicalCheckIndicator('Chain', chainCheck, checkingChain, chainError, handleChainRefresh)}
           </div>
         </div>
 
