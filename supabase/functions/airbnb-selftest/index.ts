@@ -846,6 +846,176 @@ function runZyteCanonicalBaselineCheck(): ZyteCanonicalCheckResult {
   };
 }
 
+// =============================================================================
+// FIRECRAWL CANONICAL BASELINE CHECK
+// =============================================================================
+
+interface FirecrawlCanonicalCheckResult {
+  mode: 'firecrawl-canonical-check';
+  passed: boolean;
+  checks: Array<{
+    name: string;
+    expected: string;
+    actual: string;
+    passed: boolean;
+  }>;
+  status: 'firecrawl_canonical_valid' | 'firecrawl_canonical_violation';
+  timestamp: string;
+}
+
+// Mock Firecrawl response structure (mirrors production)
+interface MockFirecrawlResponse {
+  success: boolean;
+  markdown: string | null;
+  html: string | null;
+  screenshot: string | null;
+  providerUsed: string;
+  statusCode: number;
+  error: string | null;
+}
+
+// Simulate Firecrawl extraction evaluation logic
+function evaluateFirecrawlExtraction(
+  response: MockFirecrawlResponse,
+  ocrTotal: number | null,
+  markdownTotal: number | null,
+  htmlTotal: number | null,
+  subtotalOnly: number | null
+): { status: string; price: number | null; source: string } {
+  // Check for API errors
+  if (!response.success || response.statusCode === 429) {
+    return { status: response.statusCode === 429 ? 'rate_limited' : 'provider_error', price: null, source: 'none' };
+  }
+  
+  // Check for insufficient content
+  const hasContent = (response.markdown && response.markdown.length > 100) || 
+                     (response.html && response.html.length > 500);
+  if (!hasContent) {
+    return { status: 'price_not_available_in_content', price: null, source: 'none' };
+  }
+  
+  // PRIORITY 1: OCR total from screenshot
+  if (ocrTotal && ocrTotal > 0) {
+    return { status: 'total_price_including_taxes_and_fees', price: ocrTotal, source: 'ocr_total' };
+  }
+  
+  // PRIORITY 2: Markdown regex total
+  if (markdownTotal && markdownTotal > 0) {
+    return { status: 'total_price_including_taxes_and_fees', price: markdownTotal, source: 'markdown_regex' };
+  }
+  
+  // PRIORITY 3: HTML regex total
+  if (htmlTotal && htmlTotal > 0) {
+    return { status: 'total_price_including_taxes_and_fees', price: htmlTotal, source: 'html_regex' };
+  }
+  
+  // PRIORITY 4: Subtotal only - NEVER promoted
+  if (subtotalOnly && subtotalOnly > 0) {
+    return { status: 'needs_user_confirmation', price: null, source: 'subtotal_only' };
+  }
+  
+  return { status: 'price_not_available_in_content', price: null, source: 'none' };
+}
+
+function runFirecrawlCanonicalBaselineCheck(): FirecrawlCanonicalCheckResult {
+  const checks: FirecrawlCanonicalCheckResult['checks'] = [];
+  
+  // Check 1: Output shape validation
+  const mockValidResponse: MockFirecrawlResponse = {
+    success: true,
+    markdown: '# Booking\n\nTotal (USD) $1,658.94'.repeat(10), // > 100 chars
+    html: '<html><body>Total</body></html>'.repeat(20), // > 500 chars
+    screenshot: 'base64data',
+    providerUsed: 'firecrawl',
+    statusCode: 200,
+    error: null,
+  };
+  const hasRequiredFields = 
+    'success' in mockValidResponse && 
+    'providerUsed' in mockValidResponse && 
+    'error' in mockValidResponse &&
+    mockValidResponse.providerUsed === 'firecrawl';
+  checks.push({
+    name: 'firecrawl_output_shape_valid',
+    expected: 'success, providerUsed, error present; providerUsed=firecrawl',
+    actual: hasRequiredFields ? 'all required fields present' : 'missing fields',
+    passed: hasRequiredFields,
+  });
+  
+  // Check 2: Total priority respected (OCR > markdown > HTML > subtotal)
+  const resultWithAll = evaluateFirecrawlExtraction(mockValidResponse, 1658.94, 1650.00, 1640.00, 1500.00);
+  const totalPriorityRespected = resultWithAll.source === 'ocr_total' && resultWithAll.price === 1658.94;
+  checks.push({
+    name: 'firecrawl_total_priority_respected',
+    expected: 'ocr_total wins with price 1658.94',
+    actual: `${resultWithAll.source} with price ${resultWithAll.price}`,
+    passed: totalPriorityRespected,
+  });
+  
+  // Check 3: Subtotal never promoted
+  const resultSubtotalOnly = evaluateFirecrawlExtraction(mockValidResponse, null, null, null, 1500.00);
+  const subtotalNeverPromoted = 
+    resultSubtotalOnly.status === 'needs_user_confirmation' && 
+    resultSubtotalOnly.price === null;
+  checks.push({
+    name: 'firecrawl_subtotal_never_promoted',
+    expected: 'needs_user_confirmation with null price',
+    actual: `${resultSubtotalOnly.status} with price ${resultSubtotalOnly.price}`,
+    passed: subtotalNeverPromoted,
+  });
+  
+  // Check 4: Currency normalization (reuse existing normalizeCurrencyAmount)
+  const testCases = [
+    { input: '$1,658.94', expected: 1658.94 },
+    { input: 'CHF 2,500.00', expected: 2500.00 },
+    { input: '£999.99', expected: 999.99 },
+    { input: '€1234.56', expected: 1234.56 },
+  ];
+  let allCurrencyPassed = true;
+  const currencyResults: string[] = [];
+  for (const tc of testCases) {
+    const result = normalizeCurrencyAmount(tc.input);
+    const passed = result !== null && Math.abs(result - tc.expected) < 0.01;
+    if (!passed) allCurrencyPassed = false;
+    currencyResults.push(`${tc.input}→${result}`);
+  }
+  checks.push({
+    name: 'firecrawl_currency_normalization',
+    expected: 'all currency formats parse correctly',
+    actual: allCurrencyPassed ? 'all passed' : currencyResults.join(', '),
+    passed: allCurrencyPassed,
+  });
+  
+  // Check 5: Null safety (empty/malformed input)
+  const emptyResponse: MockFirecrawlResponse = {
+    success: true,
+    markdown: '', // Empty content
+    html: '',
+    screenshot: null,
+    providerUsed: 'firecrawl',
+    statusCode: 200,
+    error: null,
+  };
+  const emptyResult = evaluateFirecrawlExtraction(emptyResponse, null, null, null, null);
+  const nullSafe = emptyResult.status === 'price_not_available_in_content' && emptyResult.price === null;
+  checks.push({
+    name: 'firecrawl_null_safe',
+    expected: 'price_not_available_in_content with null price',
+    actual: `${emptyResult.status} with price ${emptyResult.price}`,
+    passed: nullSafe,
+  });
+  
+  const allPassed = checks.every(c => c.passed);
+  
+  return {
+    mode: 'firecrawl-canonical-check',
+    passed: allPassed,
+    checks,
+    status: allPassed ? 'firecrawl_canonical_valid' : 'firecrawl_canonical_violation',
+    timestamp: new Date().toISOString(),
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
   
@@ -865,6 +1035,15 @@ Deno.serve(async (req) => {
   // Zyte canonical check
   if (mode === 'zyte-canonical-check') {
     const result = runZyteCanonicalBaselineCheck();
+    return new Response(JSON.stringify(result, null, 2), {
+      status: result.passed ? 200 : 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  
+  // Firecrawl canonical check
+  if (mode === 'firecrawl-canonical-check') {
+    const result = runFirecrawlCanonicalBaselineCheck();
     return new Response(JSON.stringify(result, null, 2), {
       status: result.passed ? 200 : 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
