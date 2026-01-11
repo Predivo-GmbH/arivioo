@@ -1225,20 +1225,36 @@ export default function SearchResults() {
 
   // Track when results page is actually rendered (after DOM update)
   const [resultsPageRendered, setResultsPageRendered] = useState(false);
-  
+  // Once we show the results view, never return to the pipeline view for this run.
+  // This prevents confetti from triggering on results and then the UI snapping back
+  // to "Finding Better Deals" while background price polling continues.
+  const [resultsViewUnlocked, setResultsViewUnlocked] = useState(false);
+
+  // Reset view-unlock when the searchId changes (new run)
+  useEffect(() => {
+    setResultsViewUnlocked(false);
+    setResultsPageRendered(false);
+    setHasCelebrated(false);
+  }, [searchId]);
+
   // Detect when results page becomes visible (pipeline hidden)
   useEffect(() => {
     const pipelineHidden = !loading && !extractingPrices;
-    if (pipelineHidden && searchPhase === 'done' && results.length > 0) {
-      // Use a delay to ensure the DOM has updated and pipeline is truly hidden
-      const timer = setTimeout(() => {
-        setResultsPageRendered(true);
-      }, 150);
-      return () => clearTimeout(timer);
-    } else {
-      setResultsPageRendered(false);
+
+    // Unlock results view as soon as we have anything to render.
+    // From this point on, we keep showing results even if extractingPrices flips true later.
+    if (!resultsViewUnlocked && pipelineHidden && searchPhase === "done" && results.length > 0) {
+      setResultsViewUnlocked(true);
     }
-  }, [loading, extractingPrices, searchPhase, results.length]);
+
+    if (pipelineHidden && searchPhase === "done" && results.length > 0) {
+      // Delay to ensure the DOM has updated and pipeline is truly hidden
+      const timer = window.setTimeout(() => setResultsPageRendered(true), 150);
+      return () => window.clearTimeout(timer);
+    }
+
+    setResultsPageRendered(false);
+  }, [loading, extractingPrices, searchPhase, results.length, resultsViewUnlocked]);
   
   // Add "Search complete" activity and confetti ONLY when results page is actually rendered
   useEffect(() => {
@@ -1658,8 +1674,9 @@ export default function SearchResults() {
       </header>
 
       <main className="container px-4 py-8 md:py-12">
-        {/* Show progress page while loading OR while price extraction is in progress */}
-        {(loading || extractingPrices) ? (
+        {/* Show progress page while loading OR while price extraction is in progress.
+            NOTE: once resultsViewUnlocked is true, we never return to the pipeline view. */}
+        {((loading || extractingPrices) && !resultsViewUnlocked) ? (
           <PipelineProgress
             status={search?.status}
             isComplete={false}
