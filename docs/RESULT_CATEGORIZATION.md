@@ -1,8 +1,19 @@
-# Result Categorization
+# Result Categorization and Price Comparison
 
 ## Overview
 
-The result categorization module (`src/lib/resultCategorization.ts`) provides unified classification of search results into user-friendly buckets based on the canonical price model.
+This document describes how search results are categorized into user-friendly buckets based on the canonical price model and extraction outcomes.
+
+## Key Principle: Price Type ≠ Confidence
+
+**CRITICAL**: The `price_type` (what kind of price was found) is determined by *what* was extracted, NOT by confidence scores.
+
+- **`total_proven`**: A verified total price including taxes and fees, with structural proof
+- **`total_derived`**: A total price calculated from components with explicit derivation
+- **`subtotal_nights_only`**: Sum of nightly rates without fees/taxes
+- **`nightly_only`**: Single night rate only
+
+**Low confidence does NOT mean partial price**. A structurally verified total with low confidence is still a total—it just needs manual verification recommended.
 
 ## Bucket Hierarchy (Precedence Order)
 
@@ -22,8 +33,18 @@ A price is **comparable** only when:
 - `price_type` is `total_proven` or `total_derived`
 - Same currency as Airbnb
 - Same date range and nights count
-- `confidence` is medium or high
 - Taxes/fees are included
+- Extraction status is success
+
+**Note**: Low confidence does NOT block comparability when `price_type` is `total_proven` (structural verification exists). It only adds a "manual check recommended" badge.
+
+## Verified vs Unverified
+
+A result is **verified** when:
+- `price_type` is `total_proven` or `total_derived`
+- Either: `is_comparable` is true OR structural proof exists
+
+A result with low confidence but structural verification is still "verified"—the low confidence just adds a note.
 
 ## Key Files
 
@@ -43,3 +64,14 @@ A price is **comparable** only when:
 | `sold_out` | "Not available for these dates" | dates_unavailable status |
 | `price_not_found` | "Price not found" | Extraction incomplete |
 | `blocked` | "Access blocked" | Bot detection, captcha |
+| `requires_action` | "Requires action" | Login needed, confirmation required |
+| `service_error` | "Temporary error" | Timeout, 5xx, provider error |
+| `platform_blocked` | "Platform not supported" | Tier C blocked |
+
+## Regression Test
+
+Test N in `src/lib/__tests__/extractionStateMachine.test.ts` ensures:
+- A total_proven price with null/low confidence is correctly classified
+- The bucket is "more_expensive" or "cheaper" (not "not_comparable")
+- The verification_label is "Verified" (not "Unverified")
+- No "partial price" messaging appears for proven totals
