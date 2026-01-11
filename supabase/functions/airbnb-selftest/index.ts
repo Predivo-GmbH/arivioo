@@ -1291,21 +1291,21 @@ function runBaselineChainCanonicalCheck(): BaselineChainCanonicalCheckResult {
 
 // =============================================================================
 // CANARY URL CONFIGURATION
-// Fixed test scenario for live provider capability checks
+// Fixed test scenario for live provider capability checks.
+// Uses Mar 1-4, 2026 (3 nights) matching the user-reported search scenario.
+// Expected total validated from live search result: $1658.94
 // =============================================================================
 const CANARY_CONFIG = {
-  // Use a known stable listing with dates far in the future
-  // This URL should reliably show the checkout page with a grounded total
   baseUrl: 'https://www.airbnb.com/rooms/903802242341279498',
-  checkIn: '2026-02-01',
-  checkOut: '2026-02-05',
-  adults: 2,
+  checkIn: '2026-03-01',
+  checkOut: '2026-03-04',
+  adults: 1,
   guestCurrency: 'USD',
   userCountry: 'US',
-  nightsCount: 4,
-  // Expected total with 1% tolerance
-  expectedTotal: 2214,
-  tolerance: 0.01,
+  nightsCount: 3,
+  // Expected total with 5% tolerance for currency/fee variations
+  expectedTotal: 1659,
+  tolerance: 0.05,
 };
 
 function buildCanaryUrl(): string {
@@ -1326,6 +1326,8 @@ interface CanaryCheckResult {
   } | null;
   failure_reason: string | null;
   expected_behavior: string;
+  expected_total?: number; // Optional - included for successful extractions to show comparison
+  price_within_tolerance?: boolean; // Optional - shows if extracted price matches expected
   timestamp: string;
   duration_ms: number;
   checks: Array<{
@@ -1486,7 +1488,19 @@ async function runBrowserlessCanaryCheck(): Promise<CanaryCheckResult> {
       passed: extractedPrice !== null && extractedPrice > 0,
     });
     
-    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0;
+    // Validate price is within tolerance of expected
+    const priceWithinTolerance = extractedPrice !== null && 
+      Math.abs(extractedPrice - CANARY_CONFIG.expectedTotal) <= CANARY_CONFIG.expectedTotal * CANARY_CONFIG.tolerance;
+    
+    checks.push({
+      name: 'price_within_tolerance',
+      expected: `${CANARY_CONFIG.expectedTotal} ±${(CANARY_CONFIG.tolerance * 100).toFixed(0)}%`,
+      actual: extractedPrice ? `${extractedPrice}` : 'null',
+      passed: priceWithinTolerance,
+    });
+    
+    // Pass requires: verified status + price extracted + price within tolerance
+    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0 && priceWithinTolerance;
     
     let failureReason: string | null = null;
     if (!isPassed) {
@@ -1496,6 +1510,8 @@ async function runBrowserlessCanaryCheck(): Promise<CanaryCheckResult> {
           : 'No price extracted from page content';
       } else if (finalStatus === 'dates_unavailable') {
         failureReason = 'Dates unavailable for canary listing';
+      } else if (!priceWithinTolerance && extractedPrice) {
+        failureReason = `Price ${extractedPrice} differs from expected ${CANARY_CONFIG.expectedTotal} by more than ${(CANARY_CONFIG.tolerance * 100).toFixed(0)}%`;
       } else {
         failureReason = `Status ${finalStatus} is not verified`;
       }
@@ -1515,6 +1531,8 @@ async function runBrowserlessCanaryCheck(): Promise<CanaryCheckResult> {
       },
       failure_reason: failureReason,
       expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      expected_total: CANARY_CONFIG.expectedTotal,
+      price_within_tolerance: priceWithinTolerance,
       timestamp: new Date().toISOString(),
       duration_ms: Date.now() - startTime,
       checks,
@@ -1581,15 +1599,11 @@ async function runZyteCanaryCheck(): Promise<CanaryCheckResult> {
       };
     }
     
-    // Call Zyte API
+    // Call Zyte API - use only standard supported properties
     const zytePayload = {
       url: bookStaysParams.book_stays_url,
       browserHtml: true,
       screenshot: true,
-      javascript: true,
-      actions: [
-        { action: 'waitForTimeout', timeout: 5000 },
-      ],
     };
     
     const zyteResponse = await fetchWithTimeout('https://api.zyte.com/v1/extract', {
@@ -1685,13 +1699,27 @@ async function runZyteCanaryCheck(): Promise<CanaryCheckResult> {
       passed: finalStatus === VERIFIED_STATUS,
     });
     
-    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0;
+    // Validate price is within tolerance of expected
+    const priceWithinTolerance = extractedPrice !== null && 
+      Math.abs(extractedPrice - CANARY_CONFIG.expectedTotal) <= CANARY_CONFIG.expectedTotal * CANARY_CONFIG.tolerance;
+    
+    checks.push({
+      name: 'price_within_tolerance',
+      expected: `${CANARY_CONFIG.expectedTotal} ±${(CANARY_CONFIG.tolerance * 100).toFixed(0)}%`,
+      actual: extractedPrice ? `${extractedPrice}` : 'null',
+      passed: priceWithinTolerance,
+    });
+    
+    // Pass requires: verified status + price extracted + price within tolerance
+    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0 && priceWithinTolerance;
     let failureReason: string | null = null;
     if (!isPassed) {
       if (finalStatus === 'needs_user_confirmation') {
         failureReason = extractedPrice 
           ? `Only subtotal found (${extractedPrice}), no grounded total pattern`
           : 'No price extracted from content';
+      } else if (!priceWithinTolerance && extractedPrice) {
+        failureReason = `Price ${extractedPrice} differs from expected ${CANARY_CONFIG.expectedTotal} by more than ${(CANARY_CONFIG.tolerance * 100).toFixed(0)}%`;
       } else {
         failureReason = `Status ${finalStatus} is not verified`;
       }
@@ -1711,6 +1739,8 @@ async function runZyteCanaryCheck(): Promise<CanaryCheckResult> {
       },
       failure_reason: failureReason,
       expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      expected_total: CANARY_CONFIG.expectedTotal,
+      price_within_tolerance: priceWithinTolerance,
       timestamp: new Date().toISOString(),
       duration_ms: Date.now() - startTime,
       checks,
@@ -1892,13 +1922,27 @@ async function runFirecrawlCanaryCheck(): Promise<CanaryCheckResult> {
       passed: finalStatus === VERIFIED_STATUS,
     });
     
-    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0;
+    // Validate price is within tolerance of expected
+    const priceWithinTolerance = extractedPrice !== null && 
+      Math.abs(extractedPrice - CANARY_CONFIG.expectedTotal) <= CANARY_CONFIG.expectedTotal * CANARY_CONFIG.tolerance;
+    
+    checks.push({
+      name: 'price_within_tolerance',
+      expected: `${CANARY_CONFIG.expectedTotal} ±${(CANARY_CONFIG.tolerance * 100).toFixed(0)}%`,
+      actual: extractedPrice ? `${extractedPrice}` : 'null',
+      passed: priceWithinTolerance,
+    });
+    
+    // Pass requires: verified status + price extracted + price within tolerance
+    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0 && priceWithinTolerance;
     let failureReason: string | null = null;
     if (!isPassed) {
       if (finalStatus === 'needs_user_confirmation') {
         failureReason = extractedPrice 
           ? `Only subtotal found (${extractedPrice}), no grounded total pattern`
           : 'No price extracted from content';
+      } else if (!priceWithinTolerance && extractedPrice) {
+        failureReason = `Price ${extractedPrice} differs from expected ${CANARY_CONFIG.expectedTotal} by more than ${(CANARY_CONFIG.tolerance * 100).toFixed(0)}%`;
       } else {
         failureReason = `Status ${finalStatus} is not verified`;
       }
@@ -1918,6 +1962,8 @@ async function runFirecrawlCanaryCheck(): Promise<CanaryCheckResult> {
       },
       failure_reason: failureReason,
       expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      expected_total: CANARY_CONFIG.expectedTotal,
+      price_within_tolerance: priceWithinTolerance,
       timestamp: new Date().toISOString(),
       duration_ms: Date.now() - startTime,
       checks,

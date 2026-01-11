@@ -50,6 +50,8 @@ interface CanaryCheckResult {
   } | null;
   failure_reason: string | null;
   expected_behavior: string;
+  expected_total?: number;
+  price_within_tolerance?: boolean;
   timestamp: string;
   duration_ms: number;
   checks: Array<{
@@ -448,21 +450,45 @@ export function BaselineInfoPanel() {
       
       {check && (
         <div className="space-y-1 text-[10px]">
-          {/* Status and price */}
+          {/* Status and price with expected comparison */}
           <div className="flex items-center justify-between">
             <code className={`px-1 py-0.5 rounded ${
               check.extraction_result?.status === 'total_price_including_taxes_and_fees'
                 ? 'bg-green-500/20 text-green-700'
-                : 'bg-amber-500/20 text-amber-700'
+                : check.extraction_result?.status?.startsWith('http_')
+                  ? 'bg-destructive/20 text-destructive'
+                  : 'bg-amber-500/20 text-amber-700'
             }`}>
               {check.extraction_result?.status?.replace(/_/g, ' ').slice(0, 25) || 'no result'}
             </code>
-            {check.extraction_result?.price && (
-              <span className="font-mono text-[10px]">
-                ${check.extraction_result.price.toLocaleString()}
-              </span>
-            )}
+            <div className="flex items-center gap-1">
+              {check.extraction_result?.price && (
+                <span className={`font-mono text-[10px] ${
+                  check.price_within_tolerance === false ? 'text-destructive' : ''
+                }`}>
+                  ${check.extraction_result.price.toLocaleString()}
+                </span>
+              )}
+              {check.expected_total && (
+                <span className="text-muted-foreground">
+                  (exp: ${check.expected_total.toLocaleString()})
+                </span>
+              )}
+            </div>
           </div>
+          
+          {/* Price tolerance indicator */}
+          {check.extraction_result?.price && check.expected_total && (
+            <div className={`flex items-center gap-1 ${
+              check.price_within_tolerance ? 'text-green-600' : 'text-destructive'
+            }`}>
+              {check.price_within_tolerance ? '✓' : '✗'} 
+              {check.price_within_tolerance 
+                ? 'Price within tolerance' 
+                : `Price differs from expected (~${((Math.abs(check.extraction_result.price - check.expected_total) / check.expected_total) * 100).toFixed(0)}%)`
+              }
+            </div>
+          )}
           
           {/* Timestamp and duration */}
           <div className="flex items-center gap-1 text-muted-foreground">
