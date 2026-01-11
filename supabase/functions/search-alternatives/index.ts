@@ -752,12 +752,41 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
            const payNowExtraction = await page.evaluate(() => {
              const text = document.body?.innerText || '';
              
-             // Look for "Pay $X now" pattern - this is the all-in total
-             // Using string-based regex construction to ensure backslashes survive serialization
-             const payNowRe = new RegExp('Pay\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s*now', 'i');
-             const totalUsdRe = new RegExp('Total\\s*\\(?\\s*USD\\s*\\)?\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)', 'i');
-             const dueTodayRe = new RegExp('Due\\s+today\\s*\\$\\s*([\\d,]+(?:\\.\\d{2})?)', 'i');
-             const subtotalRe = new RegExp('\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s+for\\s+(\\d+)\\s+nights?', 'i');
+             // Define patterns with compile-time validation
+             // Each pattern is wrapped in try/catch to prevent crashes
+             const safeRegex = (pattern, flags) => {
+               try {
+                 return new RegExp(pattern, flags);
+               } catch (e) {
+                 console.error('REGEX COMPILE ERROR:', pattern, e.message);
+                 return null;
+               }
+             };
+             
+             // Patterns for total extraction - using string-based construction
+             // Double backslashes survive JSON serialization
+             const payNowRe = safeRegex('Pay\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)\\\\s*now', 'i');
+             const totalUsdRe = safeRegex('Total\\\\s*\\\\(?\\\\s*USD\\\\s*\\\\)?\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)', 'i');
+             const dueTodayRe = safeRegex('Due\\\\s+today\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)', 'i');
+             const subtotalRe = safeRegex('\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)\\\\s+for\\\\s+(\\\\d+)\\\\s+nights?', 'i');
+             
+             // Check for compilation errors
+             const compilationErrors = [];
+             if (!payNowRe) compilationErrors.push('payNowRe');
+             if (!totalUsdRe) compilationErrors.push('totalUsdRe');
+             if (!dueTodayRe) compilationErrors.push('dueTodayRe');
+             if (!subtotalRe) compilationErrors.push('subtotalRe');
+             
+             if (compilationErrors.length > 0) {
+               return {
+                 payNowAmount: null,
+                 payNowSnippet: null,
+                 subtotalAmount: null,
+                 subtotalNights: null,
+                 subtotalSnippet: null,
+                 regexCompilationErrors: compilationErrors,
+               };
+             }
              
              const payNowMatch = text.match(payNowRe);
              const totalUsdMatch = text.match(totalUsdRe);
@@ -792,6 +821,7 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
                subtotalAmount,
                subtotalNights,
                subtotalSnippet,
+               regexCompilationErrors: null,
              };
            });
 
@@ -4621,6 +4651,20 @@ async function runSearchWithStreaming(
   };
 
   try {
+    // ========================================================================
+    // BROWSERLESS-ONLY DEBUG MODE
+    // When BROWSERLESS_ONLY_BASELINE=true, run only Browserless and stop
+    // immediately if it fails. No Zyte fallback, no platform discovery.
+    // ========================================================================
+    const browserlessOnlyMode = Deno.env.get("BROWSERLESS_ONLY_BASELINE") === "true";
+    if (browserlessOnlyMode) {
+      console.log("==========================================");
+      console.log("BROWSERLESS ONLY MODE ENABLED");
+      console.log("Stopping run if Browserless fails — no fallbacks");
+      console.log("==========================================");
+      sendProgress(controller, "DEBUG MODE", "Browserless-only baseline mode enabled — no fallbacks");
+    }
+
     // Step 1: Extract Airbnb baseline using classic fallback order (Firecrawl -> Zyte -> Browserless)
     sendProgress(controller, "Analyzing listing", "Extracting property details and Airbnb price");
     sendStatusUpdate(controller, "scraping_airbnb_page");
@@ -5210,17 +5254,23 @@ async function runSearchWithStreaming(
     
     // Fallback chain: Browserless -> Zyte -> Firecrawl
     // All providers should try to get the all-in total from book/stays checkout page
-    const fallbackChain: { provider: AirbnbProvider; run: () => Promise<ProviderPriceResult> }[] = simulateBrowserlessFail
+    // BROWSERLESS_ONLY_BASELINE mode: Only run Browserless, no fallbacks
+    const fallbackChain: { provider: AirbnbProvider; run: () => Promise<ProviderPriceResult> }[] = browserlessOnlyMode
       ? [
-          // Simulation mode: skip Browserless to test Zyte fallback
-          { provider: 'zyte', run: zyteTask },
-          { provider: 'firecrawl', run: firecrawlTask },
-        ]
-      : [
+          // Browserless-only debug mode: no fallbacks
           { provider: 'browserless', run: browserlessTask },
-          { provider: 'zyte', run: zyteTask },
-          { provider: 'firecrawl', run: firecrawlTask },
-        ];
+        ]
+      : simulateBrowserlessFail
+        ? [
+            // Simulation mode: skip Browserless to test Zyte fallback
+            { provider: 'zyte', run: zyteTask },
+            { provider: 'firecrawl', run: firecrawlTask },
+          ]
+        : [
+            { provider: 'browserless', run: browserlessTask },
+            { provider: 'zyte', run: zyteTask },
+            { provider: 'firecrawl', run: firecrawlTask },
+          ];
 
     // ========================================================================
     // ACCESS FAILURE CLASSIFICATION - Handle rate limiting and bot blocking
@@ -5459,6 +5509,83 @@ async function runSearchWithStreaming(
     // Log access layer abort summary if triggered
     if (accessLayerAbort) {
       console.log(`[ACCESS ABORT SUMMARY] failureClass=${accessLayerAbort.failureClass}, provider=${accessLayerAbort.provider}, evidence=${accessLayerAbort.evidence.join(', ')}`);
+    }
+
+    // ========================================================================
+    // BROWSERLESS-ONLY MODE: Early termination on failure
+    // If Browserless-only mode is enabled and we didn't get a valid price,
+    // stop the entire run immediately with a clear terminal state.
+    // ========================================================================
+    if (browserlessOnlyMode && !airbnbPrice) {
+      const browserlessResult = providerResults.find(r => r.provider === 'browserless');
+      const failureReason = browserlessResult?.error || browserlessResult?.baseline.status || 'unknown_failure';
+      
+      console.log("==========================================");
+      console.log("BROWSERLESS ONLY MODE: STOPPING RUN");
+      console.log(`Failure reason: ${failureReason}`);
+      console.log("No Zyte fallback, no platform discovery");
+      console.log("==========================================");
+      
+      // Update search status to terminal failure
+      await supabase.from("searches").update({
+        status: "error",
+        api_error: `baseline_browserless_failed: ${failureReason}`,
+        api_error_code: "baseline_browserless_failed",
+        last_progress_at: new Date().toISOString(),
+      }).eq("id", searchId);
+      
+      // Persist failure record to debug table
+      try {
+        await supabase.from('airbnb_baseline_debug').insert({
+          run_id: debugRunId,
+          search_id: searchId,
+          run_number: 1,
+          provider: 'browserless',
+          provider_order: 1,
+          status: 'baseline_browserless_failed',
+          duration_ms: browserlessResult?.durationMs || 0,
+          extracted_price: null,
+          currency: null,
+          includes_taxes_fees: null,
+          evidence_snippet: `BROWSERLESS ONLY MODE FAILURE: ${failureReason}`,
+          rejected_reason: failureReason,
+          airbnb_url: search.airbnb_url,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
+          nights_count: nights,
+        });
+      } catch (e) {
+        console.error('Failed to persist browserless-only failure record:', e);
+      }
+      
+      // Send terminal progress event
+      sendProgress(controller, "BROWSERLESS ONLY MODE FAILED", failureReason, {
+        browserless_only_mode: true,
+        failure_reason: failureReason,
+        provider_results: providerResults.map(r => ({
+          provider: r.provider,
+          status: r.baseline.status,
+          error: r.error,
+        })),
+      });
+      
+      // Send stream end event and close
+      sendSSE(controller, "stream_end", {
+        searchId,
+        airbnbPrice: null,
+        airbnbCurrency: null,
+        airbnbTitle,
+        nights,
+        checkIn,
+        checkOut,
+        resultsCount: 0,
+        imageUrls,
+        error: `baseline_browserless_failed: ${failureReason}`,
+        apiErrorCode: "baseline_browserless_failed",
+      });
+      
+      controller.close();
+      return;
     }
 
     // Track subtotal info from any provider that found needs_user_confirmation

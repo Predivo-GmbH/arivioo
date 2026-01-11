@@ -18,7 +18,9 @@ type TerminalErrorType =
   | "expedia_target_offer_not_found"
   | "expedia_target_offer_mismatch"
   | "expedia_dates_unavailable_for_target"
-  | "expedia_target_total_not_found";
+  | "expedia_target_total_not_found"
+  // Browserless-only debug mode (v6.4)
+  | "baseline_browserless_failed";
 
 interface TerminalErrorPanelProps {
   type: TerminalErrorType;
@@ -310,6 +312,25 @@ const config: Record<TerminalErrorType, {
       "Pricing may require selecting specific options first",
     ],
     primaryAction: { label: "View on Expedia", to: "/dashboard" },
+  },
+  // Browserless-only debug mode (v6.4)
+  baseline_browserless_failed: {
+    icon: AlertCircle,
+    iconColor: "text-red-500",
+    bgColor: "bg-red-500/10",
+    borderColor: "border-red-500/20",
+    title: "Browserless Extraction Failed",
+    description: (
+      <>
+        <span className="font-semibold text-foreground">DEBUG MODE:</span> Browserless-only baseline extraction failed. No fallback providers were attempted.
+      </>
+    ),
+    tips: [
+      "This is a debug mode — disable BROWSERLESS_ONLY_BASELINE to enable fallbacks",
+      "Check Browserless logs for the specific error",
+      "The regex patterns or page structure may have changed",
+    ],
+    primaryAction: { label: "Try Again", to: "/dashboard" },
   },
 };
 

@@ -1229,8 +1229,10 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
               usedFallback = true;
             } else {
               // Check for Total on book/stays page
-              totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(bodyText) ||
-                              /Pay\\s+\\$[\\d,]+/i.test(bodyText);
+              // NOTE: Use proper regex literals with single backslashes (not double-escaped)
+              // because this regex is evaluated inside page.evaluate, not sent as a string
+              totalRowFound = /Total\s*(USD|EUR|GBP|\(USD\))?[\s:]*[\$€£][\d,.]+/i.test(bodyText) ||
+                              /Pay\s+\$[\d,]+/i.test(bodyText);
               clickLog.push('Book/stays Total found: ' + totalRowFound);
             }
           } else {
@@ -1265,7 +1267,8 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
             }
             
             const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-            totalRowFound = /Total\\s*(USD|EUR|GBP|\\(USD\\))?[\\s:]*[\\$€£][\\d,.]+/i.test(bodyText);
+            // NOTE: Use proper regex literals with single backslashes
+            totalRowFound = /Total\s*(USD|EUR|GBP|\(USD\))?[\s:]*[\$€£][\d,.]+/i.test(bodyText);
             clickLog.push('Fallback Total found: ' + totalRowFound);
           }
 
