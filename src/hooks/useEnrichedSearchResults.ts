@@ -151,36 +151,52 @@ function classifyFailure(extractionStatus: string | null, extractionError: strin
 
 export function useEnrichedSearchResults() {
   const fetchEnrichedResults = useCallback(async (searchId: string): Promise<EnrichedSearchResult[]> => {
-    // Run all 3 queries in parallel for faster finalization
-    const [resultsResponse, extractionsResponse, adaptersResponse] = await Promise.all([
-      // Fetch search_results
+    // Phase 1: fetch results + extractions in parallel (fast, scoped by search_id)
+    const [resultsResponse, extractionsResponse] = await Promise.all([
       supabase
         .from('search_results')
         .select('*')
         .eq('search_id', searchId)
         .order('savings_percentage', { ascending: false, nullsFirst: false }),
-      
-      // Fetch price_extractions for this search - include verification fields
       supabase
         .from('price_extractions')
         .select('id, search_result_id, platform_name, extraction_status, extraction_error, extracted_price, extraction_metadata, includes_taxes_fees, dates_validated, confidence_score, updated_at, evidence_snippets, extraction_stage, price_type')
         .eq('search_id', searchId),
-      
-      // Fetch platform_adapters for tier info
-      supabase
-        .from('platform_adapters')
-        .select('platform_domain, coverage_tier, coverage_status')
     ]);
 
     const { data: resultsData, error: resultsError } = resultsResponse;
     const { data: extractionsData } = extractionsResponse;
-    const { data: adaptersData } = adaptersResponse;
 
     if (resultsError || !resultsData) {
       console.error('Failed to fetch search results:', resultsError);
       return [];
     }
-    
+
+    // Phase 2: fetch ONLY the adapter rows we might need.
+    // The platform_adapters table can be large; fetching it all makes finalization slow.
+    const platformNames = Array.from(new Set(resultsData.map(r => (r.platform_name || '').toLowerCase()))).filter(Boolean);
+
+    // Heuristic: many adapters use a ".com" domain that matches the platform name.
+    // We query a small candidate list instead of scanning the entire table.
+    const domainCandidates = Array.from(
+      new Set(
+        platformNames
+          .map(name => name.replace(/\s+/g, '').replace(/[^a-z0-9.]/g, ''))
+          .flatMap(base => {
+            // already contains a dot => likely a domain already
+            if (base.includes('.')) return [base];
+            return [`${base}.com`];
+          })
+      )
+    );
+
+    const { data: adaptersData } = domainCandidates.length
+      ? await supabase
+          .from('platform_adapters')
+          .select('platform_domain, coverage_tier, coverage_status')
+          .in('platform_domain', domainCandidates)
+      : { data: [] as any[] };
+
     // Create lookup maps
     const extractionByResultId = new Map<string, any>();
     const extractionByPlatform = new Map<string, any>();
