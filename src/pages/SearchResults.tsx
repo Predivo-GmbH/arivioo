@@ -329,6 +329,21 @@ export default function SearchResults() {
   const highestStageIndexRef = useRef(-1); // Ref for use in SSE handler
   const activityFeedRef = useRef<Array<{ ts: number; message: string; detail?: string; id: string }>>([]); // Ref for persistence
 
+  // Helper function to add activity items
+  const addActivityItem = (message: string, detail?: string) => {
+    activityIdCounterRef.current += 1;
+    const newItem = {
+      ts: Date.now(),
+      message,
+      detail,
+      id: `activity-${activityIdCounterRef.current}`,
+    };
+    setActivityFeed((prev) => {
+      const updated = [...prev, newItem];
+      activityFeedRef.current = updated;
+      return updated;
+    });
+  };
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
@@ -721,7 +736,16 @@ export default function SearchResults() {
                           .eq("id", searchId);
                       }
 
+                      // Add finalization activity logs
+                      addActivityItem("Finalizing results", "Loading price extraction data...");
+                      
                       const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:complete');
+                      
+                      const verifiedCount = (enrichedResults as any[]).filter((r: any) => r.priceVerificationStatus === 'verified').length;
+                      const totalMatches = (enrichedResults as any[]).length;
+                      addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
+                      
+                      addActivityItem("Search complete", `Found ${totalMatches} alternatives (${verifiedCount} with verified prices)`);
 
                       setSearch(updatedSearch as SearchData);
                       setResults(enrichedResults as unknown as SearchResult[]);
@@ -814,11 +838,22 @@ export default function SearchResults() {
                    .eq("id", searchId);
                }
 
+               // Add finalization activity logs
+               addActivityItem("Finalizing results", "Loading price extraction data...");
+               
                try {
                  const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:streamEnded');
+                 
+                 const verifiedCount = (enrichedResults as any[]).filter((r: any) => r.priceVerificationStatus === 'verified').length;
+                 const totalMatches = (enrichedResults as any[]).length;
+                 addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
+                 
+                 addActivityItem("Search complete", `Found ${totalMatches} alternatives (${verifiedCount} with verified prices)`);
+                 
                  setResults(enrichedResults as unknown as SearchResult[]);
                } catch (e) {
                  console.error("Failed to fetch enriched results (stream ended):", e);
+                 addActivityItem("Search complete", "Finished with partial results");
                  toast({
                    title: "Showing partial results",
                    description: "We couldn't load all comparison details, but your search finished successfully.",
@@ -1049,12 +1084,23 @@ export default function SearchResults() {
 
         // If search is done, update state
         if (["completed", "price_unavailable", "dates_required"].includes(data.status)) {
+          // Add finalization activity logs
+          addActivityItem("Finalizing results", "Loading price extraction data...");
+          
           try {
             // Fetch final results (bounded so UI never hangs on "Finalizing")
             const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:heartbeat');
+            
+            const verifiedCount = (enrichedResults as any[]).filter((r: any) => r.priceVerificationStatus === 'verified').length;
+            const totalMatches = (enrichedResults as any[]).length;
+            addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
+            
+            addActivityItem("Search complete", `Found ${totalMatches} alternatives (${verifiedCount} with verified prices)`);
+            
             setResults(enrichedResults as unknown as SearchResult[]);
           } catch (e) {
             console.error("Failed to fetch enriched results (heartbeat):", e);
+            addActivityItem("Search complete", "Finished with partial results");
             toast({
               title: "Showing partial results",
               description: "We couldn't load all comparison details, but your search finished successfully.",
