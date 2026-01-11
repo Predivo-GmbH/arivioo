@@ -8,6 +8,12 @@ import {
   type PriceSource,
   type PriceVerificationResult 
 } from '@/lib/priceVerification';
+import {
+  normalizeExtraction,
+  type CanonicalPrice,
+  type PriceType,
+  type ExtractionInput,
+} from '@/lib/canonicalPrice';
 
 export interface EnrichedSearchResult {
   id: string;
@@ -34,12 +40,17 @@ export interface EnrichedSearchResult {
   failure_category: string | null;
   failure_reason: string | null;
   is_tier_c_blocked: boolean;
-  // NEW: Price verification metadata
+  // Price verification metadata (legacy)
   price_status: PriceStatus;
   price_source: PriceSource;
   price_verified_at: string | null;
   eligible_for_comparison: boolean;
   verification_failures: string[];
+  // NEW: Canonical price model
+  canonical_price: CanonicalPrice | null;
+  price_type: PriceType;
+  price_type_label: string;
+  is_total_price: boolean;
 }
 
 // Maps extraction errors to human-readable failure categories
@@ -342,6 +353,59 @@ export function useEnrichedSearchResults() {
         };
       }
 
+      // === CANONICAL PRICE MODEL ===
+      // Normalize extraction to canonical price schema for consistent comparison
+      let canonicalPrice: CanonicalPrice | null = null;
+      let priceType: PriceType = 'unknown';
+      let priceTypeLabel = 'Price';
+      let isTotalPrice = false;
+
+      if (extraction && !isTierCBlocked) {
+        const extractionInput: ExtractionInput = {
+          platform_name: result.platform_name,
+          deep_link: extraction.deep_link || result.listing_url,
+          extracted_price: extraction.extracted_price,
+          currency: extraction.currency || null,
+          includes_taxes_fees: extraction.includes_taxes_fees,
+          dates_validated: extraction.dates_validated,
+          detected_checkin: extraction.detected_checkin || result.price_check_in || null,
+          detected_checkout: extraction.detected_checkout || result.price_check_out || null,
+          confidence_score: extraction.confidence_score,
+          extraction_status: extraction.extraction_status,
+          extraction_metadata: extraction.extraction_metadata as Record<string, any> | null,
+          evidence_snippets: Array.isArray(extraction.evidence_snippets) ? extraction.evidence_snippets : [],
+          price_type: extraction.price_type || null,
+          updated_at: extraction.updated_at || null,
+        };
+
+        canonicalPrice = normalizeExtraction(extractionInput);
+        priceType = canonicalPrice.price_type;
+        isTotalPrice = priceType === 'total_proven' || priceType === 'total_derived';
+        
+        // Set human-readable label
+        switch (priceType) {
+          case 'total_proven':
+            priceTypeLabel = 'Total';
+            break;
+          case 'total_derived':
+            priceTypeLabel = 'Total*';
+            break;
+          case 'subtotal_nights_only':
+            priceTypeLabel = 'Subtotal';
+            break;
+          case 'nightly_only':
+            priceTypeLabel = 'Per night';
+            break;
+          default:
+            priceTypeLabel = 'Price';
+        }
+      } else if (result.price && result.price > 0 && !isTierCBlocked) {
+        // Scraped price - treat as unknown type
+        priceType = 'unknown';
+        priceTypeLabel = 'Price';
+        isTotalPrice = false;
+      }
+
       return {
         ...result,
         price: effectivePrice,
@@ -352,12 +416,17 @@ export function useEnrichedSearchResults() {
         failure_category: isTierCBlocked ? 'unsupported' : category,
         failure_reason: isTierCBlocked ? 'Platform blocked (Tier C)' : reason,
         is_tier_c_blocked: isTierCBlocked,
-        // Price verification metadata
+        // Price verification metadata (legacy)
         price_status: verification.price_status,
         price_source: verification.price_source,
         price_verified_at: verification.price_verified_at,
         eligible_for_comparison: verification.eligible_for_comparison,
         verification_failures: verification.verification_failures,
+        // NEW: Canonical price model
+        canonical_price: canonicalPrice,
+        price_type: priceType,
+        price_type_label: priceTypeLabel,
+        is_total_price: isTotalPrice,
       };
     });
 

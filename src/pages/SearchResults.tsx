@@ -67,6 +67,10 @@ interface SearchResult {
   price_verified_at?: string | null;
   eligible_for_comparison?: boolean;
   verification_failures?: string[];
+  // Canonical price model
+  price_type?: 'total_proven' | 'total_derived' | 'subtotal_nights_only' | 'nightly_only' | 'unknown';
+  price_type_label?: string;
+  is_total_price?: boolean;
 }
 
 interface PriceExtraction {
