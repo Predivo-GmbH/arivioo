@@ -2,7 +2,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from "react-router-dom";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import Dashboard from "./pages/Dashboard";
@@ -15,22 +15,20 @@ import NotFound from "./pages/NotFound";
 import AdminLogin from "./pages/AdminLogin";
 import AdminLayout from "./components/admin/AdminLayout";
 import HealthOverview from "./pages/admin/HealthOverview";
-import Pipeline from "./pages/admin/Pipeline";
-import Extractions from "./pages/admin/Extractions";
-import Adapters from "./pages/admin/Adapters";
-import BlockedPlatforms from "./pages/admin/BlockedPlatforms";
-import Quotas from "./pages/admin/Quotas";
-import AuditLogs from "./pages/admin/AuditLogs";
-import NotifyMeUsers from "./pages/admin/NotifyMeUsers";
-import PlatformCoverage from "./pages/admin/PlatformCoverage";
-import SearchDebug from "./pages/admin/SearchDebug";
-import AirbnbBaselineDiagnostic from "./pages/admin/AirbnbBaselineDiagnostic";
-import PlatformReliability from "./pages/admin/PlatformReliability";
-import ExtractionDiagnostics from "./pages/admin/ExtractionDiagnostics";
-import AccessLayerTelemetry from "./pages/admin/AccessLayerTelemetry";
-import ExtractionTestHarness from "./pages/admin/ExtractionTestHarness";
+
+// New consolidated admin pages
+import Platforms from "./pages/admin/Platforms";
+import ExtractionsHub from "./pages/admin/ExtractionsHub";
+import PipelineHub from "./pages/admin/PipelineHub";
+import Diagnostics from "./pages/admin/Diagnostics";
+import Settings from "./pages/admin/Settings";
 
 const queryClient = new QueryClient();
+
+// Redirect components for backwards compatibility
+function RedirectWithTab({ to, tab }: { to: string; tab: string }) {
+  return <Navigate to={`${to}?tab=${tab}`} replace />;
+}
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -49,21 +47,39 @@ const App = () => (
           {/* Admin routes */}
           <Route path="/admin/login" element={<AdminLogin />} />
           <Route path="/admin" element={<AdminLayout />}>
+            {/* Dashboard (Health Overview) */}
             <Route index element={<HealthOverview />} />
-            <Route path="coverage" element={<PlatformCoverage />} />
-            <Route path="pipeline" element={<Pipeline />} />
-            <Route path="extractions" element={<Extractions />} />
-            <Route path="search-debug" element={<SearchDebug />} />
-            <Route path="airbnb-diagnostic" element={<AirbnbBaselineDiagnostic />} />
-            <Route path="reliability" element={<PlatformReliability />} />
-            <Route path="extraction-diagnostics" element={<ExtractionDiagnostics />} />
-            <Route path="access-layer" element={<AccessLayerTelemetry />} />
-            <Route path="extraction-test" element={<ExtractionTestHarness />} />
-            <Route path="adapters" element={<Adapters />} />
-            <Route path="blocked" element={<BlockedPlatforms />} />
-            <Route path="quotas" element={<Quotas />} />
-            <Route path="audit" element={<AuditLogs />} />
-            <Route path="notify-me" element={<NotifyMeUsers />} />
+            
+            {/* Consolidated pages */}
+            <Route path="platforms" element={<Platforms />} />
+            <Route path="extractions" element={<ExtractionsHub />} />
+            <Route path="pipeline" element={<PipelineHub />} />
+            <Route path="diagnostics" element={<Diagnostics />} />
+            <Route path="settings" element={<Settings />} />
+            
+            {/* Backwards compatibility redirects - Platforms */}
+            <Route path="coverage" element={<RedirectWithTab to="/admin/platforms" tab="coverage" />} />
+            <Route path="adapters" element={<RedirectWithTab to="/admin/platforms" tab="adapters" />} />
+            <Route path="blocked" element={<RedirectWithTab to="/admin/platforms" tab="blocked" />} />
+            
+            {/* Backwards compatibility redirects - Extractions */}
+            <Route path="reliability" element={<RedirectWithTab to="/admin/extractions" tab="reliability" />} />
+            <Route path="extraction-diagnostics" element={<RedirectWithTab to="/admin/extractions" tab="diagnostics" />} />
+            
+            {/* Backwards compatibility redirects - Pipeline */}
+            <Route path="access-layer" element={<RedirectWithTab to="/admin/pipeline" tab="access-layer" />} />
+            
+            {/* Backwards compatibility redirects - Diagnostics */}
+            <Route path="airbnb-diagnostic" element={<RedirectWithTab to="/admin/diagnostics" tab="airbnb" />} />
+            <Route path="extraction-test" element={<RedirectWithTab to="/admin/diagnostics" tab="extraction-test" />} />
+            
+            {/* Backwards compatibility redirects - Settings */}
+            <Route path="notify-me" element={<RedirectWithTab to="/admin/settings" tab="users" />} />
+            <Route path="quotas" element={<RedirectWithTab to="/admin/settings" tab="quotas" />} />
+            <Route path="audit" element={<RedirectWithTab to="/admin/settings" tab="audit" />} />
+            
+            {/* Deprecated: Search Debug - redirect to Extraction Diagnostics */}
+            <Route path="search-debug" element={<RedirectWithTab to="/admin/extractions" tab="diagnostics" />} />
           </Route>
           
           <Route path="*" element={<NotFound />} />

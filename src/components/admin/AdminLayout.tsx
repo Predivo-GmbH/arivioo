@@ -5,17 +5,12 @@ import {
   Activity,
   Database,
   Settings,
-  ShieldOff,
-  Gauge,
-  FileText,
   LogOut,
   ChevronLeft,
   ChevronRight,
   User,
   TestTube,
-  ShieldCheck,
-  Microscope,
-  FlaskConical,
+  Globe,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -35,22 +30,14 @@ import {
 } from '@/components/ui/sidebar';
 import { NavLink } from '@/components/NavLink';
 
+// Canonical 6-section navigation structure
 const navItems = [
-  { title: 'Health Overview', url: '/admin', icon: LayoutDashboard },
-  { title: 'Platform Coverage', url: '/admin/coverage', icon: Gauge },
-  { title: 'Platform Reliability', url: '/admin/reliability', icon: ShieldCheck },
-  { title: 'Extraction Diagnostics', url: '/admin/extraction-diagnostics', icon: Microscope },
-  { title: 'Extraction Test', url: '/admin/extraction-test', icon: FlaskConical },
-  { title: 'Access Layer', url: '/admin/access-layer', icon: ShieldOff },
-  { title: 'Pipeline Status', url: '/admin/pipeline', icon: Activity },
+  { title: 'Dashboard', url: '/admin', icon: LayoutDashboard },
+  { title: 'Platforms', url: '/admin/platforms', icon: Globe },
   { title: 'Extractions', url: '/admin/extractions', icon: Database },
-  { title: 'Search Debug', url: '/admin/search-debug', icon: Activity },
-  { title: 'Airbnb Diagnostic', url: '/admin/airbnb-diagnostic', icon: TestTube },
-  { title: 'Users & Notify Me', url: '/admin/notify-me', icon: User },
-  { title: 'Platform Adapters', url: '/admin/adapters', icon: Settings },
-  { title: 'Blocked Platforms', url: '/admin/blocked', icon: ShieldOff },
-  { title: 'API Quotas', url: '/admin/quotas', icon: Gauge },
-  { title: 'Audit Logs', url: '/admin/audit', icon: FileText },
+  { title: 'Pipeline', url: '/admin/pipeline', icon: Activity },
+  { title: 'Diagnostics', url: '/admin/diagnostics', icon: TestTube },
+  { title: 'Settings', url: '/admin/settings', icon: Settings },
 ];
 
 function AdminSidebar() {
@@ -83,7 +70,7 @@ function AdminSidebar() {
 
       <SidebarContent className="flex-1">
         <SidebarGroup>
-          <SidebarGroupLabel className={cn(collapsed && "sr-only")}>Dashboard</SidebarGroupLabel>
+          <SidebarGroupLabel className={cn(collapsed && "sr-only")}>Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => (
