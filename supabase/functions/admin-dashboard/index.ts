@@ -2229,18 +2229,41 @@ Deno.serve(async (req) => {
           }
 
           // Map extraction status to canonical values
+          // NOTE: some extractors persist "extraction_error" and embed a real terminal status
+          // inside extraction_error (e.g. HTTP 422 JSON with { status: "dates_unavailable" }).
           let extraction_status = 'not_attempted';
           if (extraction) {
-            const status = extraction.extraction_status?.toLowerCase() || '';
+            const rawStatus = extraction.extraction_status?.toLowerCase() || '';
+
+            // Try to decode embedded status from extraction_error if present
+            let embeddedStatus: string | null = null;
+            try {
+              const errStr = typeof extraction.extraction_error === 'string' ? extraction.extraction_error : '';
+              const start = errStr.indexOf('{');
+              const end = errStr.lastIndexOf('}');
+              if (start >= 0 && end > start) {
+                const parsed = JSON.parse(errStr.slice(start, end + 1));
+                if (typeof parsed?.status === 'string') embeddedStatus = parsed.status.toLowerCase();
+              }
+            } catch {
+              // ignore
+            }
+
+            const status = (embeddedStatus && (rawStatus === 'extraction_error' || rawStatus === 'internal_error' || rawStatus === 'validation_error'))
+              ? embeddedStatus
+              : rawStatus;
+
             if (status === 'success' || status === 'price_extracted') {
               extraction_status = 'success';
-            } else if (status.includes('blocked') || status.includes('captcha') || status.includes('bot')) {
-              extraction_status = 'blocked';
+            } else if (status === 'dates_unavailable' || status === 'sold_out' || status === 'no_availability_for_dates' || status === 'expedia_dates_unavailable_for_target') {
+              extraction_status = 'dates_unavailable';
+            } else if (status.includes('blocked') || status.includes('captcha') || status.includes('bot') || status.includes('rate_limit')) {
+              extraction_status = status.includes('rate_limit') ? 'rate_limited' : 'blocked';
             } else if (status.includes('render') || status.includes('timeout')) {
               extraction_status = status.includes('timeout') ? 'timeout' : 'render_failed';
             } else if (status.includes('price_not_found') || status.includes('not_found')) {
               extraction_status = 'price_not_found';
-            } else if (status === 'pending') {
+            } else if (status === 'pending' || status === 'running') {
               extraction_status = 'pending';
             } else {
               extraction_status = 'internal_error';
