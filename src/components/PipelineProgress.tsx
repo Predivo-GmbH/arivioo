@@ -266,8 +266,13 @@ export function PipelineProgress({
     if (status === "finalizing" || status === "computing_savings") {
       return { message: "Finalizing results", detail: "Computing savings and preparing your results" };
     }
+    // NOTE: When status is "completed" but this component is still visible,
+    // we're still finalizing (enriching results). Only show "Search complete" 
+    // once the parent transitions away from this component.
+    // Since isComplete is always false when this component is shown, we 
+    // continue showing "Finalizing results" for completed status too.
     if (status === "completed") {
-      return { message: "Search complete" };
+      return { message: "Finalizing results", detail: "Preparing your comparison results..." };
     }
 
     return { message: status.replace(/_/g, " ") };
@@ -330,7 +335,7 @@ export function PipelineProgress({
         </div>
         
         <h2 className="text-2xl font-bold text-foreground mb-2">
-          {isFailed ? (failureDetails?.title || "Search Failed") : isComplete ? "Search Complete" : "Finding Better Deals"}
+          {isFailed ? (failureDetails?.title || "Search Failed") : "Finding Better Deals"}
         </h2>
 
         {isFailed && failureDetails && (
