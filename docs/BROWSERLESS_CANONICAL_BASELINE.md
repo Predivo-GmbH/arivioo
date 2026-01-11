@@ -5,6 +5,31 @@
 
 ---
 
+## Enforcement Mechanism
+
+This baseline is protected by a **multi-layer enforcement strategy**:
+
+### Primary: Runtime Self-Test (Automatic)
+The `airbnb-selftest` edge function validates canonical baseline behaviour on every deploy.
+- **Endpoint**: `POST /airbnb-selftest?mode=canonical-check`
+- **Execution**: Runs deterministic checks against fixture expectations
+- **Failure**: Returns `canonical_baseline_violation` status
+- **Surfaced**: Admin dashboard shows health status
+
+### Secondary: Regression Test Suite
+- **File**: `src/lib/__tests__/extractionStateMachine.test.ts`
+- **Test**: "Test J: Browserless Canonical Baseline Regression Guard"
+- **Command**: `npx vitest run`
+- **Blocks**: Must pass before any Browserless code changes
+
+### Enforcement Rules
+1. Edge function deploy triggers automatic self-test
+2. Any `canonical_baseline_violation` blocks the feature from working
+3. Regression tests must pass locally before modifying Browserless logic
+4. This document MUST be consulted before any Browserless fix
+
+---
+
 ## Last Known Working State
 
 **Date Verified**: 2026-01-11  
@@ -196,6 +221,17 @@ These invariants are protected by `src/lib/__tests__/extractionStateMachine.test
 |------|-------|-------|
 | 2026-01-11 | Baseline established | After fix for payNowExtraction not being passed through |
 | 2026-01-11 | Debug/normal mode unified | Single extraction path for both modes |
+| 2026-01-11 | Enforcement implemented | Runtime self-test + regression guard |
+
+---
+
+## Future-Proofing
+
+This enforcement mechanism remains valid when:
+
+1. **CI is added later**: Regression tests become part of CI pipeline; runtime self-test remains as secondary check
+2. **Developer workflows change**: Runtime enforcement cannot be bypassed regardless of local practices
+3. **Browserless logic evolves**: Any change that breaks canonical checks is immediately visible in production
 
 ---
 

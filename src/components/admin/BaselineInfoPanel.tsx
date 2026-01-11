@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Button } from '@/components/ui/button';
-import { Shield, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Clock, GitCommit, Tag } from 'lucide-react';
+import { Shield, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Clock, GitCommit, Tag, RefreshCw, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
 import { BASELINE_EXPECTATIONS, CATEGORY_LABELS, getExpectationsByCategory } from '@/lib/baselineExpectations';
@@ -20,12 +20,49 @@ interface BaselineData {
   notes: string | null;
 }
 
+interface CanonicalCheckResult {
+  mode: 'canonical-check';
+  passed: boolean;
+  checks: Array<{
+    name: string;
+    expected: string;
+    actual: string;
+    passed: boolean;
+  }>;
+  status: 'canonical_baseline_valid' | 'canonical_baseline_violation';
+  timestamp: string;
+}
+
 export function BaselineInfoPanel() {
   const { getToken } = useAdminAuth();
   const [baseline, setBaseline] = useState<BaselineData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showExpectations, setShowExpectations] = useState(false);
+  
+  // Canonical baseline check state
+  const [canonicalCheck, setCanonicalCheck] = useState<CanonicalCheckResult | null>(null);
+  const [checkingCanonical, setCheckingCanonical] = useState(false);
+  const [canonicalError, setCanonicalError] = useState<string | null>(null);
+
+  // Fetch canonical baseline check on mount
+  const runCanonicalCheck = async () => {
+    setCheckingCanonical(true);
+    setCanonicalError(null);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=canonical-check', {
+        method: 'GET',
+      });
+      
+      if (invokeError) throw invokeError;
+      setCanonicalCheck(data as CanonicalCheckResult);
+    } catch (err: any) {
+      console.error('Canonical check failed:', err);
+      setCanonicalError(err?.message || 'Failed to run canonical check');
+    } finally {
+      setCheckingCanonical(false);
+    }
+  };
 
   useEffect(() => {
     async function fetchBaseline() {
@@ -53,6 +90,7 @@ export function BaselineInfoPanel() {
     }
 
     fetchBaseline();
+    runCanonicalCheck(); // Run on mount
   }, [getToken]);
 
   const expectationsByCategory = getExpectationsByCategory();
@@ -135,6 +173,61 @@ export function BaselineInfoPanel() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        {/* Canonical Baseline Runtime Check */}
+        <div className={`p-3 rounded-lg border ${
+          canonicalCheck?.passed 
+            ? 'bg-green-500/10 border-green-500/30' 
+            : canonicalError || (canonicalCheck && !canonicalCheck.passed)
+              ? 'bg-destructive/10 border-destructive/30'
+              : 'bg-muted/50 border-border'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {checkingCanonical ? (
+                <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+              ) : canonicalCheck?.passed ? (
+                <ShieldCheck className="h-4 w-4 text-green-500" />
+              ) : canonicalError || (canonicalCheck && !canonicalCheck.passed) ? (
+                <ShieldAlert className="h-4 w-4 text-destructive" />
+              ) : (
+                <Shield className="h-4 w-4 text-muted-foreground" />
+              )}
+              <span className="text-sm font-medium">
+                {checkingCanonical 
+                  ? 'Checking...' 
+                  : canonicalCheck?.passed 
+                    ? 'Canonical Baseline Valid' 
+                    : canonicalError 
+                      ? 'Check Failed' 
+                      : canonicalCheck 
+                        ? 'Baseline Violation!' 
+                        : 'Not Checked'}
+              </span>
+            </div>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={runCanonicalCheck}
+              disabled={checkingCanonical}
+              className="h-7 px-2"
+            >
+              <RefreshCw className={`h-3 w-3 ${checkingCanonical ? 'animate-spin' : ''}`} />
+            </Button>
+          </div>
+          {canonicalCheck && !canonicalCheck.passed && (
+            <div className="mt-2 space-y-1">
+              {canonicalCheck.checks.filter(c => !c.passed).map((check, i) => (
+                <div key={i} className="text-xs text-destructive">
+                  ✗ {check.name}: expected {check.expected}, got {check.actual}
+                </div>
+              ))}
+            </div>
+          )}
+          {canonicalError && (
+            <div className="mt-2 text-xs text-destructive">{canonicalError}</div>
+          )}
+        </div>
+
         {/* Baseline Identity */}
         <div className="grid grid-cols-2 gap-3 text-sm">
           <div className="flex items-center gap-2">
