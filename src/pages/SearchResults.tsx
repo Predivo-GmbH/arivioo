@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -1493,7 +1493,8 @@ export default function SearchResults() {
   const resultsWithPhotos = supportedResults.filter(hasComparisonPhotos);
 
   // Create baseline (Airbnb) canonical price for comparison
-  const baselineCanonicalPrice: CanonicalPriceType | null = useMemo(() => {
+  // Note: Not using useMemo here to avoid hook order issues with early returns
+  const baselineCanonicalPrice: CanonicalPriceType | null = (() => {
     if (!airbnbTotal) return null;
     
     return {
@@ -1515,28 +1516,26 @@ export default function SearchResults() {
       is_comparable: true,
       comparability_failures: [],
     };
-  }, [airbnbTotal, search, checkIn, checkOut, nights, confirmedTotal]);
+  })();
 
   // Categorize all results using the canonical model
-  const categorizedResults = useMemo(() => {
-    return resultsWithPhotos.map(r => {
-      const input: CategorizationInput = {
-        price: r.price,
-        canonical_price: r.canonical_price || null,
-        outcome_category: r.outcome_category || null,
-        extraction_status: r.extraction_status || null,
-        extraction_error: r.extraction_error || null,
-        is_tier_c_blocked: r.is_tier_c_blocked || false,
-        coverage_tier: r.coverage_tier || null,
-        price_status: r.price_status || 'unavailable',
-        eligible_for_comparison: r.eligible_for_comparison || false,
-        verification_failures: r.verification_failures || [],
-      };
-      
-      const categorization = categorizeResultFn(input, baselineCanonicalPrice);
-      return { result: r, categorization };
-    });
-  }, [resultsWithPhotos, baselineCanonicalPrice]);
+  const categorizedResults = resultsWithPhotos.map(r => {
+    const input: CategorizationInput = {
+      price: r.price,
+      canonical_price: r.canonical_price || null,
+      outcome_category: r.outcome_category || null,
+      extraction_status: r.extraction_status || null,
+      extraction_error: r.extraction_error || null,
+      is_tier_c_blocked: r.is_tier_c_blocked || false,
+      coverage_tier: r.coverage_tier || null,
+      price_status: r.price_status || 'unavailable',
+      eligible_for_comparison: r.eligible_for_comparison || false,
+      verification_failures: r.verification_failures || [],
+    };
+    
+    const categorization = categorizeResultFn(input, baselineCanonicalPrice);
+    return { result: r, categorization };
+  });
 
   // Organize results by bucket
   const cheaperResults = categorizedResults
