@@ -50,6 +50,7 @@ export interface CategorizedResult {
   // Verification status (based on canonical price model)
   is_verified: boolean;
   verification_label: 'Verified' | 'Unverified' | 'Not Available';
+  has_low_confidence: boolean;     // True if extraction had low confidence (show "manual check" note)
   
   // Non-comparability reasons (for not_comparable bucket)
   non_comparable_reasons: string[];
@@ -148,7 +149,9 @@ export const NON_COMPARABLE_REASON_LABELS: Record<string, string> = {
   nights_count_missing: 'Stay duration unknown',
   currency_unknown: 'Currency not detected',
   extraction_not_successful: 'Price extraction incomplete',
-  low_confidence: 'Low extraction confidence',
+  // NOTE: low_confidence is now only added when there's no structural verification
+  // It does NOT prevent comparison for total_proven prices
+  low_confidence: 'Manual verification recommended',
   taxes_fees_not_included: 'May not include all taxes and fees',
   
   // From price comparison
@@ -159,6 +162,7 @@ export const NON_COMPARABLE_REASON_LABELS: Record<string, string> = {
   date_range_mismatch: 'Different dates than requested',
   missing_total_price: 'Price unavailable',
   incompatible_price_types: 'Cannot compare these price types',
+  no_canonical_price: 'Price data incomplete',
 };
 
 // ============================================
@@ -295,14 +299,30 @@ function createResult(
   const canonicalPrice = input.canonical_price;
   
   // Determine verification status from canonical price model
+  // CRITICAL: "Verified" means we have a proven or derived total.
+  // Low confidence does NOT prevent "verified" status when structural proof exists.
+  // Low confidence only adds a "manual check recommended" note.
   let isVerified = false;
   let verificationLabel: 'Verified' | 'Unverified' | 'Not Available' = 'Not Available';
+  let hasLowConfidence = false;
   
   if (canonicalPrice) {
-    isVerified = 
-      (canonicalPrice.price_type === 'total_proven' || canonicalPrice.price_type === 'total_derived') &&
-      canonicalPrice.confidence !== 'low' &&
-      canonicalPrice.is_comparable;
+    const isTotalType = canonicalPrice.price_type === 'total_proven' || canonicalPrice.price_type === 'total_derived';
+    
+    // Check for structural verification
+    const structuralProof = canonicalPrice.structural_proof;
+    const hasStructuralVerification = structuralProof && (
+      (structuralProof.breakdown_found === true && structuralProof.extracted_from_breakdown_total === true) ||
+      (structuralProof.breakdown_found === true && structuralProof.total_label_found === true)
+    );
+    
+    // Verified if:
+    // - Price type is total_proven or total_derived
+    // - Either: has structural verification OR is_comparable is true
+    // Low confidence does NOT prevent verified status when we have structural proof
+    isVerified = isTotalType && (canonicalPrice.is_comparable || hasStructuralVerification);
+    
+    hasLowConfidence = canonicalPrice.confidence === 'low';
     
     if (canonicalPrice.total_price !== null) {
       verificationLabel = isVerified ? 'Verified' : 'Unverified';
@@ -330,6 +350,9 @@ function createResult(
     
     price_type: canonicalPrice?.price_type ?? null,
     outcome_category: input.outcome_category,
+    
+    // Add low confidence flag for UI to show "manual check recommended" badge
+    has_low_confidence: hasLowConfidence,
   };
 }
 

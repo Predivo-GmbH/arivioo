@@ -179,20 +179,61 @@ function parsePrice(value: unknown): number | null {
 
 /**
  * Map confidence score (0-1) to confidence level
+ * IMPORTANT: null confidence with structural proof should NOT be treated as 'low'
+ * That case will be handled separately by checking structural verification
  */
-function mapConfidence(score: number | null): ConfidenceLevel {
-  if (score === null || score < 0.3) return 'low';
+function mapConfidence(score: number | null, hasStructuralVerification: boolean = false): ConfidenceLevel {
+  // If structural verification exists but no numeric score, treat as medium (not low)
+  if (score === null) {
+    return hasStructuralVerification ? 'medium' : 'low';
+  }
+  if (score < 0.3) return 'low';
   if (score < 0.7) return 'medium';
   return 'high';
 }
 
 /**
+ * Check if structural proof exists in any of the nested metadata locations
+ * Extractors may store proof in different nested structures
+ */
+function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boolean {
+  if (!metadata) return false;
+  
+  // Check top-level fields
+  const topLevel = 
+    metadata.breakdown_found === true &&
+    metadata.total_label_found === true &&
+    metadata.extracted_from_breakdown_total === true;
+  if (topLevel) return true;
+  
+  // Check nested structuralProof object (Expedia golden path uses this)
+  const structuralProof = metadata.structuralProof || metadata.structural_proof || {};
+  const nestedProof = 
+    structuralProof.breakdown_found === true &&
+    (structuralProof.total_label_found === true || structuralProof.hasTotalWithTaxes === true) &&
+    (structuralProof.extracted_from_breakdown_total === true || structuralProof.extracted_from_target_card === true);
+  if (nestedProof) return true;
+  
+  // Check offersPage object (also used by Expedia)
+  const offersPage = metadata.offersPage || {};
+  const offersProof = 
+    offersPage.hasOfferCards === true &&
+    offersPage.hasTotalWithTaxes === true &&
+    offersPage.datesRenderedCorrectly === true;
+  if (offersProof) return true;
+  
+  return false;
+}
+
+/**
  * Determine price type from extraction metadata and flags
+ * CRITICAL: This determines whether we have a comparable total or just a partial price
+ * Price type must be derived from WHAT was found (total vs subtotal), NOT from confidence
  */
 function determinePriceType(input: ExtractionInput): PriceType {
   const metadata = input.extraction_metadata || {};
   
-  // Explicit price_type from extractor
+  // Explicit price_type from extractor takes priority
   if (input.price_type) {
     const explicit = input.price_type.toLowerCase();
     if (explicit.includes('total') && (explicit.includes('proven') || explicit.includes('verified'))) {
@@ -209,13 +250,33 @@ function determinePriceType(input: ExtractionInput): PriceType {
     }
   }
   
-  // Check structural proof
-  const hasStructuralProof = 
-    metadata.breakdown_found === true &&
-    metadata.total_label_found === true &&
-    metadata.extracted_from_breakdown_total === true;
+  // Check for verified structural proof from any nested location
+  const hasStructural = hasVerifiedStructuralProof(metadata);
   
-  if (hasStructuralProof && input.includes_taxes_fees === true && input.dates_validated === true) {
+  // If structural proof exists with taxes/fees and dates validated, it's a proven total
+  if (hasStructural && input.includes_taxes_fees === true && input.dates_validated === true) {
+    return 'total_proven';
+  }
+  
+  // Check evidence snippets for "total with taxes and fees" patterns
+  const evidenceSnippets = input.evidence_snippets || [];
+  const evidenceText = evidenceSnippets.join(' ').toLowerCase();
+  const hasTotalEvidence = 
+    evidenceText.includes('total (with taxes') ||
+    evidenceText.includes('total with taxes') ||
+    evidenceText.includes('including taxes') ||
+    evidenceText.includes('taxes and fees');
+  
+  // Evidence of "total with taxes" + dates validated + taxes included = proven total
+  if (hasTotalEvidence && input.dates_validated === true && input.includes_taxes_fees === true) {
+    return 'total_proven';
+  }
+  
+  // Check offersPage semantic signals (Expedia golden path)
+  const offersPage = metadata.offersPage || {};
+  if (offersPage.hasTotalWithTaxes === true && 
+      offersPage.datesRenderedCorrectly === true && 
+      input.includes_taxes_fees === true) {
     return 'total_proven';
   }
   
@@ -224,10 +285,11 @@ function determinePriceType(input: ExtractionInput): PriceType {
     return 'total_derived';
   }
   
-  // Check if taxes/fees are included (indicates total, not subtotal)
+  // Check if taxes/fees are included with successful extraction
+  // This indicates a total was found, though we can't prove it structurally
   if (input.includes_taxes_fees === true && input.dates_validated === true) {
-    // High confidence + taxes included suggests this is a total
-    if (input.confidence_score && input.confidence_score >= 0.7) {
+    const successStatuses = ['success', 'price_extracted', 'completed'];
+    if (input.extraction_status && successStatuses.includes(input.extraction_status)) {
       return 'total_derived';
     }
   }
@@ -380,8 +442,11 @@ export function normalizeExtraction(input: ExtractionInput): CanonicalPrice {
     ? input.evidence_snippets[0]
     : (metadata.evidence_snippet || null);
   
-  // Confidence
-  const confidence = mapConfidence(input.confidence_score);
+  // Check for structural verification to adjust confidence mapping
+  const hasStructural = hasVerifiedStructuralProof(metadata);
+  
+  // Confidence - if structural proof exists but no score, don't penalize
+  const confidence = mapConfidence(input.confidence_score, hasStructural);
   
   // Pre-compute comparability
   const { isComparable, failures } = computeComparability({
@@ -495,8 +560,18 @@ function computeComparability(input: ComparabilityInput): { isComparable: boolea
     failures.push('extraction_not_successful');
   }
   
-  // Rule 7: Low confidence prices are not comparable
-  if (input.confidence === 'low') {
+  // Rule 7: Low confidence prices add a warning but do NOT block comparison
+  // when we have a proven total (structural proof verified).
+  // CRITICAL: Price type is derived from WHAT was found, not confidence.
+  // Low confidence is a signal for "recommend manual check", not a blocker.
+  // If price_type is total_proven, structural verification already passed.
+  const hasStructuralVerification = 
+    input.structuralProof.breakdown_found === true &&
+    (input.structuralProof.total_label_found === true || input.structuralProof.extracted_from_breakdown_total === true);
+  
+  // Only block on low confidence if we DON'T have structural verification
+  // A total_proven price type implies structural verification was successful
+  if (input.confidence === 'low' && input.priceType !== 'total_proven' && !hasStructuralVerification) {
     failures.push('low_confidence');
   }
   

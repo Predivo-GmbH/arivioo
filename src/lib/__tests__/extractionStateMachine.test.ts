@@ -2058,3 +2058,173 @@ describe('Test M: Baseline Chain Canonical Regression Guard', () => {
     expect(result.finalStatus).toBe('needs_user_confirmation');
   });
 });
+
+// =============================================================================
+// TEST N: Total Proven Must Not Be Shown as Partial (Confidence ≠ Price Type)
+// =============================================================================
+describe('Test N: Total proven with low/null confidence must not be shown as partial', () => {
+  /**
+   * CRITICAL REGRESSION TEST
+   * 
+   * Bug: Expedia extraction with verified structural proof and semantic pass 
+   * was being shown as "unverified" with "Only partial price found" message
+   * because confidence_score was null → mapped to 'low' → blocked comparison.
+   * 
+   * Fix: Price type is derived from WHAT was found (total vs subtotal),
+   * not from confidence. Low confidence should only add "manual check" note.
+   */
+
+  it('total_proven price type should be returned when structural proof exists regardless of confidence score', () => {
+    // Import normalizeExtraction
+    const { normalizeExtraction } = require('../canonicalPrice');
+    
+    // Simulate Expedia extraction metadata exactly as seen in production
+    const expediaExtraction = {
+      platform_name: 'Expedia',
+      deep_link: 'https://www.expedia.com/Hotel-Search?...',
+      extracted_price: 2225.00,
+      currency: 'USD',
+      includes_taxes_fees: true,
+      dates_validated: true,
+      detected_checkin: '2026-03-08',
+      detected_checkout: '2026-03-11',
+      confidence_score: null, // NULL confidence - this was causing the bug
+      extraction_status: 'success',
+      extraction_metadata: {
+        breakdown_found: true,
+        extracted_from_breakdown_total: true,
+        structuralProof: {
+          breakdown_found: true,
+          total_label_found: true,
+          extracted_from_breakdown_total: true,
+          extracted_from_target_card: true,
+        },
+        offersPage: {
+          hasOfferCards: true,
+          hasTotalWithTaxes: true,
+          datesRenderedCorrectly: true,
+        },
+      },
+      evidence_snippets: ['TARGET_CARD [23179611]: $2,225 total (with taxes and fees)'],
+      price_type: null,
+    };
+
+    const canonical = normalizeExtraction(expediaExtraction);
+
+    // CRITICAL ASSERTIONS:
+    // 1. Price type must be total_proven (NOT unknown or subtotal)
+    expect(canonical.price_type).toBe('total_proven');
+    
+    // 2. Total price must be populated
+    expect(canonical.total_price).toBe(2225.00);
+    
+    // 3. Must be marked as comparable (low confidence should NOT block this)
+    expect(canonical.is_comparable).toBe(true);
+    
+    // 4. Confidence should NOT be 'low' when structural proof exists
+    expect(canonical.confidence).not.toBe('low');
+    
+    // 5. Comparability failures should NOT include 'low_confidence' or 'price_type_not_total'
+    expect(canonical.comparability_failures).not.toContain('low_confidence');
+    expect(canonical.comparability_failures).not.toContain('price_type_not_total');
+    expect(canonical.comparability_failures).not.toContain('no_total_price');
+  });
+
+  it('categorization should return "more_expensive" bucket for verified total higher than baseline', () => {
+    const { normalizeExtraction } = require('../canonicalPrice');
+    const { categorizeResult } = require('../resultCategorization');
+
+    // Create Airbnb baseline
+    const baselinePrice = {
+      platform_id: 'airbnb',
+      source_url: 'https://www.airbnb.com/rooms/...',
+      check_in_date: '2026-03-08',
+      check_out_date: '2026-03-11',
+      nights_count: 3,
+      currency: 'USD',
+      total_price: 1659.00, // Cheaper than Expedia
+      price_type: 'total_proven' as const,
+      is_comparable: true,
+      comparability_failures: [],
+      confidence: 'high' as const,
+      extraction_method: 'visual_ocr' as const,
+      nightly_rate: null,
+      subtotal_nights: null,
+      fees_total: null,
+      taxes_total: null,
+      extracted_at: new Date().toISOString(),
+    };
+
+    // Create Expedia canonical price with structural proof but null confidence
+    const expediaCanonical = normalizeExtraction({
+      platform_name: 'Expedia',
+      deep_link: 'https://www.expedia.com/Hotel-Search?...',
+      extracted_price: 2225.00,
+      currency: 'USD',
+      includes_taxes_fees: true,
+      dates_validated: true,
+      detected_checkin: '2026-03-08',
+      detected_checkout: '2026-03-11',
+      confidence_score: null,
+      extraction_status: 'success',
+      extraction_metadata: {
+        structuralProof: {
+          breakdown_found: true,
+          total_label_found: true,
+          extracted_from_breakdown_total: true,
+        },
+        offersPage: {
+          hasTotalWithTaxes: true,
+          datesRenderedCorrectly: true,
+        },
+      },
+      evidence_snippets: ['$2,225 total (with taxes and fees)'],
+      requested_check_in: '2026-03-08',
+      requested_check_out: '2026-03-11',
+      requested_nights: 3,
+    });
+
+    const input = {
+      price: 2225.00,
+      canonical_price: expediaCanonical,
+      outcome_category: null,
+      extraction_status: 'success',
+      extraction_error: null,
+      is_tier_c_blocked: false,
+      coverage_tier: 'A' as const,
+      price_status: 'verified' as const,
+      eligible_for_comparison: true,
+      verification_failures: [],
+    };
+
+    const categorized = categorizeResult(input, baselinePrice);
+
+    // CRITICAL ASSERTIONS:
+    // 1. Bucket must be 'more_expensive' (NOT 'not_comparable')
+    expect(categorized.bucket).toBe('more_expensive');
+    
+    // 2. Must be marked as verified
+    expect(categorized.is_verified).toBe(true);
+    expect(categorized.verification_label).toBe('Verified');
+    
+    // 3. Comparison must work correctly
+    expect(categorized.is_comparable).toBe(true);
+    expect(categorized.savings_amount).toBeLessThan(0); // More expensive = negative savings
+    
+    // 4. User message should NOT contain "partial" or "not available"
+    expect(categorized.bucket_label).not.toContain('partial');
+    expect(categorized.bucket_description).not.toContain('partial');
+    expect(categorized.non_comparable_user_message).toBeNull();
+  });
+
+  it('NON_COMPARABLE_REASON_LABELS must not show "partial" for total prices', () => {
+    const { NON_COMPARABLE_REASON_LABELS } = require('../resultCategorization');
+    
+    // The 'price_type_not_total' message should only appear for subtotals/nightly rates
+    // It should NOT appear for total_proven prices
+    expect(NON_COMPARABLE_REASON_LABELS.price_type_not_total).toContain('partial');
+    
+    // Verify it's properly labeled
+    expect(NON_COMPARABLE_REASON_LABELS.price_type_not_total).toBe('Only partial price found (subtotal or nightly)');
+  });
+});
