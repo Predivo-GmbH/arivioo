@@ -193,12 +193,20 @@ export function useEnrichedSearchResults() {
       const extractionError = extraction?.extraction_error || null;
       const extractionMetadata = extraction?.extraction_metadata as Record<string, any> | null;
 
+      // Unavailability marker can live in multiple shapes depending on extractor/version
+      const unavailabilityMarker =
+        extractionMetadata?.unavailability_marker ??
+        extractionMetadata?.unavailabilityMarker ??
+        extractionMetadata?.structuralProof?.unavailability_marker ??
+        extractionMetadata?.structural_proof?.unavailability_marker ??
+        null;
+
       // Classify failure using canonical taxonomy
       const { category, reason, outcomeCategory } = classifyFailure(
-        extractionStatus, 
-        extractionError, 
+        extractionStatus,
+        extractionError,
         coverageTier,
-        { unavailabilityMarker: extractionMetadata?.unavailability_marker }
+        { unavailabilityMarker }
       );
 
       // FRONTEND GUARD: Additional defense-in-depth

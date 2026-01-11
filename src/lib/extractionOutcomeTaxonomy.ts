@@ -209,8 +209,49 @@ export function classifyOutcome(
     hasPrice?: boolean;
   } = {}
 ): OutcomeClassification {
-  const status = extractionStatus?.toLowerCase() || '';
+  const rawStatus = extractionStatus?.toLowerCase() || '';
   const error = extractionError?.toLowerCase() || '';
+
+  // Some backends persist a generic status like "extraction_error" but embed the real terminal
+  // outcome inside the error payload (e.g. HTTP 422 JSON with { status: "dates_unavailable" }).
+  // This is classification-only: we do NOT change extraction logic; we just decode meaning.
+  const parseEmbeddedStatus = (
+    err: string | null
+  ): { embeddedStatus: string | null; embeddedMarker: string | null } => {
+    if (!err) return { embeddedStatus: null, embeddedMarker: null };
+
+    // Try to parse JSON substring in strings like: "HTTP 422: {...}" or plain "{...}".
+    try {
+      const start = err.indexOf('{');
+      const end = err.lastIndexOf('}');
+      if (start >= 0 && end > start) {
+        const jsonStr = err.slice(start, end + 1);
+        const parsed = JSON.parse(jsonStr);
+        const embeddedStatus = typeof parsed?.status === 'string' ? parsed.status.toLowerCase() : null;
+        const embeddedMarker =
+          typeof parsed?.structuralProof?.unavailability_marker === 'string'
+            ? parsed.structuralProof.unavailability_marker
+            : null;
+        return { embeddedStatus, embeddedMarker };
+      }
+    } catch {
+      // ignore
+    }
+
+    // Heuristic fallbacks for non-JSON errors
+    if (err.toLowerCase().includes('dates unavailable')) return { embeddedStatus: 'dates_unavailable', embeddedMarker: 'sold out' };
+    if (err.toLowerCase().includes('sold out')) return { embeddedStatus: 'dates_unavailable', embeddedMarker: 'sold out' };
+
+    return { embeddedStatus: null, embeddedMarker: null };
+  };
+
+  const { embeddedStatus, embeddedMarker } = parseEmbeddedStatus(extractionError);
+  const status = (embeddedStatus && (rawStatus === 'extraction_error' || rawStatus === 'internal_error' || rawStatus === 'validation_error'))
+    ? embeddedStatus
+    : rawStatus;
+
+  // Prefer explicit marker passed by caller; fall back to embedded marker.
+  const unavailabilityMarker = metadata.unavailabilityMarker ?? embeddedMarker;
 
   // 1. Platform unsupported (Tier C)
   if (metadata.coverageTier === 'C' || UNSUPPORTED_STATUSES.has(status)) {
@@ -241,12 +282,12 @@ export function classifyOutcome(
   }
 
   // 3. Dates unavailable / sold out (NOT an error)
-  if (UNAVAILABLE_STATUSES.has(status)) {
+  if (UNAVAILABLE_STATUSES.has(status) || (unavailabilityMarker && unavailabilityMarker.toLowerCase().includes('sold out'))) {
     return {
       category: 'unavailable_for_dates',
-      reasonCode: status,
+      reasonCode: status || 'dates_unavailable',
       isTerminal: true,
-      marker: metadata.unavailabilityMarker || undefined,
+      marker: unavailabilityMarker || undefined,
     };
   }
 
