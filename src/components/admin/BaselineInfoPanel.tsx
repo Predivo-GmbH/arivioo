@@ -49,6 +49,11 @@ export function BaselineInfoPanel() {
   const [zyteCheck, setZyteCheck] = useState<CanonicalCheckResult | null>(null);
   const [checkingZyte, setCheckingZyte] = useState(false);
   const [zyteError, setZyteError] = useState<string | null>(null);
+  
+  // Firecrawl canonical baseline check state
+  const [firecrawlCheck, setFirecrawlCheck] = useState<CanonicalCheckResult | null>(null);
+  const [checkingFirecrawl, setCheckingFirecrawl] = useState(false);
+  const [firecrawlError, setFirecrawlError] = useState<string | null>(null);
 
   // Fetch Browserless canonical check
   const runBrowserlessCheck = async () => {
@@ -88,10 +93,30 @@ export function BaselineInfoPanel() {
     }
   };
   
-  // Run both checks
+  // Fetch Firecrawl canonical check
+  const runFirecrawlCheck = async () => {
+    setCheckingFirecrawl(true);
+    setFirecrawlError(null);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=firecrawl-canonical-check', {
+        method: 'GET',
+      });
+      
+      if (invokeError) throw invokeError;
+      setFirecrawlCheck(data as CanonicalCheckResult);
+    } catch (err: any) {
+      console.error('Firecrawl canonical check failed:', err);
+      setFirecrawlError(err?.message || 'Failed to run check');
+    } finally {
+      setCheckingFirecrawl(false);
+    }
+  };
+  
+  // Run all checks
   const runAllChecks = () => {
     runBrowserlessCheck();
     runZyteCheck();
+    runFirecrawlCheck();
   };
 
   useEffect(() => {
@@ -120,7 +145,7 @@ export function BaselineInfoPanel() {
     }
 
     fetchBaseline();
-    runAllChecks(); // Run both Browserless and Zyte checks on mount
+    runAllChecks(); // Run Browserless, Zyte, and Firecrawl checks on mount
   }, [getToken]);
 
   const expectationsByCategory = getExpectationsByCategory();
@@ -274,16 +299,17 @@ export function BaselineInfoPanel() {
               variant="ghost" 
               size="sm" 
               onClick={runAllChecks}
-              disabled={checkingBrowserless || checkingZyte}
+              disabled={checkingBrowserless || checkingZyte || checkingFirecrawl}
               className="h-6 px-2 text-xs"
             >
-              <RefreshCw className={`h-3 w-3 mr-1 ${(checkingBrowserless || checkingZyte) ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-3 w-3 mr-1 ${(checkingBrowserless || checkingZyte || checkingFirecrawl) ? 'animate-spin' : ''}`} />
               Check All
             </Button>
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             {renderCanonicalCheckIndicator('Browserless', browserlessCheck, checkingBrowserless, browserlessError, runBrowserlessCheck)}
             {renderCanonicalCheckIndicator('Zyte', zyteCheck, checkingZyte, zyteError, runZyteCheck)}
+            {renderCanonicalCheckIndicator('Firecrawl', firecrawlCheck, checkingFirecrawl, firecrawlError, runFirecrawlCheck)}
           </div>
         </div>
 
