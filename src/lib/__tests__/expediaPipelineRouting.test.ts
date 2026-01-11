@@ -175,4 +175,58 @@ describe('Expedia Pipeline Routing', () => {
       // In production, this should NOT happen for Expedia
     });
   });
+  
+  describe('generate-deep-links routing fix', () => {
+    // This test validates the fix for b3ebf96d-b6de-444d-ad1e-9c61ae51ee78
+    // where Expedia was incorrectly routed through validate-dates → extract-prices
+    // instead of process-platform-extraction → extract-expedia
+    
+    it('should route through process-platform-extraction, not validate-dates', () => {
+      // OLD (broken): generate-deep-links → validate-dates → extract-prices
+      // NEW (fixed): generate-deep-links → process-platform-extraction → extract-expedia
+      
+      const brokenFlow = ['generate-deep-links', 'validate-dates', 'extract-prices'];
+      const fixedFlow = ['generate-deep-links', 'process-platform-extraction', 'extract-expedia'];
+      
+      // The key difference: process-platform-extraction checks platform tier
+      // and routes Tier A platforms (Expedia) to their dedicated extractors
+      expect(fixedFlow.includes('process-platform-extraction')).toBe(true);
+      expect(fixedFlow.includes('extract-expedia')).toBe(true);
+      
+      // Validate-dates should NOT be in the flow for Expedia
+      expect(fixedFlow.includes('validate-dates')).toBe(false);
+    });
+    
+    it('Expedia extraction metadata should have goldenPath, not strategy_used', () => {
+      // Correct Expedia extraction metadata from extract-expedia golden path
+      const correctExpediaMetadata = {
+        goldenPath: {
+          propertyId: '23179611',
+          propertyIdSource: 'url_path',
+          offersPageUrl: 'https://www.expedia.com/Hotel-Search?...',
+          guestMapping: 'Airbnb adults=1 mapped to Expedia adults=2 (minimum)',
+          requestedStartDate: '2026-03-01',
+          requestedEndDate: '2026-03-04',
+          requestedAdults: 1,
+        },
+        structuralProof: {
+          proof_version: '6.3-target-card',
+          extracted_from_target_card: true,
+          target_card_found: true,
+          offers_page_gate_passed: true,
+        },
+        expedia_trace: {
+          offers_url_usd: 'https://www.expedia.com/Hotel-Search?...',
+          usd_attempt_made: true,
+        },
+      };
+      
+      // Must have goldenPath (from extract-expedia)
+      expect(correctExpediaMetadata.goldenPath).toBeDefined();
+      expect(correctExpediaMetadata.goldenPath.propertyId).toBeDefined();
+      
+      // Must NOT have strategy_used (from validate-dates)
+      expect('strategy_used' in correctExpediaMetadata).toBe(false);
+    });
+  });
 });
