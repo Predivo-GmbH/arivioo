@@ -1016,6 +1016,279 @@ function runFirecrawlCanonicalBaselineCheck(): FirecrawlCanonicalCheckResult {
   };
 }
 
+// =============================================================================
+// BASELINE CHAIN CANONICAL CHECK (Orchestration Guard)
+// =============================================================================
+
+interface BaselineChainCanonicalCheckResult {
+  mode: 'baseline-chain-canonical-check';
+  passed: boolean;
+  checks: Array<{
+    name: string;
+    expected: string;
+    actual: string;
+    passed: boolean;
+  }>;
+  status: 'baseline_chain_canonical_valid' | 'baseline_chain_canonical_violation';
+  timestamp: string;
+}
+
+// Mock provider result structure for chain testing
+interface MockProviderResult {
+  provider: 'browserless' | 'zyte' | 'firecrawl';
+  status: string;
+  price: number | null;
+  currency: string;
+}
+
+// Simulate baseline chain orchestration logic
+function evaluateBaselineChain(
+  browserlessResult: MockProviderResult,
+  zyteResult: MockProviderResult,
+  firecrawlResult: MockProviderResult
+): { 
+  finalProvider: string; 
+  finalStatus: string; 
+  finalPrice: number | null;
+  finalCurrency: string;
+  fallbackAttempted: boolean;
+  zyteAttempted: boolean;
+  firecrawlAttempted: boolean;
+} {
+  const VERIFIED_STATUS = 'total_price_including_taxes_and_fees';
+  
+  // STEP 1: Check Browserless first (primary)
+  if (browserlessResult.status === VERIFIED_STATUS) {
+    return {
+      finalProvider: 'browserless',
+      finalStatus: browserlessResult.status,
+      finalPrice: browserlessResult.price,
+      finalCurrency: browserlessResult.currency,
+      fallbackAttempted: false,
+      zyteAttempted: false,
+      firecrawlAttempted: false,
+    };
+  }
+  
+  // STEP 2: Browserless not verified, try Zyte
+  if (zyteResult.status === VERIFIED_STATUS) {
+    return {
+      finalProvider: 'zyte',
+      finalStatus: zyteResult.status,
+      finalPrice: zyteResult.price,
+      finalCurrency: zyteResult.currency,
+      fallbackAttempted: true,
+      zyteAttempted: true,
+      firecrawlAttempted: false,
+    };
+  }
+  
+  // STEP 3: Zyte not verified, try Firecrawl
+  if (firecrawlResult.status === VERIFIED_STATUS) {
+    return {
+      finalProvider: 'firecrawl',
+      finalStatus: firecrawlResult.status,
+      finalPrice: firecrawlResult.price,
+      finalCurrency: firecrawlResult.currency,
+      fallbackAttempted: true,
+      zyteAttempted: true,
+      firecrawlAttempted: true,
+    };
+  }
+  
+  // STEP 4: None verified - determine final status
+  // Priority: needs_user_confirmation > blocked > rate_limited > price_not_available > provider_error
+  const allStatuses = [browserlessResult.status, zyteResult.status, firecrawlResult.status];
+  
+  let finalStatus = 'price_not_available_in_content';
+  if (allStatuses.includes('needs_user_confirmation')) {
+    finalStatus = 'needs_user_confirmation';
+  } else if (allStatuses.includes('blocked_captcha_or_bot')) {
+    finalStatus = 'blocked_captcha_or_bot';
+  } else if (allStatuses.includes('rate_limited')) {
+    finalStatus = 'rate_limited';
+  }
+  
+  return {
+    finalProvider: 'none',
+    finalStatus,
+    finalPrice: null,
+    finalCurrency: 'USD',
+    fallbackAttempted: true,
+    zyteAttempted: true,
+    firecrawlAttempted: true,
+  };
+}
+
+function runBaselineChainCanonicalCheck(): BaselineChainCanonicalCheckResult {
+  const checks: BaselineChainCanonicalCheckResult['checks'] = [];
+  const VERIFIED_STATUS = 'total_price_including_taxes_and_fees';
+  
+  // Check A: browserless_wins_when_verified
+  // When Browserless returns verified, it should be used and no fallback attempted
+  const checkA_browserless: MockProviderResult = {
+    provider: 'browserless',
+    status: VERIFIED_STATUS,
+    price: 1658.94,
+    currency: 'USD',
+  };
+  const checkA_zyte: MockProviderResult = {
+    provider: 'zyte',
+    status: VERIFIED_STATUS,
+    price: 9999.99, // Should not be used
+    currency: 'USD',
+  };
+  const checkA_firecrawl: MockProviderResult = {
+    provider: 'firecrawl',
+    status: VERIFIED_STATUS,
+    price: 8888.88, // Should not be used
+    currency: 'USD',
+  };
+  const resultA = evaluateBaselineChain(checkA_browserless, checkA_zyte, checkA_firecrawl);
+  const checkA_passed = 
+    resultA.finalProvider === 'browserless' &&
+    resultA.finalStatus === VERIFIED_STATUS &&
+    resultA.finalPrice === 1658.94 &&
+    !resultA.fallbackAttempted &&
+    !resultA.zyteAttempted &&
+    !resultA.firecrawlAttempted;
+  checks.push({
+    name: 'browserless_wins_when_verified',
+    expected: 'browserless verified, no fallback',
+    actual: `provider=${resultA.finalProvider}, fallback=${resultA.fallbackAttempted}`,
+    passed: checkA_passed,
+  });
+  
+  // Check B: zyte_used_when_browserless_not_verified
+  const checkB_browserless: MockProviderResult = {
+    provider: 'browserless',
+    status: 'needs_user_confirmation', // Not verified
+    price: null,
+    currency: 'USD',
+  };
+  const checkB_zyte: MockProviderResult = {
+    provider: 'zyte',
+    status: VERIFIED_STATUS,
+    price: 1650.00,
+    currency: 'USD',
+  };
+  const checkB_firecrawl: MockProviderResult = {
+    provider: 'firecrawl',
+    status: 'provider_error', // Should not be consulted
+    price: null,
+    currency: 'USD',
+  };
+  const resultB = evaluateBaselineChain(checkB_browserless, checkB_zyte, checkB_firecrawl);
+  const checkB_passed = 
+    resultB.finalProvider === 'zyte' &&
+    resultB.finalStatus === VERIFIED_STATUS &&
+    resultB.finalPrice === 1650.00 &&
+    resultB.zyteAttempted &&
+    !resultB.firecrawlAttempted;
+  checks.push({
+    name: 'zyte_used_when_browserless_not_verified',
+    expected: 'zyte verified, firecrawl not attempted',
+    actual: `provider=${resultB.finalProvider}, firecrawl=${resultB.firecrawlAttempted}`,
+    passed: checkB_passed,
+  });
+  
+  // Check C: firecrawl_used_when_browserless_and_zyte_not_verified
+  const checkC_browserless: MockProviderResult = {
+    provider: 'browserless',
+    status: 'price_not_available_in_content',
+    price: null,
+    currency: 'USD',
+  };
+  const checkC_zyte: MockProviderResult = {
+    provider: 'zyte',
+    status: 'needs_user_confirmation',
+    price: null,
+    currency: 'USD',
+  };
+  const checkC_firecrawl: MockProviderResult = {
+    provider: 'firecrawl',
+    status: VERIFIED_STATUS,
+    price: 1640.00,
+    currency: 'USD',
+  };
+  const resultC = evaluateBaselineChain(checkC_browserless, checkC_zyte, checkC_firecrawl);
+  const checkC_passed = 
+    resultC.finalProvider === 'firecrawl' &&
+    resultC.finalStatus === VERIFIED_STATUS &&
+    resultC.finalPrice === 1640.00 &&
+    resultC.zyteAttempted &&
+    resultC.firecrawlAttempted;
+  checks.push({
+    name: 'firecrawl_used_when_both_not_verified',
+    expected: 'firecrawl verified after both fallbacks',
+    actual: `provider=${resultC.finalProvider}, price=${resultC.finalPrice}`,
+    passed: checkC_passed,
+  });
+  
+  // Check D: subtotal_never_promoted_across_chain
+  const checkD_browserless: MockProviderResult = {
+    provider: 'browserless',
+    status: 'needs_user_confirmation', // Subtotal only
+    price: null,
+    currency: 'USD',
+  };
+  const checkD_zyte: MockProviderResult = {
+    provider: 'zyte',
+    status: 'needs_user_confirmation', // Subtotal only
+    price: null,
+    currency: 'USD',
+  };
+  const checkD_firecrawl: MockProviderResult = {
+    provider: 'firecrawl',
+    status: 'needs_user_confirmation', // Subtotal only
+    price: null,
+    currency: 'USD',
+  };
+  const resultD = evaluateBaselineChain(checkD_browserless, checkD_zyte, checkD_firecrawl);
+  const checkD_passed = 
+    resultD.finalStatus === 'needs_user_confirmation' &&
+    resultD.finalPrice === null;
+  checks.push({
+    name: 'subtotal_never_promoted_across_chain',
+    expected: 'needs_user_confirmation, NOT verified',
+    actual: `status=${resultD.finalStatus}, price=${resultD.finalPrice}`,
+    passed: checkD_passed,
+  });
+  
+  // Check E: currency_normalisation_consistent
+  // Test that currency normalization produces consistent results
+  const testCases = [
+    { input: '$1,658.94', expected: 1658.94 },
+    { input: 'CHF 2,500.00', expected: 2500.00 },
+    { input: '£999.99', expected: 999.99 },
+    { input: '€1234.56', expected: 1234.56 },
+  ];
+  let allCurrencyPassed = true;
+  const currencyResults: string[] = [];
+  for (const tc of testCases) {
+    const result = normalizeCurrencyAmount(tc.input);
+    const passed = result !== null && Math.abs(result - tc.expected) < 0.01;
+    if (!passed) allCurrencyPassed = false;
+    currencyResults.push(`${tc.input}→${result}`);
+  }
+  checks.push({
+    name: 'currency_normalisation_consistent',
+    expected: 'all formats normalize correctly',
+    actual: allCurrencyPassed ? 'all passed' : currencyResults.join(', '),
+    passed: allCurrencyPassed,
+  });
+  
+  const allPassed = checks.every(c => c.passed);
+  
+  return {
+    mode: 'baseline-chain-canonical-check',
+    passed: allPassed,
+    checks,
+    status: allPassed ? 'baseline_chain_canonical_valid' : 'baseline_chain_canonical_violation',
+    timestamp: new Date().toISOString(),
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
   
@@ -1044,6 +1317,15 @@ Deno.serve(async (req) => {
   // Firecrawl canonical check
   if (mode === 'firecrawl-canonical-check') {
     const result = runFirecrawlCanonicalBaselineCheck();
+    return new Response(JSON.stringify(result, null, 2), {
+      status: result.passed ? 200 : 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  
+  // Baseline chain canonical check (orchestration)
+  if (mode === 'baseline-chain-canonical-check') {
+    const result = runBaselineChainCanonicalCheck();
     return new Response(JSON.stringify(result, null, 2), {
       status: result.passed ? 200 : 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
