@@ -151,7 +151,23 @@ interface AirbnbScrapeResult {
   isDatesUnavailable?: boolean; // True if Airbnb shows "dates unavailable" interstitial
   // OCR reference data (captured via screenshot + AI OCR)
   ocrReference?: OcrVisualReference | null;
-  // Direct text extraction for Pay Now total (more reliable than OCR)
+  
+  /**
+   * BROWSERLESS CANONICAL BASELINE - payNowExtraction
+   * 
+   * Reference: docs/BROWSERLESS_CANONICAL_BASELINE.md
+   * 
+   * This field is the PRIMARY source of truth for Airbnb checkout totals.
+   * It is extracted via direct text search in Browserless page.evaluate().
+   * 
+   * PROTECTED INVARIANTS (any change must compare against baseline):
+   * 1. payNowAmount is extracted from "Pay $X now" or "Total (USD) $X" patterns
+   * 2. This field MUST be assigned from fnJson.payNowExtraction in both success paths
+   * 3. If payNowAmount is present and > 0, status is 'total_price_including_taxes_and_fees'
+   * 4. subtotalAmount alone (without payNowAmount) → 'needs_user_confirmation'
+   * 
+   * DO NOT MODIFY extraction logic without comparing to the canonical baseline first.
+   */
   payNowExtraction?: {
     payNowAmount: number | null;
     payNowSnippet: string | null;

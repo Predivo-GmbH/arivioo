@@ -1141,9 +1141,31 @@ describe('Test I: Browserless-only debug mode behavior', () => {
 });
 
 // =============================================================================
-// TEST J: Browserless extraction result consistency
+// TEST J: Browserless Canonical Baseline Regression Guard
 // =============================================================================
-describe('Test J: Browserless extraction result consistency', () => {
+/**
+ * CANONICAL BROWSERLESS BASELINE REGRESSION GUARD
+ * 
+ * Reference: docs/BROWSERLESS_CANONICAL_BASELINE.md
+ * 
+ * These tests protect the known-working Browserless extraction behaviour.
+ * Any change that breaks these tests MUST be compared against the canonical
+ * baseline documentation BEFORE modifying the tests.
+ * 
+ * PROTECTED INVARIANTS:
+ * 1. payNowExtraction must be passed through from Browserless to consumer
+ * 2. Direct text extraction takes priority over OCR
+ * 3. Subtotals are NEVER promoted to verified totals
+ * 4. Debug mode vs normal mode produces identical extraction
+ * 5. Null payNowExtraction doesn't crash the pipeline
+ * 
+ * If these tests fail after a change, DO NOT simply update the expectations.
+ * Instead: 
+ * 1. Compare against docs/BROWSERLESS_CANONICAL_BASELINE.md
+ * 2. Identify what changed from the canonical working state
+ * 3. Document why the change is intentional OR revert
+ */
+describe('Test J: Browserless Canonical Baseline Regression Guard', () => {
   /**
    * These tests ensure that the Browserless extraction path produces
    * identical results regardless of debug mode setting.
@@ -1284,5 +1306,68 @@ describe('Test J: Browserless extraction result consistency', () => {
     expect(debugModeResult).toEqual(normalModeResult);
     expect(debugModeResult.status).toBe('total_price_including_taxes_and_fees');
     expect(debugModeResult.price).toBe(1658.94);
+  });
+  
+  /**
+   * CANONICAL FIXTURE TEST
+   * 
+   * This test uses the exact values from a known-working Browserless extraction.
+   * It serves as the regression guard for the canonical baseline.
+   * 
+   * Reference: docs/BROWSERLESS_CANONICAL_BASELINE.md
+   * 
+   * If this test fails, compare against the canonical baseline before changing.
+   */
+  it('CANONICAL FIXTURE: verified extraction produces exact expected output', () => {
+    // This is the canonical test case from 2026-01-11
+    // Airbnb checkout page: 3 nights, total $1658.94
+    const canonicalPayNowData: MockPayNowExtraction = {
+      payNowAmount: 1658.94,
+      payNowSnippet: 'Pay $1,658.94 now',
+      payNowCurrencySymbol: '$',
+      subtotalAmount: 1482,
+      subtotalNights: 3,
+      subtotalSnippet: '$1,482 for 3 nights',
+      subtotalCurrencySymbol: '$',
+      regexCompilationErrors: null,
+    };
+    
+    const result = evaluateBrowserlessExtraction(canonicalPayNowData, null, null);
+    
+    // EXACT expected output - any deviation is a regression
+    expect(result).toEqual({
+      status: 'total_price_including_taxes_and_fees',
+      price: 1658.94,
+      source: 'direct_text_extraction',
+    });
+  });
+  
+  it('CANONICAL FIXTURE: priority order is direct text > OCR breakdown > OCR card', () => {
+    const payNowData: MockPayNowExtraction = {
+      payNowAmount: 1658.94,
+      payNowSnippet: 'Pay $1,658.94 now',
+      payNowCurrencySymbol: '$',
+      subtotalAmount: 1482,
+      subtotalNights: 3,
+      subtotalSnippet: '$1,482 for 3 nights',
+      subtotalCurrencySymbol: '$',
+      regexCompilationErrors: null,
+    };
+    
+    // When all three sources are available, direct text wins
+    const withAllSources = evaluateBrowserlessExtraction(payNowData, 1660.00, 1482);
+    expect(withAllSources.source).toBe('direct_text_extraction');
+    expect(withAllSources.price).toBe(1658.94);
+    
+    // When only OCR sources available, breakdown wins over card
+    const withOnlyOcr = evaluateBrowserlessExtraction(null, 1660.00, 1482);
+    expect(withOnlyOcr.source).toBe('ocr_breakdown');
+    expect(withOnlyOcr.price).toBe(1660.00);
+    
+    // When only card available, needs_user_confirmation (not promoted)
+    const withOnlyCard = evaluateBrowserlessExtraction(null, null, 1482);
+    expect(withOnlyCard.source).toBe('subtotal_only');
+    expect(withOnlyCard.status).toBe('needs_user_confirmation');
+    expect(withOnlyCard.price).toBeNull();
   });
 });
