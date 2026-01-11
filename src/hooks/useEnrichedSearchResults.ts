@@ -20,6 +20,12 @@ import {
   FAILURE_CATEGORY_LABELS as TAXONOMY_FAILURE_LABELS,
   type OutcomeCategory,
 } from '@/lib/extractionOutcomeTaxonomy';
+import {
+  categorizeResult,
+  type ResultBucket,
+  type CategorizedResult,
+  type CategorizationInput,
+} from '@/lib/resultCategorization';
 
 export interface EnrichedSearchResult {
   id: string;
@@ -46,7 +52,7 @@ export interface EnrichedSearchResult {
   failure_category: string | null;
   failure_reason: string | null;
   is_tier_c_blocked: boolean;
-  // NEW: Outcome taxonomy
+  // Outcome taxonomy
   outcome_category: OutcomeCategory | null;
   outcome_label: string | null;
   // Price verification metadata (legacy)
@@ -55,11 +61,14 @@ export interface EnrichedSearchResult {
   price_verified_at: string | null;
   eligible_for_comparison: boolean;
   verification_failures: string[];
-  // NEW: Canonical price model
+  // Canonical price model
   canonical_price: CanonicalPrice | null;
   price_type: PriceType;
   price_type_label: string;
   is_total_price: boolean;
+  // NEW: Result categorization bucket
+  result_bucket: ResultBucket | null;
+  categorization: CategorizedResult | null;
 }
 
 // Maps extraction errors to human-readable failure categories using canonical taxonomy
@@ -362,6 +371,26 @@ export function useEnrichedSearchResults() {
         isTotalPrice = false;
       }
 
+      // Build categorization input for the new bucket system
+      const categorizationInput: CategorizationInput = {
+        price: effectivePrice,
+        canonical_price: canonicalPrice,
+        outcome_category: isTierCBlocked ? 'platform_unsupported' as OutcomeCategory : outcomeCategory,
+        extraction_status: extractionStatus,
+        extraction_error: extractionError,
+        is_tier_c_blocked: isTierCBlocked,
+        coverage_tier: coverageTier as 'A' | 'B' | 'C' | null,
+        price_status: verification.price_status,
+        eligible_for_comparison: verification.eligible_for_comparison,
+        verification_failures: verification.verification_failures,
+      };
+
+      // Note: We can't do full comparison here without baseline price
+      // That will be done in SearchResults.tsx where we have the Airbnb baseline
+      // For now, set bucket to null - it will be computed client-side
+      const categorization: CategorizedResult | null = null;
+      const resultBucket: ResultBucket | null = null;
+
       return {
         ...result,
         price: effectivePrice,
@@ -372,7 +401,7 @@ export function useEnrichedSearchResults() {
         failure_category: isTierCBlocked ? 'unsupported' : category,
         failure_reason: isTierCBlocked ? 'Platform not supported' : reason,
         is_tier_c_blocked: isTierCBlocked,
-        // NEW: Outcome taxonomy
+        // Outcome taxonomy
         outcome_category: isTierCBlocked ? 'platform_unsupported' as OutcomeCategory : outcomeCategory,
         outcome_label: isTierCBlocked ? 'Platform not supported' : reason,
         // Price verification metadata (legacy)
@@ -381,11 +410,14 @@ export function useEnrichedSearchResults() {
         price_verified_at: verification.price_verified_at,
         eligible_for_comparison: verification.eligible_for_comparison,
         verification_failures: verification.verification_failures,
-        // NEW: Canonical price model
+        // Canonical price model
         canonical_price: canonicalPrice,
         price_type: priceType,
         price_type_label: priceTypeLabel,
         is_total_price: isTotalPrice,
+        // Result categorization (computed in SearchResults with baseline)
+        result_bucket: resultBucket,
+        categorization: categorization,
       };
     });
 

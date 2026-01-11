@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -8,11 +8,25 @@ import { ImageComparison } from "@/components/ImageComparison";
 import { quickCelebration } from "@/lib/confetti";
 import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
 import { PipelineProgress, type ActivityItem } from "@/components/PipelineProgress";
-import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS } from "@/hooks/useEnrichedSearchResults";
+import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS, type EnrichedSearchResult } from "@/hooks/useEnrichedSearchResults";
 import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/lib/pipelineStages";
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
+import {
+  normalizeExtraction,
+  type CanonicalPrice,
+  type ExtractionInput,
+} from "@/lib/canonicalPrice";
+import {
+  categorizeResult as categorizeResultFn,
+  categorizeAllResults,
+  BUCKET_DISPLAY,
+  NON_COMPARABLE_REASON_LABELS,
+  type ResultBucket,
+  type CategorizedResult,
+  type CategorizationInput,
+} from "@/lib/resultCategorization";
 import { 
   ArrowLeft, 
   ExternalLink, 
@@ -38,7 +52,10 @@ import {
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
+import type { OutcomeCategory } from "@/lib/extractionOutcomeTaxonomy";
+import type { PriceType, CanonicalPrice as CanonicalPriceType } from "@/lib/canonicalPrice";
 
+// SearchResult can come from raw DB or enriched - make enrichment fields optional
 interface SearchResult {
   id: string;
   platform_name: string;
@@ -56,7 +73,7 @@ interface SearchResult {
   price_check_in?: string | null;
   price_check_out?: string | null;
   dates_differ?: boolean;
-  // Tier enrichment
+  // Tier enrichment (optional - from enrichment)
   coverage_tier?: 'A' | 'B' | 'C' | null;
   is_tier_c_blocked?: boolean;
   failure_category?: string | null;
@@ -65,7 +82,7 @@ interface SearchResult {
   extraction_status?: string | null;
   extraction_error?: string | null;
   // Outcome taxonomy
-  outcome_category?: string | null;
+  outcome_category?: OutcomeCategory | null;
   outcome_label?: string | null;
   // Price verification metadata
   price_status?: 'verified' | 'unverified' | 'unavailable';
@@ -74,9 +91,13 @@ interface SearchResult {
   eligible_for_comparison?: boolean;
   verification_failures?: string[];
   // Canonical price model
-  price_type?: 'total_proven' | 'total_derived' | 'subtotal_nights_only' | 'nightly_only' | 'unknown';
+  canonical_price?: CanonicalPriceType | null;
+  price_type?: PriceType;
   price_type_label?: string;
   is_total_price?: boolean;
+  // Result categorization bucket
+  result_bucket?: ResultBucket | null;
+  categorization?: CategorizedResult | null;
 }
 
 interface PriceExtraction {
@@ -1464,91 +1485,119 @@ export default function SearchResults() {
   };
 
   // =========================================
-  // VERIFIED vs UNVERIFIED PRICE GROUPING
+  // CANONICAL PRICE MODEL & BUCKET CATEGORIZATION
   // =========================================
-  // CRITICAL: Only eligible_for_comparison === true can be used for numeric comparisons
-  // This prevents false savings claims from unverified/scraped prices
+  // Use the canonical price model for comparison and categorization
+  // This ensures verified totals are properly classified
   
   const resultsWithPhotos = supportedResults.filter(hasComparisonPhotos);
-  
-  // VERIFIED: Prices that passed all verification checks (extraction success, dates validated, taxes included)
-  const verifiedResults = resultsWithPhotos.filter((r) => 
-    r.eligible_for_comparison === true && r.price && r.price >= 10
-  );
-  
-  // UNVERIFIED: Platforms found but prices not verified (scraped, extraction failed, dates not applied, etc.)
-  // Still shown but NOT used for comparison logic
-  const unverifiedResults = resultsWithPhotos.filter((r) => 
-    r.eligible_for_comparison !== true
-  );
-  
-  // Categorize unverified results by extraction outcome using canonical taxonomy
-  const categorizeResult = (r: SearchResult): 'price_unverified' | 'blocked' | 'sold_out' | 'failed' => {
-    // Check if blocked by platform (Tier C or blocked status)
-    if (r.is_tier_c_blocked || r.failure_category === 'blocked' || 
-        r.outcome_category === 'access_blocked') {
-      return 'blocked';
-    }
-    // Check if sold out / dates unavailable (NOT an error)
-    if (r.failure_category === 'sold_out' || 
-        r.outcome_category === 'unavailable_for_dates' ||
-        r.extraction_status === 'dates_unavailable' ||
-        r.extraction_status === 'sold_out' ||
-        r.extraction_status === 'expedia_dates_unavailable_for_target') {
-      return 'sold_out';
-    }
-    // Has a price but it's unverified
-    if (r.price && r.price > 0 && r.price_status === 'unverified') {
-      return 'price_unverified';
-    }
-    // Everything else is a failed extraction
-    return 'failed';
+
+  // Create baseline (Airbnb) canonical price for comparison
+  const baselineCanonicalPrice: CanonicalPriceType | null = useMemo(() => {
+    if (!airbnbTotal) return null;
+    
+    return {
+      platform_id: 'airbnb',
+      source_url: search?.airbnb_url || '',
+      check_in_date: checkIn || null,
+      check_out_date: checkOut || null,
+      nights_count: nights || null,
+      currency: confirmedTotal?.confirmed_currency || search?.airbnb_currency || 'USD',
+      nightly_rate: null,
+      subtotal_nights: null,
+      fees_total: null,
+      taxes_total: null,
+      total_price: airbnbTotal,
+      price_type: 'total_proven' as PriceType,
+      extraction_method: 'dom' as const,
+      confidence: 'high' as const,
+      extracted_at: new Date().toISOString(),
+      is_comparable: true,
+      comparability_failures: [],
+    };
+  }, [airbnbTotal, search, checkIn, checkOut, nights, confirmedTotal]);
+
+  // Categorize all results using the canonical model
+  const categorizedResults = useMemo(() => {
+    return resultsWithPhotos.map(r => {
+      const input: CategorizationInput = {
+        price: r.price,
+        canonical_price: r.canonical_price || null,
+        outcome_category: r.outcome_category || null,
+        extraction_status: r.extraction_status || null,
+        extraction_error: r.extraction_error || null,
+        is_tier_c_blocked: r.is_tier_c_blocked || false,
+        coverage_tier: r.coverage_tier || null,
+        price_status: r.price_status || 'unavailable',
+        eligible_for_comparison: r.eligible_for_comparison || false,
+        verification_failures: r.verification_failures || [],
+      };
+      
+      const categorization = categorizeResultFn(input, baselineCanonicalPrice);
+      return { result: r, categorization };
+    });
+  }, [resultsWithPhotos, baselineCanonicalPrice]);
+
+  // Organize results by bucket
+  const cheaperResults = categorizedResults
+    .filter(({ categorization }) => categorization.bucket === 'cheaper')
+    .sort((a, b) => (b.categorization.savings_amount ?? 0) - (a.categorization.savings_amount ?? 0))
+    .map(({ result }) => result);
+
+  const moreExpensiveResults = categorizedResults
+    .filter(({ categorization }) => categorization.bucket === 'more_expensive')
+    .map(({ result }) => result);
+
+  const notComparableResults = categorizedResults
+    .filter(({ categorization }) => categorization.bucket === 'not_comparable')
+    .map(({ result }) => result);
+
+  const soldOutResults = categorizedResults
+    .filter(({ categorization }) => categorization.bucket === 'sold_out')
+    .map(({ result }) => result);
+
+  const blockedResults = categorizedResults
+    .filter(({ categorization }) => categorization.bucket === 'blocked' || categorization.bucket === 'platform_blocked')
+    .map(({ result }) => result);
+
+  const failedResults = categorizedResults
+    .filter(({ categorization }) => 
+      categorization.bucket === 'price_not_found' || 
+      categorization.bucket === 'service_error' ||
+      categorization.bucket === 'requires_action'
+    )
+    .map(({ result }) => result);
+
+  // Get categorization for a result (for UI display)
+  const getResultCategorization = (resultId: string): CategorizedResult | null => {
+    const found = categorizedResults.find(({ result }) => result.id === resultId);
+    return found?.categorization || null;
   };
+
+  // VERIFIED = comparable totals (cheaper or more expensive)
+  // These are results where we can make definitive price claims
+  const verifiedResults = [...cheaperResults, ...moreExpensiveResults];
   
-  const unverifiedWithPrice = unverifiedResults.filter(r => categorizeResult(r) === 'price_unverified');
-  const blockedResults = unverifiedResults.filter(r => categorizeResult(r) === 'blocked');
-  const soldOutResults = unverifiedResults.filter(r => categorizeResult(r) === 'sold_out');
-  const failedResults = unverifiedResults.filter(r => categorizeResult(r) === 'failed');
-  
-  // For backward compatibility: resultsWithPrices = verified only now
-  // This ensures all savings calculations use only trusted prices
+  // UNVERIFIED = not comparable + failed + blocked
+  // These need manual verification
+  const unverifiedResults = [...notComparableResults, ...failedResults, ...blockedResults];
+  const unverifiedWithPrice = notComparableResults.filter(r => r.price && r.price > 0);
+
+  // Legacy compatibility
   const resultsWithPrices = verifiedResults;
   const resultsWithoutPrices = unverifiedResults;
-
-  // Sort verified results by price descending
   const sortedByPrice = [...verifiedResults].sort((a, b) => (b.price ?? 0) - (a.price ?? 0));
-
-  // Separate verified results into cheaper (savings) and more expensive (no savings)
-  // ONLY verified prices are used for this comparison
-  const cheaperResults = sortedByPrice.filter((r) => {
-    if (!airbnbTotal) return true;
-    return r.price! < airbnbTotal;
-  });
-
-  // More expensive verified alternatives for collapsed section
-  const moreExpensiveResults = sortedByPrice.filter((r) => {
-    if (!airbnbTotal) return false;
-    return r.price! >= airbnbTotal;
-  });
-
-  // For backward compatibility, validResults = verified results with prices
   const validResults = verifiedResults;
 
-  // Show up to 10 cheaper verified alternatives, while ensuring the cheapest is included
+  // Show up to 10 cheaper alternatives
   const MAX_ALTERNATIVES = 10;
   let displayResults: SearchResult[] = cheaperResults.slice(0, MAX_ALTERNATIVES);
 
-  // Only consider verified prices when finding cheapest
-  const resultsWithValidPrices = cheaperResults;
-  const cheapestOverall = resultsWithValidPrices.length
-    ? resultsWithValidPrices.reduce(
-        (min, r) => (r.price! < min.price! ? r : min),
-        resultsWithValidPrices[0]
-      )
-    : null;
+  // Find cheapest result
+  const cheapestResult = cheaperResults.length > 0 ? cheaperResults[0] : null;
+  const cheapestOverall = cheapestResult;
 
   if (cheapestOverall && !displayResults.some((r) => r.id === cheapestOverall.id)) {
-    // Replace last slot with the cheapest so the Unlock CTA always has something real
     if (displayResults.length === MAX_ALTERNATIVES) {
       displayResults = [...displayResults.slice(0, MAX_ALTERNATIVES - 1), cheapestOverall];
     } else {
@@ -1556,57 +1605,38 @@ export default function SearchResults() {
     }
   }
 
-  // Find cheapest verified result for unlock button
-  const cheapestResult = resultsWithValidPrices.length > 0
-    ? resultsWithValidPrices.reduce(
-        (min, r) => (r.price! < min.price! ? r : min),
-        resultsWithValidPrices[0]
-      )
-    : null;
-
-  // Calculate potential savings - ONLY from verified prices
+  // Calculate potential savings
   const cheapestTotal = cheapestResult?.price || null;
   const potentialSavings = airbnbTotal && cheapestTotal ? airbnbTotal - cheapestTotal : null;
 
   // ========================================
   // CANONICAL RESULT STATE COMPUTATION
   // ========================================
-  // Define mutually exclusive outcome states for consistent messaging
-  // UPDATED: Now uses verified results for comparison states
   type ResultState = 
-    | 'no_platforms_found'           // No other platforms found at all
-    | 'cheaper_found'                // Found cheaper verified alternatives
-    | 'no_cheaper_found'             // Found verified platforms but none cheaper
-    | 'prices_unavailable';          // Found platforms but no verified prices
+    | 'no_platforms_found'
+    | 'cheaper_found'
+    | 'no_cheaper_found'
+    | 'prices_unavailable';
 
   const computeResultState = (): ResultState => {
-    // Total valid matches (with photos)
-    const totalMatchesWithPhotos = resultsWithPhotos.length;
-    
-    if (totalMatchesWithPhotos === 0) {
+    if (resultsWithPhotos.length === 0) {
       return 'no_platforms_found';
     }
-    
-    // Cheaper verified results exist
     if (cheaperResults.length > 0) {
       return 'cheaper_found';
     }
-    
-    // Have verified platforms with prices (just not cheaper)
     if (moreExpensiveResults.length > 0) {
       return 'no_cheaper_found';
     }
-    
-    // Have platforms but no verified prices available
     return 'prices_unavailable';
   };
 
   const resultState = computeResultState();
 
   // Get counts for display
-  const comparedPlatformsCount = verifiedResults.length;  // Only verified platforms count as "compared"
-  const platformsWithoutPricesCount = unverifiedResults.length;  // Unverified = manual check recommended
-
+  const comparedPlatformsCount = verifiedResults.length;
+  const platformsWithoutPricesCount = unverifiedResults.length;
+  const notComparableCount = notComparableResults.length;
 
   // Helper to generate key differences based on platform
   const getKeyDifferences = (result: SearchResult): string[] => {
@@ -1636,58 +1666,52 @@ export default function SearchResults() {
     return differences.length > 0 ? differences : ["Verify booking terms on site"];
   };
 
-  // Get human-readable failure reason for display using canonical taxonomy
-  // Returns user-friendly text based on outcome_category and outcome_label
-  const getFailureDisplay = (result: SearchResult): { text: string; isTierC: boolean; isTierA: boolean; isUnverified: boolean; isSoldOut: boolean } => {
+  // Get human-readable failure reason using canonical categorization
+  const getFailureDisplay = (result: SearchResult): { 
+    text: string; 
+    isTierC: boolean; 
+    isTierA: boolean; 
+    isUnverified: boolean; 
+    isSoldOut: boolean;
+    isNotComparable: boolean;
+    isMoreExpensive: boolean;
+  } => {
+    const categorization = getResultCategorization(result.id);
+    const bucket = categorization?.bucket;
     const isTierC = result.is_tier_c_blocked === true;
     const isTierA = result.coverage_tier === 'A';
-    const isUnverified = result.price_status === 'unverified';
-    const isSoldOut = result.failure_category === 'sold_out' || 
-                      result.extraction_status === 'dates_unavailable' ||
-                      result.extraction_status === 'sold_out' ||
-                      result.extraction_status === 'expedia_dates_unavailable_for_target';
     
-    if (isTierC) {
-      return { text: 'Platform not supported', isTierC: true, isTierA: false, isUnverified: false, isSoldOut: false };
+    if (isTierC || bucket === 'platform_blocked') {
+      return { text: 'Platform not supported', isTierC: true, isTierA: false, isUnverified: false, isSoldOut: false, isNotComparable: false, isMoreExpensive: false };
     }
     
-    // Sold out / dates unavailable - this is NOT an error
-    if (isSoldOut) {
-      return { text: 'Not available for these dates', isTierC: false, isTierA, isUnverified: false, isSoldOut: true };
+    if (bucket === 'sold_out') {
+      return { text: 'Not available for these dates', isTierC: false, isTierA, isUnverified: false, isSoldOut: true, isNotComparable: false, isMoreExpensive: false };
     }
     
-    // If we have a price but it's unverified, show why
-    if (isUnverified && result.price && result.price > 0) {
-      const failures = result.verification_failures || [];
-      if (failures.includes('scraped_not_extracted')) {
-        return { text: 'Manual check recommended', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
-      }
-      if (failures.includes('dates_not_validated')) {
-        return { text: 'Dates could not be confirmed', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
-      }
-      if (failures.includes('taxes_fees_not_included')) {
-        return { text: 'May not include all fees', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
-      }
-      if (failures.includes('low_confidence')) {
-        return { text: 'Low extraction confidence', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
-      }
-      return { text: 'Manual check recommended', isTierC: false, isTierA, isUnverified: true, isSoldOut: false };
+    if (bucket === 'more_expensive') {
+      const savings = categorization?.savings_amount;
+      const text = savings ? `${Math.abs(savings).toFixed(0)} more than Airbnb` : 'More expensive than Airbnb';
+      return { text, isTierC: false, isTierA, isUnverified: false, isSoldOut: false, isNotComparable: false, isMoreExpensive: true };
     }
     
-    // Use the outcome label from taxonomy if available
-    if (result.failure_reason) {
-      return { 
-        text: result.failure_reason, 
-        isTierC: false, 
-        isTierA,
-        isUnverified: false,
-        isSoldOut: false
-      };
+    if (bucket === 'not_comparable') {
+      const msg = categorization?.non_comparable_user_message || 'Price not directly comparable';
+      return { text: msg, isTierC: false, isTierA, isUnverified: true, isSoldOut: false, isNotComparable: true, isMoreExpensive: false };
+    }
+    
+    if (bucket === 'blocked') {
+      return { text: 'Access blocked by platform', isTierC: false, isTierA, isUnverified: false, isSoldOut: false, isNotComparable: false, isMoreExpensive: false };
+    }
+    
+    if (bucket === 'price_not_found' || bucket === 'service_error') {
+      return { text: 'Price unavailable', isTierC: false, isTierA, isUnverified: false, isSoldOut: false, isNotComparable: false, isMoreExpensive: false };
     }
     
     // Fallback
-    return { text: 'Price unavailable', isTierC: false, isTierA, isUnverified: false, isSoldOut: false };
+    return { text: result.failure_reason || 'Manual check recommended', isTierC: false, isTierA, isUnverified: true, isSoldOut: false, isNotComparable: false, isMoreExpensive: false };
   };
+
 
   return (
     <div className="min-h-screen bg-background">
