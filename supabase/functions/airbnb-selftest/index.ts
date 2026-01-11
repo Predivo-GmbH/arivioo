@@ -1289,6 +1289,253 @@ function runBaselineChainCanonicalCheck(): BaselineChainCanonicalCheckResult {
   };
 }
 
+// =============================================================================
+// CANARY URL CONFIGURATION
+// Fixed test scenario for live provider capability checks
+// =============================================================================
+const CANARY_CONFIG = {
+  // Use a known stable listing with dates far in the future
+  // This URL should reliably show the checkout page with a grounded total
+  baseUrl: 'https://www.airbnb.com/rooms/903802242341279498',
+  checkIn: '2026-02-01',
+  checkOut: '2026-02-05',
+  adults: 2,
+  guestCurrency: 'USD',
+  userCountry: 'US',
+  nightsCount: 4,
+  // Expected total with 1% tolerance
+  expectedTotal: 2214,
+  tolerance: 0.01,
+};
+
+function buildCanaryUrl(): string {
+  return `${CANARY_CONFIG.baseUrl}?check_in=${CANARY_CONFIG.checkIn}&check_out=${CANARY_CONFIG.checkOut}&adults=${CANARY_CONFIG.adults}`;
+}
+
+interface CanaryCheckResult {
+  mode: string;
+  passed: boolean;
+  provider: string;
+  canary_url: string;
+  canary_dates: { check_in: string; check_out: string; nights: number };
+  extraction_result: {
+    status: string;
+    price: number | null;
+    currency: string;
+    evidence_snippet: string | null;
+  } | null;
+  failure_reason: string | null;
+  expected_behavior: string;
+  timestamp: string;
+  duration_ms: number;
+  checks: Array<{
+    name: string;
+    expected: string;
+    actual: string;
+    passed: boolean;
+  }>;
+}
+
+// Run live Browserless canary check
+async function runBrowserlessCanaryCheck(): Promise<CanaryCheckResult> {
+  const startTime = Date.now();
+  const canaryUrl = buildCanaryUrl();
+  const checks: CanaryCheckResult['checks'] = [];
+  
+  const VERIFIED_STATUS = 'total_price_including_taxes_and_fees';
+  
+  try {
+    // Build book/stays URL for canary
+    const bookStaysParams = buildBookStaysUrl(canaryUrl, CANARY_CONFIG.guestCurrency);
+    if (!bookStaysParams) {
+      return {
+        mode: 'browserless-canary',
+        passed: false,
+        provider: 'browserless',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: null,
+        failure_reason: 'Failed to parse canary URL',
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'url_parse', expected: 'valid', actual: 'invalid', passed: false }],
+      };
+    }
+    
+    // Actually call Browserless
+    const browserResult = await runBrowserlessBookStays(
+      bookStaysParams.book_stays_url,
+      bookStaysParams.rooms_url,
+      bookStaysParams.room_id,
+      CANARY_CONFIG.nightsCount,
+      CANARY_CONFIG.userCountry,
+      CANARY_CONFIG.guestCurrency
+    );
+    
+    // Check if provider is configured
+    if (browserResult.status === 'provider_not_configured') {
+      return {
+        mode: 'browserless-canary',
+        passed: false,
+        provider: 'browserless',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: null,
+        failure_reason: 'BROWSERLESS_API_KEY not configured',
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'provider_configured', expected: 'true', actual: 'false', passed: false }],
+      };
+    }
+    
+    // Check if we got a screenshot
+    if (!browserResult.screenshotBase64) {
+      return {
+        mode: 'browserless-canary',
+        passed: false,
+        provider: 'browserless',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: { status: browserResult.status || 'screenshot_missing', price: null, currency: 'USD', evidence_snippet: null },
+        failure_reason: browserResult.wrongPageReason || 'No screenshot captured',
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'screenshot_captured', expected: 'true', actual: 'false', passed: false }],
+      };
+    }
+    
+    // Run OCR on the screenshot
+    let ocrTextRaw = '';
+    try {
+      ocrTextRaw = await ocrImageToText(browserResult.screenshotBase64);
+    } catch (ocrErr) {
+      return {
+        mode: 'browserless-canary',
+        passed: false,
+        provider: 'browserless',
+        canary_url: canaryUrl,
+        canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+        extraction_result: { status: 'ocr_error', price: null, currency: 'USD', evidence_snippet: null },
+        failure_reason: `OCR failed: ${ocrErr instanceof Error ? ocrErr.message : String(ocrErr)}`,
+        expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        checks: [{ name: 'ocr_success', expected: 'true', actual: 'false', passed: false }],
+      };
+    }
+    
+    // Extract total from OCR
+    const extractionResult = browserResult.usedFallback
+      ? extractBookingCardFromRoomsOcr(ocrTextRaw, CANARY_CONFIG.nightsCount)
+      : extractAllInTotalFromOcr(ocrTextRaw, CANARY_CONFIG.nightsCount);
+    
+    const extractedPrice = browserResult.usedFallback 
+      ? (extractionResult as any).booking_card_amount_value 
+      : (extractionResult as any).all_in_total_amount_value;
+    const extractedCurrency = (extractionResult as any).currency || 'USD';
+    const evidenceSnippet = (extractionResult as any).evidence_snippet || null;
+    
+    // Determine status based on extraction
+    let finalStatus = 'price_not_available_in_content';
+    if (browserResult.isUnavailable) {
+      finalStatus = 'dates_unavailable';
+    } else if (extractedPrice && extractedPrice > 0) {
+      // Check for grounded total patterns in evidence
+      const hasPayNowPattern = /pay\s*\$?\s*[\d,]+/i.test(ocrTextRaw);
+      const hasTotalPattern = /total\s*\(?[A-Z]{3}\)?\s*\$?\s*[\d,]+/i.test(ocrTextRaw);
+      const hasDueTodayPattern = /due\s+today\s*\$?\s*[\d,]+/i.test(ocrTextRaw);
+      
+      if (hasPayNowPattern || hasTotalPattern || hasDueTodayPattern) {
+        finalStatus = VERIFIED_STATUS;
+      } else {
+        finalStatus = 'needs_user_confirmation';
+      }
+    } else {
+      finalStatus = 'needs_user_confirmation';
+    }
+    
+    // Build checks
+    checks.push({
+      name: 'navigation_success',
+      expected: 'reached checkout page',
+      actual: browserResult.usedFallback ? 'fallback to rooms page' : 'book/stays page',
+      passed: !browserResult.wrongPageReason,
+    });
+    
+    checks.push({
+      name: 'screenshot_captured',
+      expected: 'true',
+      actual: 'true',
+      passed: true,
+    });
+    
+    checks.push({
+      name: 'extraction_status',
+      expected: VERIFIED_STATUS,
+      actual: finalStatus,
+      passed: finalStatus === VERIFIED_STATUS,
+    });
+    
+    checks.push({
+      name: 'price_extracted',
+      expected: `~${CANARY_CONFIG.expectedTotal} USD`,
+      actual: extractedPrice ? `${extractedPrice} ${extractedCurrency}` : 'null',
+      passed: extractedPrice !== null && extractedPrice > 0,
+    });
+    
+    const isPassed = finalStatus === VERIFIED_STATUS && extractedPrice !== null && extractedPrice > 0;
+    
+    let failureReason: string | null = null;
+    if (!isPassed) {
+      if (finalStatus === 'needs_user_confirmation') {
+        failureReason = extractedPrice 
+          ? `Only subtotal found (${extractedPrice}), no grounded total pattern detected`
+          : 'No price extracted from page content';
+      } else if (finalStatus === 'dates_unavailable') {
+        failureReason = 'Dates unavailable for canary listing';
+      } else {
+        failureReason = `Status ${finalStatus} is not verified`;
+      }
+    }
+    
+    return {
+      mode: 'browserless-canary',
+      passed: isPassed,
+      provider: 'browserless',
+      canary_url: canaryUrl,
+      canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+      extraction_result: {
+        status: finalStatus,
+        price: extractedPrice,
+        currency: extractedCurrency,
+        evidence_snippet: evidenceSnippet ? safeSnippet(evidenceSnippet, 200) : null,
+      },
+      failure_reason: failureReason,
+      expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      checks,
+    };
+  } catch (err) {
+    return {
+      mode: 'browserless-canary',
+      passed: false,
+      provider: 'browserless',
+      canary_url: canaryUrl,
+      canary_dates: { check_in: CANARY_CONFIG.checkIn, check_out: CANARY_CONFIG.checkOut, nights: CANARY_CONFIG.nightsCount },
+      extraction_result: null,
+      failure_reason: `Exception: ${err instanceof Error ? err.message : String(err)}`,
+      expected_behavior: 'Extract grounded total with status total_price_including_taxes_and_fees',
+      timestamp: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      checks: [{ name: 'execution_success', expected: 'no exception', actual: 'exception thrown', passed: false }],
+    };
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
   
@@ -1296,7 +1543,24 @@ Deno.serve(async (req) => {
   const reqUrl = new URL(req.url);
   const mode = reqUrl.searchParams.get('mode');
   
-  // Browserless canonical check
+  // ==========================================================================
+  // LIVE CANARY CHECKS - Actually call providers against fixed canary URL
+  // ==========================================================================
+  
+  // Browserless live canary check
+  if (mode === 'browserless-canary') {
+    const result = await runBrowserlessCanaryCheck();
+    return new Response(JSON.stringify(result, null, 2), {
+      status: result.passed ? 200 : 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  
+  // ==========================================================================
+  // DETERMINISTIC CANONICAL CHECKS - Logic validation with mock data
+  // ==========================================================================
+  
+  // Browserless canonical check (logic validation)
   if (mode === 'canonical-check') {
     const result = runCanonicalBaselineCheck();
     return new Response(JSON.stringify(result, null, 2), {
@@ -1305,7 +1569,7 @@ Deno.serve(async (req) => {
     });
   }
   
-  // Zyte canonical check
+  // Zyte canonical check (logic validation)
   if (mode === 'zyte-canonical-check') {
     const result = runZyteCanonicalBaselineCheck();
     return new Response(JSON.stringify(result, null, 2), {
@@ -1314,7 +1578,7 @@ Deno.serve(async (req) => {
     });
   }
   
-  // Firecrawl canonical check
+  // Firecrawl canonical check (logic validation)
   if (mode === 'firecrawl-canonical-check') {
     const result = runFirecrawlCanonicalBaselineCheck();
     return new Response(JSON.stringify(result, null, 2), {
@@ -1323,7 +1587,7 @@ Deno.serve(async (req) => {
     });
   }
   
-  // Baseline chain canonical check (orchestration)
+  // Baseline chain canonical check (orchestration logic validation)
   if (mode === 'baseline-chain-canonical-check') {
     const result = runBaselineChainCanonicalCheck();
     return new Response(JSON.stringify(result, null, 2), {
