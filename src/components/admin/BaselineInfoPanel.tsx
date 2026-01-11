@@ -3,7 +3,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Button } from '@/components/ui/button';
-import { Shield, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Clock, GitCommit, Tag, RefreshCw, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip';
+import { Shield, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Clock, GitCommit, Tag, RefreshCw, ShieldCheck, ShieldAlert, Zap, Activity } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
 import { BASELINE_EXPECTATIONS, CATEGORY_LABELS, getExpectationsByCategory } from '@/lib/baselineExpectations';
@@ -20,8 +21,9 @@ interface BaselineData {
   notes: string | null;
 }
 
+// Canonical check result (logic validation - deterministic)
 interface CanonicalCheckResult {
-  mode: 'canonical-check' | 'zyte-canonical-check';
+  mode: string;
   passed: boolean;
   checks: Array<{
     name: string;
@@ -33,43 +35,101 @@ interface CanonicalCheckResult {
   timestamp: string;
 }
 
+// Canary check result (live provider capability check)
+interface CanaryCheckResult {
+  mode: string;
+  passed: boolean;
+  provider: string;
+  canary_url: string;
+  canary_dates: { check_in: string; check_out: string; nights: number };
+  extraction_result: {
+    status: string;
+    price: number | null;
+    currency: string;
+    evidence_snippet: string | null;
+  } | null;
+  failure_reason: string | null;
+  expected_behavior: string;
+  timestamp: string;
+  duration_ms: number;
+  checks: Array<{
+    name: string;
+    expected: string;
+    actual: string;
+    passed: boolean;
+  }>;
+}
+
+type CheckResult = CanonicalCheckResult | CanaryCheckResult;
+
+function isCanaryResult(result: CheckResult): result is CanaryCheckResult {
+  return 'provider' in result && 'canary_url' in result;
+}
+
 export function BaselineInfoPanel() {
   const { getToken } = useAdminAuth();
   const [baseline, setBaseline] = useState<BaselineData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showExpectations, setShowExpectations] = useState(false);
+  const [showLogicChecks, setShowLogicChecks] = useState(false);
   
-  // Browserless canonical baseline check state
-  const [browserlessCheck, setBrowserlessCheck] = useState<CanonicalCheckResult | null>(null);
-  const [checkingBrowserless, setCheckingBrowserless] = useState(false);
-  const [browserlessError, setBrowserlessError] = useState<string | null>(null);
+  // Browserless CANARY check (live capability)
+  const [browserlessCanary, setBrowserlessCanary] = useState<CanaryCheckResult | null>(null);
+  const [checkingBrowserlessCanary, setCheckingBrowserlessCanary] = useState(false);
+  const [browserlessCanaryError, setBrowserlessCanaryError] = useState<string | null>(null);
   
-  // Zyte canonical baseline check state
-  const [zyteCheck, setZyteCheck] = useState<CanonicalCheckResult | null>(null);
-  const [checkingZyte, setCheckingZyte] = useState(false);
-  const [zyteError, setZyteError] = useState<string | null>(null);
+  // Logic validation checks (deterministic)
+  const [browserlessLogic, setBrowserlessLogic] = useState<CanonicalCheckResult | null>(null);
+  const [checkingBrowserlessLogic, setCheckingBrowserlessLogic] = useState(false);
+  const [browserlessLogicError, setBrowserlessLogicError] = useState<string | null>(null);
   
-  // Firecrawl canonical baseline check state
-  const [firecrawlCheck, setFirecrawlCheck] = useState<CanonicalCheckResult | null>(null);
-  const [checkingFirecrawl, setCheckingFirecrawl] = useState(false);
-  const [firecrawlError, setFirecrawlError] = useState<string | null>(null);
+  const [zyteLogic, setZyteLogic] = useState<CanonicalCheckResult | null>(null);
+  const [checkingZyteLogic, setCheckingZyteLogic] = useState(false);
+  const [zyteLogicError, setZyteLogicError] = useState<string | null>(null);
   
-  // Baseline Chain canonical check state (orchestration)
-  const [chainCheck, setChainCheck] = useState<CanonicalCheckResult | null>(null);
-  const [checkingChain, setCheckingChain] = useState(false);
-  const [chainError, setChainError] = useState<string | null>(null);
+  const [firecrawlLogic, setFirecrawlLogic] = useState<CanonicalCheckResult | null>(null);
+  const [checkingFirecrawlLogic, setCheckingFirecrawlLogic] = useState(false);
+  const [firecrawlLogicError, setFirecrawlLogicError] = useState<string | null>(null);
+  
+  const [chainLogic, setChainLogic] = useState<CanonicalCheckResult | null>(null);
+  const [checkingChainLogic, setCheckingChainLogic] = useState(false);
+  const [chainLogicError, setChainLogicError] = useState<string | null>(null);
   
   // Guards to prevent duplicate runs and handle cleanup
   const hasRunInitialChecks = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isRunningRef = useRef(false);
 
-  // Fetch Browserless canonical check
-  const runBrowserlessCheck = useCallback(async (signal?: AbortSignal) => {
+  // Run Browserless CANARY check (live provider capability)
+  const runBrowserlessCanary = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
-    setCheckingBrowserless(true);
-    setBrowserlessError(null);
+    setCheckingBrowserlessCanary(true);
+    setBrowserlessCanaryError(null);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=browserless-canary', {
+        method: 'GET',
+      });
+      
+      if (signal?.aborted) return;
+      if (invokeError) throw invokeError;
+      setBrowserlessCanary(data as CanaryCheckResult);
+    } catch (err: any) {
+      if (signal?.aborted) return;
+      console.error('Browserless canary check failed:', err);
+      setBrowserlessCanaryError(err?.message || 'Failed to run check');
+    } finally {
+      if (!signal?.aborted) {
+        setCheckingBrowserlessCanary(false);
+      }
+    }
+  }, []);
+
+  // Run Browserless logic validation (deterministic)
+  const runBrowserlessLogic = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
+    setCheckingBrowserlessLogic(true);
+    setBrowserlessLogicError(null);
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=canonical-check', {
         method: 'GET',
@@ -77,23 +137,23 @@ export function BaselineInfoPanel() {
       
       if (signal?.aborted) return;
       if (invokeError) throw invokeError;
-      setBrowserlessCheck(data as CanonicalCheckResult);
+      setBrowserlessLogic(data as CanonicalCheckResult);
     } catch (err: any) {
       if (signal?.aborted) return;
-      console.error('Browserless canonical check failed:', err);
-      setBrowserlessError(err?.message || 'Failed to run check');
+      console.error('Browserless logic check failed:', err);
+      setBrowserlessLogicError(err?.message || 'Failed to run check');
     } finally {
       if (!signal?.aborted) {
-        setCheckingBrowserless(false);
+        setCheckingBrowserlessLogic(false);
       }
     }
   }, []);
   
-  // Fetch Zyte canonical check
-  const runZyteCheck = useCallback(async (signal?: AbortSignal) => {
+  // Run Zyte logic validation
+  const runZyteLogic = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
-    setCheckingZyte(true);
-    setZyteError(null);
+    setCheckingZyteLogic(true);
+    setZyteLogicError(null);
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=zyte-canonical-check', {
         method: 'GET',
@@ -101,23 +161,23 @@ export function BaselineInfoPanel() {
       
       if (signal?.aborted) return;
       if (invokeError) throw invokeError;
-      setZyteCheck(data as CanonicalCheckResult);
+      setZyteLogic(data as CanonicalCheckResult);
     } catch (err: any) {
       if (signal?.aborted) return;
-      console.error('Zyte canonical check failed:', err);
-      setZyteError(err?.message || 'Failed to run check');
+      console.error('Zyte logic check failed:', err);
+      setZyteLogicError(err?.message || 'Failed to run check');
     } finally {
       if (!signal?.aborted) {
-        setCheckingZyte(false);
+        setCheckingZyteLogic(false);
       }
     }
   }, []);
   
-  // Fetch Firecrawl canonical check
-  const runFirecrawlCheck = useCallback(async (signal?: AbortSignal) => {
+  // Run Firecrawl logic validation
+  const runFirecrawlLogic = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
-    setCheckingFirecrawl(true);
-    setFirecrawlError(null);
+    setCheckingFirecrawlLogic(true);
+    setFirecrawlLogicError(null);
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=firecrawl-canonical-check', {
         method: 'GET',
@@ -125,23 +185,23 @@ export function BaselineInfoPanel() {
       
       if (signal?.aborted) return;
       if (invokeError) throw invokeError;
-      setFirecrawlCheck(data as CanonicalCheckResult);
+      setFirecrawlLogic(data as CanonicalCheckResult);
     } catch (err: any) {
       if (signal?.aborted) return;
-      console.error('Firecrawl canonical check failed:', err);
-      setFirecrawlError(err?.message || 'Failed to run check');
+      console.error('Firecrawl logic check failed:', err);
+      setFirecrawlLogicError(err?.message || 'Failed to run check');
     } finally {
       if (!signal?.aborted) {
-        setCheckingFirecrawl(false);
+        setCheckingFirecrawlLogic(false);
       }
     }
   }, []);
   
-  // Fetch Baseline Chain canonical check (orchestration)
-  const runChainCheck = useCallback(async (signal?: AbortSignal) => {
+  // Run Chain logic validation
+  const runChainLogic = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
-    setCheckingChain(true);
-    setChainError(null);
+    setCheckingChainLogic(true);
+    setChainLogicError(null);
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=baseline-chain-canonical-check', {
         method: 'GET',
@@ -149,14 +209,14 @@ export function BaselineInfoPanel() {
       
       if (signal?.aborted) return;
       if (invokeError) throw invokeError;
-      setChainCheck(data as CanonicalCheckResult);
+      setChainLogic(data as CanonicalCheckResult);
     } catch (err: any) {
       if (signal?.aborted) return;
-      console.error('Baseline Chain canonical check failed:', err);
-      setChainError(err?.message || 'Failed to run check');
+      console.error('Chain logic check failed:', err);
+      setChainLogicError(err?.message || 'Failed to run check');
     } finally {
       if (!signal?.aborted) {
-        setCheckingChain(false);
+        setCheckingChainLogic(false);
       }
     }
   }, []);
@@ -165,22 +225,23 @@ export function BaselineInfoPanel() {
   const runAllChecks = useCallback((signal?: AbortSignal) => {
     // Prevent overlapping runs
     if (isRunningRef.current) {
-      console.log('Canonical checks already running, skipping');
+      console.log('Checks already running, skipping');
       return;
     }
     
     isRunningRef.current = true;
     
-    // Run all checks in parallel
+    // Run canary + logic checks in parallel
     Promise.all([
-      runBrowserlessCheck(signal),
-      runZyteCheck(signal),
-      runFirecrawlCheck(signal),
-      runChainCheck(signal),
+      runBrowserlessCanary(signal),
+      runBrowserlessLogic(signal),
+      runZyteLogic(signal),
+      runFirecrawlLogic(signal),
+      runChainLogic(signal),
     ]).finally(() => {
       isRunningRef.current = false;
     });
-  }, [runBrowserlessCheck, runZyteCheck, runFirecrawlCheck, runChainCheck]);
+  }, [runBrowserlessCanary, runBrowserlessLogic, runZyteLogic, runFirecrawlLogic, runChainLogic]);
   
   // Handler for user-initiated "Check All" button
   const handleCheckAll = useCallback(() => {
@@ -192,22 +253,10 @@ export function BaselineInfoPanel() {
     runAllChecks(abortControllerRef.current.signal);
   }, [runAllChecks]);
   
-  // Individual refresh handlers for button callbacks (no signal needed - user initiated)
-  const handleBrowserlessRefresh = useCallback(() => {
-    runBrowserlessCheck();
-  }, [runBrowserlessCheck]);
-  
-  const handleZyteRefresh = useCallback(() => {
-    runZyteCheck();
-  }, [runZyteCheck]);
-  
-  const handleFirecrawlRefresh = useCallback(() => {
-    runFirecrawlCheck();
-  }, [runFirecrawlCheck]);
-  
-  const handleChainRefresh = useCallback(() => {
-    runChainCheck();
-  }, [runChainCheck]);
+  // Individual refresh handlers
+  const handleBrowserlessCanaryRefresh = useCallback(() => {
+    runBrowserlessCanary();
+  }, [runBrowserlessCanary]);
 
   // Fetch baseline data on mount (once only)
   useEffect(() => {
@@ -246,9 +295,9 @@ export function BaselineInfoPanel() {
     return () => {
       cancelled = true;
     };
-  }, []); // Empty deps - run once on mount only
+  }, []);
   
-  // Run canonical checks exactly once on mount
+  // Run checks exactly once on mount
   useEffect(() => {
     // Strict guard: only run once ever per component instance
     if (hasRunInitialChecks.current) {
@@ -270,67 +319,187 @@ export function BaselineInfoPanel() {
 
   const expectationsByCategory = getExpectationsByCategory();
   
-  // Helper to render a canonical check indicator
-  const renderCanonicalCheckIndicator = (
+  // Format timestamp for display
+  const formatTimestamp = (timestamp: string) => {
+    try {
+      const date = new Date(timestamp);
+      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch {
+      return '—';
+    }
+  };
+  
+  // Check if any checks are running
+  const isAnyCheckRunning = checkingBrowserlessCanary || checkingBrowserlessLogic || checkingZyteLogic || checkingFirecrawlLogic || checkingChainLogic;
+  
+  // Helper to render the Browserless canary indicator (main provider capability check)
+  const renderBrowserlessCanaryIndicator = () => {
+    const check = browserlessCanary;
+    const checking = checkingBrowserlessCanary;
+    const error = browserlessCanaryError;
+    
+    return (
+      <div className={`p-3 rounded-lg border ${
+        check?.passed 
+          ? 'bg-green-500/10 border-green-500/30' 
+          : error || (check && !check.passed)
+            ? 'bg-destructive/10 border-destructive/30'
+            : 'bg-muted/50 border-border'
+      }`}>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            {checking ? (
+              <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : check?.passed ? (
+              <ShieldCheck className="h-4 w-4 text-green-500" />
+            ) : error || (check && !check.passed) ? (
+              <ShieldAlert className="h-4 w-4 text-destructive" />
+            ) : (
+              <Shield className="h-4 w-4 text-muted-foreground" />
+            )}
+            <span className="text-sm font-medium">
+              Browserless Canary
+            </span>
+            <Badge variant={check?.passed ? 'default' : 'destructive'} className="text-[10px] px-1.5 py-0">
+              {checking 
+                ? 'Running...' 
+                : check?.passed 
+                  ? 'PASSING' 
+                  : error 
+                    ? 'ERROR' 
+                    : check 
+                      ? 'FAILING' 
+                      : '—'}
+            </Badge>
+          </div>
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onClick={handleBrowserlessCanaryRefresh}
+            disabled={checking}
+            className="h-6 w-6 p-0"
+          >
+            <RefreshCw className={`h-3 w-3 ${checking ? 'animate-spin' : ''}`} />
+          </Button>
+        </div>
+        
+        {/* Canary scenario info */}
+        {check && (
+          <div className="space-y-1.5 text-xs">
+            <div className="flex items-center gap-1.5 text-muted-foreground">
+              <Clock className="h-3 w-3" />
+              <span>Checked: {formatTimestamp(check.timestamp)}</span>
+              {check.duration_ms && (
+                <span className="text-muted-foreground/70">({(check.duration_ms / 1000).toFixed(1)}s)</span>
+              )}
+            </div>
+            
+            <div className="text-muted-foreground">
+              Canary: {check.canary_dates.nights} nights ({check.canary_dates.check_in} → {check.canary_dates.check_out})
+            </div>
+            
+            {/* Extraction result */}
+            {check.extraction_result && (
+              <div className={`p-2 rounded mt-1.5 ${
+                check.extraction_result.status === 'total_price_including_taxes_and_fees'
+                  ? 'bg-green-500/10'
+                  : 'bg-amber-500/10'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">
+                    Status: <code className="text-[10px]">{check.extraction_result.status}</code>
+                  </span>
+                  {check.extraction_result.price && (
+                    <span className="font-mono">
+                      {check.extraction_result.currency} {check.extraction_result.price.toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                {check.extraction_result.evidence_snippet && (
+                  <div className="mt-1 text-[10px] text-muted-foreground truncate">
+                    Evidence: "{check.extraction_result.evidence_snippet}"
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* Failure reason */}
+            {check.failure_reason && (
+              <div className="p-2 rounded bg-destructive/10 text-destructive text-[11px] mt-1.5">
+                <strong>Failure:</strong> {check.failure_reason}
+              </div>
+            )}
+            
+            {/* Failed checks */}
+            {check.checks.filter(c => !c.passed).length > 0 && (
+              <div className="mt-1.5 space-y-0.5">
+                {check.checks.filter(c => !c.passed).slice(0, 3).map((c, i) => (
+                  <div key={i} className="text-[10px] text-destructive">
+                    ✗ {c.name}: expected "{c.expected}", got "{c.actual}"
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        
+        {error && (
+          <div className="mt-1.5 text-xs text-destructive">{error}</div>
+        )}
+      </div>
+    );
+  };
+  
+  // Helper to render a compact logic check indicator
+  const renderLogicCheckIndicator = (
     label: string,
     check: CanonicalCheckResult | null,
     checking: boolean,
-    error: string | null,
-    onRefresh: () => void
+    error: string | null
   ) => (
-    <div className={`p-2 rounded-lg border ${
-      check?.passed 
-        ? 'bg-green-500/10 border-green-500/30' 
-        : error || (check && !check.passed)
-          ? 'bg-destructive/10 border-destructive/30'
-          : 'bg-muted/50 border-border'
-    }`}>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          {checking ? (
-            <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
-          ) : check?.passed ? (
-            <ShieldCheck className="h-3 w-3 text-green-500" />
-          ) : error || (check && !check.passed) ? (
-            <ShieldAlert className="h-3 w-3 text-destructive" />
-          ) : (
-            <Shield className="h-3 w-3 text-muted-foreground" />
-          )}
-          <span className="text-xs font-medium">
-            {label}: {checking 
-              ? 'Checking...' 
-              : check?.passed 
-                ? 'Valid' 
-                : error 
-                  ? 'Error' 
-                  : check 
-                    ? 'Violation!' 
-                    : '—'}
-          </span>
-        </div>
-        <Button 
-          variant="ghost" 
-          size="sm" 
-          onClick={onRefresh}
-          disabled={checking}
-          className="h-5 w-5 p-0"
-        >
-          <RefreshCw className={`h-2.5 w-2.5 ${checking ? 'animate-spin' : ''}`} />
-        </Button>
-      </div>
-      {check && !check.passed && (
-        <div className="mt-1.5 space-y-0.5">
-          {check.checks.filter(c => !c.passed).slice(0, 2).map((c, i) => (
-            <div key={i} className="text-[10px] text-destructive truncate">
-              ✗ {c.name}
-            </div>
-          ))}
-        </div>
-      )}
-      {error && (
-        <div className="mt-1 text-[10px] text-destructive truncate">{error}</div>
-      )}
-    </div>
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs ${
+            check?.passed 
+              ? 'bg-green-500/10 text-green-600' 
+              : error || (check && !check.passed)
+                ? 'bg-destructive/10 text-destructive'
+                : 'bg-muted/50 text-muted-foreground'
+          }`}>
+            {checking ? (
+              <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+            ) : check?.passed ? (
+              <CheckCircle2 className="h-2.5 w-2.5" />
+            ) : error || (check && !check.passed) ? (
+              <AlertCircle className="h-2.5 w-2.5" />
+            ) : (
+              <Activity className="h-2.5 w-2.5" />
+            )}
+            <span>{label}</span>
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-xs">
+          <div className="text-xs">
+            <strong>{label} Logic Validation</strong>
+            {check && (
+              <div className="mt-1">
+                {check.passed ? (
+                  <span className="text-green-600">All {check.checks.length} checks passed</span>
+                ) : (
+                  <div className="text-destructive">
+                    {check.checks.filter(c => !c.passed).map((c, i) => (
+                      <div key={i}>✗ {c.name}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {error && <div className="text-destructive mt-1">{error}</div>}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 
   if (loading) {
@@ -410,32 +579,68 @@ export function BaselineInfoPanel() {
           Reference point for debugging and regression analysis
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {/* Canonical Baseline Runtime Checks */}
+      <CardContent className="space-y-4">
+        
+        {/* Provider Capability Guard (Live Canary) */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-muted-foreground">Canonical Baseline Guards</span>
+            <div className="flex items-center gap-2">
+              <Zap className="h-3.5 w-3.5 text-amber-500" />
+              <span className="text-xs font-medium">Provider Capability Guard</span>
+            </div>
             <Button 
               variant="ghost" 
               size="sm" 
               onClick={handleCheckAll}
-              disabled={checkingBrowserless || checkingZyte || checkingFirecrawl || checkingChain}
+              disabled={isAnyCheckRunning}
               className="h-6 px-2 text-xs"
             >
-              <RefreshCw className={`h-3 w-3 mr-1 ${(checkingBrowserless || checkingZyte || checkingFirecrawl || checkingChain) ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-3 w-3 mr-1 ${isAnyCheckRunning ? 'animate-spin' : ''}`} />
               Check All
             </Button>
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            {renderCanonicalCheckIndicator('Browserless', browserlessCheck, checkingBrowserless, browserlessError, handleBrowserlessRefresh)}
-            {renderCanonicalCheckIndicator('Zyte', zyteCheck, checkingZyte, zyteError, handleZyteRefresh)}
-            {renderCanonicalCheckIndicator('Firecrawl', firecrawlCheck, checkingFirecrawl, firecrawlError, handleFirecrawlRefresh)}
-            {renderCanonicalCheckIndicator('Chain', chainCheck, checkingChain, chainError, handleChainRefresh)}
+          
+          {/* Browserless Canary - Primary capability indicator */}
+          {renderBrowserlessCanaryIndicator()}
+          
+          <div className="text-[10px] text-muted-foreground mt-1">
+            Live test against fixed canary URL. If Browserless fails to extract a grounded total, it indicates a regression.
           </div>
         </div>
+        
+        {/* Logic Validation Checks (Deterministic) */}
+        <Collapsible open={showLogicChecks} onOpenChange={setShowLogicChecks}>
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" className="w-full justify-between px-2 py-1 h-auto">
+              <div className="flex items-center gap-2">
+                <Activity className="h-3 w-3 text-muted-foreground" />
+                <span className="text-xs text-muted-foreground">Logic Validation Guards</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1">
+                  {renderLogicCheckIndicator('Browserless', browserlessLogic, checkingBrowserlessLogic, browserlessLogicError)}
+                  {renderLogicCheckIndicator('Zyte', zyteLogic, checkingZyteLogic, zyteLogicError)}
+                  {renderLogicCheckIndicator('Firecrawl', firecrawlLogic, checkingFirecrawlLogic, firecrawlLogicError)}
+                  {renderLogicCheckIndicator('Chain', chainLogic, checkingChainLogic, chainLogicError)}
+                </div>
+                {showLogicChecks ? (
+                  <ChevronDown className="h-3 w-3 ml-2" />
+                ) : (
+                  <ChevronRight className="h-3 w-3 ml-2" />
+                )}
+              </div>
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-2">
+            <div className="text-[10px] text-muted-foreground p-2 bg-muted/30 rounded">
+              Deterministic unit tests validating extraction logic, priority rules, and orchestration behavior with mock data.
+              These verify the code is correct. Canary checks verify providers work in production.
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
 
         {/* Baseline Identity */}
-        <div className="grid grid-cols-2 gap-3 text-sm">
+        <div className="grid grid-cols-2 gap-3 text-sm pt-2 border-t">
           <div className="flex items-center gap-2">
             <Tag className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="text-muted-foreground">Name:</span>
