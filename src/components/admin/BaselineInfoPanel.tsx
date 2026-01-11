@@ -450,6 +450,19 @@ export function BaselineInfoPanel() {
       
       {check && (
         <div className="space-y-1 text-[10px]">
+          {/* Test inputs used - URL and dates */}
+          <div className="bg-muted/30 rounded px-1.5 py-1 space-y-0.5">
+            <div className="flex items-center gap-1 text-muted-foreground">
+              <span className="font-medium">Tested:</span>
+              <code className="text-[9px] truncate max-w-[200px]" title={check.canary_url}>
+                {check.canary_dates.check_in} → {check.canary_dates.check_out} ({check.canary_dates.nights}n)
+              </code>
+            </div>
+            <div className="text-[9px] text-muted-foreground/70 truncate" title={check.canary_url}>
+              {check.canary_url}
+            </div>
+          </div>
+          
           {/* Status and price with expected comparison */}
           <div className="flex items-center justify-between">
             <code className={`px-1 py-0.5 rounded ${
@@ -499,10 +512,10 @@ export function BaselineInfoPanel() {
             )}
           </div>
           
-          {/* Failure reason */}
+          {/* Failure reason - show full detail for HTTP errors */}
           {check.failure_reason && (
-            <div className="text-destructive truncate" title={check.failure_reason}>
-              ✗ {check.failure_reason}
+            <div className="text-destructive text-[9px] break-words" title={check.failure_reason}>
+              ✗ {check.failure_reason.slice(0, 200)}{check.failure_reason.length > 200 ? '...' : ''}
             </div>
           )}
         </div>
@@ -664,6 +677,34 @@ export function BaselineInfoPanel() {
             </Button>
           </div>
           
+          {/* Canary Scenario Header - Shows the exact test inputs */}
+          <div className="p-2 bg-muted/40 rounded-md border border-border/50 text-[10px] space-y-1">
+            <div className="flex items-center gap-1 font-medium text-muted-foreground">
+              <span>📍 Canary Scenario:</span>
+              <span className="text-foreground">Airbnb Room 903802242341279498</span>
+            </div>
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-muted-foreground">
+              <span>
+                <span className="font-medium">Dates:</span>{' '}
+                <code className="bg-muted px-1 rounded text-foreground">2026-03-01</code>
+                {' → '}
+                <code className="bg-muted px-1 rounded text-foreground">2026-03-04</code>
+                {' (3 nights)'}
+              </span>
+              <span>
+                <span className="font-medium">Guests:</span>{' '}
+                <code className="bg-muted px-1 rounded text-foreground">1 adult</code>
+              </span>
+              <span>
+                <span className="font-medium">Expected:</span>{' '}
+                <code className="bg-muted px-1 rounded text-foreground">~$1,659</code>
+              </span>
+            </div>
+            <div className="text-[9px] text-muted-foreground/70 truncate">
+              URL: https://www.airbnb.com/rooms/903802242341279498?check_in=2026-03-01&check_out=2026-03-04&adults=1
+            </div>
+          </div>
+          
           {/* Three provider canary cards */}
           <div className="grid grid-cols-1 gap-2">
             {renderCanaryIndicator('Browserless', browserlessCanary, checkingBrowserlessCanary, browserlessCanaryError, handleBrowserlessCanaryRefresh)}
@@ -672,7 +713,7 @@ export function BaselineInfoPanel() {
           </div>
           
           <div className="text-[10px] text-muted-foreground">
-            Live tests against canary URL. Failures indicate provider regressions.
+            Each provider runs against the canary URL above. PASS requires verified total within ±5% of expected.
           </div>
         </div>
         
