@@ -744,8 +744,6 @@ export default function SearchResults() {
                       const verifiedCount = (enrichedResults as any[]).filter((r: any) => r.priceVerificationStatus === 'verified').length;
                       const totalMatches = (enrichedResults as any[]).length;
                       addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
-                      
-                      addActivityItem("Search complete", `Found ${totalMatches} alternatives (${verifiedCount} with verified prices)`);
 
                       setSearch(updatedSearch as SearchData);
                       setResults(enrichedResults as unknown as SearchResult[]);
@@ -848,12 +846,9 @@ export default function SearchResults() {
                  const totalMatches = (enrichedResults as any[]).length;
                  addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
                  
-                 addActivityItem("Search complete", `Found ${totalMatches} alternatives (${verifiedCount} with verified prices)`);
-                 
                  setResults(enrichedResults as unknown as SearchResult[]);
                } catch (e) {
                  console.error("Failed to fetch enriched results (stream ended):", e);
-                 addActivityItem("Search complete", "Finished with partial results");
                  toast({
                    title: "Showing partial results",
                    description: "We couldn't load all comparison details, but your search finished successfully.",
@@ -1095,12 +1090,9 @@ export default function SearchResults() {
             const totalMatches = (enrichedResults as any[]).length;
             addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
             
-            addActivityItem("Search complete", `Found ${totalMatches} alternatives (${verifiedCount} with verified prices)`);
-            
             setResults(enrichedResults as unknown as SearchResult[]);
           } catch (e) {
             console.error("Failed to fetch enriched results (heartbeat):", e);
-            addActivityItem("Search complete", "Finished with partial results");
             toast({
               title: "Showing partial results",
               description: "We couldn't load all comparison details, but your search finished successfully.",
@@ -1231,20 +1223,35 @@ export default function SearchResults() {
     });
   }, [loading, search?.status]);
 
-  // Celebrate when results page is actually shown (searchPhase === 'done' and not showing pipeline)
+  // Track when results page is actually rendered (after DOM update)
+  const [resultsPageRendered, setResultsPageRendered] = useState(false);
+  
+  // Detect when results page becomes visible (pipeline hidden)
   useEffect(() => {
-    // Only celebrate when:
-    // 1. Not loading AND not extracting prices (pipeline view is hidden)
-    // 2. searchPhase is 'done' (finalization complete)
-    // 3. We have results to celebrate
-    // 4. Haven't celebrated yet
     const pipelineHidden = !loading && !extractingPrices;
-    if (pipelineHidden && searchPhase === 'done' && results.length > 0 && !hasCelebrated) {
+    if (pipelineHidden && searchPhase === 'done' && results.length > 0) {
+      // Use a delay to ensure the DOM has updated and pipeline is truly hidden
+      const timer = setTimeout(() => {
+        setResultsPageRendered(true);
+      }, 150);
+      return () => clearTimeout(timer);
+    } else {
+      setResultsPageRendered(false);
+    }
+  }, [loading, extractingPrices, searchPhase, results.length]);
+  
+  // Add "Search complete" activity and confetti ONLY when results page is actually rendered
+  useEffect(() => {
+    if (resultsPageRendered && !hasCelebrated) {
+      // Count verified results
+      const verifiedCount = results.filter((r: any) => r.priceVerificationStatus === 'verified').length;
+      addActivityItem("Search complete", `Found ${results.length} alternatives (${verifiedCount} with verified prices)`);
+      
       setHasCelebrated(true);
-      // Small delay for UX
+      // Small delay for confetti after results page is confirmed visible
       setTimeout(() => quickCelebration(), 300);
     }
-  }, [loading, extractingPrices, searchPhase, results.length, hasCelebrated]);
+  }, [resultsPageRendered, hasCelebrated, results]);
 
   // Poll for price extraction status - runs when extractingPrices is true OR after search completes
   useEffect(() => {
