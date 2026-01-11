@@ -749,81 +749,106 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
            // NOTE: Regex patterns use double-escaped backslashes (\\s, \\d, etc.) because
            // this code is a string that gets sent to Browserless and parsed - single backslashes
            // would be stripped during JSON serialization, causing "Invalid regex" errors.
-           const payNowExtraction = await page.evaluate(() => {
-             const text = document.body?.innerText || '';
-             
-             // Define patterns with compile-time validation
-             // Each pattern is wrapped in try/catch to prevent crashes
-             const safeRegex = (pattern, flags) => {
-               try {
-                 return new RegExp(pattern, flags);
-               } catch (e) {
-                 console.error('REGEX COMPILE ERROR:', pattern, e.message);
-                 return null;
-               }
-             };
-             
-             // Patterns for total extraction - using string-based construction
-             // Double backslashes survive JSON serialization
-             const payNowRe = safeRegex('Pay\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)\\\\s*now', 'i');
-             const totalUsdRe = safeRegex('Total\\\\s*\\\\(?\\\\s*USD\\\\s*\\\\)?\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)', 'i');
-             const dueTodayRe = safeRegex('Due\\\\s+today\\\\s*\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)', 'i');
-             const subtotalRe = safeRegex('\\\\$\\\\s*([\\\\d,]+(?:\\\\.\\\\d{2})?)\\\\s+for\\\\s+(\\\\d+)\\\\s+nights?', 'i');
-             
-             // Check for compilation errors
-             const compilationErrors = [];
-             if (!payNowRe) compilationErrors.push('payNowRe');
-             if (!totalUsdRe) compilationErrors.push('totalUsdRe');
-             if (!dueTodayRe) compilationErrors.push('dueTodayRe');
-             if (!subtotalRe) compilationErrors.push('subtotalRe');
-             
-             if (compilationErrors.length > 0) {
-               return {
-                 payNowAmount: null,
-                 payNowSnippet: null,
-                 subtotalAmount: null,
-                 subtotalNights: null,
-                 subtotalSnippet: null,
-                 regexCompilationErrors: compilationErrors,
-               };
-             }
-             
-             const payNowMatch = text.match(payNowRe);
-             const totalUsdMatch = text.match(totalUsdRe);
-             const dueTodayMatch = text.match(dueTodayRe);
-             const subtotalMatch = text.match(subtotalRe);
-             
-             let payNowAmount = null;
-             let payNowSnippet = null;
-             if (payNowMatch) {
-               payNowAmount = parseFloat(payNowMatch[1].replace(/,/g, ''));
-               payNowSnippet = payNowMatch[0];
-             } else if (totalUsdMatch) {
-               payNowAmount = parseFloat(totalUsdMatch[1].replace(/,/g, ''));
-               payNowSnippet = totalUsdMatch[0];
-             } else if (dueTodayMatch) {
-               payNowAmount = parseFloat(dueTodayMatch[1].replace(/,/g, ''));
-               payNowSnippet = dueTodayMatch[0];
-             }
-             
-             let subtotalAmount = null;
-             let subtotalNights = null;
-             let subtotalSnippet = null;
-             if (subtotalMatch) {
-               subtotalAmount = parseFloat(subtotalMatch[1].replace(/,/g, ''));
-               subtotalNights = parseInt(subtotalMatch[2], 10);
-               subtotalSnippet = subtotalMatch[0];
-             }
-             
-             return {
-               payNowAmount,
-               payNowSnippet,
-               subtotalAmount,
-               subtotalNights,
-               subtotalSnippet,
-               regexCompilationErrors: null,
-             };
-           });
+            const payNowExtraction = await page.evaluate(() => {
+              const text = document.body?.innerText || '';
+              const html = document.documentElement?.innerHTML || '';
+              
+              // Define patterns with compile-time validation
+              // Each pattern is wrapped in try/catch to prevent crashes
+              const safeRegex = (pattern, flags) => {
+                try {
+                  return new RegExp(pattern, flags);
+                } catch (e) {
+                  console.error('REGEX COMPILE ERROR:', pattern, e.message);
+                  return null;
+                }
+              };
+              
+              // Currency helpers
+              const currencyPrefix = '(?:US\\s*)?';
+              const currencySymbol = '([\\$€£])';
+              const amount = '([\\d,]+(?:\\.\\d{2})?)';
+              
+              // Patterns for total extraction
+              // NOTE: patterns are string literals with double-escaped backslashes to survive JSON transport
+              const payNowPattern = 'Pay\\s*' + currencyPrefix + currencySymbol + '\\s*' + amount + '\\s*now';
+              const totalPattern = 'Total\\s*(?:\\(?\\s*[A-Z]{3}\\s*\\)?\\s*)?' + currencyPrefix + currencySymbol + '\\s*' + amount;
+              const dueTodayPattern = 'Due\\s+today\\s*' + currencyPrefix + currencySymbol + '\\s*' + amount;
+              const subtotalPattern = currencyPrefix + currencySymbol + '\\s*' + amount + '\\s+for\\s+(\\d+)\\s+nights?';
+
+              const payNowRe = safeRegex(payNowPattern, 'i');
+              const totalRe = safeRegex(totalPattern, 'i');
+              const dueTodayRe = safeRegex(dueTodayPattern, 'i');
+              const subtotalRe = safeRegex(subtotalPattern, 'i');
+              
+              // Check for compilation errors
+              const compilationErrors = [];
+              if (!payNowRe) compilationErrors.push('payNowRe');
+              if (!totalRe) compilationErrors.push('totalRe');
+              if (!dueTodayRe) compilationErrors.push('dueTodayRe');
+              if (!subtotalRe) compilationErrors.push('subtotalRe');
+              
+              if (compilationErrors.length > 0) {
+                return {
+                  payNowAmount: null,
+                  payNowSnippet: null,
+                  payNowCurrencySymbol: null,
+                  subtotalAmount: null,
+                  subtotalNights: null,
+                  subtotalSnippet: null,
+                  subtotalCurrencySymbol: null,
+                  regexCompilationErrors: compilationErrors,
+                };
+              }
+              
+              // Try against visible text first, then against raw HTML
+              const findMatch = (re) => text.match(re) || html.match(re);
+              
+              const payNowMatch = findMatch(payNowRe);
+              const totalMatch = findMatch(totalRe);
+              const dueTodayMatch = findMatch(dueTodayRe);
+              const subtotalMatch = findMatch(subtotalRe);
+              
+              let payNowAmount = null;
+              let payNowSnippet = null;
+              let payNowCurrencySymbol = null;
+              if (payNowMatch) {
+                payNowCurrencySymbol = payNowMatch[1];
+                payNowAmount = parseFloat(payNowMatch[2].replace(/,/g, ''));
+                payNowSnippet = payNowMatch[0];
+              } else if (totalMatch) {
+                payNowCurrencySymbol = totalMatch[1];
+                payNowAmount = parseFloat(totalMatch[2].replace(/,/g, ''));
+                payNowSnippet = totalMatch[0];
+              } else if (dueTodayMatch) {
+                payNowCurrencySymbol = dueTodayMatch[1];
+                payNowAmount = parseFloat(dueTodayMatch[2].replace(/,/g, ''));
+                payNowSnippet = dueTodayMatch[0];
+              }
+              
+              let subtotalAmount = null;
+              let subtotalNights = null;
+              let subtotalSnippet = null;
+              let subtotalCurrencySymbol = null;
+              if (subtotalMatch) {
+                // subtotalMatch: [0]=full, [1]=symbol, [2]=amount, [3]=nights
+                subtotalCurrencySymbol = subtotalMatch[1];
+                subtotalAmount = parseFloat(subtotalMatch[2].replace(/,/g, ''));
+                subtotalNights = parseInt(subtotalMatch[3], 10);
+                subtotalSnippet = subtotalMatch[0];
+              }
+              
+              return {
+                payNowAmount,
+                payNowSnippet,
+                payNowCurrencySymbol,
+                subtotalAmount,
+                subtotalNights,
+                subtotalSnippet,
+                subtotalCurrencySymbol,
+                regexCompilationErrors: null,
+              };
+            });
 
            // Debug: return a snippet around "total" or "Pay"
            const totalSnippet = await page.evaluate(() => {
@@ -5130,20 +5155,31 @@ async function runSearchWithStreaming(
         const payNowData = (browserlessResult as any).payNowExtraction as {
           payNowAmount: number | null;
           payNowSnippet: string | null;
+          payNowCurrencySymbol?: string | null;
           subtotalAmount: number | null;
           subtotalNights: number | null;
           subtotalSnippet: string | null;
+          subtotalCurrencySymbol?: string | null;
+          regexCompilationErrors?: string[] | null;
         } | null;
+        
+        const currencyFromSymbol = (symbol?: string | null): string => {
+          if (symbol === '€') return 'EUR';
+          if (symbol === '£') return 'GBP';
+          if (symbol === '$') return 'USD';
+          return 'USD';
+        };
         
         // PRIORITY 1: Use direct text extraction if "Pay $X now" was found
         if (payNowData?.payNowAmount && payNowData.payNowAmount > 0) {
-          console.log(`Browserless: Using direct text extraction "Pay now" total: $${payNowData.payNowAmount}`);
+          const currency = currencyFromSymbol(payNowData.payNowCurrencySymbol ?? '$');
+          console.log(`Browserless: Using direct text extraction total: ${currency} ${payNowData.payNowAmount}`);
           finalBaseline = {
             status: 'total_price_including_taxes_and_fees',
             price: payNowData.payNowAmount,
-            currency: 'USD',
+            currency,
             includes_taxes_fees: true,
-            evidence_snippet: payNowData.payNowSnippet || `Pay $${payNowData.payNowAmount} now`,
+            evidence_snippet: payNowData.payNowSnippet || `Total ${currency} ${payNowData.payNowAmount}`,
             subtotal_nights_only: payNowData.subtotalAmount || undefined,
             subtotal_nights_count: payNowData.subtotalNights || undefined,
             debug: {
@@ -5156,9 +5192,9 @@ async function runSearchWithStreaming(
             accepted: true,
             status: 'total_price_including_taxes_and_fees',
             includesTaxesFees: true,
-            acceptedVia: 'breakdown_match', // Direct text extraction treated as breakdown match
+            acceptedVia: 'breakdown_match',
             mismatchReason: null,
-            evidenceSnippet: payNowData.payNowSnippet || `Pay $${payNowData.payNowAmount} now`,
+            evidenceSnippet: payNowData.payNowSnippet || `Total ${currency} ${payNowData.payNowAmount}`,
             validatedPrice: payNowData.payNowAmount,
           };
           console.log(`Browserless: Direct text extraction succeeded (treated as breakdown_match)`);
