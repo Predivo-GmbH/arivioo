@@ -71,6 +71,99 @@ export interface FinalizeAndCompleteResult {
   error?: string;
 }
 
+// ============================================
+// PRICE TYPE DETERMINATION
+// ============================================
+
+/**
+ * Determine price_type for a canonical price object.
+ * Must mirror logic in src/lib/canonicalPrice.ts determinePriceType()
+ * 
+ * This is critical for correct categorization:
+ * - 'total_proven' or 'total_derived' = comparable for cheaper/more expensive
+ * - 'unknown', 'subtotal_nights_only', 'nightly_only' = not comparable
+ */
+function determinePriceTypeFromExtraction(extraction: any): string {
+  if (!extraction) return 'unknown';
+  
+  const metadata = extraction.extraction_metadata || {};
+  const platformName = (extraction.platform_name || '').toLowerCase();
+  const isExpedia = platformName.includes('expedia');
+  
+  // 1. Check explicit price_type from extractor first
+  const rawPriceType = extraction.price_type || metadata?.price_type || '';
+  const normalizedRawType = String(rawPriceType).toLowerCase();
+  
+  if (normalizedRawType.includes('total') && (normalizedRawType.includes('proven') || normalizedRawType.includes('verified'))) {
+    return 'total_proven';
+  }
+  if (normalizedRawType.includes('total') && normalizedRawType.includes('derived')) {
+    return 'total_derived';
+  }
+  if (normalizedRawType.includes('subtotal') || normalizedRawType.includes('nights_only')) {
+    return 'subtotal_nights_only';
+  }
+  if (normalizedRawType.includes('nightly') || normalizedRawType.includes('per_night')) {
+    return 'nightly_only';
+  }
+  
+  // 2. EXPEDIA-SPECIFIC: Check for verification: "VERIFIED" signal from golden path
+  if (isExpedia) {
+    const verification = metadata.verification || metadata.structuralProof?.verification || '';
+    const semantic = metadata.semantic || '';
+    
+    if (
+      typeof verification === 'string' &&
+      verification.toUpperCase() === 'VERIFIED' &&
+      extraction.includes_taxes_fees === true &&
+      extraction.dates_validated === true
+    ) {
+      return 'total_proven';
+    }
+    
+    // Also accept semantic: "pass" with taxes/fees for Expedia
+    if (
+      typeof semantic === 'string' &&
+      semantic.toLowerCase() === 'pass' &&
+      extraction.includes_taxes_fees === true &&
+      extraction.dates_validated === true &&
+      extraction.extraction_status === 'success'
+    ) {
+      return 'total_proven';
+    }
+  }
+  
+  // 3. Check structural proof from metadata
+  const structuralProof = metadata.structuralProof || metadata.structural_proof || {};
+  const offersPage = metadata.offersPage || {};
+  
+  const hasStructuralProof = 
+    (metadata.breakdown_found === true && metadata.total_label_found === true && metadata.extracted_from_breakdown_total === true) ||
+    (structuralProof.breakdown_found === true && 
+     (structuralProof.total_label_found === true || structuralProof.hasTotalWithTaxes === true) &&
+     (structuralProof.extracted_from_breakdown_total === true || structuralProof.extracted_from_target_card === true)) ||
+    (offersPage.hasOfferCards === true && offersPage.hasTotalWithTaxes === true && offersPage.datesRenderedCorrectly === true);
+  
+  if (hasStructuralProof && extraction.includes_taxes_fees === true && extraction.dates_validated === true) {
+    return 'total_proven';
+  }
+  
+  // 4. Check if taxes/fees are included with successful extraction → total_derived
+  if (extraction.includes_taxes_fees === true && extraction.dates_validated === true) {
+    const successStatuses = ['success', 'price_extracted', 'completed'];
+    if (extraction.extraction_status && successStatuses.includes(extraction.extraction_status)) {
+      return 'total_derived';
+    }
+  }
+  
+  // 5. If taxes/fees explicitly not included
+  if (extraction.includes_taxes_fees === false) {
+    return 'subtotal_nights_only';
+  }
+  
+  return 'unknown';
+}
+
 export interface FinalizeAndCompleteParams {
   supabase: any;
   searchId: string;
@@ -329,19 +422,40 @@ export async function finalizeAndCompleteSearch(
           effectivePrice = extraction.extracted_price;
         }
 
-        // Build canonical price object
+        // Build canonical price object with PROPER price_type determination
         let canonicalPrice = null;
         if (extraction?.extraction_metadata || extraction?.extracted_price) {
-          const metadata = extraction.extraction_metadata as Record<string, any> || {};
+          // Use the determinePriceTypeFromExtraction helper to properly classify
+          const derivedPriceType = determinePriceTypeFromExtraction(extraction);
+          const isComparable = (derivedPriceType === 'total_proven' || derivedPriceType === 'total_derived') &&
+                               extraction.includes_taxes_fees === true &&
+                               extraction.dates_validated === true;
+          
+          // Build comparability_failures array for frontend categorization
+          const failures: string[] = [];
+          if (!isComparable) {
+            if (derivedPriceType !== 'total_proven' && derivedPriceType !== 'total_derived') {
+              failures.push('price_type_not_total');
+            }
+            if (!extraction.includes_taxes_fees) {
+              failures.push('taxes_fees_not_included');
+            }
+            if (!extraction.dates_validated) {
+              failures.push('dates_not_validated');
+            }
+          }
+          
           canonicalPrice = {
             total_price: extraction.extracted_price || null,
             currency: extraction.currency || 'USD',
-            price_type: extraction.price_type || metadata?.price_type || 'unknown',
+            price_type: derivedPriceType,
             nights_count: nights,
             check_in_date: checkIn,
             check_out_date: checkOut,
             includes_taxes_fees: extraction.includes_taxes_fees || false,
             dates_validated: extraction.dates_validated || false,
+            is_comparable: isComparable,
+            comparability_failures: failures,
           };
         }
 
@@ -407,18 +521,38 @@ export async function finalizeAndCompleteSearch(
           effectivePrice = extraction.extracted_price;
         }
 
+        // Build canonical price object with PROPER price_type determination (legacy path)
         let canonicalPrice = null;
         if (extraction?.extraction_metadata || extraction?.extracted_price) {
-          const metadata = extraction.extraction_metadata as Record<string, any> || {};
+          const derivedPriceType = determinePriceTypeFromExtraction(extraction);
+          const isComparable = (derivedPriceType === 'total_proven' || derivedPriceType === 'total_derived') &&
+                               extraction.includes_taxes_fees === true &&
+                               extraction.dates_validated === true;
+          
+          const failures: string[] = [];
+          if (!isComparable) {
+            if (derivedPriceType !== 'total_proven' && derivedPriceType !== 'total_derived') {
+              failures.push('price_type_not_total');
+            }
+            if (!extraction.includes_taxes_fees) {
+              failures.push('taxes_fees_not_included');
+            }
+            if (!extraction.dates_validated) {
+              failures.push('dates_not_validated');
+            }
+          }
+          
           canonicalPrice = {
             total_price: extraction.extracted_price || null,
             currency: extraction.currency || 'USD',
-            price_type: extraction.price_type || metadata?.price_type || 'unknown',
+            price_type: derivedPriceType,
             nights_count: nights,
             check_in_date: checkIn,
             check_out_date: checkOut,
             includes_taxes_fees: extraction.includes_taxes_fees || false,
             dates_validated: extraction.dates_validated || false,
+            is_comparable: isComparable,
+            comparability_failures: failures,
           };
         }
 
