@@ -227,6 +227,9 @@ export function useEnrichedSearchResults() {
         }
         effectivePrice = null; // Never show price for Tier C
       } else if (extraction?.extracted_price && extraction.extracted_price > 0) {
+        // CRITICAL: Always prefer extracted_price over result.price from search_results
+        // For Expedia specifically, the search_results.price may contain a stale subtotal
+        // while the extraction has the correct proven total from the golden path
         effectivePrice = extraction.extracted_price;
       }
 
