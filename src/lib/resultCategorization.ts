@@ -263,7 +263,9 @@ export function categorizeResult(
       // One or both prices are not comparable types
       const reasons: string[] = [];
       if (!isCanonicalComparable) {
-        reasons.push(...canonicalPrice.comparability_failures);
+        // Defensive: comparability_failures may be undefined in legacy/snapshot data
+        const failures = canonicalPrice.comparability_failures ?? ['no_canonical_price'];
+        reasons.push(...failures);
       }
       if (!isBaselineComparable) {
         reasons.push('baseline_not_comparable');
