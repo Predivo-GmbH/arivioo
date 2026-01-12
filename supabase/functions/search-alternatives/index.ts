@@ -1,7 +1,7 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { buildAndPersistFinalSnapshot } from "../_shared/buildFinalSnapshot.ts";
+import { finalizeAndCompleteSearch } from "../_shared/buildFinalSnapshot.ts";
 
 // ============================================================================
 // SECURE CORS - Domain allowlist for production security
@@ -7958,27 +7958,35 @@ serve(async (req) => {
         }
       }
 
-      // Update search to completed status first
-      await supabase.from("searches").update({
-        status: "completed",
-        airbnb_title: airbnbTitle,
-        airbnb_price: airbnbPrice,
-        airbnb_image_url: airbnbImageUrl,
-        airbnb_images: airbnbImages,
-        check_in_date: checkIn,
-        check_out_date: checkOut,
-        nights_count: nights,
-      }).eq("id", searchId);
+      // ATOMIC FINALIZATION: Set snapshot + finalised_at + status='completed' in ONE call
+      // This ensures the invariant: status='completed' ONLY when snapshot exists
+      const finalizationResult = await finalizeAndCompleteSearch({
+        supabase,
+        searchId,
+        airbnbTitle,
+        airbnbPrice,
+        airbnbCurrency: search.airbnb_currency || 'USD',
+        airbnbImageUrl,
+        airbnbImages,
+        checkIn,
+        checkOut,
+        nights,
+      });
 
-      // BUILD AND PERSIST FINAL SNAPSHOT
-      // This is the authoritative finalization point - called by backend, not frontend
-      try {
-        await buildAndPersistFinalSnapshot(supabase, searchId);
-        console.log(`[search-alternatives] Finalized snapshot for search ${searchId}`);
-      } catch (finalizeError) {
-        console.error(`[search-alternatives] Failed to finalize snapshot:`, finalizeError);
-        // Continue anyway - frontend can fall back to live fetch
+      if (!finalizationResult.success && !finalizationResult.alreadyFinalized) {
+        console.error(`[search-alternatives] Finalization failed: ${finalizationResult.error}`);
+        // Status is already set to 'finalization_failed' by the helper
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: `Finalization failed: ${finalizationResult.error}`,
+            finalization_failed: true,
+          }),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
       }
+
+      console.log(`[search-alternatives] Finalized search ${searchId} with ${finalizationResult.resultCount} results`);
 
       return new Response(
         JSON.stringify({
@@ -8306,29 +8314,35 @@ serve(async (req) => {
       console.log("No results with valid prices to store");
     }
 
-    // Update search to completed status first
-    await supabase.from("searches").update({ 
-      status: "completed",
-      airbnb_title: airbnbTitle,
-      airbnb_price: airbnbPrice,
-      airbnb_image_url: airbnbImageUrl,
-      airbnb_images: airbnbImages,
-      check_in_date: checkIn,
-      check_out_date: checkOut,
-      nights_count: nights,
-    }).eq("id", searchId);
+    // ATOMIC FINALIZATION: Set snapshot + finalised_at + status='completed' in ONE call
+    // This ensures the invariant: status='completed' ONLY when snapshot exists
+    const finalizationResult = await finalizeAndCompleteSearch({
+      supabase,
+      searchId,
+      airbnbTitle,
+      airbnbPrice,
+      airbnbCurrency: search.airbnb_currency || 'USD',
+      airbnbImageUrl,
+      airbnbImages,
+      checkIn,
+      checkOut,
+      nights,
+    });
 
-    // BUILD AND PERSIST FINAL SNAPSHOT
-    // This is the authoritative finalization point - called by backend, not frontend
-    try {
-      await buildAndPersistFinalSnapshot(supabase, searchId);
-      console.log(`[search-alternatives] Finalized snapshot for search ${searchId}`);
-    } catch (finalizeError) {
-      console.error(`[search-alternatives] Failed to finalize snapshot:`, finalizeError);
-      // Continue anyway - frontend can fall back to live fetch
+    if (!finalizationResult.success && !finalizationResult.alreadyFinalized) {
+      console.error(`[search-alternatives] Finalization failed: ${finalizationResult.error}`);
+      // Status is already set to 'finalization_failed' by the helper
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: `Finalization failed: ${finalizationResult.error}`,
+          finalization_failed: true,
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
-    console.log("Search completed with", resultsWithSavings.length, "results");
+    console.log(`[search-alternatives] Finalized search ${searchId} with ${finalizationResult.resultCount} results`);
 
     return new Response(
       JSON.stringify({ 

@@ -2,14 +2,38 @@
 
 ## Overview
 
-The search finalization architecture ensures deterministic results by having the **backend pipeline** (not frontend) create and persist the final results snapshot.
+The search finalization architecture ensures deterministic results by having the **backend pipeline** (not frontend) create and persist the final results snapshot **atomically** with setting status='completed'.
 
-## Key Invariants
+## Critical Invariant
 
-1. **`finalised_at` is set ONLY by backend pipeline** - specifically in `search-alternatives` at the moment `status: "completed"` is set
-2. **`final_results_snapshot` is immutable** - once set, it never changes
-3. **Frontend only reads** - it never calls any endpoint to create/modify the snapshot
-4. **Refresh is deterministic** - same snapshot = same UI every time
+**STATUS = 'completed' MUST ONLY BE SET WHEN:**
+1. `final_results_snapshot` is persisted (non-null)
+2. `finalised_at` is set (non-null)
+
+This is enforced by the `finalizeAndCompleteSearch()` helper which performs an **atomic update** setting all three values in a single database call.
+
+## Failure Handling
+
+If snapshot persistence fails:
+- `status` is set to `'finalization_failed'` (NOT 'completed')
+- `api_error` contains the error message
+- `api_error_code` is set to `'finalization_failed'`
+- Frontend shows an error state with the Activity Log
+
+## Terminal Statuses
+
+```typescript
+const TERMINAL_STATUSES = [
+  'completed',             // Success - snapshot exists
+  'done',                  // Alias for completed
+  'error',                 // Fatal pipeline error
+  'failed',                // Fatal pipeline error (legacy)
+  'cancelled',             // User cancelled the search
+  'price_unavailable',     // No prices could be extracted
+  'dates_unavailable',     // Listing not available for dates
+  'finalization_failed',   // Snapshot persistence failed
+];
+```
 
 ## Architecture
 
@@ -23,11 +47,19 @@ The search finalization architecture ensures deterministic results by having the
 │       ├─► Find alternatives                                     │
 │       ├─► Extract prices                                        │
 │       │                                                          │
-│       └─► SET status = "completed"                              │
-│           └─► buildAndPersistFinalSnapshot()                    │
+│       └─► finalizeAndCompleteSearch()  ◄── SINGLE ATOMIC CALL   │
+│               │                                                  │
 │               ├─► Fetch search_results + price_extractions      │
 │               ├─► Build denormalized snapshot                   │
-│               └─► SET final_results_snapshot + finalised_at     │
+│               │                                                  │
+│               └─► ATOMIC UPDATE:                                │
+│                   - status = 'completed'                        │
+│                   - final_results_snapshot = <snapshot>         │
+│                   - finalised_at = now()                        │
+│                                                                  │
+│               IF UPDATE FAILS:                                   │
+│                   - status = 'finalization_failed'              │
+│                   - api_error_code = 'finalization_failed'      │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -40,6 +72,9 @@ The search finalization architecture ensures deterministic results by having the
 │       ├─► While finalised_at is NULL:                           │
 │       │       Show "Finding better deals" + Activity Log        │
 │       │                                                          │
+│       ├─► If status = 'finalization_failed':                    │
+│       │       Show error state with api_error message           │
+│       │                                                          │
 │       └─► When finalised_at is SET:                             │
 │               ├─► Fetch final_results_snapshot from DB          │
 │               ├─► Render results (single-shot, no mutations)    │
@@ -50,29 +85,25 @@ The search finalization architecture ensures deterministic results by having the
 
 ## Files
 
-- `supabase/functions/_shared/buildFinalSnapshot.ts` - Shared helper that builds and persists the snapshot
-- `supabase/functions/search-alternatives/index.ts` - Calls `buildAndPersistFinalSnapshot()` at completion points
-- `supabase/functions/finalize-search-snapshot/index.ts` - DEPRECATED read-only endpoint (for backwards compat)
+- `supabase/functions/_shared/buildFinalSnapshot.ts` - `finalizeAndCompleteSearch()` atomic helper
+- `supabase/functions/search-alternatives/index.ts` - Calls atomic helper at completion points
+- `supabase/functions/finalize-search-snapshot/index.ts` - DEPRECATED read-only endpoint
 - `src/pages/SearchResults.tsx` - Frontend reads `final_results_snapshot` directly from DB
-
-## Terminal Statuses
-
-These statuses indicate the search is complete:
-- `completed`
-- `error`
-- `cancelled`
-- `price_unavailable`
-- `dates_unavailable`
+- `src/lib/pipelineStages.ts` - Defines `TERMINAL_STATUSES` including `finalization_failed`
 
 ## Database Columns
 
 ```sql
-searches.finalised_at      -- TIMESTAMP: When the snapshot was created (NULL = still running)
-searches.final_results_snapshot -- JSONB: The immutable snapshot used for UI rendering
+searches.status                 -- Current status (completed/finalization_failed/etc)
+searches.finalised_at           -- TIMESTAMP: When snapshot was created (NULL = running)
+searches.final_results_snapshot -- JSONB: Immutable snapshot for UI rendering
+searches.api_error              -- Error message if finalization failed
+searches.api_error_code         -- 'finalization_failed' if snapshot persistence failed
 ```
 
 ## Testing
 
-1. Start a search, close browser mid-run, reopen later → results still finalize correctly
+1. Start a search, close browser mid-run, reopen later → results finalize correctly
 2. Refresh after completion → identical output every time
-3. No "Loading final results..." stuck state - bounded retry with timeout
+3. No "Search not yet finalized" error during normal flow
+4. If finalization fails → user sees clear error with Activity Log details

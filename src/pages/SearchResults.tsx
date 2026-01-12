@@ -484,6 +484,18 @@ export default function SearchResults() {
         return;
       }
 
+      // HANDLE finalization_failed - search completed but snapshot persistence failed
+      // Show error state with option to retry
+      if (searchRecord.status === 'finalization_failed') {
+        console.log('[TerminalFreeze] finalization_failed on load, showing error');
+        isTerminalFrozenRef.current = true;
+        setIsTerminalFrozen(true);
+        setSearchPhase("done");
+        setLoading(false);
+        setHydrationError(`Finalization failed: ${searchRecord.api_error || 'Unknown error'}. Please try refreshing.`);
+        return;
+      }
+
       // If search needs user confirmation, show the modal
       if (searchRecord.status === "needs_user_confirmation") {
         // Parse subtotal info from api_error JSON
@@ -502,6 +514,10 @@ export default function SearchResults() {
         setShowConfirmationModal(true);
         return;
       }
+
+      // NEW GATE: Only hydrate results if finalised_at exists
+      // For terminal statuses that should have a snapshot (completed), verify finalised_at
+      // If status is 'completed' but no finalised_at, redirect to dashboard (shouldn't happen with new invariant)
 
       // If search is already terminal, do a deterministic single-shot hydration.
       // IMPORTANT: Do NOT render any intermediate snapshot that could later flip buckets.
@@ -880,7 +896,7 @@ export default function SearchResults() {
                       setSubtotalInfo(null);
                       setShowConfirmationModal(false);
 
-                      // Refresh search and results from DB
+                      // Refresh search from DB to get finalized data
                       const { data: updatedSearch } = await supabase
                         .from("searches")
                         .select("*")
@@ -901,17 +917,34 @@ export default function SearchResults() {
                           .eq("id", searchId);
                       }
 
-                      // Add finalization activity logs
-                      addActivityItem("Finalizing results", "Loading price extraction data...");
+                      addActivityItem("Finalizing results", "Loading final snapshot...");
                       
-                      const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:complete');
+                      // FETCH THE SNAPSHOT - not enriched results
+                      // Backend should have set finalised_at and final_results_snapshot atomically
+                      const { data: snapshotData } = await supabase
+                        .from('searches')
+                        .select('finalised_at, final_results_snapshot')
+                        .eq('id', searchId)
+                        .single();
                       
-                      const verifiedCount = (enrichedResults as any[]).filter((r: any) => r.priceVerificationStatus === 'verified').length;
-                      const totalMatches = (enrichedResults as any[]).length;
-                      addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
-
-                      setSearch(updatedSearch as SearchData);
-                      setResults(enrichedResults as unknown as SearchResult[]);
+                      const finalisedAt = (snapshotData as any)?.finalised_at;
+                      const snapshot = (snapshotData as any)?.final_results_snapshot;
+                      
+                      if (finalisedAt && snapshot && snapshot.results) {
+                        console.log(`[SSEComplete] Using persisted snapshot with ${snapshot.results.length} results`);
+                        addActivityItem("Search complete", `Found ${snapshot.results.length} alternatives`);
+                        setSearch(updatedSearch as SearchData);
+                        setResults(snapshot.results as unknown as SearchResult[]);
+                        setIsFinalized(true);
+                      } else {
+                        // Fallback: snapshot not found, use enriched results
+                        console.warn('[SSEComplete] No snapshot found, falling back to enriched results');
+                        addActivityItem("Computing savings", "Analyzing alternatives...");
+                        const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:complete');
+                        setSearch(updatedSearch as SearchData);
+                        setResults(enrichedResults as unknown as SearchResult[]);
+                      }
+                      
                       setSearchPhase("done");
                       setLoading(false);
                     } else if (eventType === "error") {
