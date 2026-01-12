@@ -302,6 +302,9 @@ export default function SearchResults() {
   const [terminalHydrating, setTerminalHydrating] = useState(false);
   const [hydrationRetryCount, setHydrationRetryCount] = useState(0);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
+  
+  // Finalization gate progress tracking
+  const [finalizationProgress, setFinalizationProgress] = useState<{ terminal: number; total: number } | null>(null);
   const [searchPhase, setSearchPhase] = useState<'thinking' | 'animating' | 'done'>('thinking');
   const [currentStep, setCurrentStep] = useState(-1); // -1 = thinking phase
   const [stepProgress, setStepProgress] = useState(0);
@@ -1586,7 +1589,48 @@ export default function SearchResults() {
     return () => window.clearInterval(pollInterval);
   }, [loading, searchId, extractingPrices, isTerminalFrozen]);
 
-  // Fetch confirmed Airbnb total if exists
+  // Poll finalization progress during terminal hydration
+  useEffect(() => {
+    if (!searchId || !terminalHydrating) {
+      setFinalizationProgress(null);
+      return;
+    }
+
+    let cancelled = false;
+    
+    const TERMINAL_STATUSES = ['success', 'failed', 'timeout', 'render_failed', 'dates_unavailable', 'sold_out', 'blocked', 'error', 'captcha', 'bot_detected', 'rate_limited'];
+
+    const fetchProgress = async () => {
+      try {
+        // Get total platforms from search_platforms
+        const { data: platforms, error: platformError } = await supabase
+          .from('search_platforms')
+          .select('id, extraction_status_terminal')
+          .eq('search_id', searchId);
+
+        if (platformError || !platforms) return;
+
+        const total = platforms.length;
+        const terminal = platforms.filter(p => 
+          p.extraction_status_terminal && TERMINAL_STATUSES.includes(p.extraction_status_terminal)
+        ).length;
+
+        if (!cancelled) {
+          setFinalizationProgress({ terminal, total });
+        }
+      } catch (e) {
+        console.error('[FinalizationProgress] Error fetching progress:', e);
+      }
+    };
+
+    fetchProgress();
+    const interval = setInterval(fetchProgress, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [searchId, terminalHydrating]);
   useEffect(() => {
     if (!searchId) return;
     
@@ -2037,8 +2081,29 @@ export default function SearchResults() {
                   <Sparkles className="w-6 h-6 text-primary animate-pulse" />
                 </div>
                 <p className="text-sm text-muted-foreground mb-2">Loading final results…</p>
+                
+                {/* Finalization Gate Progress */}
+                {finalizationProgress && finalizationProgress.total > 0 && (
+                  <div className="mt-4 space-y-2">
+                    <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground/80">
+                      <span className="font-medium">
+                        {finalizationProgress.terminal}/{finalizationProgress.total}
+                      </span>
+                      <span>platforms finalized</span>
+                    </div>
+                    <div className="w-48 mx-auto h-1.5 bg-muted rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-primary/60 rounded-full transition-all duration-500"
+                        style={{ 
+                          width: `${Math.round((finalizationProgress.terminal / finalizationProgress.total) * 100)}%` 
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+                
                 {hydrationRetryCount > 1 && (
-                  <p className="text-xs text-muted-foreground/70">
+                  <p className="text-xs text-muted-foreground/70 mt-3">
                     Attempt {hydrationRetryCount} of 5
                   </p>
                 )}
