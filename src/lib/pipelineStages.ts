@@ -158,12 +158,38 @@ export function getStageIndexFromStatus(status: string | null | undefined): numb
 }
 
 /**
- * Check if a status indicates completion
+ * Terminal search statuses - once a search reaches one of these, results should be frozen.
+ * These represent final states where no further pipeline work will occur.
+ */
+export const TERMINAL_STATUSES = [
+  'completed',           // Success - all platforms processed
+  'done',                // Alias for completed
+  'error',               // Fatal pipeline error
+  'failed',              // Fatal pipeline error (legacy)
+  'cancelled',           // User cancelled the search
+  'price_unavailable',   // No prices could be extracted but search finished
+  'dates_unavailable',   // The listing is not available for the requested dates
+] as const;
+
+export type TerminalStatus = typeof TERMINAL_STATUSES[number];
+
+/**
+ * Check if a status indicates completion (alias for isTerminalStatus)
  */
 export function isCompletedStatus(status: string | null | undefined): boolean {
+  return isTerminalStatus(status);
+}
+
+/**
+ * Check if a status is terminal (search is done, no more updates expected).
+ * Once a search reaches a terminal status:
+ * - Polling should stop
+ * - Results should be frozen
+ * - UI should display the final snapshot
+ */
+export function isTerminalStatus(status: string | null | undefined): boolean {
   if (!status) return false;
-  const completedStatuses = ['completed', 'done', 'error', 'failed', 'cancelled'];
-  return completedStatuses.includes(status);
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
 /**
