@@ -381,8 +381,12 @@ export default function SearchResults() {
     latestRequestTokenRef.current += 1;
     return latestRequestTokenRef.current;
   };
-  const commitIfFresh = (token: number, commit: () => void) => {
-    if (isTerminalFrozenRef.current) return;
+  /**
+   * Commit a state update only if the request token is still fresh.
+   * The skipFreezeCheck flag allows terminal hydration to commit even after freeze is set.
+   */
+  const commitIfFresh = (token: number, commit: () => void, skipFreezeCheck = false) => {
+    if (!skipFreezeCheck && isTerminalFrozenRef.current) return;
     if (latestRequestTokenRef.current !== token) return;
     commit();
   };
@@ -591,7 +595,7 @@ export default function SearchResults() {
                 setTerminalHydrating(false);
                 setLoading(false);
                 setHydrationError(null);
-              });
+              }, true); // skipFreezeCheck: allow commit during terminal hydration
               success = true;
             } else {
               // Fallback: snapshot exists but no results - fetch enriched results
@@ -609,7 +613,7 @@ export default function SearchResults() {
                 setTerminalHydrating(false);
                 setLoading(false);
                 setHydrationError(null);
-              });
+              }, true); // skipFreezeCheck: allow commit during terminal hydration
               success = true;
             }
           } catch (e) {
