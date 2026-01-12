@@ -6857,10 +6857,15 @@ async function runSearchWithStreaming(
 
   // Step 4: ATOMIC FINALIZATION
   // Use finalizeAndCompleteSearch to ensure invariant: completed = snapshot exists
-  sendProgress(controller, "Finalizing results", "Computing savings and preparing your results");
+  // CRITICAL: finalization must NOT run until every matched platform has a terminal extraction status.
+  sendProgress(controller, "Finalizing results", "Waiting for all platforms to finish pricing");
   sendStatusUpdate(controller, "finalizing");
 
-  const finalizationResult = await finalizeAndCompleteSearch({
+  const FINALIZE_MAX_WAIT_MS = 60_000;
+  const FINALIZE_POLL_MS = 2_000;
+  const finalizeStart = Date.now();
+
+  let finalizationResult = await finalizeAndCompleteSearch({
     supabase,
     searchId,
     airbnbTitle,
@@ -6872,6 +6877,33 @@ async function runSearchWithStreaming(
     checkOut,
     nights,
   });
+
+  while (!finalizationResult.success && !finalizationResult.alreadyFinalized) {
+    const elapsed = Date.now() - finalizeStart;
+    if (elapsed > FINALIZE_MAX_WAIT_MS) break;
+
+    // The shared helper returns "Not ready to finalize" while extractions are still running.
+    if (finalizationResult.error?.includes('Not ready to finalize')) {
+      sendProgress(controller, "Finalizing results", finalizationResult.error);
+      await new Promise((r) => setTimeout(r, FINALIZE_POLL_MS));
+      finalizationResult = await finalizeAndCompleteSearch({
+        supabase,
+        searchId,
+        airbnbTitle,
+        airbnbPrice,
+        airbnbCurrency: search.airbnb_currency || 'USD',
+        airbnbImageUrl: imageUrls[0] || null,
+        airbnbImages: imageUrls.slice(0, 5),
+        checkIn,
+        checkOut,
+        nights,
+      });
+      continue;
+    }
+
+    // Any other error is fatal
+    break;
+  }
 
   if (!finalizationResult.success && !finalizationResult.alreadyFinalized) {
     console.error(`[search-alternatives/SSE] Finalization failed: ${finalizationResult.error}`);
