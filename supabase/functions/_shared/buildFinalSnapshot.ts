@@ -4,7 +4,10 @@
  * Shared helper to build and persist the final results snapshot.
  * Called by backend pipeline at TRUE completion points (never by frontend).
  * 
- * INVARIANT: Once finalised_at is set, the snapshot is immutable.
+ * CRITICAL INVARIANT: 
+ * - status = 'completed' is ONLY set when snapshot persistence succeeds
+ * - If snapshot fails, status = 'finalization_failed' with error details
+ * - Once finalised_at is set, the snapshot is immutable
  */
 
 // Note: We use 'any' for supabase client type to allow flexibility across different edge functions
@@ -53,7 +56,7 @@ export interface FinalSnapshot {
   result_count: number;
 }
 
-export interface BuildSnapshotResult {
+export interface FinalizeAndCompleteResult {
   success: boolean;
   alreadyFinalized: boolean;
   finalisedAt: string | null;
@@ -61,24 +64,40 @@ export interface BuildSnapshotResult {
   error?: string;
 }
 
+export interface FinalizeAndCompleteParams {
+  supabase: any;
+  searchId: string;
+  // Search metadata to persist alongside completion
+  airbnbTitle?: string | null;
+  airbnbPrice?: number | null;
+  airbnbCurrency?: string | null;
+  airbnbImageUrl?: string | null;
+  airbnbImages?: any[];
+  checkIn?: string | null;
+  checkOut?: string | null;
+  nights?: number | null;
+}
+
 /**
- * Build and persist the final results snapshot.
+ * ATOMIC finalize-and-complete helper.
  * 
- * This function:
- * 1. Checks if already finalized (idempotent - returns success if so)
- * 2. Fetches all search_results and price_extractions
- * 3. Builds a denormalized snapshot with all data needed for UI
- * 4. Persists final_results_snapshot and finalised_at atomically
+ * This function ensures the INVARIANT:
+ * - status = 'completed' is ONLY set when snapshot persistence succeeds
+ * - If snapshot fails, status = 'finalization_failed' with error details
  * 
- * @param supabase - Supabase client (with service role for writes)
- * @param searchId - The search ID to finalize
- * @returns Result indicating success/failure
+ * Steps:
+ * 1. Check if already finalized (idempotent)
+ * 2. Fetch search_results and price_extractions
+ * 3. Build denormalized snapshot
+ * 4. ATOMIC UPDATE: Set snapshot + finalised_at + status='completed' in ONE call
+ * 5. If step 4 fails, set status='finalization_failed' + api_error_code
  */
-export async function buildAndPersistFinalSnapshot(
-  supabase: any,
-  searchId: string
-): Promise<BuildSnapshotResult> {
-  console.log(`[buildFinalSnapshot] Building snapshot for search ${searchId}`);
+export async function finalizeAndCompleteSearch(
+  params: FinalizeAndCompleteParams
+): Promise<FinalizeAndCompleteResult> {
+  const { supabase, searchId } = params;
+  
+  console.log(`[finalizeAndComplete] Starting atomic finalization for search ${searchId}`);
   
   try {
     // Step 1: Check if already finalized (idempotent guard)
@@ -89,7 +108,7 @@ export async function buildAndPersistFinalSnapshot(
       .single();
 
     if (searchError || !rawSearchData) {
-      console.error('[buildFinalSnapshot] Search not found:', searchError);
+      console.error('[finalizeAndComplete] Search not found:', searchError);
       return {
         success: false,
         alreadyFinalized: false,
@@ -99,7 +118,6 @@ export async function buildAndPersistFinalSnapshot(
       };
     }
 
-    // Type cast to access columns (Supabase types may not include new columns yet)
     const searchData = rawSearchData as {
       id: string;
       status: string;
@@ -114,14 +132,22 @@ export async function buildAndPersistFinalSnapshot(
 
     // If already finalized, return success (idempotent)
     if (searchData.finalised_at) {
-      console.log(`[buildFinalSnapshot] Search ${searchId} already finalized at ${searchData.finalised_at}`);
+      console.log(`[finalizeAndComplete] Search ${searchId} already finalized at ${searchData.finalised_at}`);
       return {
         success: true,
         alreadyFinalized: true,
         finalisedAt: searchData.finalised_at,
-        resultCount: 0, // Don't re-count
+        resultCount: 0,
       };
     }
+
+    // Use provided metadata or fall back to existing DB values
+    const airbnbPrice = params.airbnbPrice ?? searchData.airbnb_price;
+    const airbnbCurrency = params.airbnbCurrency ?? searchData.airbnb_currency;
+    const airbnbTitle = params.airbnbTitle ?? searchData.airbnb_title;
+    const checkIn = params.checkIn ?? searchData.check_in_date;
+    const checkOut = params.checkOut ?? searchData.check_out_date;
+    const nights = params.nights ?? searchData.nights_count;
 
     // Step 2: Fetch all search results
     const { data: resultsData, error: resultsError } = await supabase
@@ -131,7 +157,8 @@ export async function buildAndPersistFinalSnapshot(
       .order('savings_percentage', { ascending: false, nullsFirst: false });
 
     if (resultsError) {
-      console.error('[buildFinalSnapshot] Failed to fetch results:', resultsError);
+      console.error('[finalizeAndComplete] Failed to fetch results:', resultsError);
+      await markFinalizationFailed(supabase, searchId, `Failed to fetch results: ${resultsError.message}`);
       return {
         success: false,
         alreadyFinalized: false,
@@ -142,10 +169,15 @@ export async function buildAndPersistFinalSnapshot(
     }
 
     // Step 3: Fetch price extractions
-    const { data: extractionsData } = await supabase
+    const { data: extractionsData, error: extractionsError } = await supabase
       .from('price_extractions')
       .select('*')
       .eq('search_id', searchId);
+
+    if (extractionsError) {
+      console.error('[finalizeAndComplete] Failed to fetch extractions:', extractionsError);
+      // Non-fatal - continue without extractions
+    }
 
     // Create extraction lookup maps
     const extractionByResultId = new Map<string, any>();
@@ -157,21 +189,18 @@ export async function buildAndPersistFinalSnapshot(
       extractionByPlatform.set(e.platform_name.toLowerCase(), e);
     });
 
-    // Step 4: Build the final snapshot with all necessary data
+    // Step 4: Build the final snapshot
     const finalResults: FinalResultRow[] = (resultsData || []).map((result: any) => {
-      // Find extraction for this result
       let extraction = extractionByResultId.get(result.id);
       if (!extraction) {
         extraction = extractionByPlatform.get(result.platform_name.toLowerCase());
       }
 
-      // Effective price (prioritize extraction over result.price)
       let effectivePrice = result.price;
       if (extraction?.extracted_price && extraction.extracted_price > 0) {
         effectivePrice = extraction.extracted_price;
       }
 
-      // Build canonical price object if extraction exists
       let canonicalPrice = null;
       if (extraction?.extraction_metadata || extraction?.extracted_price) {
         const metadata = extraction.extraction_metadata as Record<string, any> || {};
@@ -179,9 +208,9 @@ export async function buildAndPersistFinalSnapshot(
           total_price: extraction.extracted_price || null,
           currency: extraction.currency || 'USD',
           price_type: extraction.price_type || metadata?.price_type || 'unknown',
-          nights_count: searchData.nights_count,
-          check_in_date: searchData.check_in_date,
-          check_out_date: searchData.check_out_date,
+          nights_count: nights,
+          check_in_date: checkIn,
+          check_out_date: checkOut,
           includes_taxes_fees: extraction.includes_taxes_fees || false,
           dates_validated: extraction.dates_validated || false,
         };
@@ -204,7 +233,6 @@ export async function buildAndPersistFinalSnapshot(
         price_check_in: result.price_check_in,
         price_check_out: result.price_check_out,
         dates_differ: result.dates_differ,
-        // Extraction data
         extraction_status: extraction?.extraction_status || null,
         extraction_error: extraction?.extraction_error || null,
         canonical_price: canonicalPrice,
@@ -214,50 +242,70 @@ export async function buildAndPersistFinalSnapshot(
       };
     });
 
-    // Step 5: Create the final snapshot
+    const finalisedAt = new Date().toISOString();
     const snapshot: FinalSnapshot = {
       version: 1,
-      generated_at: new Date().toISOString(),
+      generated_at: finalisedAt,
       search_id: searchId,
       airbnb: {
-        price: searchData.airbnb_price,
-        currency: searchData.airbnb_currency,
-        title: searchData.airbnb_title,
+        price: airbnbPrice,
+        currency: airbnbCurrency,
+        title: airbnbTitle,
       },
       dates: {
-        check_in: searchData.check_in_date,
-        check_out: searchData.check_out_date,
-        nights: searchData.nights_count,
+        check_in: checkIn,
+        check_out: checkOut,
+        nights: nights,
       },
       results: finalResults,
       result_count: finalResults.length,
     };
 
-    // Step 6: Persist the snapshot and set finalised_at atomically
-    // Note: Using 'any' cast because Supabase types may not include new columns yet
-    const finalisedAt = new Date().toISOString();
-    const updatePayload = {
+    // Step 5: ATOMIC UPDATE - Set snapshot + finalised_at + status='completed' in ONE call
+    // This ensures the invariant: completed status = snapshot exists
+    const atomicPayload: Record<string, any> = {
+      status: 'completed',
       final_results_snapshot: snapshot,
       finalised_at: finalisedAt,
+      airbnb_title: airbnbTitle,
+      airbnb_price: airbnbPrice,
+      airbnb_currency: airbnbCurrency,
+      check_in_date: checkIn,
+      check_out_date: checkOut,
+      nights_count: nights,
+      updated_at: finalisedAt,
+      // Clear any previous error state
+      api_error: null,
+      api_error_code: null,
     };
+
+    // Add optional fields if provided
+    if (params.airbnbImageUrl !== undefined) {
+      atomicPayload.airbnb_image_url = params.airbnbImageUrl;
+    }
+    if (params.airbnbImages !== undefined) {
+      atomicPayload.airbnb_images = params.airbnbImages;
+    }
+
     const { error: updateError } = await (supabase as any)
       .from('searches')
-      .update(updatePayload)
+      .update(atomicPayload)
       .eq('id', searchId)
-      .is('finalised_at', null); // Only update if not already finalized (race condition guard)
+      .is('finalised_at', null); // Race condition guard
 
     if (updateError) {
-      console.error('[buildFinalSnapshot] Failed to persist snapshot:', updateError);
+      console.error('[finalizeAndComplete] ATOMIC UPDATE FAILED:', updateError);
+      await markFinalizationFailed(supabase, searchId, `Atomic update failed: ${updateError.message}`);
       return {
         success: false,
         alreadyFinalized: false,
         finalisedAt: null,
         resultCount: 0,
-        error: `Failed to persist snapshot: ${updateError.message}`,
+        error: `Atomic update failed: ${updateError.message}`,
       };
     }
 
-    console.log(`[buildFinalSnapshot] Successfully finalized search ${searchId} with ${finalResults.length} results`);
+    console.log(`[finalizeAndComplete] SUCCESS - Search ${searchId} finalized with ${finalResults.length} results`);
 
     return {
       success: true,
@@ -268,7 +316,15 @@ export async function buildAndPersistFinalSnapshot(
 
   } catch (e) {
     const errorMsg = e instanceof Error ? e.message : 'Unknown error';
-    console.error('[buildFinalSnapshot] Exception:', e);
+    console.error('[finalizeAndComplete] EXCEPTION:', e);
+    
+    // Mark as finalization_failed
+    try {
+      await markFinalizationFailed(supabase, searchId, errorMsg);
+    } catch (markError) {
+      console.error('[finalizeAndComplete] Failed to mark finalization_failed:', markError);
+    }
+    
     return {
       success: false,
       alreadyFinalized: false,
@@ -278,3 +334,38 @@ export async function buildAndPersistFinalSnapshot(
     };
   }
 }
+
+/**
+ * Mark a search as finalization_failed with error details.
+ * This is a terminal status - the search will not auto-retry.
+ */
+async function markFinalizationFailed(
+  supabase: any,
+  searchId: string,
+  errorMessage: string
+): Promise<void> {
+  console.log(`[finalizeAndComplete] Marking search ${searchId} as finalization_failed: ${errorMessage}`);
+  
+  const { error } = await (supabase as any)
+    .from('searches')
+    .update({
+      status: 'finalization_failed',
+      api_error: errorMessage,
+      api_error_code: 'finalization_failed',
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', searchId)
+    .is('finalised_at', null); // Only update if not already finalized
+  
+  if (error) {
+    console.error('[finalizeAndComplete] Failed to mark finalization_failed:', error);
+  }
+}
+
+// Legacy export for backwards compatibility (deprecated)
+export const buildAndPersistFinalSnapshot = async (
+  supabase: any,
+  searchId: string
+): Promise<FinalizeAndCompleteResult> => {
+  return finalizeAndCompleteSearch({ supabase, searchId });
+};

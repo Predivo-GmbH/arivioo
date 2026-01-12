@@ -162,13 +162,14 @@ export function getStageIndexFromStatus(status: string | null | undefined): numb
  * These represent final states where no further pipeline work will occur.
  */
 export const TERMINAL_STATUSES = [
-  'completed',           // Success - all platforms processed
-  'done',                // Alias for completed
-  'error',               // Fatal pipeline error
-  'failed',              // Fatal pipeline error (legacy)
-  'cancelled',           // User cancelled the search
-  'price_unavailable',   // No prices could be extracted but search finished
-  'dates_unavailable',   // The listing is not available for the requested dates
+  'completed',             // Success - all platforms processed
+  'done',                  // Alias for completed
+  'error',                 // Fatal pipeline error
+  'failed',                // Fatal pipeline error (legacy)
+  'cancelled',             // User cancelled the search
+  'price_unavailable',     // No prices could be extracted but search finished
+  'dates_unavailable',     // The listing is not available for the requested dates
+  'finalization_failed',   // Snapshot persistence failed (retryable)
 ] as const;
 
 export type TerminalStatus = typeof TERMINAL_STATUSES[number];
