@@ -5787,7 +5787,8 @@ async function runSearchWithStreaming(
     const finalOcrVal = acceptedProviderResult?.ocrValidation;
 
     // Update the database including OCR fields
-    await supabase
+    // CRITICAL: This update MUST persist the airbnb_price - if this fails, savings comparisons break
+    const { error: airbnbUpdateError } = await supabase
       .from("searches")
       .update({
         status: "searching_platforms",
@@ -5809,6 +5810,27 @@ async function runSearchWithStreaming(
         ocr_mismatch_reason: finalOcrVal?.mismatchReason || null,
       })
       .eq("id", searchId);
+    
+    if (airbnbUpdateError) {
+      console.error(`[CRITICAL] Failed to persist airbnb_price for search ${searchId}:`, airbnbUpdateError);
+      // Log to activity
+      const activityLog = search.activity_log || [];
+      activityLog.push({
+        ts: Date.now(),
+        message: "Database update failed",
+        detail: `Failed to save Airbnb price: ${airbnbUpdateError.message}`,
+      });
+      // Retry once
+      const { error: retryError } = await supabase.from("searches").update({
+        status: "searching_platforms",
+        airbnb_price: airbnbPrice,
+        airbnb_currency: airbnbCurrency,
+        activity_log: activityLog,
+      }).eq("id", searchId);
+      if (retryError) {
+        console.error(`[CRITICAL] Retry also failed for search ${searchId}:`, retryError);
+      }
+    }
     
     // Old fallback chain code removed - now using parallel multi-provider extraction above
 
@@ -7098,9 +7120,11 @@ serve(async (req) => {
               const nonTerminalStatuses = ['pending', 'searching', 'searching_platforms', 'comparing_prices', 'extracting_price', 'scraping_airbnb_page'];
               if (finalCheck && nonTerminalStatuses.some(s => finalCheck.status?.startsWith(s) || finalCheck.status === s)) {
                 console.log(`SAFETY NET: Search ${searchId} was stuck at "${finalCheck.status}", marking as completed`);
+                // CRITICAL: Only update status and api_error - do NOT overwrite airbnb_price or other fields
+                // The airbnb_price should already be persisted from earlier in the pipeline
                 await supabase.from("searches").update({ 
                   status: "completed",
-                  api_error: finalCheck.status === 'searching' ? 'Search stream closed before completion' : null,
+                  api_error: 'Search stream closed before completion',
                 }).eq("id", searchId);
               }
             } catch (safetyErr) {
