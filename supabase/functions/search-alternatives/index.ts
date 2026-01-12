@@ -6767,6 +6767,34 @@ async function runSearchWithStreaming(
     } else {
       console.log(`SUCCESS: Inserted ${insertedData?.length || 0} results to search_results table`);
       
+      // ============================================================================
+      // AUTHORITATIVE PLATFORM SET: Insert into search_platforms
+      // This is the canonical set - all matched platforms MUST appear here
+      // The final snapshot is built from this set, ensuring no platforms are dropped
+      // ============================================================================
+      if (insertedData && insertedData.length > 0) {
+        const platformInserts = insertedData.map((r: any) => ({
+          search_id: searchId,
+          platform_name: r.platform_name,
+          listing_url: r.listing_url,
+          listing_title: r.listing_title,
+          image_url: r.image_url,
+          images: r.images || [],
+          match_type: r.match_type,
+          source_airbnb_image: r.source_airbnb_image || null,
+        }));
+        
+        const { error: platformError } = await supabase
+          .from("search_platforms")
+          .insert(platformInserts);
+        
+        if (platformError) {
+          console.error("[search_platforms] Insert failed:", platformError.message);
+        } else {
+          console.log(`[search_platforms] Inserted ${platformInserts.length} platforms to authoritative set`);
+        }
+      }
+      
       // After saving results, trigger deep link generation for price extraction
       // This runs in the background and doesn't block the response
       if (insertedData && insertedData.length > 0) {
@@ -6827,21 +6855,34 @@ async function runSearchWithStreaming(
     }
   }
 
-  // Step 4: Finalize results
+  // Step 4: ATOMIC FINALIZATION
+  // Use finalizeAndCompleteSearch to ensure invariant: completed = snapshot exists
   sendProgress(controller, "Finalizing results", "Computing savings and preparing your results");
   sendStatusUpdate(controller, "finalizing");
 
-  await supabase.from("searches").update({
-    status: "completed",
-    airbnb_title: airbnbTitle,
-    airbnb_price: airbnbPrice,
-    airbnb_image_url: imageUrls[0] || null,
-    airbnb_images: imageUrls.slice(0, 5),
-    check_in_date: checkIn,
-    check_out_date: checkOut,
-    nights_count: nights,
-  }).eq("id", searchId);
+  const finalizationResult = await finalizeAndCompleteSearch({
+    supabase,
+    searchId,
+    airbnbTitle,
+    airbnbPrice,
+    airbnbCurrency: search.airbnb_currency || 'USD',
+    airbnbImageUrl: imageUrls[0] || null,
+    airbnbImages: imageUrls.slice(0, 5),
+    checkIn,
+    checkOut,
+    nights,
+  });
 
+  if (!finalizationResult.success && !finalizationResult.alreadyFinalized) {
+    console.error(`[search-alternatives/SSE] Finalization failed: ${finalizationResult.error}`);
+    sendSSE(controller, "error", { 
+      message: `Finalization failed: ${finalizationResult.error}`,
+      finalization_failed: true,
+    });
+    return;
+  }
+
+  console.log(`[search-alternatives/SSE] Finalized search ${searchId} with ${finalizationResult.resultCount} results`);
   sendProgress(controller, "Search complete", allResultsSorted.length > 0 ? `Found ${allResultsSorted.length} alternatives (${resultsWithPrices.length} with prices)` : "No alternatives found");
   sendSSE(controller, "complete", {
     success: true,
@@ -7919,7 +7960,7 @@ serve(async (req) => {
       const resultsWithValidPrices = alternatives.filter(a => a.price && a.price >= 10);
       
       if (resultsWithValidPrices.length > 0) {
-        await supabase.from("search_results").insert(
+        const { data: insertedResults } = await supabase.from("search_results").insert(
           resultsWithValidPrices.map(r => ({
             search_id: searchId,
             platform_name: r.platform_name,
@@ -7938,7 +7979,31 @@ serve(async (req) => {
             price_check_out: checkOut,
             dates_differ: false,
           }))
-        );
+        ).select();
+        
+        // Insert into AUTHORITATIVE search_platforms set
+        if (insertedResults && insertedResults.length > 0) {
+          const platformInserts = insertedResults.map((r: any) => ({
+            search_id: searchId,
+            platform_name: r.platform_name,
+            listing_url: r.listing_url,
+            listing_title: r.listing_title,
+            image_url: r.image_url,
+            images: r.images || [],
+            match_type: r.match_type,
+            source_airbnb_image: r.source_airbnb_image || null,
+          }));
+          
+          const { error: platformError } = await supabase
+            .from("search_platforms")
+            .insert(platformInserts);
+          
+          if (platformError) {
+            console.error("[search_platforms] Insert failed (no visual matches path):", platformError.message);
+          } else {
+            console.log(`[search_platforms] Inserted ${platformInserts.length} platforms (no visual matches path)`);
+          }
+        }
         
         // Trigger deep link generation for price extraction
         try {
@@ -8270,10 +8335,9 @@ serve(async (req) => {
       return scoreB - scoreA;
     });
 
-    // Only store results that have valid prices (this is already filtered in step 4)
     if (resultsWithSavings.length > 0) {
       console.log(`Storing ${resultsWithSavings.length} results with valid prices`);
-      await supabase.from("search_results").insert(
+      const { data: insertedResults } = await supabase.from("search_results").insert(
         resultsWithSavings.map(r => ({
           search_id: searchId,
           platform_name: r.platform_name,
@@ -8292,7 +8356,31 @@ serve(async (req) => {
           price_check_out: r.price_check_out || checkOut,
           dates_differ: r.dates_differ || false,
         }))
-      );
+      ).select();
+      
+      // Insert into AUTHORITATIVE search_platforms set
+      if (insertedResults && insertedResults.length > 0) {
+        const platformInserts = insertedResults.map((r: any) => ({
+          search_id: searchId,
+          platform_name: r.platform_name,
+          listing_url: r.listing_url,
+          listing_title: r.listing_title,
+          image_url: r.image_url,
+          images: r.images || [],
+          match_type: r.match_type,
+          source_airbnb_image: r.source_airbnb_image || null,
+        }));
+        
+        const { error: platformError } = await supabase
+          .from("search_platforms")
+          .insert(platformInserts);
+        
+        if (platformError) {
+          console.error("[search_platforms] Insert failed (legacy path):", platformError.message);
+        } else {
+          console.log(`[search_platforms] Inserted ${platformInserts.length} platforms (legacy path)`);
+        }
+      }
       
       // Trigger deep link generation for price extraction
       try {
