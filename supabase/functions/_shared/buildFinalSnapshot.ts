@@ -376,7 +376,8 @@ export async function finalizeAndCompleteSearch(
       if (terminal < expected) {
         const msg = `Not ready to finalize: ${terminal}/${expected} platforms terminal`;
         console.log(`[finalizeAndComplete] ${msg}`);
-        await logActivity(supabase, searchId, 'Finalization waiting', msg);
+        // Note: Activity log is intentionally NOT written here to avoid duplicate entries
+        // The calling SSE loop handles progress updates at a higher level
         return {
           success: false,
           alreadyFinalized: false,

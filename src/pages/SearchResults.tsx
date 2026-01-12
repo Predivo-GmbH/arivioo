@@ -2711,7 +2711,7 @@ export default function SearchResults() {
                                               {result.match_type === "visual" && result.confidence_score ? (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
                                                   <Shield className="w-3 h-3" />
-                                                  {Math.round(result.confidence_score * 100)}%
+                                                  {Math.min(100, Math.round(result.confidence_score))}%
                                                 </span>
                                               ) : (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
@@ -2823,7 +2823,7 @@ export default function SearchResults() {
                                               {result.match_type === "visual" && result.confidence_score ? (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
                                                   <Shield className="w-3 h-3" />
-                                                  {Math.round(result.confidence_score * 100)}%
+                                                  {Math.min(100, Math.round(result.confidence_score))}%
                                                 </span>
                                               ) : (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
@@ -2983,7 +2983,7 @@ export default function SearchResults() {
                                               {result.match_type === "visual" && result.confidence_score ? (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
                                                   <Shield className="w-3 h-3" />
-                                                  {Math.round(result.confidence_score * 100)}%
+                                                  {Math.min(100, Math.round(result.confidence_score))}%
                                                 </span>
                                               ) : (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
@@ -3151,12 +3151,12 @@ export default function SearchResults() {
                                   <td className="py-4 px-4 text-center">
                                     {result.confidence_score !== null && result.confidence_score !== undefined ? (
                                       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                                        result.confidence_score >= 0.9 
+                                        result.confidence_score >= 90 
                                           ? 'bg-success/20 text-success' 
                                           : 'bg-primary/20 text-primary'
                                       }`}>
                                         <Shield className="w-3 h-3" />
-                                        {Math.round(result.confidence_score * 100)}%
+                                        {Math.min(100, Math.round(result.confidence_score))}%
                                       </span>
                                     ) : (
                                       <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs font-medium">
@@ -3408,7 +3408,7 @@ export default function SearchResults() {
                                               {result.match_type === "visual" && result.confidence_score ? (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
                                                   <Shield className="w-3 h-3" />
-                                                  {Math.round(result.confidence_score * 100)}%
+                                                  {Math.min(100, Math.round(result.confidence_score))}%
                                                 </span>
                                               ) : (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
@@ -3512,7 +3512,7 @@ export default function SearchResults() {
                                               {result.match_type === "visual" && result.confidence_score ? (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
                                                   <Shield className="w-3 h-3" />
-                                                  {Math.round(result.confidence_score * 100)}%
+                                                  {Math.min(100, Math.round(result.confidence_score))}%
                                                 </span>
                                               ) : (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
@@ -3607,7 +3607,7 @@ export default function SearchResults() {
                                               {result.match_type === "visual" && result.confidence_score ? (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
                                                   <Shield className="w-3 h-3" />
-                                                  {Math.round(result.confidence_score * 100)}%
+                                                  {Math.min(100, Math.round(result.confidence_score))}%
                                                 </span>
                                               ) : (
                                                 <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
