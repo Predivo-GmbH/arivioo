@@ -225,4 +225,49 @@ This enforcement mechanism remains valid when:
 
 ---
 
+## Adding New System Logic Baselines
+
+To add a new system-level baseline (following the same pattern as this one):
+
+1. **Define the baseline in `SYSTEM_LOGIC_BASELINES` array** (`BaselineInfoPanel.tsx`):
+   ```typescript
+   {
+     id: 'your_baseline_id',
+     name: 'Your Baseline Name',
+     version: '1.0.0',
+     description: 'What this baseline protects.',
+     checkMode: 'your-canonical-check', // Edge function mode
+     invariants: [
+       { id: 'inv_1', label: 'Description shown in UI', description: 'Tooltip text' },
+     ],
+   }
+   ```
+
+2. **Add edge function handler** in `airbnb-selftest/index.ts`:
+   - Create `runYourCanonicalCheck()` function returning same shape as `FinalizationCanonicalCheckResult`
+   - Add handler for `mode === 'your-canonical-check'`
+   - **CRITICAL**: Always return HTTP 200 with structured result (`ok`, `error`, `checks`, `meta` fields)
+   - Failures must be `ok: false` with HTTP 200, NOT HTTP 500
+
+3. **Stable Response Contract** (all baseline checks must follow):
+   ```json
+   {
+     "ok": boolean,
+     "passed": boolean,
+     "status": "baseline_valid" | "baseline_violation" | "error",
+     "checks": [{ "name": string, "expected": string, "actual": string, "passed": boolean }],
+     "error": { "code": string, "message": string, "details": any[] } | null,
+     "meta": { "evaluated_at": string, "duration_ms": number }
+   }
+   ```
+
+4. **Add state + runner in `BaselineInfoPanel.tsx`**:
+   - Add state: `[yourLogic, setYourLogic]` and `[checkingYourLogic, setCheckingYourLogic]`
+   - Add runner function following `runFinalizationLogic` pattern
+   - Include in `runAllChecks`
+
+5. **Map invariants** in the UI render section using `checkNameMap` for reliable matching.
+
+---
+
 *This baseline is the canonical reference point. Future fixes MUST compare against it first.*

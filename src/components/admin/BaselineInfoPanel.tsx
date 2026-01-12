@@ -21,10 +21,25 @@ interface BaselineData {
   notes: string | null;
 }
 
+// Structured error from edge function
+interface StructuredError {
+  code: string;
+  message: string;
+  details?: string[] | null;
+}
+
+// Meta info from edge function
+interface CheckMeta {
+  evaluated_at: string;
+  duration_ms?: number;
+}
+
 // Canonical check result (logic validation - deterministic)
+// Follows the stable response contract - always HTTP 200 with structured result
 interface CanonicalCheckResult {
   mode: string;
   passed: boolean;
+  ok?: boolean;
   checks: Array<{
     name: string;
     expected: string;
@@ -33,6 +48,8 @@ interface CanonicalCheckResult {
   }>;
   status: string;
   timestamp: string;
+  error?: StructuredError | null;
+  meta?: CheckMeta;
 }
 
 // Canary check result (live provider capability check)
@@ -323,12 +340,26 @@ export function BaselineInfoPanel() {
       });
       
       if (signal?.aborted) return;
-      if (invokeError) throw invokeError;
-      setFinalizationLogic(data as CanonicalCheckResult);
+      
+      // Handle structured error in response (HTTP 200 with error field)
+      if (data?.error && !data?.passed) {
+        setFinalizationLogicError(`${data.error.code}: ${data.error.message}`);
+        // Still set the data so we can display partial info (checks, etc.)
+        setFinalizationLogic(data as CanonicalCheckResult);
+      } else if (invokeError) {
+        throw invokeError;
+      } else {
+        setFinalizationLogic(data as CanonicalCheckResult);
+      }
     } catch (err: any) {
       if (signal?.aborted) return;
       console.error('Finalization logic check failed:', err);
-      setFinalizationLogicError(err?.message || 'Failed to run check');
+      // Provide actionable error message instead of generic "non-2xx"
+      const errorMessage = err?.message || 'Failed to run check';
+      const friendlyMessage = errorMessage.includes('non-2xx') 
+        ? 'Baseline check could not run - see logs for details'
+        : errorMessage;
+      setFinalizationLogicError(friendlyMessage);
     } finally {
       if (!signal?.aborted) {
         setCheckingFinalizationLogic(false);
@@ -927,10 +958,26 @@ export function BaselineInfoPanel() {
                         </div>
                       )}
                       
-                      {/* Error display */}
-                      {error && (
-                        <div className="text-[10px] text-destructive bg-destructive/10 rounded px-2 py-1">
-                          ✗ {error}
+                      {/* Error display - shows structured error with actionable info */}
+                      {(error || check?.error) && (
+                        <div className="text-[10px] bg-destructive/10 rounded px-2 py-1.5 space-y-1">
+                          <div className="text-destructive font-medium flex items-center gap-1">
+                            <AlertCircle className="h-3 w-3" />
+                            {check?.error?.code || 'ERROR'}: {check?.error?.message || error || 'Check failed'}
+                          </div>
+                          {check?.error?.details && Array.isArray(check.error.details) && check.error.details.length > 0 && (
+                            <Collapsible>
+                              <CollapsibleTrigger className="text-[9px] text-muted-foreground hover:text-foreground flex items-center gap-1">
+                                <ChevronRight className="h-2 w-2" />
+                                Show details ({check.error.details.length} failed)
+                              </CollapsibleTrigger>
+                              <CollapsibleContent className="text-[9px] text-muted-foreground pt-1 pl-3">
+                                {check.error.details.map((d, i) => (
+                                  <div key={i}>• {d}</div>
+                                ))}
+                              </CollapsibleContent>
+                            </Collapsible>
+                          )}
                         </div>
                       )}
                       
@@ -939,12 +986,22 @@ export function BaselineInfoPanel() {
                         <span className="text-[10px] font-medium text-muted-foreground">Invariant Checks:</span>
                         <ul className="space-y-1">
                           {sysBaseline.invariants.map((inv) => {
-                            // Find matching check result
+                            // Map UI invariant IDs to edge function check names
+                            const checkNameMap: Record<string, string[]> = {
+                              'no_early_render': ['no_results_before_finalization'],
+                              'immutable_snapshot': ['atomic_finalization_invariant'],
+                              'deterministic_refresh': ['atomic_finalization_invariant'],
+                              'all_platforms_included': ['all_platforms_in_snapshot'],
+                              'no_post_mutation': ['terminal_freeze_blocks_mutations'],
+                              'progress_observable': ['terminal_statuses_defined'],
+                            };
+                            
                             const matchingCheck = check?.checks?.find(c => 
-                              c.name.toLowerCase().includes(inv.id.replace(/_/g, ' ').toLowerCase()) ||
-                              inv.label.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+                              checkNameMap[inv.id]?.includes(c.name) ||
+                              c.name.toLowerCase().includes(inv.id.replace(/_/g, '_').toLowerCase())
                             );
-                            const invPassed = matchingCheck?.passed ?? (check?.passed ?? null);
+                            // Only show as passed/failed if we have the check data, otherwise show pending
+                            const invPassed = matchingCheck ? matchingCheck.passed : (check ? check.passed : null);
                             
                             return (
                               <li 
