@@ -6137,6 +6137,141 @@ async function runSearchWithStreaming(
   const bestMatchPerPlatform = new Map<string, typeof alternatives[number]>();
 
   // ============================================================================
+  // PARALLEL PIPELINE OPTIMIZATION
+  // Track platforms already sent to price extraction to avoid redundant work.
+  // Price extraction is triggered IMMEDIATELY when a platform reaches VERIFIED.
+  // ============================================================================
+  const platformsInPriceExtraction = new Set<string>();
+  const PRICE_EXTRACTION_CONCURRENCY = 3; // Max concurrent extractions
+  let activeExtractionCount = 0;
+  const extractionPromises: Promise<void>[] = [];
+
+  /**
+   * Immediately trigger price extraction for a verified platform.
+   * This runs as a background task, allowing discovery to continue.
+   */
+  async function triggerImmediatePriceExtraction(
+    platformMatch: typeof alternatives[number]
+  ): Promise<void> {
+    const platformKey = platformMatch.platform_name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    
+    // Skip if already in extraction
+    if (platformsInPriceExtraction.has(platformKey)) {
+      console.log(`[ImmediateExtraction] Skipping ${platformMatch.platform_name} - already in extraction`);
+      return;
+    }
+    
+    // Wait for concurrency slot
+    while (activeExtractionCount >= PRICE_EXTRACTION_CONCURRENCY) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    
+    platformsInPriceExtraction.add(platformKey);
+    activeExtractionCount++;
+    
+    try {
+      console.log(`[ImmediateExtraction] Starting extraction for ${platformMatch.platform_name}`);
+      
+      // First, persist to search_results and search_platforms so extraction can find it
+      const insertData = {
+        search_id: searchId,
+        platform_name: platformMatch.platform_name,
+        listing_url: platformMatch.listing_url,
+        listing_title: platformMatch.listing_title,
+        price: null,
+        original_price: airbnbPrice,
+        savings_amount: null,
+        savings_percentage: null,
+        confidence_score: platformMatch.confidence_score,
+        image_url: platformMatch.image_url,
+        images: platformMatch.images,
+        match_type: platformMatch.match_type,
+        source_airbnb_image: platformMatch.source_airbnb_image || null,
+        price_check_in: checkIn,
+        price_check_out: checkOut,
+        dates_differ: false,
+      };
+      
+      const { data: insertedData, error: insertError } = await supabase
+        .from("search_results")
+        .upsert(insertData, { onConflict: 'search_id,listing_url' })
+        .select()
+        .single();
+      
+      if (insertError) {
+        console.error(`[ImmediateExtraction] Failed to persist ${platformMatch.platform_name}:`, insertError);
+        return;
+      }
+      
+      // Also insert into search_platforms (authoritative set)
+      await supabase
+        .from("search_platforms")
+        .upsert({
+          search_id: searchId,
+          platform_name: platformMatch.platform_name,
+          listing_url: platformMatch.listing_url,
+          listing_title: platformMatch.listing_title,
+          image_url: platformMatch.image_url,
+          images: platformMatch.images || [],
+          match_type: platformMatch.match_type,
+          source_airbnb_image: platformMatch.source_airbnb_image || null,
+        }, { onConflict: 'search_id,listing_url' });
+      
+      // Create price extraction record
+      const { data: extractionData, error: extractionError } = await supabase
+        .from("price_extractions")
+        .upsert({
+          search_result_id: insertedData.id,
+          search_id: searchId,
+          platform_name: platformMatch.platform_name,
+          deep_link: platformMatch.listing_url, // Will be updated by worker
+          assumed_adults: 2,
+          assumed_children: 0,
+          assumed_rooms: 1,
+          occupancy_assumed: true,
+          extraction_status: 'pending',
+          dates_validated: false,
+        }, { onConflict: 'search_result_id' })
+        .select('id')
+        .single();
+      
+      if (extractionError) {
+        console.error(`[ImmediateExtraction] Failed to create extraction for ${platformMatch.platform_name}:`, extractionError);
+        return;
+      }
+      
+      // Trigger worker immediately
+      const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+      const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+      
+      const workerResponse = await fetch(`${supabaseUrl}/functions/v1/process-platform-extraction`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseServiceKey}`,
+        },
+        body: JSON.stringify({
+          extractionId: extractionData.id,
+          requestedCheckIn: checkIn,
+          requestedCheckOut: checkOut,
+        }),
+      });
+      
+      if (!workerResponse.ok) {
+        const errorText = await workerResponse.text().catch(() => 'Unknown error');
+        console.error(`[ImmediateExtraction] Worker failed for ${platformMatch.platform_name}: ${workerResponse.status} - ${errorText.slice(0, 200)}`);
+      } else {
+        const result = await workerResponse.json();
+        console.log(`[ImmediateExtraction] ${platformMatch.platform_name}: ${result.result?.finalStatus || result.status || 'unknown'}`);
+      }
+    } catch (err) {
+      console.error(`[ImmediateExtraction] Error for ${platformMatch.platform_name}:`, err);
+    } finally {
+      activeExtractionCount--;
+    }
+  }
+
+  // ============================================================================
   // CACHED MATCHES: Loaded ONLY after discovery completes as fallback merge
   // CRITICAL: Do NOT load cached matches here - they are merged AFTER the
   // 5-image discovery loop completes. See "FALLBACK MERGE" section below.
@@ -6341,6 +6476,19 @@ async function runSearchWithStreaming(
               platform: platformName,
               confidence: aiResult.score,
             });
+            
+            // ============================================================================
+            // PARALLEL PIPELINE OPTIMIZATION: Trigger price extraction IMMEDIATELY
+            // Don't wait for all images - start extraction as soon as platform is VERIFIED
+            // ============================================================================
+            if (newConfidence >= 75) { // Above IMAGE_VERIFICATION_THRESHOLD
+              const extractionPromise = triggerImmediatePriceExtraction(newMatch);
+              extractionPromises.push(extractionPromise);
+              sendProgress(controller, `Starting price extraction for ${platformName}`, "Running in parallel with continued discovery", {
+                platform: platformName,
+                parallelExtraction: true,
+              });
+            }
           }
         }
       }
@@ -6553,6 +6701,19 @@ async function runSearchWithStreaming(
   };
 
   const toScrape = prioritizedForPricing.slice(0, 20);
+  
+  // ============================================================================
+  // PARALLEL PIPELINE OPTIMIZATION: Wait for parallel extractions to complete
+  // Platforms already in extraction don't need to be processed again
+  // ============================================================================
+  console.log(`[ParallelPipeline] ${platformsInPriceExtraction.size} platforms already in extraction, ${extractionPromises.length} promises pending`);
+  
+  // Wait briefly for immediate extractions to be dispatched (not complete, just started)
+  await Promise.race([
+    Promise.all(extractionPromises),
+    new Promise((r) => setTimeout(r, 1000)), // Only wait 1s max, don't block discovery
+  ]);
+  
   for (let i = 0; i < toScrape.length; i++) {
     // Check for skip request before each price scrape
     if (await claimSkipNow()) {
@@ -6563,6 +6724,21 @@ async function runSearchWithStreaming(
     await heartbeat();
 
     const alt = toScrape[i];
+    const platformKey = alt.platform_name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    
+    // ============================================================================
+    // PARALLEL PIPELINE OPTIMIZATION: Skip if already being extracted
+    // ============================================================================
+    if (platformsInPriceExtraction.has(platformKey)) {
+      console.log(`[ParallelPipeline] Skipping ${alt.platform_name} - already in parallel extraction`);
+      sendProgress(
+        controller,
+        `Price extraction running for ${alt.platform_name}`,
+        "Already processing in parallel pipeline",
+        { platform: alt.platform_name, parallelExtraction: true, skipped: true }
+      );
+      continue;
+    }
     
     // SHORT-CIRCUIT: Check if platform is Tier C (blocked/unsupported) BEFORE any extraction attempt
     const tierCCheck = isTierCPlatform(alt.listing_url);
@@ -6838,132 +7014,160 @@ async function runSearchWithStreaming(
   const allResultsSorted = [...resultsWithPrices, ...resultsWithoutPrices];
 
   // Save only IMAGE-VERIFIED results to DB
+  // PARALLEL PIPELINE OPTIMIZATION: Use upsert since some may already be persisted via immediate extraction
   console.log(`[ImageGate] Saving ${allResultsSorted.length} image-verified results to DB (${resultsWithPrices.length} with prices, ${resultsWithoutPrices.length} without) for search ${searchId}`);
   if (allResultsSorted.length > 0) {
     // BACKEND GUARD: Tier C platforms must NEVER have prices persisted
     // This is defense-in-depth - even if upstream logic fails, prices cannot leak
-    const insertData = allResultsSorted.map((r) => {
-      const tierCCheck = isTierCPlatform(r.listing_url);
-      const isTierC = tierCCheck.isTierC || (r as any)._tierCSkipped;
-      
-      if (isTierC && r.price) {
-        console.log(`GUARD: Nulling price for Tier C platform ${r.platform_name} (was ${r.price})`);
-      }
-      
-      return {
-        search_id: searchId,
-        platform_name: r.platform_name,
-        listing_url: r.listing_url,
-        listing_title: r.listing_title,
-        // CRITICAL: Null price for Tier C platforms
-        price: isTierC ? null : r.price,
-        original_price: r.original_price,
-        savings_amount: isTierC ? null : r.savings_amount,
-        savings_percentage: isTierC ? null : r.savings_percentage,
-        confidence_score: r.confidence_score,
-        image_url: r.image_url,
-        images: r.images,
-        match_type: r.match_type,
-        source_airbnb_image: r.source_airbnb_image || null,
-        price_check_in: r.price_check_in || checkIn,
-        price_check_out: r.price_check_out || checkOut,
-        dates_differ: r.dates_differ || false,
-      };
-    });
-    console.log(
-      "Insert data:",
-      JSON.stringify(insertData.map((d) => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price, datesDiffer: d.dates_differ })))
-    );
-    const { data: insertedData, error: insertError } = await supabase.from("search_results").insert(insertData).select();
-    if (insertError) {
-      console.error("CRITICAL: Failed to insert search results:", insertError.message, insertError.details);
-    } else {
-      console.log(`SUCCESS: Inserted ${insertedData?.length || 0} results to search_results table`);
-      
-      // ============================================================================
-      // AUTHORITATIVE PLATFORM SET: Insert into search_platforms
-      // This is the canonical set - all matched platforms MUST appear here
-      // The final snapshot is built from this set, ensuring no platforms are dropped
-      // ============================================================================
-      if (insertedData && insertedData.length > 0) {
-        const platformInserts = insertedData.map((r: any) => ({
+    const insertData = allResultsSorted
+      .filter((r) => {
+        // Skip platforms already handled by immediate extraction (they're already persisted)
+        const platformKey = r.platform_name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (platformsInPriceExtraction.has(platformKey)) {
+          console.log(`[ParallelPipeline] Skipping insert for ${r.platform_name} - already persisted via immediate extraction`);
+          return false;
+        }
+        return true;
+      })
+      .map((r) => {
+        const tierCCheck = isTierCPlatform(r.listing_url);
+        const isTierC = tierCCheck.isTierC || (r as any)._tierCSkipped;
+        
+        if (isTierC && r.price) {
+          console.log(`GUARD: Nulling price for Tier C platform ${r.platform_name} (was ${r.price})`);
+        }
+        
+        return {
           search_id: searchId,
           platform_name: r.platform_name,
           listing_url: r.listing_url,
           listing_title: r.listing_title,
+          // CRITICAL: Null price for Tier C platforms
+          price: isTierC ? null : r.price,
+          original_price: r.original_price,
+          savings_amount: isTierC ? null : r.savings_amount,
+          savings_percentage: isTierC ? null : r.savings_percentage,
+          confidence_score: r.confidence_score,
           image_url: r.image_url,
-          images: r.images || [],
+          images: r.images,
           match_type: r.match_type,
           source_airbnb_image: r.source_airbnb_image || null,
-        }));
+          price_check_in: r.price_check_in || checkIn,
+          price_check_out: r.price_check_out || checkOut,
+          dates_differ: r.dates_differ || false,
+        };
+      });
+    
+    if (insertData.length > 0) {
+      console.log(
+        "Insert data:",
+        JSON.stringify(insertData.map((d) => ({ platform: d.platform_name, url: d.listing_url.slice(0, 50), price: d.price, datesDiffer: d.dates_differ })))
+      );
+      const { data: insertedData, error: insertError } = await supabase
+        .from("search_results")
+        .upsert(insertData, { onConflict: 'search_id,listing_url' })
+        .select();
+      if (insertError) {
+        console.error("CRITICAL: Failed to insert search results:", insertError.message, insertError.details);
+      } else {
+        console.log(`SUCCESS: Upserted ${insertedData?.length || 0} results to search_results table`);
         
-        const { error: platformError } = await supabase
-          .from("search_platforms")
-          .insert(platformInserts);
-        
-        if (platformError) {
-          console.error("[search_platforms] Insert failed:", platformError.message);
-        } else {
-          console.log(`[search_platforms] Inserted ${platformInserts.length} platforms to authoritative set`);
+        // ============================================================================
+        // AUTHORITATIVE PLATFORM SET: Insert into search_platforms
+        // This is the canonical set - all matched platforms MUST appear here
+        // The final snapshot is built from this set, ensuring no platforms are dropped
+        // ============================================================================
+        if (insertedData && insertedData.length > 0) {
+          const platformInserts = insertedData.map((r: any) => ({
+            search_id: searchId,
+            platform_name: r.platform_name,
+            listing_url: r.listing_url,
+            listing_title: r.listing_title,
+            image_url: r.image_url,
+            images: r.images || [],
+            match_type: r.match_type,
+            source_airbnb_image: r.source_airbnb_image || null,
+          }));
+          
+          const { error: platformError } = await supabase
+            .from("search_platforms")
+            .upsert(platformInserts, { onConflict: 'search_id,listing_url' });
+          
+          if (platformError) {
+            console.error("[search_platforms] Upsert failed:", platformError.message);
+          } else {
+            console.log(`[search_platforms] Upserted ${platformInserts.length} platforms to authoritative set`);
+          }
         }
       }
+    } else {
+      console.log(`[ParallelPipeline] All ${allResultsSorted.length} platforms already persisted via immediate extraction`);
+    }
+    
+    // ============================================================================
+    // PARALLEL PIPELINE OPTIMIZATION: Trigger deep links for remaining platforms
+    // Platforms already in extraction skip this step (they already have workers running)
+    // ============================================================================
+    const remainingPlatformsCount = allResultsSorted.filter((r) => {
+      const platformKey = r.platform_name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return !platformsInPriceExtraction.has(platformKey);
+    }).length;
+    
+    if (remainingPlatformsCount > 0) {
+      sendProgress(controller, "Generating booking links", `Creating deep links for ${remainingPlatformsCount} remaining platforms`);
       
-      // After saving results, trigger deep link generation for price extraction
-      // This runs in the background and doesn't block the response
-      if (insertedData && insertedData.length > 0) {
-        sendProgress(controller, "Generating booking links", "Creating deep links with dates for each platform");
+      try {
+        // Call generate-deep-links function to create proper booking links
+        const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+        const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
         
-        try {
-          // Call generate-deep-links function to create proper booking links
-          const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-          const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-          
-          const deepLinkResponse = await fetch(`${supabaseUrl}/functions/v1/generate-deep-links`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${supabaseServiceKey}`,
-            },
-            body: JSON.stringify({
-              searchId,
-              checkIn,
-              checkOut,
-              adults: 2, // Default occupancy
-              children: 0,
-              rooms: 1,
-            }),
-          });
-          
-          if (deepLinkResponse.ok) {
-            const deepLinkData = await deepLinkResponse.json();
-            console.log(`Generated ${deepLinkData.deepLinks?.length || 0} deep links`);
-            sendProgress(controller, "Booking links ready", `Created ${deepLinkData.deepLinks?.length || 0} platform-specific links`);
-          } else {
-            console.error("Failed to generate deep links:", await deepLinkResponse.text());
-          }
-        } catch (deepLinkError) {
-          console.error("Error generating deep links:", deepLinkError);
-          // Don't fail the search if deep link generation fails
-        }
+        const deepLinkResponse = await fetch(`${supabaseUrl}/functions/v1/generate-deep-links`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseServiceKey}`,
+          },
+          body: JSON.stringify({
+            searchId,
+            checkIn,
+            checkOut,
+            adults: 2, // Default occupancy
+            children: 0,
+            rooms: 1,
+          }),
+        });
         
-        // ============================================================================
-        // SAVE TO KNOWN MATCHES CACHE: Store matches for future consistency
-        // This ensures subsequent searches for the same property find the same platforms
-        // ============================================================================
-        if (airbnbRoomId && insertedData.length > 0) {
-          const matchesToCache = insertedData
-            .filter((r: any) => r.confidence_score >= 0.85) // Only cache high-confidence matches
-            .map((r: any) => ({
-              platform_name: r.platform_name,
-              listing_url: r.listing_url,
-              listing_title: r.listing_title,
-            }));
-          
-          if (matchesToCache.length > 0) {
-            saveKnownMatches(supabase, airbnbRoomId, matchesToCache);
-            console.log(`[KnownMatches] Scheduled caching of ${matchesToCache.length} matches for room ${airbnbRoomId}`);
-          }
+        if (deepLinkResponse.ok) {
+          const deepLinkData = await deepLinkResponse.json();
+          console.log(`Generated ${deepLinkData.deepLinks?.length || 0} deep links`);
+          sendProgress(controller, "Booking links ready", `Created ${deepLinkData.deepLinks?.length || 0} platform-specific links`);
+        } else {
+          console.error("Failed to generate deep links:", await deepLinkResponse.text());
         }
+      } catch (deepLinkError) {
+        console.error("Error generating deep links:", deepLinkError);
+        // Don't fail the search if deep link generation fails
+      }
+    } else {
+      console.log(`[ParallelPipeline] All platforms already have price extraction running`);
+    }
+    
+    // ============================================================================
+    // SAVE TO KNOWN MATCHES CACHE: Store matches for future consistency
+    // This ensures subsequent searches for the same property find the same platforms
+    // ============================================================================
+    if (airbnbRoomId && allResultsSorted.length > 0) {
+      const matchesToCache = allResultsSorted
+        .filter((r: any) => r.confidence_score >= 85) // Only cache high-confidence matches (0-100 scale)
+        .map((r: any) => ({
+          platform_name: r.platform_name,
+          listing_url: r.listing_url,
+          listing_title: r.listing_title,
+        }));
+      
+      if (matchesToCache.length > 0) {
+        saveKnownMatches(supabase, airbnbRoomId, matchesToCache);
+        console.log(`[KnownMatches] Scheduled caching of ${matchesToCache.length} matches for room ${airbnbRoomId}`);
       }
     }
   }
