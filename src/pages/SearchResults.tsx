@@ -9,7 +9,7 @@ import { quickCelebration } from "@/lib/confetti";
 import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
 import { PipelineProgress, type ActivityItem } from "@/components/PipelineProgress";
 import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS, type EnrichedSearchResult } from "@/hooks/useEnrichedSearchResults";
-import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/lib/pipelineStages";
+import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus, isTerminalStatus } from "@/lib/pipelineStages";
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
@@ -362,6 +362,11 @@ export default function SearchResults() {
   const heartbeatIntervalRef = useRef<number | null>(null);
   const highestStageIndexRef = useRef(-1); // Ref for use in SSE handler
   const activityFeedRef = useRef<Array<{ ts: number; message: string; detail?: string; id: string }>>([]); // Ref for persistence
+  
+  // TERMINAL STATE FREEZE: Once search reaches a terminal status, results are frozen
+  // No more polling, no more live mutations. This ensures deterministic display.
+  const isTerminalFrozenRef = useRef(false); // Ref for synchronous checks in callbacks
+  const [isTerminalFrozen, setIsTerminalFrozen] = useState(false);
 
   // Helper function to add activity items
   const addActivityItem = (message: string, detail?: string) => {
@@ -438,7 +443,11 @@ export default function SearchResults() {
       }
 
       // Terminal UX: dates unavailable
+      // TERMINAL FREEZE: dates_unavailable is terminal
       if (resolvedErrorCode === 'dates_unavailable') {
+        console.log('[TerminalFreeze] dates_unavailable on load, freezing');
+        isTerminalFrozenRef.current = true;
+        setIsTerminalFrozen(true);
         setSearchPhase("done");
         setLoading(false);
         setShowConfirmationModal(false);
@@ -446,7 +455,11 @@ export default function SearchResults() {
       }
 
       // If the search has already failed, show the error state immediately.
+      // TERMINAL FREEZE: error is terminal
       if (searchRecord.status === 'error') {
+        console.log('[TerminalFreeze] error status on load, freezing');
+        isTerminalFrozenRef.current = true;
+        setIsTerminalFrozen(true);
         setSearchPhase("done");
         setLoading(false);
         return;
@@ -472,7 +485,12 @@ export default function SearchResults() {
       }
 
       // If search is already completed, fetch results (never block UI on enrichment failures)
+      // TERMINAL FREEZE: Immediately freeze since search is already terminal
       if (searchRecord.status === "completed") {
+        console.log('[TerminalFreeze] Search already completed on load, freezing immediately');
+        isTerminalFrozenRef.current = true;
+        setIsTerminalFrozen(true);
+        
         try {
           const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:initial');
           setResults(enrichedResults as unknown as SearchResult[]);
@@ -704,6 +722,11 @@ export default function SearchResults() {
                       setShowConfirmationModal(true);
                       // Continue to complete event which will set the status
                     } else if (eventType === "complete") {
+                      // TERMINAL FREEZE: SSE complete means search is done
+                      console.log('[TerminalFreeze] SSE complete event received, freezing');
+                      isTerminalFrozenRef.current = true;
+                      setIsTerminalFrozen(true);
+                      
                       searchComplete = true;
                       actualDurationRef.current = Date.now() - startedAt;
 
@@ -849,12 +872,17 @@ export default function SearchResults() {
                return;
              }
 
-             // If the backend is still running, keep the user in the loading state
-             if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
-               setSearch(updatedSearch as SearchData);
-               setSearchPhase("thinking");
-               return;
-             }
+              // If the backend is still running, keep the user in the loading state
+              if (updatedSearch && updatedSearch.status !== "completed" && updatedSearch.status !== "price_unavailable") {
+                setSearch(updatedSearch as SearchData);
+                setSearchPhase("thinking");
+                return;
+              }
+              
+              // TERMINAL FREEZE: Stream ended and status is terminal
+              console.log('[TerminalFreeze] Stream ended with terminal status:', updatedSearch?.status);
+              isTerminalFrozenRef.current = true;
+              setIsTerminalFrozen(true);
 
                // Persist activity log for admin diagnostics (stream ended path, use ref)
                const currentFeed = activityFeedRef.current.map(item => ({
@@ -1046,10 +1074,17 @@ export default function SearchResults() {
   };
 
   // Backend heartbeat polling - detect stalls even if SSE stream disconnects
+  // TERMINAL FREEZE: Stop polling once results are frozen
   useEffect(() => {
     if (!loading || searchPhase !== "thinking" || !searchId) return;
+    
+    // Don't start heartbeat if already frozen
+    if (isTerminalFrozenRef.current) return;
 
     const pollHeartbeat = async () => {
+      // Check freeze before polling
+      if (isTerminalFrozenRef.current) return;
+      
       try {
         const { data } = await supabase
           .from("searches")
@@ -1089,7 +1124,12 @@ export default function SearchResults() {
         });
 
         // Handle terminal failure states
+        // TERMINAL FREEZE: error is terminal
         if (data.status === "error") {
+          console.log('[TerminalFreeze] error detected via heartbeat, freezing');
+          isTerminalFrozenRef.current = true;
+          setIsTerminalFrozen(true);
+          
           const errorMessage = data.api_error || "Search failed unexpectedly";
           toast({
             title: "Search Failed",
@@ -1102,7 +1142,12 @@ export default function SearchResults() {
         }
 
         // Handle cancelled status
+        // TERMINAL FREEZE: cancelled is terminal
         if (data.status === "cancelled") {
+          console.log('[TerminalFreeze] cancelled detected via heartbeat, freezing');
+          isTerminalFrozenRef.current = true;
+          setIsTerminalFrozen(true);
+          
           toast({
             title: "Search Cancelled",
             description: "This search was cancelled.",
@@ -1112,7 +1157,12 @@ export default function SearchResults() {
         }
 
         // If search is done, update state
+        // TERMINAL FREEZE: completed/price_unavailable/dates_required are terminal
         if (["completed", "price_unavailable", "dates_required"].includes(data.status)) {
+          console.log('[TerminalFreeze] terminal status detected via heartbeat:', data.status);
+          isTerminalFrozenRef.current = true;
+          setIsTerminalFrozen(true);
+          
           // Add finalization activity logs
           addActivityItem("Finalizing results", "Loading price extraction data...");
           
@@ -1264,12 +1314,33 @@ export default function SearchResults() {
   // to "Finding Better Deals" while background price polling continues.
   const [resultsViewUnlocked, setResultsViewUnlocked] = useState(false);
 
-  // Reset view-unlock when the searchId changes (new run)
+  // Reset view-unlock and terminal freeze when the searchId changes (new run)
   useEffect(() => {
     setResultsViewUnlocked(false);
     setResultsPageRendered(false);
     setHasCelebrated(false);
+    // Reset terminal freeze for new search
+    isTerminalFrozenRef.current = false;
+    setIsTerminalFrozen(false);
   }, [searchId]);
+
+  // TERMINAL STATE FREEZE: Freeze results once search reaches terminal status
+  // This ensures deterministic display regardless of late polling or background updates
+  useEffect(() => {
+    if (!search?.status) return;
+    
+    if (isTerminalStatus(search.status) && !isTerminalFrozenRef.current) {
+      console.log('[TerminalFreeze] Freezing results, status:', search.status);
+      isTerminalFrozenRef.current = true;
+      setIsTerminalFrozen(true);
+      
+      // Stop any remaining polling intervals
+      if (heartbeatIntervalRef.current) {
+        window.clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
+    }
+  }, [search?.status]);
 
   // Detect when results page becomes visible (pipeline hidden)
   useEffect(() => {
@@ -1304,15 +1375,24 @@ export default function SearchResults() {
   }, [resultsPageRendered, hasCelebrated, results]);
 
   // Poll for price extraction status - runs when extractingPrices is true OR after search completes
+  // IMPORTANT: Once terminal freeze is active, stop polling and don't mutate results
   useEffect(() => {
     // Don't poll if we don't have a searchId yet
     if (!searchId) return;
+    
+    // TERMINAL FREEZE: Stop polling once results are frozen
+    if (isTerminalFrozenRef.current) {
+      console.log('[TerminalFreeze] Skipping extraction poll - results frozen');
+      return;
+    }
     
     // Skip initial poll if we're in early loading phase and no extractions started
     // But allow polling once extractingPrices is triggered by SSE
     if (loading && !extractingPrices) return;
     
     const fetchExtractionStatus = async () => {
+      // Double-check terminal freeze before mutating
+      if (isTerminalFrozenRef.current) return;
       const { data } = await supabase
         .from('price_extractions')
         .select('id, search_result_id, platform_name, extraction_status, extracted_price, extraction_error, deep_link')
@@ -1350,18 +1430,21 @@ export default function SearchResults() {
       }
     };
     
-    // Initial fetch
-    fetchExtractionStatus();
+    // Initial fetch (only if not frozen)
+    if (!isTerminalFrozenRef.current) {
+      fetchExtractionStatus();
+    }
     
     // Poll every 3 seconds while extractions are in progress
+    // TERMINAL FREEZE: Stop polling once frozen
     const pollInterval = setInterval(() => {
-      if (extractingPrices) {
+      if (extractingPrices && !isTerminalFrozenRef.current) {
         fetchExtractionStatus();
       }
     }, 3000);
     
     return () => clearInterval(pollInterval);
-  }, [loading, searchId, extractingPrices]);
+  }, [loading, searchId, extractingPrices, isTerminalFrozen]);
 
   // Fetch confirmed Airbnb total if exists
   useEffect(() => {
