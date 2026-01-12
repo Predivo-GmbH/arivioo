@@ -1511,6 +1511,8 @@ export type Database = {
           check_in_date: string | null
           check_out_date: string | null
           created_at: string
+          final_results_snapshot: Json | null
+          finalised_at: string | null
           id: string
           last_progress_at: string | null
           nights_count: number | null
@@ -1539,6 +1541,8 @@ export type Database = {
           check_in_date?: string | null
           check_out_date?: string | null
           created_at?: string
+          final_results_snapshot?: Json | null
+          finalised_at?: string | null
           id?: string
           last_progress_at?: string | null
           nights_count?: number | null
@@ -1567,6 +1571,8 @@ export type Database = {
           check_in_date?: string | null
           check_out_date?: string | null
           created_at?: string
+          final_results_snapshot?: Json | null
+          finalised_at?: string | null
           id?: string
           last_progress_at?: string | null
           nights_count?: number | null

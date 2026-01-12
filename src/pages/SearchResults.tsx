@@ -300,6 +300,8 @@ export default function SearchResults() {
   const [priceExtractions, setPriceExtractions] = useState<PriceExtraction[]>([]);
   const [loading, setLoading] = useState(true);
   const [terminalHydrating, setTerminalHydrating] = useState(false);
+  const [hydrationRetryCount, setHydrationRetryCount] = useState(0);
+  const [hydrationError, setHydrationError] = useState<string | null>(null);
   const [searchPhase, setSearchPhase] = useState<'thinking' | 'animating' | 'done'>('thinking');
   const [currentStep, setCurrentStep] = useState(-1); // -1 = thinking phase
   const [stepProgress, setStepProgress] = useState(0);
@@ -318,6 +320,9 @@ export default function SearchResults() {
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
   const [priceExtractionTotal, setPriceExtractionTotal] = useState(0);
   const [priceExtractionCompleted, setPriceExtractionCompleted] = useState(0);
+  
+  // Track if search is finalized (finalised_at is set in DB)
+  const [isFinalized, setIsFinalized] = useState(false);
   
   const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
     let timeoutId: number | null = null;
@@ -508,6 +513,7 @@ export default function SearchResults() {
         // Freeze immediately to prevent ANY later merges/polls from committing.
         isTerminalFrozenRef.current = true;
         setIsTerminalFrozen(true);
+        setIsFinalized(true);
 
         // Show a lightweight loading state while we fetch the authoritative joined dataset.
         setTerminalHydrating(true);
@@ -515,20 +521,68 @@ export default function SearchResults() {
         setExtractingPrices(false);
         setResults([]);
         setPriceExtractions([]);
+        setHydrationError(null);
 
-        try {
-          const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:terminal_hydrate');
-          commitIfFresh(token, () => {
-            setSearch(searchRecord);
-            setResults(enrichedResults as unknown as SearchResult[]);
-          });
-        } catch (e) {
-          console.error('Failed to fetch enriched results (terminal hydrate):', e);
-        } finally {
-          commitIfFresh(token, () => {
-            setTerminalHydrating(false);
-            setLoading(false);
-          });
+        // BOUNDED RETRY: Fetch with retries and timeout
+        const MAX_RETRIES = 5;
+        const INITIAL_BACKOFF_MS = 1000;
+        const TOTAL_TIMEOUT_MS = 30000;
+        const startTime = Date.now();
+        let attempt = 0;
+        let backoffMs = INITIAL_BACKOFF_MS;
+        let success = false;
+
+        while (attempt < MAX_RETRIES && !success) {
+          if (Date.now() - startTime > TOTAL_TIMEOUT_MS) {
+            console.error('[TerminalHydration] Total timeout exceeded');
+            break;
+          }
+          
+          attempt++;
+          setHydrationRetryCount(attempt);
+          
+          try {
+            console.log(`[TerminalHydration] Attempt ${attempt}/${MAX_RETRIES}`);
+            
+            // First, try to finalize the snapshot if not already done
+            try {
+              await supabase.functions.invoke('finalize-search-snapshot', {
+                body: { searchId },
+              });
+            } catch (finalizeError) {
+              console.warn('[TerminalHydration] Finalization call failed (continuing anyway):', finalizeError);
+            }
+            
+            // Fetch the enriched results
+            const enrichedResults = await withTimeout(
+              fetchEnrichedResults(searchId), 
+              12_000, 
+              'fetchEnrichedResults:terminal_hydrate'
+            );
+            
+            commitIfFresh(token, () => {
+              setSearch(searchRecord);
+              setResults(enrichedResults as unknown as SearchResult[]);
+              setTerminalHydrating(false);
+              setLoading(false);
+              setHydrationError(null);
+            });
+            success = true;
+          } catch (e) {
+            console.error(`[TerminalHydration] Attempt ${attempt} failed:`, e);
+            
+            if (attempt >= MAX_RETRIES) {
+              const errorMsg = e instanceof Error ? e.message : 'Unknown error';
+              setHydrationError(`Failed to load results: ${errorMsg}`);
+              setTerminalHydrating(false);
+              setLoading(false);
+              setSearch(searchRecord);
+            } else {
+              // Wait with backoff before next attempt
+              await new Promise(resolve => setTimeout(resolve, backoffMs));
+              backoffMs = Math.min(backoffMs * 1.5, 8000);
+            }
+          }
         }
 
         return;
@@ -1875,13 +1929,54 @@ export default function SearchResults() {
       </header>
 
       <main className="container px-4 py-8 md:py-12">
-        {/* Terminal single-shot hydration state (prevents any intermediate rendering on refresh) */}
-        {terminalHydrating ? (
+        {/* Hydration error state with retry button (prevents stuck Loading forever) */}
+        {hydrationError ? (
           <div className="max-w-3xl mx-auto">
             <div className="bg-card rounded-2xl shadow-large border border-border overflow-hidden">
               <div className="p-8 text-center">
-                <div className="h-4 w-40 bg-muted animate-pulse rounded mx-auto mb-3" />
-                <p className="text-sm text-muted-foreground">Loading final results…</p>
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-destructive/10 flex items-center justify-center">
+                  <AlertCircle className="w-8 h-8 text-destructive" />
+                </div>
+                <h3 className="text-xl font-semibold text-foreground mb-2">
+                  Failed to Load Results
+                </h3>
+                <p className="text-muted-foreground mb-4 max-w-md mx-auto">
+                  {hydrationError}
+                </p>
+                <div className="flex items-center justify-center gap-3">
+                  <Button 
+                    onClick={() => {
+                      setHydrationError(null);
+                      setTerminalHydrating(true);
+                      setHydrationRetryCount(0);
+                      // Reset and re-trigger by incrementing runSeq
+                      searchTriggeredRef.current = false;
+                      setRunSeq(s => s + 1);
+                    }}
+                  >
+                    <Search className="w-4 h-4 mr-2" />
+                    Retry
+                  </Button>
+                  <Button variant="outline" asChild>
+                    <Link to="/dashboard">Go to Dashboard</Link>
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : terminalHydrating ? (
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-card rounded-2xl shadow-large border border-border overflow-hidden">
+              <div className="p-8 text-center">
+                <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-primary/10 flex items-center justify-center">
+                  <Sparkles className="w-6 h-6 text-primary animate-pulse" />
+                </div>
+                <p className="text-sm text-muted-foreground mb-2">Loading final results…</p>
+                {hydrationRetryCount > 1 && (
+                  <p className="text-xs text-muted-foreground/70">
+                    Attempt {hydrationRetryCount} of 5
+                  </p>
+                )}
               </div>
             </div>
           </div>

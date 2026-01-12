@@ -132,3 +132,6 @@ verify_jwt = false
 
 [functions.hotelscom-structural-test]
 verify_jwt = false
+
+[functions.finalize-search-snapshot]
+verify_jwt = false
