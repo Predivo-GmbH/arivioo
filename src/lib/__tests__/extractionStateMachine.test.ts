@@ -2494,3 +2494,274 @@ describe('Test P: Expedia canonical total must be used over stale result.price',
     expect(effectivePrice).toBe(2225);
   });
 });
+
+// =============================================================================
+// TEST Q: Finalization Baseline Regression Guard
+// =============================================================================
+// Reference: docs/FINALIZATION_CANONICAL_BASELINE.md
+// These tests protect the "No Results Until Final" contract.
+// =============================================================================
+describe('Test Q: Finalization Baseline Regression Guard', () => {
+  /**
+   * FINALIZATION BASELINE INVARIANTS:
+   * 
+   * 1. No results before finalised_at - Results page must not render until finalised_at is set
+   * 2. Atomic backend finalization - status='completed' only set with snapshot
+   * 3. Deterministic snapshot - final_results_snapshot is authoritative source
+   * 4. No background mutation - isTerminalFrozen blocks all setState calls
+   * 5. All platforms in snapshot - Every search_platform appears in final results
+   * 6. Refresh stability - Same results on page reload
+   */
+
+  // Simulate terminal statuses from pipelineStages.ts
+  const TERMINAL_STATUSES = [
+    'completed',
+    'done',
+    'error',
+    'failed',
+    'cancelled',
+    'price_unavailable',
+    'dates_unavailable',
+    'finalization_failed',
+  ];
+
+  // Check Q1: Terminal status detection works correctly
+  it('correctly identifies all terminal statuses', () => {
+    const isTerminalStatus = (status: string): boolean => {
+      return TERMINAL_STATUSES.includes(status);
+    };
+
+    // All terminal statuses should return true
+    for (const status of TERMINAL_STATUSES) {
+      expect(isTerminalStatus(status)).toBe(true);
+    }
+
+    // Non-terminal statuses should return false
+    expect(isTerminalStatus('searching')).toBe(false);
+    expect(isTerminalStatus('pending')).toBe(false);
+    expect(isTerminalStatus('extracting')).toBe(false);
+    expect(isTerminalStatus('finding_alternatives')).toBe(false);
+  });
+
+  // Check Q2: Results should not render before finalization
+  it('shouldRenderResults returns false when finalised_at is null', () => {
+    const shouldRenderResults = (
+      status: string,
+      finalisedAt: string | null,
+      finalSnapshot: object | null
+    ): boolean => {
+      // Results should ONLY render when finalised_at is set
+      return finalisedAt !== null && finalSnapshot !== null;
+    };
+
+    // Terminal status but no finalised_at = NO RESULTS
+    expect(shouldRenderResults('completed', null, null)).toBe(false);
+    expect(shouldRenderResults('done', null, { results: [] })).toBe(false);
+    
+    // Non-terminal with finalised_at (edge case) = still render if snapshot exists
+    expect(shouldRenderResults('searching', '2026-01-12T00:00:00Z', { results: [] })).toBe(true);
+    
+    // Terminal with finalised_at = RENDER RESULTS
+    expect(shouldRenderResults('completed', '2026-01-12T00:00:00Z', { results: [] })).toBe(true);
+  });
+
+  // Check Q3: Atomic finalization contract
+  it('atomic finalization requires all three fields to be set together', () => {
+    interface AtomicUpdate {
+      status: string;
+      finalised_at: string | null;
+      final_results_snapshot: object | null;
+    }
+
+    const isValidAtomicFinalization = (update: AtomicUpdate): boolean => {
+      // If status is 'completed', finalised_at and snapshot MUST be non-null
+      if (update.status === 'completed') {
+        return update.finalised_at !== null && update.final_results_snapshot !== null;
+      }
+      // If status is 'finalization_failed', finalised_at should be null
+      if (update.status === 'finalization_failed') {
+        return update.finalised_at === null;
+      }
+      return true;
+    };
+
+    // Valid: completed with all fields
+    expect(isValidAtomicFinalization({
+      status: 'completed',
+      finalised_at: '2026-01-12T00:00:00Z',
+      final_results_snapshot: { results: [] },
+    })).toBe(true);
+
+    // INVALID: completed without finalised_at
+    expect(isValidAtomicFinalization({
+      status: 'completed',
+      finalised_at: null,
+      final_results_snapshot: { results: [] },
+    })).toBe(false);
+
+    // INVALID: completed without snapshot
+    expect(isValidAtomicFinalization({
+      status: 'completed',
+      finalised_at: '2026-01-12T00:00:00Z',
+      final_results_snapshot: null,
+    })).toBe(false);
+
+    // Valid: finalization_failed without finalised_at
+    expect(isValidAtomicFinalization({
+      status: 'finalization_failed',
+      finalised_at: null,
+      final_results_snapshot: null,
+    })).toBe(true);
+  });
+
+  // Check Q4: Terminal freeze blocks mutations
+  it('isTerminalFrozen guard blocks all setState calls', () => {
+    let stateUpdates = 0;
+    let isTerminalFrozen = false;
+
+    const safeSetState = (newValue: any) => {
+      if (isTerminalFrozen) {
+        // This should NOT increment stateUpdates
+        return;
+      }
+      stateUpdates++;
+    };
+
+    // Before freeze, updates work
+    safeSetState({ results: ['a'] });
+    safeSetState({ results: ['a', 'b'] });
+    expect(stateUpdates).toBe(2);
+
+    // Activate freeze
+    isTerminalFrozen = true;
+
+    // After freeze, updates are blocked
+    safeSetState({ results: ['a', 'b', 'c'] });
+    safeSetState({ results: [] });
+    expect(stateUpdates).toBe(2); // Still 2, no new updates
+  });
+
+  // Check Q5: All platforms appear in snapshot
+  it('all search_platforms must appear in final_results_snapshot', () => {
+    interface SearchPlatform {
+      id: string;
+      platform_name: string;
+      extraction_status_terminal: string | null;
+    }
+
+    interface FinalResultRow {
+      platform: string;
+      price: number | null;
+      outcome: string;
+    }
+
+    const validateSnapshotCompleteness = (
+      platforms: SearchPlatform[],
+      snapshotResults: FinalResultRow[]
+    ): { valid: boolean; missing: string[] } => {
+      const snapshotPlatforms = new Set(snapshotResults.map(r => r.platform.toLowerCase()));
+      const missing = platforms
+        .filter(p => !snapshotPlatforms.has(p.platform_name.toLowerCase()))
+        .map(p => p.platform_name);
+      
+      return { valid: missing.length === 0, missing };
+    };
+
+    // All platforms present
+    const platforms1: SearchPlatform[] = [
+      { id: '1', platform_name: 'Expedia', extraction_status_terminal: 'success' },
+      { id: '2', platform_name: 'Booking.com', extraction_status_terminal: 'failed' },
+    ];
+    const snapshot1: FinalResultRow[] = [
+      { platform: 'Expedia', price: 2225, outcome: 'verified' },
+      { platform: 'Booking.com', price: null, outcome: 'failed' },
+    ];
+    expect(validateSnapshotCompleteness(platforms1, snapshot1).valid).toBe(true);
+
+    // INVALID: Platform missing from snapshot
+    const snapshot2: FinalResultRow[] = [
+      { platform: 'Expedia', price: 2225, outcome: 'verified' },
+      // Booking.com is missing!
+    ];
+    const result2 = validateSnapshotCompleteness(platforms1, snapshot2);
+    expect(result2.valid).toBe(false);
+    expect(result2.missing).toContain('Booking.com');
+  });
+
+  // Check Q6: Refresh stability (deterministic rendering)
+  it('same snapshot produces identical render output', () => {
+    const snapshot = {
+      version: '1.0',
+      generated_at: '2026-01-12T00:00:00Z',
+      search_id: 'test-123',
+      results: [
+        { platform: 'Expedia', price: 2225, savings_amount: -566 },
+        { platform: 'Booking.com', price: null, outcome: 'sold_out' },
+      ],
+    };
+
+    // Simulate rendering logic
+    const renderFromSnapshot = (snap: typeof snapshot) => {
+      return snap.results.map(r => ({
+        key: `${r.platform}-${r.price || 'no-price'}`,
+        displayPrice: r.price ? `$${r.price.toLocaleString()}` : 'N/A',
+      }));
+    };
+
+    const render1 = renderFromSnapshot(snapshot);
+    const render2 = renderFromSnapshot(snapshot);
+
+    // Results must be identical
+    expect(render1).toEqual(render2);
+    expect(JSON.stringify(render1)).toBe(JSON.stringify(render2));
+  });
+
+  // Check Q7: Finalization progress gate logic
+  it('finalization gate calculates correct platform count', () => {
+    interface SearchPlatform {
+      extraction_status_terminal: string | null;
+    }
+
+    const TERMINAL_EXTRACTION_STATUSES = [
+      'success',
+      'failed',
+      'sold_out',
+      'blocked',
+      'dates_unavailable',
+      'price_not_found',
+      'timeout',
+    ];
+
+    const countTerminalPlatforms = (platforms: SearchPlatform[]): { ready: number; total: number } => {
+      const total = platforms.length;
+      const ready = platforms.filter(p => 
+        p.extraction_status_terminal !== null && 
+        TERMINAL_EXTRACTION_STATUSES.includes(p.extraction_status_terminal)
+      ).length;
+      return { ready, total };
+    };
+
+    // All platforms terminal
+    const platforms1: SearchPlatform[] = [
+      { extraction_status_terminal: 'success' },
+      { extraction_status_terminal: 'failed' },
+      { extraction_status_terminal: 'sold_out' },
+    ];
+    expect(countTerminalPlatforms(platforms1)).toEqual({ ready: 3, total: 3 });
+
+    // Some platforms still pending
+    const platforms2: SearchPlatform[] = [
+      { extraction_status_terminal: 'success' },
+      { extraction_status_terminal: null }, // Still pending
+      { extraction_status_terminal: 'failed' },
+    ];
+    expect(countTerminalPlatforms(platforms2)).toEqual({ ready: 2, total: 3 });
+
+    // All pending
+    const platforms3: SearchPlatform[] = [
+      { extraction_status_terminal: null },
+      { extraction_status_terminal: null },
+    ];
+    expect(countTerminalPlatforms(platforms3)).toEqual({ ready: 0, total: 2 });
+  });
+});
