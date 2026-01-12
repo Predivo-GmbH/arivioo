@@ -14,6 +14,7 @@ import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
 import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
+import { ResultBucketSection } from "@/components/search/ResultBucketSection";
 import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
 import {
   normalizeExtraction,
@@ -298,6 +299,7 @@ export default function SearchResults() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [priceExtractions, setPriceExtractions] = useState<PriceExtraction[]>([]);
   const [loading, setLoading] = useState(true);
+  const [terminalHydrating, setTerminalHydrating] = useState(false);
   const [searchPhase, setSearchPhase] = useState<'thinking' | 'animating' | 'done'>('thinking');
   const [currentStep, setCurrentStep] = useState(-1); // -1 = thinking phase
   const [stepProgress, setStepProgress] = useState(0);
@@ -362,11 +364,23 @@ export default function SearchResults() {
   const heartbeatIntervalRef = useRef<number | null>(null);
   const highestStageIndexRef = useRef(-1); // Ref for use in SSE handler
   const activityFeedRef = useRef<Array<{ ts: number; message: string; detail?: string; id: string }>>([]); // Ref for persistence
-  
+
   // TERMINAL STATE FREEZE: Once search reaches a terminal status, results are frozen
   // No more polling, no more live mutations. This ensures deterministic display.
   const isTerminalFrozenRef = useRef(false); // Ref for synchronous checks in callbacks
   const [isTerminalFrozen, setIsTerminalFrozen] = useState(false);
+
+  // Late-async guard: only the latest request is allowed to commit state
+  const latestRequestTokenRef = useRef(0);
+  const nextRequestToken = () => {
+    latestRequestTokenRef.current += 1;
+    return latestRequestTokenRef.current;
+  };
+  const commitIfFresh = (token: number, commit: () => void) => {
+    if (isTerminalFrozenRef.current) return;
+    if (latestRequestTokenRef.current !== token) return;
+    commit();
+  };
 
   // Helper function to add activity items
   const addActivityItem = (message: string, detail?: string) => {
@@ -484,27 +498,39 @@ export default function SearchResults() {
         return;
       }
 
-      // If search is already completed, fetch results (never block UI on enrichment failures)
-      // TERMINAL FREEZE: Immediately freeze since search is already terminal
-      if (searchRecord.status === "completed") {
-        console.log('[TerminalFreeze] Search already completed on load, freezing immediately');
+      // If search is already terminal, do a deterministic single-shot hydration.
+      // IMPORTANT: Do NOT render any intermediate snapshot that could later flip buckets.
+      if (isTerminalStatus(searchRecord.status)) {
+        console.log('[TerminalFreeze] Terminal status on load, single-shot hydrating:', searchRecord.status);
+
+        const token = nextRequestToken();
+
+        // Freeze immediately to prevent ANY later merges/polls from committing.
         isTerminalFrozenRef.current = true;
         setIsTerminalFrozen(true);
-        
+
+        // Show a lightweight loading state while we fetch the authoritative joined dataset.
+        setTerminalHydrating(true);
+        setSearchPhase('done');
+        setExtractingPrices(false);
+        setResults([]);
+        setPriceExtractions([]);
+
         try {
-          const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:initial');
-          setResults(enrichedResults as unknown as SearchResult[]);
-        } catch (e) {
-          console.error("Failed to fetch enriched results (initial load):", e);
-          toast({
-            title: "Showing partial results",
-            description: "We couldn't load all comparison details, but your search finished successfully.",
+          const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:terminal_hydrate');
+          commitIfFresh(token, () => {
+            setSearch(searchRecord);
+            setResults(enrichedResults as unknown as SearchResult[]);
           });
-          setResults([]);
+        } catch (e) {
+          console.error('Failed to fetch enriched results (terminal hydrate):', e);
         } finally {
-          setSearchPhase("done");
-          setLoading(false);
+          commitIfFresh(token, () => {
+            setTerminalHydrating(false);
+            setLoading(false);
+          });
         }
+
         return;
       }
 
@@ -1319,9 +1345,12 @@ export default function SearchResults() {
     setResultsViewUnlocked(false);
     setResultsPageRendered(false);
     setHasCelebrated(false);
+    setTerminalHydrating(false);
     // Reset terminal freeze for new search
     isTerminalFrozenRef.current = false;
     setIsTerminalFrozen(false);
+    // Reset late-async guard
+    latestRequestTokenRef.current = 0;
   }, [searchId]);
 
   // TERMINAL STATE FREEZE: Freeze results once search reaches terminal status
@@ -1377,73 +1406,65 @@ export default function SearchResults() {
   // Poll for price extraction status - runs when extractingPrices is true OR after search completes
   // IMPORTANT: Once terminal freeze is active, stop polling and don't mutate results
   useEffect(() => {
-    // Don't poll if we don't have a searchId yet
     if (!searchId) return;
-    
+
     // TERMINAL FREEZE: Stop polling once results are frozen
     if (isTerminalFrozenRef.current) {
-      console.log('[TerminalFreeze] Skipping extraction poll - results frozen');
       return;
     }
-    
-    // Skip initial poll if we're in early loading phase and no extractions started
-    // But allow polling once extractingPrices is triggered by SSE
+
     if (loading && !extractingPrices) return;
-    
+
+    const token = nextRequestToken();
+
     const fetchExtractionStatus = async () => {
-      // Double-check terminal freeze before mutating
       if (isTerminalFrozenRef.current) return;
+
       const { data } = await supabase
         .from('price_extractions')
         .select('id, search_result_id, platform_name, extraction_status, extracted_price, extraction_error, deep_link')
         .eq('search_id', searchId);
-      
+
+      // Late async guard: ignore if we froze or a newer request started.
+      if (isTerminalFrozenRef.current) return;
+      if (latestRequestTokenRef.current !== token) return;
+
       if (data) {
         setPriceExtractions(data as PriceExtraction[]);
-        
-        // Check if any extractions are still in progress
+
         const inProgress = data.some(e => e.extraction_status === 'pending' || e.extraction_status === 'running');
         setExtractingPrices(inProgress);
-        
-        // Update results with extracted prices
-        // CRITICAL FIX FOR EXPEDIA: Always prefer extraction price over stale search_results.price
-        // The previous logic only updated if r.price < 10, which kept stale subtotals for Expedia
+
+        // IMPORTANT: incremental merges are ONLY allowed pre-terminal.
+        // Once terminal, we never touch results again.
         if (data.length > 0) {
-          setResults(prev => prev.map(r => {
-            const extraction = data.find(e => e.search_result_id === r.id);
-            if (extraction?.extracted_price && extraction.extracted_price > 0) {
-              // For Expedia: Always use extraction price (golden path total)
-              // For other platforms: Use extraction if no price or extraction differs significantly
-              const isExpedia = r.platform_name.toLowerCase().includes('expedia');
-              const shouldUpdate = isExpedia || 
-                !r.price || 
-                r.price < 10 || 
-                (extraction.extracted_price !== r.price && extraction.extraction_status === 'success');
-              
-              if (shouldUpdate) {
-                return { ...r, price: extraction.extracted_price };
+          setResults(prev => {
+            if (isTerminalFrozenRef.current) return prev;
+            return prev.map(r => {
+              const extraction = data.find(e => e.search_result_id === r.id);
+              if (extraction?.extracted_price && extraction.extracted_price > 0) {
+                const isExpedia = r.platform_name.toLowerCase().includes('expedia');
+                const shouldUpdate = isExpedia || !r.price || r.price < 10 || (extraction.extracted_price !== r.price && extraction.extraction_status === 'success');
+                if (shouldUpdate) return { ...r, price: extraction.extracted_price };
               }
-            }
-            return r;
-          }));
+              return r;
+            });
+          });
         }
       }
     };
-    
-    // Initial fetch (only if not frozen)
+
     if (!isTerminalFrozenRef.current) {
       fetchExtractionStatus();
     }
-    
-    // Poll every 3 seconds while extractions are in progress
-    // TERMINAL FREEZE: Stop polling once frozen
-    const pollInterval = setInterval(() => {
+
+    const pollInterval = window.setInterval(() => {
       if (extractingPrices && !isTerminalFrozenRef.current) {
         fetchExtractionStatus();
       }
     }, 3000);
-    
-    return () => clearInterval(pollInterval);
+
+    return () => window.clearInterval(pollInterval);
   }, [loading, searchId, extractingPrices, isTerminalFrozen]);
 
   // Fetch confirmed Airbnb total if exists
@@ -1854,9 +1875,17 @@ export default function SearchResults() {
       </header>
 
       <main className="container px-4 py-8 md:py-12">
-        {/* Show progress page while loading OR while price extraction is in progress.
-            NOTE: once resultsViewUnlocked is true, we never return to the pipeline view. */}
-        {((loading || extractingPrices) && !resultsViewUnlocked) ? (
+        {/* Terminal single-shot hydration state (prevents any intermediate rendering on refresh) */}
+        {terminalHydrating ? (
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-card rounded-2xl shadow-large border border-border overflow-hidden">
+              <div className="p-8 text-center">
+                <div className="h-4 w-40 bg-muted animate-pulse rounded mx-auto mb-3" />
+                <p className="text-sm text-muted-foreground">Loading final results…</p>
+              </div>
+            </div>
+          </div>
+        ) : ((loading || extractingPrices) && !resultsViewUnlocked) ? (
           <PipelineProgress
             status={search?.status}
             isComplete={false}
@@ -2265,109 +2294,117 @@ export default function SearchResults() {
                       </table>
                     </div>
 
-                    {/* Collapsible more expensive alternatives */}
+                    {/* More expensive alternatives (same bucket UI structure as other categories) */}
                     {moreExpensiveResults.length > 0 && (
-                      <div className="border-t border-border/50 pt-6">
-                        <button
-                          onClick={() => setShowMoreExpensive(!showMoreExpensive)}
-                          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-4"
-                        >
-                          {showMoreExpensive ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                          <span>View {moreExpensiveResults.length} more expensive alternative{moreExpensiveResults.length !== 1 ? "s" : ""}</span>
-                        </button>
-                        
-                        {showMoreExpensive && (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <tbody>
-                                {moreExpensiveResults.map((result) => {
-                                  // EXPEDIA-SPECIFIC: Use effective price (canonical total) not stale result.price
-                                  const effectiveTotal = getEffectivePrice(result) || 0;
-                                  const priceDiff = Math.round(effectiveTotal - (airbnbTotal || 0));
-                                  const resultImages = toStringArray(result.images);
-                                  const isExpanded = expandedComparison === result.id;
-                                  return (
-                                    <React.Fragment key={result.id}>
-                                      <tr className="border-b border-border/50 hover:bg-muted/30">
-                                        <td className="py-4 px-4">
-                                          <div className="flex items-center gap-2">
-                                            <span className="w-2 h-2 rounded-full bg-amber-500" />
-                                            <span className="font-medium text-foreground">{result.platform_name}</span>
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-4 text-center">
-                                          {result.match_type === "visual" && result.confidence_score ? (
-                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                              <Shield className="w-3 h-3" />
-                                              {Math.round(result.confidence_score)}%
-                                            </span>
+                      <ResultBucketSection
+                        open={showMoreExpensive}
+                        onToggle={() => setShowMoreExpensive(!showMoreExpensive)}
+                        containerClassName="rounded-xl border border-border bg-muted/30 overflow-hidden"
+                        headerClassName="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/50 transition-colors"
+                        borderTopClassName="border-t border-border"
+                        leading={<span className="w-2 h-2 rounded-full bg-muted-foreground" />}
+                        title={
+                          <>
+                            {moreExpensiveResults.length} more expensive alternative{moreExpensiveResults.length !== 1 ? "s" : ""}
+                          </>
+                        }
+                        subtitle="Higher total than Airbnb"
+                      >
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <tbody>
+                              {moreExpensiveResults.map((result) => {
+                                const effectiveTotal = getEffectivePrice(result) || 0;
+                                const priceDiff = Math.round(effectiveTotal - (airbnbTotal || 0));
+                                const resultImages = toStringArray(result.images);
+                                const isExpanded = expandedComparison === result.id;
+
+                                return (
+                                  <React.Fragment key={result.id}>
+                                    <tr className="border-b border-border/50 hover:bg-muted/30">
+                                      <td className="py-4 px-4">
+                                        <div className="flex items-center gap-2">
+                                          <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                          <span className="font-medium text-foreground">{result.platform_name}</span>
+                                        </div>
+                                      </td>
+                                      <td className="py-4 px-4 text-center">
+                                        {result.match_type === "visual" && result.confidence_score ? (
+                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-success/10 text-success text-xs font-medium">
+                                            <Shield className="w-3 h-3" />
+                                            {Math.round(result.confidence_score)}%
+                                          </span>
+                                        ) : (
+                                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-muted text-muted-foreground text-xs font-medium">
+                                            <Info className="w-3 h-3" />
+                                            Text
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="py-4 px-4 text-right">
+                                        <div className="flex flex-col items-end gap-0.5">
+                                          <span className="font-semibold text-foreground">
+                                            {currencySymbol}{formatUSDPrice(effectiveTotal)}
+                                          </span>
+                                          <span className="text-xs text-muted-foreground">
+                                            (+{currencySymbol}{formatUSDPrice(priceDiff)})
+                                          </span>
+                                          <ExpediaDebugReveal
+                                            platformName={result.platform_name}
+                                            canonicalPrice={result.canonical_price || null}
+                                            categorization={getResultCategorization(result.id)}
+                                            extractionMetadata={(result as any).extraction_metadata}
+                                            airbnbTotal={airbnbTotal}
+                                          />
+                                        </div>
+                                      </td>
+                                      <td className="py-4 px-4 hidden lg:table-cell">
+                                        <span className="text-xs text-muted-foreground">May have different terms</span>
+                                      </td>
+                                      <td className="py-4 px-4 text-center">
+                                        <div className="flex flex-col gap-1.5 items-center">
+                                          <Button variant="outline" size="sm" asChild>
+                                            <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                              View <ExternalLink className="w-3 h-3 ml-1" />
+                                            </a>
+                                          </Button>
+                                          <button
+                                            onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                            className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                                              isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'
+                                            }`}
+                                          >
+                                            <ArrowLeftRight className="w-3 h-3" />
+                                            {isExpanded ? 'Hide' : 'Photos'}
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                    {isExpanded && (
+                                      <tr className="border-b border-border/50">
+                                        <td colSpan={5} className="p-4 bg-muted/30">
+                                          {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                            <ImageComparison
+                                              airbnbImages={airbnbImages}
+                                              alternativeImages={resultImages}
+                                              airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                              alternativeTitle={result.listing_title || "Alternative Listing"}
+                                              platformName={result.platform_name}
+                                              sourceAirbnbImage={result.source_airbnb_image}
+                                            />
                                           ) : (
-                                            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                              <Info className="w-3 h-3" />
-                                              Text
-                                            </span>
+                                            <p className="text-sm text-muted-foreground text-center py-4">No photos available for comparison</p>
                                           )}
                                         </td>
-                                        <td className="py-4 px-4 text-right">
-                                          <div className="flex flex-col items-end gap-0.5">
-                                            <span className="font-semibold text-foreground">{currencySymbol}{formatUSDPrice(effectiveTotal)}</span>
-                                            <span className="text-amber-600 text-xs">(+{currencySymbol}{formatUSDPrice(priceDiff)})</span>
-                                            {/* Expedia Debug Reveal */}
-                                            <ExpediaDebugReveal
-                                              platformName={result.platform_name}
-                                              canonicalPrice={result.canonical_price || null}
-                                              categorization={getResultCategorization(result.id)}
-                                              extractionMetadata={(result as any).extraction_metadata}
-                                              airbnbTotal={airbnbTotal}
-                                            />
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-4 hidden lg:table-cell">
-                                          <span className="text-xs text-muted-foreground">May have different terms</span>
-                                        </td>
-                                        <td className="py-4 px-4 text-center">
-                                          <div className="flex flex-col gap-1.5 items-center">
-                                            <Button variant="outline" size="sm" asChild>
-                                              <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                                View <ExternalLink className="w-3 h-3 ml-1" />
-                                              </a>
-                                            </Button>
-                                            <button
-                                              onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                              className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
-                                            >
-                                              <ArrowLeftRight className="w-3 h-3" />
-                                              {isExpanded ? 'Hide' : 'Photos'}
-                                            </button>
-                                          </div>
-                                        </td>
                                       </tr>
-                                      {isExpanded && (
-                                        <tr className="border-b border-border/50">
-                                          <td colSpan={5} className="p-4 bg-muted/30">
-                                            {resultImages.length > 0 || airbnbImages.length > 0 ? (
-                                              <ImageComparison 
-                                                airbnbImages={airbnbImages} 
-                                                alternativeImages={resultImages} 
-                                                airbnbTitle={search?.airbnb_title || "Airbnb Listing"} 
-                                                alternativeTitle={result.listing_title || "Alternative Listing"} 
-                                                platformName={result.platform_name} 
-                                                sourceAirbnbImage={result.source_airbnb_image} 
-                                              />
-                                            ) : (
-                                              <p className="text-sm text-muted-foreground text-center py-4">No photos available for comparison</p>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      )}
-                                    </React.Fragment>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
+                                    )}
+                                  </React.Fragment>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </ResultBucketSection>
                     )}
 
                     {/* Categorized Platform Results */}
