@@ -6281,7 +6281,11 @@ async function runSearchWithStreaming(
       
       // Check if we already have a match for this platform with high confidence
       const existingMatch = bestMatchPerPlatform.get(platformKey);
-      if (existingMatch && existingMatch.confidence_score && existingMatch.confidence_score >= 0.98) {
+      if (
+        existingMatch &&
+        typeof existingMatch.confidence_score === "number" &&
+        existingMatch.confidence_score >= 98
+      ) {
         // Already have an excellent match for this platform, skip
         console.log(`Skipping ${platformName} verification - already have 98%+ match`);
         filterStats.filtered_already_high_confidence++;
@@ -6291,7 +6295,10 @@ async function runSearchWithStreaming(
       filterStats.sent_to_verification++;
       sendProgress(controller, `Verifying match on ${platformName}`, "AI comparing property photos to confirm it's the same place", { platform: platformName });
       sendStatusUpdate(controller, `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`);
-      await supabase.from("searches").update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, last_progress_at: new Date().toISOString() }).eq("id", searchId);
+      await supabase
+        .from("searches")
+        .update({ status: `ai_verifying_${platformName.toLowerCase().replace(/[^a-z0-9]/g, "_")}`, last_progress_at: new Date().toISOString() })
+        .eq("id", searchId);
       await heartbeat();
 
       aiCount++;
@@ -6299,10 +6306,13 @@ async function runSearchWithStreaming(
       foundUrls.add(matchUrl);
 
       const aiResult = await compareImagesWithAI(imageUrl, match.thumbnail || matchUrl);
-      
+
+      // IMPORTANT: aiResult.score is expressed in 0-100 "percent" units.
+      // We persist confidence_score in the SAME 0-100 scale everywhere.
+      // (Previously some code stored 0-1 which caused ImageGate to reject 95% as 0.95.)
       if (aiResult.isMatch && aiResult.score >= 90) {
-        const newConfidence = aiResult.score / 100;
-        
+        const newConfidence = aiResult.score;
+
         // Only keep this match if it's better than what we have for this platform
         if (!existingMatch || newConfidence > (existingMatch.confidence_score || 0)) {
           const newMatch = {
@@ -6313,16 +6323,24 @@ async function runSearchWithStreaming(
             confidence_score: newConfidence,
             image_url: match.thumbnail || null,
             images: match.thumbnail ? [match.thumbnail] : [],
-            match_type: 'visual' as const,
+            match_type: "visual" as const,
             source_airbnb_image: imageUrl,
           };
-          
+
           bestMatchPerPlatform.set(platformKey, newMatch);
-          
+
           if (existingMatch) {
-            sendProgress(controller, `Better match on ${platformName}`, `${aiResult.score}% confidence (was ${Math.round((existingMatch.confidence_score || 0) * 100)}%)`, { platform: platformName, confidence: aiResult.score });
+            sendProgress(
+              controller,
+              `Better match on ${platformName}`,
+              `${aiResult.score}% confidence (was ${Math.round(existingMatch.confidence_score || 0)}%)`,
+              { platform: platformName, confidence: aiResult.score },
+            );
           } else {
-            sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, { platform: platformName, confidence: aiResult.score });
+            sendProgress(controller, `Verified match on ${platformName}`, `${aiResult.score}% confidence - same property confirmed`, {
+              platform: platformName,
+              confidence: aiResult.score,
+            });
           }
         }
       }
@@ -6404,7 +6422,7 @@ async function runSearchWithStreaming(
             listing_url: cached.platform_url,
             listing_title: cached.listing_title,
             price: null,
-            confidence_score: 0.95, // High confidence since it was previously verified
+            confidence_score: 95, // High confidence since it was previously verified (0-100 scale)
             image_url: null,
             images: [],
             match_type: 'visual' as const, // Use 'visual' for type compatibility
@@ -7888,8 +7906,8 @@ serve(async (req) => {
               continue;
             }
 
-            // Use AI-verified confidence score (converted to 0-1 scale)
-            const verifiedConfidence = aiComparison.score / 100;
+            // Store AI-verified confidence score in 0-100 "percent" units (consistent everywhere)
+            const verifiedConfidence = aiComparison.score;
 
             // Check if it's a known booking platform OR regional hotel site (skip blocked platforms)
             if (isBlockedNonBookingPlatform(url)) continue;
@@ -7913,7 +7931,7 @@ serve(async (req) => {
                 "✓ AI-VERIFIED match on platform:",
                 getPlatformName(url),
                 "confidence:",
-                (verifiedConfidence * 100).toFixed(0) + "%",
+                `${verifiedConfidence.toFixed(0)}%`,
               );
             }
             // Also check for direct property websites
@@ -7957,7 +7975,7 @@ serve(async (req) => {
                       listing_url: kgUrl,
                       listing_title: lensData.knowledge_graph.title || null,
                       price: null,
-                      confidence_score: kgComparison.score / 100, // AI-verified
+                      confidence_score: kgComparison.score, // AI-verified (0-100 scale)
                       image_url: kgImage,
                       images: [kgImage],
                       match_type: "visual",
@@ -7980,41 +7998,40 @@ serve(async (req) => {
       if (alternatives.length < 3 && !isTimeBudgetExceeded() && !isAIBudgetExceeded()) {
         await supabase.from("searches").update({ status: "reverse_image_search_backup" }).eq("id", searchId);
         console.log("Running reverse image search as backup...");
-        
+
         for (const imageUrl of imageUrls.slice(0, 2)) {
           // Check budgets before each image
           if (isTimeBudgetExceeded() || isAIBudgetExceeded() || hasEnoughMatches()) break;
 
           try {
             console.log("Reverse searching:", imageUrl.slice(0, 80));
-            
+
             const reverseResult = await fetchSerpApi(
               `engine=google_reverse_image&image_url=${encodeURIComponent(imageUrl)}`,
-              serpApiKey!
+              serpApiKey!,
             );
-            
+
             if (!reverseResult.success) {
-              if (reverseResult.error?.type === 'quota_exceeded' || reverseResult.error?.type === 'rate_limited') {
+              if (reverseResult.error?.type === "quota_exceeded" || reverseResult.error?.type === "rate_limited") {
                 console.error(`SERPAPI ${reverseResult.error.type.toUpperCase()}: ${reverseResult.error.message}`);
-                await supabase.from("searches").update({ 
-                  api_error: reverseResult.error.message,
-                  api_error_code: reverseResult.error.type,
-                }).eq("id", searchId);
+                await supabase
+                  .from("searches")
+                  .update({
+                    api_error: reverseResult.error.message,
+                    api_error_code: reverseResult.error.type,
+                  })
+                  .eq("id", searchId);
                 break;
               }
               continue;
             }
-            
+
             const reverseData = reverseResult.data;
             console.log("Reverse results - image:", reverseData?.image_results?.length || 0);
-            
+
             // LIMIT results to check
-            const allResults = [
-              ...(reverseData.image_results || []),
-              ...(reverseData.inline_images || []),
-              ...(reverseData.organic_results || []),
-            ].slice(0, 8);
-            
+            const allResults = [...(reverseData.image_results || []), ...(reverseData.inline_images || []), ...(reverseData.organic_results || [])].slice(0, 8);
+
             for (const result of allResults) {
               // Check budgets before each comparison
               if (isTimeBudgetExceeded() || isAIBudgetExceeded() || hasEnoughMatches()) break;
@@ -8022,38 +8039,41 @@ serve(async (req) => {
               const url = result.link || result.source;
               if (!url) continue;
               if (url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
-              
+
               const resultImage = result.thumbnail || result.original;
               if (!resultImage) continue;
-              
+
               if (isBookingPlatform(url) || isDirectPropertySite(url) || isRegionalHotelSite(url)) {
                 // AI verify reverse image match
                 console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (reverse)...`);
                 aiComparisonCount++;
                 const reverseComparison = await compareImagesWithAI(imageUrl, resultImage);
-                
+
                 if (!reverseComparison.isMatch) {
                   console.log("AI rejected reverse image match (score < 90%):", url.slice(0, 60));
                   continue;
                 }
-                
+
                 foundUrls.add(url);
                 alternatives.push({
-                  platform_name: isBookingPlatform(url) || isRegionalHotelSite(url) ? getPlatformName(url) : getPlatformName(url) + " (Direct)",
+                  platform_name:
+                    isBookingPlatform(url) || isRegionalHotelSite(url)
+                      ? getPlatformName(url)
+                      : getPlatformName(url) + " (Direct)",
                   listing_url: url,
                   listing_title: result.title || result.snippet || null,
                   price: null,
-                  confidence_score: reverseComparison.score / 100, // AI-verified confidence
+                  confidence_score: reverseComparison.score, // AI-verified confidence (0-100 scale)
                   image_url: resultImage,
                   images: [result.thumbnail, result.original].filter(Boolean).slice(0, 5),
-                  match_type: 'visual',
+                  match_type: "visual",
                   source_airbnb_image: imageUrl,
                 });
                 console.log("✓ AI-VERIFIED reverse image match:", url.slice(0, 80));
               }
             }
-            
-            await new Promise(r => setTimeout(r, 200));
+
+            await new Promise((r) => setTimeout(r, 200));
           } catch (e) {
             console.error("Reverse search error:", e);
           }
