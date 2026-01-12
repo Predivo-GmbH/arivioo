@@ -2169,16 +2169,23 @@ Deno.serve(async (req) => {
   const reqUrl = new URL(req.url);
   const mode = reqUrl.searchParams.get('mode');
   
-  // ==========================================================================
+// ==========================================================================
   // LIVE CANARY CHECKS - Actually call providers against fixed canary URL
+  // IMPORTANT: All checks return HTTP 200 with structured result.
+  // "fail" is a valid outcome and must not cause HTTP error.
   // ==========================================================================
   
   // Browserless live canary check
   if (mode === 'browserless-canary') {
     const result = await runBrowserlessCanaryCheck();
     await persistCanaryResult(result, supabaseForCanary);
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
+    return new Response(JSON.stringify({
+      ...result,
+      ok: result.passed,
+      error: result.passed ? null : { code: 'CANARY_CHECK_FAILED', message: result.failure_reason || 'Check failed' },
+      meta: { evaluated_at: result.timestamp, duration_ms: result.duration_ms },
+    }, null, 2), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
@@ -2187,8 +2194,13 @@ Deno.serve(async (req) => {
   if (mode === 'zyte-canary') {
     const result = await runZyteCanaryCheck();
     await persistCanaryResult(result, supabaseForCanary);
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
+    return new Response(JSON.stringify({
+      ...result,
+      ok: result.passed,
+      error: result.passed ? null : { code: 'CANARY_CHECK_FAILED', message: result.failure_reason || 'Check failed' },
+      meta: { evaluated_at: result.timestamp, duration_ms: result.duration_ms },
+    }, null, 2), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
@@ -2197,21 +2209,35 @@ Deno.serve(async (req) => {
   if (mode === 'firecrawl-canary') {
     const result = await runFirecrawlCanaryCheck();
     await persistCanaryResult(result, supabaseForCanary);
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
+    return new Response(JSON.stringify({
+      ...result,
+      ok: result.passed,
+      error: result.passed ? null : { code: 'CANARY_CHECK_FAILED', message: result.failure_reason || 'Check failed' },
+      meta: { evaluated_at: result.timestamp, duration_ms: result.duration_ms },
+    }, null, 2), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
   
   // ==========================================================================
   // DETERMINISTIC CANONICAL CHECKS - Logic validation with mock data
+  // IMPORTANT: All checks return HTTP 200 with structured result.
   // ==========================================================================
   
   // Browserless canonical check (logic validation)
   if (mode === 'canonical-check') {
     const result = runCanonicalBaselineCheck();
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
+    return new Response(JSON.stringify({
+      ...result,
+      ok: result.passed,
+      error: result.passed ? null : { 
+        code: 'BASELINE_CHECK_FAILED', 
+        message: `${result.checks.filter(c => !c.passed).length} invariant(s) failed` 
+      },
+      meta: { evaluated_at: result.timestamp },
+    }, null, 2), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
@@ -2219,8 +2245,16 @@ Deno.serve(async (req) => {
   // Zyte canonical check (logic validation)
   if (mode === 'zyte-canonical-check') {
     const result = runZyteCanonicalBaselineCheck();
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
+    return new Response(JSON.stringify({
+      ...result,
+      ok: result.passed,
+      error: result.passed ? null : { 
+        code: 'BASELINE_CHECK_FAILED', 
+        message: `${result.checks.filter(c => !c.passed).length} invariant(s) failed` 
+      },
+      meta: { evaluated_at: result.timestamp },
+    }, null, 2), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
@@ -2228,8 +2262,16 @@ Deno.serve(async (req) => {
   // Firecrawl canonical check (logic validation)
   if (mode === 'firecrawl-canonical-check') {
     const result = runFirecrawlCanonicalBaselineCheck();
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
+    return new Response(JSON.stringify({
+      ...result,
+      ok: result.passed,
+      error: result.passed ? null : { 
+        code: 'BASELINE_CHECK_FAILED', 
+        message: `${result.checks.filter(c => !c.passed).length} invariant(s) failed` 
+      },
+      meta: { evaluated_at: result.timestamp },
+    }, null, 2), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
@@ -2237,22 +2279,67 @@ Deno.serve(async (req) => {
   // Baseline chain canonical check (orchestration logic validation)
   if (mode === 'baseline-chain-canonical-check') {
     const result = runBaselineChainCanonicalCheck();
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
+    return new Response(JSON.stringify({
+      ...result,
+      ok: result.passed,
+      error: result.passed ? null : { 
+        code: 'BASELINE_CHECK_FAILED', 
+        message: `${result.checks.filter(c => !c.passed).length} invariant(s) failed` 
+      },
+      meta: { evaluated_at: result.timestamp },
+    }, null, 2), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
   
-  // ==========================================================================
+// ==========================================================================
   // FINALIZATION BASELINE CANONICAL CHECK
   // Reference: docs/FINALIZATION_CANONICAL_BASELINE.md
+  // CRITICAL: Always return HTTP 200 with structured result.
+  // "fail" is a valid outcome, not an HTTP error.
   // ==========================================================================
   if (mode === 'finalization-canonical-check') {
-    const result = runFinalizationCanonicalCheck();
-    return new Response(JSON.stringify(result, null, 2), {
-      status: result.passed ? 200 : 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+    try {
+      const result = runFinalizationCanonicalCheck();
+      return new Response(JSON.stringify({
+        ...result,
+        ok: result.passed,
+        error: result.passed ? null : {
+          code: 'BASELINE_CHECK_FAILED',
+          message: `${result.checks.filter(c => !c.passed).length} invariant(s) failed`,
+          details: result.checks.filter(c => !c.passed).map(c => c.name),
+        },
+        meta: {
+          evaluated_at: result.timestamp,
+        },
+      }, null, 2), {
+        status: 200, // Always 200 - "fail" is valid outcome, not HTTP error
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    } catch (err) {
+      // Infrastructure/runtime error - still return 200 with structured error
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      return new Response(JSON.stringify({
+        mode: 'finalization-canonical-check',
+        passed: false,
+        ok: false,
+        status: 'error',
+        checks: [],
+        error: {
+          code: 'RUNTIME_ERROR',
+          message: errorMessage,
+          details: null,
+        },
+        meta: {
+          evaluated_at: new Date().toISOString(),
+        },
+        timestamp: new Date().toISOString(),
+      }, null, 2), {
+        status: 200, // Still 200 - structured error response
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
   }
   
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);

@@ -2764,4 +2764,64 @@ describe('Test Q: Finalization Baseline Regression Guard', () => {
     ];
     expect(countTerminalPlatforms(platforms3)).toEqual({ ready: 0, total: 2 });
   });
+
+  // Check Q8: Edge function response contract (HTTP 200 always)
+  it('baseline check response follows stable contract schema', () => {
+    // Simulates the response shape from edge function
+    interface BaselineCheckResponse {
+      ok: boolean;
+      passed: boolean;
+      status: string;
+      checks: Array<{ name: string; expected: string; actual: string; passed: boolean }>;
+      error: { code: string; message: string; details?: string[] | null } | null;
+      meta: { evaluated_at: string; duration_ms?: number };
+    }
+
+    const validateResponseContract = (response: BaselineCheckResponse): boolean => {
+      // Required fields
+      if (typeof response.ok !== 'boolean') return false;
+      if (typeof response.passed !== 'boolean') return false;
+      if (typeof response.status !== 'string') return false;
+      if (!Array.isArray(response.checks)) return false;
+      if (response.meta?.evaluated_at === undefined) return false;
+      
+      // ok and passed must be consistent
+      if (response.ok !== response.passed) return false;
+      
+      // Error must be present when not ok
+      if (!response.ok && response.error === null) return false;
+      
+      return true;
+    };
+
+    // Valid pass response
+    expect(validateResponseContract({
+      ok: true,
+      passed: true,
+      status: 'finalization_baseline_valid',
+      checks: [{ name: 'test', expected: 'a', actual: 'a', passed: true }],
+      error: null,
+      meta: { evaluated_at: '2026-01-12T00:00:00Z' },
+    })).toBe(true);
+
+    // Valid fail response (ok=false with error)
+    expect(validateResponseContract({
+      ok: false,
+      passed: false,
+      status: 'finalization_baseline_violation',
+      checks: [{ name: 'test', expected: 'a', actual: 'b', passed: false }],
+      error: { code: 'BASELINE_CHECK_FAILED', message: '1 invariant(s) failed' },
+      meta: { evaluated_at: '2026-01-12T00:00:00Z' },
+    })).toBe(true);
+
+    // Invalid: ok=false but no error
+    expect(validateResponseContract({
+      ok: false,
+      passed: false,
+      status: 'error',
+      checks: [],
+      error: null, // Missing error when not ok
+      meta: { evaluated_at: '2026-01-12T00:00:00Z' },
+    })).toBe(false);
+  });
 });
