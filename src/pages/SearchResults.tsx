@@ -544,30 +544,58 @@ export default function SearchResults() {
           try {
             console.log(`[TerminalHydration] Attempt ${attempt}/${MAX_RETRIES}`);
             
-            // First, try to finalize the snapshot if not already done
-            try {
-              await supabase.functions.invoke('finalize-search-snapshot', {
-                body: { searchId },
-              });
-            } catch (finalizeError) {
-              console.warn('[TerminalHydration] Finalization call failed (continuing anyway):', finalizeError);
+            // Fetch finalised_at and final_results_snapshot from DB
+            // Backend is responsible for setting these - frontend only reads
+            const { data: snapshotData, error: snapshotError } = await supabase
+              .from('searches')
+              .select('finalised_at, final_results_snapshot')
+              .eq('id', searchId)
+              .single();
+            
+            if (snapshotError) {
+              throw new Error(`Failed to fetch snapshot: ${snapshotError.message}`);
             }
             
-            // Fetch the enriched results
-            const enrichedResults = await withTimeout(
-              fetchEnrichedResults(searchId), 
-              12_000, 
-              'fetchEnrichedResults:terminal_hydrate'
-            );
+            const finalisedAt = (snapshotData as any)?.finalised_at;
+            const snapshot = (snapshotData as any)?.final_results_snapshot;
             
-            commitIfFresh(token, () => {
-              setSearch(searchRecord);
-              setResults(enrichedResults as unknown as SearchResult[]);
-              setTerminalHydrating(false);
-              setLoading(false);
-              setHydrationError(null);
-            });
-            success = true;
+            // If not yet finalized by backend, wait and retry
+            if (!finalisedAt) {
+              console.log('[TerminalHydration] Search not yet finalized by backend, waiting...');
+              throw new Error('Search not yet finalized');
+            }
+            
+            // If we have a snapshot, use it directly (deterministic)
+            if (snapshot && snapshot.results) {
+              console.log(`[TerminalHydration] Using persisted snapshot with ${snapshot.results.length} results`);
+              commitIfFresh(token, () => {
+                setSearch(searchRecord);
+                setResults(snapshot.results as unknown as SearchResult[]);
+                setIsFinalized(true);
+                setTerminalHydrating(false);
+                setLoading(false);
+                setHydrationError(null);
+              });
+              success = true;
+            } else {
+              // Fallback: snapshot exists but no results - fetch enriched results
+              console.log('[TerminalHydration] Finalized but no snapshot - falling back to enriched fetch');
+              const enrichedResults = await withTimeout(
+                fetchEnrichedResults(searchId), 
+                12_000, 
+                'fetchEnrichedResults:terminal_hydrate'
+              );
+              
+              commitIfFresh(token, () => {
+                setSearch(searchRecord);
+                setResults(enrichedResults as unknown as SearchResult[]);
+                setIsFinalized(true);
+                setTerminalHydrating(false);
+                setLoading(false);
+                setHydrationError(null);
+              });
+              success = true;
+            }
           } catch (e) {
             console.error(`[TerminalHydration] Attempt ${attempt} failed:`, e);
             

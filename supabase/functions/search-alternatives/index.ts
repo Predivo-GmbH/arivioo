@@ -1,6 +1,7 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { buildAndPersistFinalSnapshot } from "../_shared/buildFinalSnapshot.ts";
 
 // ============================================================================
 // SECURE CORS - Domain allowlist for production security
@@ -7957,6 +7958,7 @@ serve(async (req) => {
         }
       }
 
+      // Update search to completed status first
       await supabase.from("searches").update({
         status: "completed",
         airbnb_title: airbnbTitle,
@@ -7967,6 +7969,16 @@ serve(async (req) => {
         check_out_date: checkOut,
         nights_count: nights,
       }).eq("id", searchId);
+
+      // BUILD AND PERSIST FINAL SNAPSHOT
+      // This is the authoritative finalization point - called by backend, not frontend
+      try {
+        await buildAndPersistFinalSnapshot(supabase, searchId);
+        console.log(`[search-alternatives] Finalized snapshot for search ${searchId}`);
+      } catch (finalizeError) {
+        console.error(`[search-alternatives] Failed to finalize snapshot:`, finalizeError);
+        // Continue anyway - frontend can fall back to live fetch
+      }
 
       return new Response(
         JSON.stringify({
@@ -8294,6 +8306,7 @@ serve(async (req) => {
       console.log("No results with valid prices to store");
     }
 
+    // Update search to completed status first
     await supabase.from("searches").update({ 
       status: "completed",
       airbnb_title: airbnbTitle,
@@ -8304,6 +8317,16 @@ serve(async (req) => {
       check_out_date: checkOut,
       nights_count: nights,
     }).eq("id", searchId);
+
+    // BUILD AND PERSIST FINAL SNAPSHOT
+    // This is the authoritative finalization point - called by backend, not frontend
+    try {
+      await buildAndPersistFinalSnapshot(supabase, searchId);
+      console.log(`[search-alternatives] Finalized snapshot for search ${searchId}`);
+    } catch (finalizeError) {
+      console.error(`[search-alternatives] Failed to finalize snapshot:`, finalizeError);
+      // Continue anyway - frontend can fall back to live fetch
+    }
 
     console.log("Search completed with", resultsWithSavings.length, "results");
 
