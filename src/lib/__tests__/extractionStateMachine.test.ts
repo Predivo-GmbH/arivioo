@@ -2364,3 +2364,133 @@ describe('Test O: Expedia Golden Path - verification and semantic signals', () =
     expect(categorized.non_comparable_user_message).toBeNull();
   });
 });
+
+// =============================================================================
+// TEST P: Expedia canonical total must be used over stale result.price
+// Regression test for: subtotal ($742) in search_results vs total ($2225) in extraction
+// =============================================================================
+describe('Test P: Expedia canonical total must be used over stale result.price', () => {
+  it('when Expedia has both subtotal in search_results and total in extraction, frontend must use total', () => {
+    const { normalizeExtraction } = require('../canonicalPrice');
+    const { categorizeResult } = require('../resultCategorization');
+    
+    // Create Airbnb baseline at $1659
+    const baselinePrice = {
+      platform_id: 'airbnb',
+      source_url: 'https://www.airbnb.com/rooms/12345',
+      check_in_date: '2026-03-08',
+      check_out_date: '2026-03-11',
+      nights_count: 3,
+      currency: 'USD',
+      total_price: 1659,
+      price_type: 'total_proven' as const,
+      confidence: 'high' as const,
+      is_comparable: true,
+      comparability_failures: [],
+      nightly_rate: null,
+      subtotal_nights: null,
+      fees_total: null,
+      taxes_total: null,
+      extraction_method: 'dom' as const,
+      extracted_at: new Date().toISOString(),
+    };
+    
+    // Create Expedia extraction with the correct total ($2225)
+    const expediaCanonical = normalizeExtraction({
+      platform_name: 'Expedia',
+      deep_link: 'https://www.expedia.com/Hotel-Search?selected=12345',
+      extracted_price: 2225.00, // The correct total from golden path
+      currency: 'USD',
+      includes_taxes_fees: true,
+      dates_validated: true,
+      detected_checkin: '2026-03-08',
+      detected_checkout: '2026-03-11',
+      confidence_score: null,
+      extraction_status: 'success',
+      extraction_metadata: {
+        verification: 'VERIFIED',
+        semantic: 'pass',
+        structuralProof: {
+          breakdown_found: true,
+          total_label_found: true,
+          extracted_from_breakdown_total: true,
+        },
+      },
+      evidence_snippets: ['$2,225 total (with taxes and fees)'],
+      requested_check_in: '2026-03-08',
+      requested_check_out: '2026-03-11',
+      requested_nights: 3,
+    });
+    
+    // CRITICAL: canonical_price.total_price must be $2225, not $742
+    expect(expediaCanonical.total_price).toBe(2225);
+    expect(expediaCanonical.price_type).toBe('total_proven');
+    expect(expediaCanonical.is_comparable).toBe(true);
+    
+    // Simulate what happens in SearchResults.tsx with stale result.price
+    const staleSubtotalPrice = 742; // This was scraped earlier
+    
+    // The categorization input uses canonical_price, so even if price is wrong,
+    // the comparison should use canonical_price.total_price
+    const input = {
+      price: staleSubtotalPrice, // Stale subtotal - but should NOT be used for comparison
+      canonical_price: expediaCanonical,
+      outcome_category: null,
+      extraction_status: 'success',
+      extraction_error: null,
+      is_tier_c_blocked: false,
+      coverage_tier: 'A' as const,
+      price_status: 'verified' as const,
+      eligible_for_comparison: true,
+      verification_failures: [],
+    };
+    
+    const categorized = categorizeResult(input, baselinePrice);
+    
+    // CRITICAL: Must be in more_expensive bucket using $2225 (the canonical total)
+    // NOT cheaper bucket using $742 (the stale subtotal)
+    expect(categorized.bucket).toBe('more_expensive');
+    expect(categorized.is_verified).toBe(true);
+    expect(categorized.is_comparable).toBe(true);
+    
+    // The savings should be calculated from $2225 vs $1659, not $742 vs $1659
+    // $2225 - $1659 = $566 more expensive (negative savings)
+    expect(categorized.savings_amount).toBeLessThan(0);
+    expect(categorized.savings_amount).toBeCloseTo(-566, 0);
+  });
+
+  it('getEffectivePrice helper should prefer canonical total for Expedia', () => {
+    // This tests the helper function logic (simulated, as the real helper is in SearchResults.tsx)
+    const isExpedia = true;
+    const resultPrice = 742; // Stale subtotal
+    const canonicalTotalPrice = 2225; // Correct total
+    const priceType = 'total_proven';
+    
+    // Simulate getEffectivePrice logic
+    const getEffectivePrice = (
+      isExpediaPlatform: boolean, 
+      rPrice: number | null, 
+      canonicalPrice: { total_price: number | null; price_type: string } | null
+    ): number | null => {
+      if (isExpediaPlatform && canonicalPrice?.total_price && canonicalPrice.total_price > 0) {
+        return canonicalPrice.total_price;
+      }
+      if (canonicalPrice?.total_price && canonicalPrice.total_price > 0) {
+        const isTotalType = canonicalPrice.price_type === 'total_proven' || 
+                            canonicalPrice.price_type === 'total_derived';
+        if (isTotalType) {
+          return canonicalPrice.total_price;
+        }
+      }
+      return rPrice;
+    };
+    
+    const effectivePrice = getEffectivePrice(isExpedia, resultPrice, { 
+      total_price: canonicalTotalPrice, 
+      price_type: priceType 
+    });
+    
+    // CRITICAL: Must return $2225, not $742
+    expect(effectivePrice).toBe(2225);
+  });
+});

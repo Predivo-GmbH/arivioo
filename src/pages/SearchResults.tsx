@@ -1326,11 +1326,23 @@ export default function SearchResults() {
         setExtractingPrices(inProgress);
         
         // Update results with extracted prices
+        // CRITICAL FIX FOR EXPEDIA: Always prefer extraction price over stale search_results.price
+        // The previous logic only updated if r.price < 10, which kept stale subtotals for Expedia
         if (data.length > 0) {
           setResults(prev => prev.map(r => {
             const extraction = data.find(e => e.search_result_id === r.id);
-            if (extraction?.extracted_price && (!r.price || r.price < 10)) {
-              return { ...r, price: extraction.extracted_price };
+            if (extraction?.extracted_price && extraction.extracted_price > 0) {
+              // For Expedia: Always use extraction price (golden path total)
+              // For other platforms: Use extraction if no price or extraction differs significantly
+              const isExpedia = r.platform_name.toLowerCase().includes('expedia');
+              const shouldUpdate = isExpedia || 
+                !r.price || 
+                r.price < 10 || 
+                (extraction.extracted_price !== r.price && extraction.extraction_status === 'success');
+              
+              if (shouldUpdate) {
+                return { ...r, price: extraction.extracted_price };
+              }
             }
             return r;
           }));
@@ -1522,8 +1534,14 @@ export default function SearchResults() {
 
   // Categorize all results using the canonical model
   const categorizedResults = resultsWithPhotos.map(r => {
+    // EXPEDIA-SPECIFIC: Use canonical total_price if available
+    const isExpedia = r.platform_name.toLowerCase().includes('expedia');
+    const effectivePrice = (isExpedia && r.canonical_price?.total_price && r.canonical_price.total_price > 0)
+      ? r.canonical_price.total_price
+      : r.price;
+    
     const input: CategorizationInput = {
-      price: r.price,
+      price: effectivePrice,
       canonical_price: r.canonical_price || null,
       outcome_category: r.outcome_category || null,
       extraction_status: r.extraction_status || null,
@@ -1713,6 +1731,28 @@ export default function SearchResults() {
     return { text: result.failure_reason || 'Manual check recommended', isTierC: false, isTierA, isUnverified: true, isSoldOut: false, isNotComparable: false, isMoreExpensive: false };
   };
 
+  // EXPEDIA-SPECIFIC: Get effective display price for a result
+  // For Expedia, prefer canonical_price.total_price over result.price to avoid stale subtotals
+  const getEffectivePrice = (result: SearchResult): number | null => {
+    const isExpedia = result.platform_name.toLowerCase().includes('expedia');
+    
+    // For Expedia: use canonical_price.total_price if available (proven golden path total)
+    if (isExpedia && result.canonical_price?.total_price && result.canonical_price.total_price > 0) {
+      return result.canonical_price.total_price;
+    }
+    
+    // For all platforms: if canonical_price.total_price exists and price_type is total, prefer it
+    if (result.canonical_price?.total_price && result.canonical_price.total_price > 0) {
+      const isTotalType = result.canonical_price.price_type === 'total_proven' || 
+                          result.canonical_price.price_type === 'total_derived';
+      if (isTotalType) {
+        return result.canonical_price.total_price;
+      }
+    }
+    
+    // Fallback to result.price
+    return result.price;
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -2158,8 +2198,9 @@ export default function SearchResults() {
                             <table className="w-full text-sm">
                               <tbody>
                                 {moreExpensiveResults.map((result) => {
-                                  const alternativeTotal = result.price || 0;
-                                  const priceDiff = Math.round(alternativeTotal - (airbnbTotal || 0));
+                                  // EXPEDIA-SPECIFIC: Use effective price (canonical total) not stale result.price
+                                  const effectiveTotal = getEffectivePrice(result) || 0;
+                                  const priceDiff = Math.round(effectiveTotal - (airbnbTotal || 0));
                                   const resultImages = toStringArray(result.images);
                                   const isExpanded = expandedComparison === result.id;
                                   return (
@@ -2186,7 +2227,7 @@ export default function SearchResults() {
                                         </td>
                                         <td className="py-4 px-4 text-right">
                                           <div className="flex flex-col items-end gap-0.5">
-                                            <span className="font-semibold text-foreground">{currencySymbol}{formatUSDPrice(alternativeTotal)}</span>
+                                            <span className="font-semibold text-foreground">{currencySymbol}{formatUSDPrice(effectiveTotal)}</span>
                                             <span className="text-amber-600 text-xs">(+{currencySymbol}{formatUSDPrice(priceDiff)})</span>
                                             {/* Expedia Debug Reveal */}
                                             <ExpediaDebugReveal
@@ -2278,6 +2319,8 @@ export default function SearchResults() {
                                       const resultImages = toStringArray(result.images);
                                       const isExpanded = expandedComparison === result.id;
                                       const failureDisplay = getFailureDisplay(result);
+                                      // EXPEDIA-SPECIFIC: Use effective price (canonical total) not stale result.price
+                                      const effectivePrice = getEffectivePrice(result);
                                       
                                       return (
                                         <React.Fragment key={result.id}>
@@ -2304,7 +2347,7 @@ export default function SearchResults() {
                                             <td className="py-4 px-4 text-right">
                                               <div className="flex flex-col items-end gap-0.5">
                                                 <span className="text-sm font-medium text-foreground">
-                                                  {currencySymbol}{formatUSDPrice(result.price)}
+                                                  {currencySymbol}{formatUSDPrice(effectivePrice)}
                                                 </span>
                                                 <span className="text-xs text-amber-600">{failureDisplay.text}</span>
                                                 {/* Expedia Debug Reveal */}
