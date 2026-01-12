@@ -1334,6 +1334,60 @@ export type Database = {
         }
         Relationships: []
       }
+      search_platforms: {
+        Row: {
+          extraction_id_latest: string | null
+          extraction_status_terminal: string | null
+          id: string
+          image_url: string | null
+          images: Json
+          last_error: string | null
+          listing_title: string | null
+          listing_url: string
+          match_type: string | null
+          matched_at: string
+          outcome_category: string | null
+          platform_name: string
+          search_id: string
+          source_airbnb_image: string | null
+          updated_at: string
+        }
+        Insert: {
+          extraction_id_latest?: string | null
+          extraction_status_terminal?: string | null
+          id?: string
+          image_url?: string | null
+          images?: Json
+          last_error?: string | null
+          listing_title?: string | null
+          listing_url: string
+          match_type?: string | null
+          matched_at?: string
+          outcome_category?: string | null
+          platform_name: string
+          search_id: string
+          source_airbnb_image?: string | null
+          updated_at?: string
+        }
+        Update: {
+          extraction_id_latest?: string | null
+          extraction_status_terminal?: string | null
+          id?: string
+          image_url?: string | null
+          images?: Json
+          last_error?: string | null
+          listing_title?: string | null
+          listing_url?: string
+          match_type?: string | null
+          matched_at?: string
+          outcome_category?: string | null
+          platform_name?: string
+          search_id?: string
+          source_airbnb_image?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       search_results: {
         Row: {
           confidence_score: number | null
@@ -1513,6 +1567,7 @@ export type Database = {
           created_at: string
           final_results_snapshot: Json | null
           finalised_at: string | null
+          finalization_error: Json | null
           id: string
           last_progress_at: string | null
           nights_count: number | null
@@ -1543,6 +1598,7 @@ export type Database = {
           created_at?: string
           final_results_snapshot?: Json | null
           finalised_at?: string | null
+          finalization_error?: Json | null
           id?: string
           last_progress_at?: string | null
           nights_count?: number | null
@@ -1573,6 +1629,7 @@ export type Database = {
           created_at?: string
           final_results_snapshot?: Json | null
           finalised_at?: string | null
+          finalization_error?: Json | null
           id?: string
           last_progress_at?: string | null
           nights_count?: number | null
