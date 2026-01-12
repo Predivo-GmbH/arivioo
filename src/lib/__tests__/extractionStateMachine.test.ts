@@ -2228,3 +2228,139 @@ describe('Test N: Total proven with low/null confidence must not be shown as par
     expect(NON_COMPARABLE_REASON_LABELS.price_type_not_total).toBe('Only partial price found (subtotal or nightly)');
   });
 });
+
+// =============================================================================
+// TEST O: Expedia Golden Path - verification: "VERIFIED" and semantic: "pass"
+// =============================================================================
+describe('Test O: Expedia Golden Path - verification and semantic signals', () => {
+  it('classifies Expedia with verification: "VERIFIED" as total_proven regardless of confidence', () => {
+    const { normalizeExtraction } = require('../canonicalPrice');
+    
+    // Simulate exact Expedia golden path response format
+    const expediaGoldenPath = normalizeExtraction({
+      platform_name: 'Expedia',
+      deep_link: 'https://www.expedia.com/Hotel-Search?selected=12345',
+      extracted_price: 2225.00,
+      currency: 'USD',
+      includes_taxes_fees: true,
+      dates_validated: true,
+      detected_checkin: '2026-03-08',
+      detected_checkout: '2026-03-11',
+      confidence_score: null, // No confidence score from extractor
+      extraction_status: 'success',
+      extraction_metadata: {
+        verification: 'VERIFIED', // Key signal from golden path
+        semantic: 'pass',         // Key signal from golden path
+        dates_matched: true,
+        offersPage: {
+          hasTotalWithTaxes: true,
+          datesRenderedCorrectly: true,
+          hasOfferCards: true,
+        },
+        structuralProof: {
+          verification: 'VERIFIED',
+          breakdown_found: true,
+        },
+      },
+      evidence_snippets: ['$2,225 total (with taxes and fees)'],
+      requested_check_in: '2026-03-08',
+      requested_check_out: '2026-03-11',
+      requested_nights: 3,
+    });
+
+    // CRITICAL: Must be total_proven
+    expect(expediaGoldenPath.price_type).toBe('total_proven');
+    
+    // CRITICAL: Must have total_price populated
+    expect(expediaGoldenPath.total_price).toBe(2225.00);
+    
+    // CRITICAL: Must be comparable
+    expect(expediaGoldenPath.is_comparable).toBe(true);
+    
+    // Confidence should NOT be 'low' when structural verification exists
+    expect(expediaGoldenPath.confidence).not.toBe('low');
+  });
+
+  it('USD formatting must show $2,225 not $2.225', () => {
+    const { formatUSDPrice } = require('../priceFormatter');
+    
+    // CRITICAL: Price formatting must use en-US locale
+    expect(formatUSDPrice(2225)).toBe('2,225');
+    expect(formatUSDPrice(1659)).toBe('1,659');
+    expect(formatUSDPrice(12345.67)).toBe('12,346'); // Rounds to nearest
+    expect(formatUSDPrice(null)).toBe('—');
+    expect(formatUSDPrice(undefined)).toBe('—');
+  });
+
+  it('Expedia proven total lands in more_expensive bucket when higher than Airbnb', () => {
+    const { normalizeExtraction } = require('../canonicalPrice');
+    const { categorizeResult } = require('../resultCategorization');
+    
+    // Create Airbnb baseline
+    const baselinePrice = {
+      platform_id: 'airbnb',
+      source_url: 'https://www.airbnb.com/rooms/12345',
+      check_in_date: '2026-03-08',
+      check_out_date: '2026-03-11',
+      nights_count: 3,
+      currency: 'USD',
+      total_price: 1659,
+      price_type: 'total_proven' as const,
+      confidence: 'high' as const,
+      is_comparable: true,
+      comparability_failures: [],
+      nightly_rate: null,
+      subtotal_nights: null,
+      fees_total: null,
+      taxes_total: null,
+      extraction_method: 'dom' as const,
+      extracted_at: new Date().toISOString(),
+    };
+    
+    // Create Expedia with verification: "VERIFIED"
+    const expediaCanonical = normalizeExtraction({
+      platform_name: 'Expedia',
+      deep_link: 'https://www.expedia.com/Hotel-Search?selected=12345',
+      extracted_price: 2225.00,
+      currency: 'USD',
+      includes_taxes_fees: true,
+      dates_validated: true,
+      detected_checkin: '2026-03-08',
+      detected_checkout: '2026-03-11',
+      confidence_score: null,
+      extraction_status: 'success',
+      extraction_metadata: {
+        verification: 'VERIFIED',
+        semantic: 'pass',
+      },
+      evidence_snippets: ['$2,225 total (with taxes and fees)'],
+      requested_check_in: '2026-03-08',
+      requested_check_out: '2026-03-11',
+      requested_nights: 3,
+    });
+    
+    const input = {
+      price: 2225.00,
+      canonical_price: expediaCanonical,
+      outcome_category: null,
+      extraction_status: 'success',
+      extraction_error: null,
+      is_tier_c_blocked: false,
+      coverage_tier: 'A' as const,
+      price_status: 'verified' as const,
+      eligible_for_comparison: true,
+      verification_failures: [],
+    };
+    
+    const categorized = categorizeResult(input, baselinePrice);
+    
+    // CRITICAL: Must be in more_expensive bucket, NOT not_comparable or unverified
+    expect(categorized.bucket).toBe('more_expensive');
+    expect(categorized.is_verified).toBe(true);
+    expect(categorized.is_comparable).toBe(true);
+    
+    // Message must NOT contain "partial" or "Total price not available"
+    expect(categorized.bucket_label).toBe('Found but more expensive');
+    expect(categorized.non_comparable_user_message).toBeNull();
+  });
+});

@@ -13,6 +13,8 @@ import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus } from "@/l
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
+import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
+import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
 import {
   normalizeExtraction,
   type CanonicalPrice,
@@ -2183,8 +2185,18 @@ export default function SearchResults() {
                                           )}
                                         </td>
                                         <td className="py-4 px-4 text-right">
-                                          <span className="font-semibold text-foreground">{currencySymbol}{Math.round(alternativeTotal)}</span>
-                                          <span className="text-amber-600 text-xs ml-2">(+{currencySymbol}{priceDiff})</span>
+                                          <div className="flex flex-col items-end gap-0.5">
+                                            <span className="font-semibold text-foreground">{currencySymbol}{formatUSDPrice(alternativeTotal)}</span>
+                                            <span className="text-amber-600 text-xs">(+{currencySymbol}{formatUSDPrice(priceDiff)})</span>
+                                            {/* Expedia Debug Reveal */}
+                                            <ExpediaDebugReveal
+                                              platformName={result.platform_name}
+                                              canonicalPrice={result.canonical_price || null}
+                                              categorization={getResultCategorization(result.id)}
+                                              extractionMetadata={(result as any).extraction_metadata}
+                                              airbnbTotal={airbnbTotal}
+                                            />
+                                          </div>
                                         </td>
                                         <td className="py-4 px-4 hidden lg:table-cell">
                                           <span className="text-xs text-muted-foreground">May have different terms</span>
@@ -2292,9 +2304,17 @@ export default function SearchResults() {
                                             <td className="py-4 px-4 text-right">
                                               <div className="flex flex-col items-end gap-0.5">
                                                 <span className="text-sm font-medium text-foreground">
-                                                  ${result.price?.toLocaleString()}
+                                                  {currencySymbol}{formatUSDPrice(result.price)}
                                                 </span>
                                                 <span className="text-xs text-amber-600">{failureDisplay.text}</span>
+                                                {/* Expedia Debug Reveal */}
+                                                <ExpediaDebugReveal
+                                                  platformName={result.platform_name}
+                                                  canonicalPrice={result.canonical_price || null}
+                                                  categorization={getResultCategorization(result.id)}
+                                                  extractionMetadata={(result as any).extraction_metadata}
+                                                  airbnbTotal={airbnbTotal}
+                                                />
                                               </div>
                                             </td>
                                             <td className="py-4 px-4 text-center">

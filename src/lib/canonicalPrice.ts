@@ -195,9 +195,22 @@ function mapConfidence(score: number | null, hasStructuralVerification: boolean 
 /**
  * Check if structural proof exists in any of the nested metadata locations
  * Extractors may store proof in different nested structures
+ * 
+ * EXPEDIA-SPECIFIC: The extract-expedia golden path returns:
+ * - structuralProof.breakdown_found, structuralProof.total_label_found, etc.
+ * - verification: "VERIFIED" or "PARTIAL"
+ * - semantic: "pass" or "fail"
+ * - offersPage metadata
  */
 function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boolean {
   if (!metadata) return false;
+  
+  // EXPEDIA-SPECIFIC: Check for verification: "VERIFIED" (case insensitive)
+  // This is the primary signal from extract-expedia golden path
+  const verification = metadata.verification || metadata.structuralProof?.verification || '';
+  if (typeof verification === 'string' && verification.toUpperCase() === 'VERIFIED') {
+    return true;
+  }
   
   // Check top-level fields
   const topLevel = 
@@ -222,16 +235,35 @@ function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boole
     offersPage.datesRenderedCorrectly === true;
   if (offersProof) return true;
   
+  // EXPEDIA-SPECIFIC: Check semantic pass as additional verification
+  // If semantic: "pass" and extraction was successful, trust it
+  const semantic = metadata.semantic || '';
+  if (typeof semantic === 'string' && semantic.toLowerCase() === 'pass') {
+    return true;
+  }
+  
   return false;
+}
+
+/**
+ * Check if this is an Expedia extraction based on platform name
+ */
+function isExpediaPlatform(platformName: string): boolean {
+  const lower = platformName.toLowerCase();
+  return lower.includes('expedia');
 }
 
 /**
  * Determine price type from extraction metadata and flags
  * CRITICAL: This determines whether we have a comparable total or just a partial price
  * Price type must be derived from WHAT was found (total vs subtotal), NOT from confidence
+ * 
+ * EXPEDIA-SPECIFIC: The golden path extractor returns verification: "VERIFIED" and
+ * semantic: "pass" when it successfully extracts a total with taxes and fees.
  */
 function determinePriceType(input: ExtractionInput): PriceType {
   const metadata = input.extraction_metadata || {};
+  const isExpedia = isExpediaPlatform(input.platform_name);
   
   // Explicit price_type from extractor takes priority
   if (input.price_type) {
@@ -247,6 +279,33 @@ function determinePriceType(input: ExtractionInput): PriceType {
     }
     if (explicit.includes('nightly') || explicit.includes('per_night')) {
       return 'nightly_only';
+    }
+  }
+  
+  // EXPEDIA-SPECIFIC: Check for verification: "VERIFIED" with semantic: "pass"
+  // This is the definitive signal from extract-expedia golden path
+  if (isExpedia) {
+    const verification = metadata.verification || metadata.structuralProof?.verification || '';
+    const semantic = metadata.semantic || '';
+    
+    if (
+      typeof verification === 'string' && 
+      verification.toUpperCase() === 'VERIFIED' &&
+      input.includes_taxes_fees === true &&
+      input.dates_validated === true
+    ) {
+      return 'total_proven';
+    }
+    
+    // Also accept semantic: "pass" with taxes/fees for Expedia
+    if (
+      typeof semantic === 'string' &&
+      semantic.toLowerCase() === 'pass' &&
+      input.includes_taxes_fees === true &&
+      input.dates_validated === true &&
+      input.extraction_status === 'success'
+    ) {
+      return 'total_proven';
     }
   }
   
