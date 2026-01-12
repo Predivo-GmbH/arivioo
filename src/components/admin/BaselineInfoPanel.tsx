@@ -100,6 +100,10 @@ export function BaselineInfoPanel() {
   const [checkingChainLogic, setCheckingChainLogic] = useState(false);
   const [chainLogicError, setChainLogicError] = useState<string | null>(null);
   
+  const [finalizationLogic, setFinalizationLogic] = useState<CanonicalCheckResult | null>(null);
+  const [checkingFinalizationLogic, setCheckingFinalizationLogic] = useState(false);
+  const [finalizationLogicError, setFinalizationLogicError] = useState<string | null>(null);
+  
   // Guards to prevent duplicate runs and handle cleanup
   const hasRunInitialChecks = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -273,6 +277,30 @@ export function BaselineInfoPanel() {
     }
   }, []);
   
+  // Run Finalization logic validation
+  const runFinalizationLogic = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
+    setCheckingFinalizationLogic(true);
+    setFinalizationLogicError(null);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=finalization-canonical-check', {
+        method: 'GET',
+      });
+      
+      if (signal?.aborted) return;
+      if (invokeError) throw invokeError;
+      setFinalizationLogic(data as CanonicalCheckResult);
+    } catch (err: any) {
+      if (signal?.aborted) return;
+      console.error('Finalization logic check failed:', err);
+      setFinalizationLogicError(err?.message || 'Failed to run check');
+    } finally {
+      if (!signal?.aborted) {
+        setCheckingFinalizationLogic(false);
+      }
+    }
+  }, []);
+  
   // Run all checks with re-entrancy guard
   const runAllChecks = useCallback((signal?: AbortSignal) => {
     // Prevent overlapping runs
@@ -292,10 +320,11 @@ export function BaselineInfoPanel() {
       runZyteLogic(signal),
       runFirecrawlLogic(signal),
       runChainLogic(signal),
+      runFinalizationLogic(signal),
     ]).finally(() => {
       isRunningRef.current = false;
     });
-  }, [runBrowserlessCanary, runZyteCanary, runFirecrawlCanary, runBrowserlessLogic, runZyteLogic, runFirecrawlLogic, runChainLogic]);
+  }, [runBrowserlessCanary, runZyteCanary, runFirecrawlCanary, runBrowserlessLogic, runZyteLogic, runFirecrawlLogic, runChainLogic, runFinalizationLogic]);
   
   // Handler for user-initiated "Check All" button
   const handleCheckAll = useCallback(() => {
@@ -393,7 +422,7 @@ export function BaselineInfoPanel() {
   
   // Check if any checks are running
   const isAnyCheckRunning = checkingBrowserlessCanary || checkingZyteCanary || checkingFirecrawlCanary || 
-    checkingBrowserlessLogic || checkingZyteLogic || checkingFirecrawlLogic || checkingChainLogic;
+    checkingBrowserlessLogic || checkingZyteLogic || checkingFirecrawlLogic || checkingChainLogic || checkingFinalizationLogic;
   
   // Helper to render a provider canary indicator (compact card)
   const renderCanaryIndicator = (

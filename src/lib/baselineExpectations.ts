@@ -11,12 +11,12 @@
  * Do not auto-update on deploy.
  */
 
-export const BASELINE_NAME = 'search-results-stable-v2';
-export const BASELINE_VERSION = '2.0.0';
+export const BASELINE_NAME = 'search-results-finalization-baseline-v1';
+export const BASELINE_VERSION = '1.0.0';
 
 export interface BaselineExpectation {
   id: string;
-  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin';
+  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization';
   description: string;
   observable: string;
   critical: boolean;
@@ -183,6 +183,50 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     observable: 'Health Overview shows active baseline name and version',
     critical: false,
   },
+
+  // Finalization Contract (NEW in v1.0.0)
+  {
+    id: 'no_results_before_final',
+    category: 'finalization',
+    description: 'No results render before finalised_at',
+    observable: 'User sees "Finding Better Deals" with Activity Log until finalization completes',
+    critical: true,
+  },
+  {
+    id: 'atomic_backend_finalization',
+    category: 'finalization',
+    description: 'status=completed only set with snapshot',
+    observable: 'finalizeAndCompleteSearch() performs single atomic DB update',
+    critical: true,
+  },
+  {
+    id: 'deterministic_snapshot_rendering',
+    category: 'finalization',
+    description: 'Results from snapshot only after finalization',
+    observable: 'Refreshing page shows identical results',
+    critical: true,
+  },
+  {
+    id: 'no_background_mutation',
+    category: 'finalization',
+    description: 'No mutations after terminal freeze',
+    observable: 'No UI flicker after isTerminalFrozen is set',
+    critical: true,
+  },
+  {
+    id: 'all_platforms_in_snapshot',
+    category: 'finalization',
+    description: 'All matched platforms appear in results',
+    observable: 'Platforms never disappear from final results, even if extraction failed',
+    critical: true,
+  },
+  {
+    id: 'finalization_progress_gate',
+    category: 'finalization',
+    description: 'Finalization progress indicator visible',
+    observable: '"X/Y platforms finalized" shown during terminalHydrating state',
+    critical: false,
+  },
 ];
 
 /**
@@ -212,4 +256,5 @@ export const CATEGORY_LABELS: Record<string, string> = {
   pricing: 'Pricing Integrity',
   access_control: 'Access Control',
   admin: 'Admin Dashboard',
+  finalization: 'Finalization Contract',
 };

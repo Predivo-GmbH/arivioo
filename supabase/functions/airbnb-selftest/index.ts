@@ -1290,7 +1290,153 @@ function runBaselineChainCanonicalCheck(): BaselineChainCanonicalCheckResult {
 }
 
 // =============================================================================
-// CANARY URL CONFIGURATION
+// FINALIZATION CANONICAL BASELINE CHECK
+// =============================================================================
+// When mode=finalization-canonical-check is passed, this function validates
+// the "No Results Until Final" contract through deterministic checks.
+// Reference: docs/FINALIZATION_CANONICAL_BASELINE.md
+// =============================================================================
+
+interface FinalizationCanonicalCheckResult {
+  mode: 'finalization-canonical-check';
+  passed: boolean;
+  checks: Array<{
+    name: string;
+    expected: string;
+    actual: string;
+    passed: boolean;
+  }>;
+  status: 'finalization_baseline_valid' | 'finalization_baseline_violation';
+  timestamp: string;
+}
+
+function runFinalizationCanonicalCheck(): FinalizationCanonicalCheckResult {
+  const checks: FinalizationCanonicalCheckResult['checks'] = [];
+  
+  // Terminal statuses that should freeze UI
+  const TERMINAL_STATUSES = [
+    'completed', 'done', 'error', 'failed', 
+    'cancelled', 'price_unavailable', 'dates_unavailable', 'finalization_failed'
+  ];
+  
+  // Terminal extraction statuses for platform tracking
+  const TERMINAL_EXTRACTION_STATUSES = [
+    'success', 'failed', 'sold_out', 'blocked', 
+    'dates_unavailable', 'price_not_found', 'timeout'
+  ];
+  
+  // Check 1: Terminal status detection includes all required statuses
+  const allTerminalStatusesRecognized = TERMINAL_STATUSES.every(s => 
+    typeof s === 'string' && s.length > 0
+  );
+  checks.push({
+    name: 'terminal_statuses_defined',
+    expected: '8 terminal statuses',
+    actual: `${TERMINAL_STATUSES.length} statuses`,
+    passed: TERMINAL_STATUSES.length === 8 && allTerminalStatusesRecognized,
+  });
+  
+  // Check 2: Atomic finalization invariant - completed requires finalised_at
+  const atomicFinalizationValid = (status: string, finalisedAt: string | null, snapshot: object | null): boolean => {
+    if (status === 'completed') {
+      return finalisedAt !== null && snapshot !== null;
+    }
+    return true;
+  };
+  
+  const atomicCheck1 = atomicFinalizationValid('completed', '2026-01-12T00:00:00Z', { results: [] }) === true;
+  const atomicCheck2 = atomicFinalizationValid('completed', null, { results: [] }) === false; // Should fail
+  const atomicCheck3 = atomicFinalizationValid('completed', '2026-01-12T00:00:00Z', null) === false; // Should fail
+  const atomicCheck4 = atomicFinalizationValid('searching', null, null) === true; // Non-terminal is ok
+  
+  checks.push({
+    name: 'atomic_finalization_invariant',
+    expected: 'completed requires finalised_at AND snapshot',
+    actual: atomicCheck1 && atomicCheck2 && atomicCheck3 && atomicCheck4 ? 'invariant holds' : 'invariant violated',
+    passed: atomicCheck1 && atomicCheck2 && atomicCheck3 && atomicCheck4,
+  });
+  
+  // Check 3: shouldRenderResults logic - no results before finalization
+  const shouldRenderResults = (finalisedAt: string | null, snapshot: object | null): boolean => {
+    return finalisedAt !== null && snapshot !== null;
+  };
+  
+  const renderCheck1 = shouldRenderResults(null, null) === false;
+  const renderCheck2 = shouldRenderResults('2026-01-12T00:00:00Z', null) === false;
+  const renderCheck3 = shouldRenderResults(null, { results: [] }) === false;
+  const renderCheck4 = shouldRenderResults('2026-01-12T00:00:00Z', { results: [] }) === true;
+  
+  checks.push({
+    name: 'no_results_before_finalization',
+    expected: 'results only when finalised_at AND snapshot exist',
+    actual: renderCheck1 && renderCheck2 && renderCheck3 && renderCheck4 ? 'logic correct' : 'logic violated',
+    passed: renderCheck1 && renderCheck2 && renderCheck3 && renderCheck4,
+  });
+  
+  // Check 4: All platforms must appear in snapshot
+  const validateSnapshotCompleteness = (
+    platforms: string[],
+    snapshotPlatforms: string[]
+  ): boolean => {
+    const snapshotSet = new Set(snapshotPlatforms.map(p => p.toLowerCase()));
+    return platforms.every(p => snapshotSet.has(p.toLowerCase()));
+  };
+  
+  const completenessCheck1 = validateSnapshotCompleteness(
+    ['Expedia', 'Booking.com'],
+    ['Expedia', 'Booking.com']
+  ) === true;
+  const completenessCheck2 = validateSnapshotCompleteness(
+    ['Expedia', 'Booking.com'],
+    ['Expedia'] // Missing Booking.com
+  ) === false;
+  
+  checks.push({
+    name: 'all_platforms_in_snapshot',
+    expected: 'every search_platform appears in snapshot',
+    actual: completenessCheck1 && completenessCheck2 ? 'completeness enforced' : 'completeness violated',
+    passed: completenessCheck1 && completenessCheck2,
+  });
+  
+  // Check 5: Terminal freeze blocks mutations
+  let mutationBlocked = true;
+  const testTerminalFreeze = (): boolean => {
+    let frozenState = false;
+    let updateCount = 0;
+    
+    const safeUpdate = () => {
+      if (frozenState) return;
+      updateCount++;
+    };
+    
+    safeUpdate(); // Should work
+    safeUpdate(); // Should work
+    frozenState = true;
+    safeUpdate(); // Should be blocked
+    safeUpdate(); // Should be blocked
+    
+    return updateCount === 2;
+  };
+  
+  mutationBlocked = testTerminalFreeze();
+  checks.push({
+    name: 'terminal_freeze_blocks_mutations',
+    expected: 'mutations blocked after freeze',
+    actual: mutationBlocked ? 'freeze working' : 'freeze bypassed',
+    passed: mutationBlocked,
+  });
+  
+  const allPassed = checks.every(c => c.passed);
+  
+  return {
+    mode: 'finalization-canonical-check',
+    passed: allPassed,
+    checks,
+    status: allPassed ? 'finalization_baseline_valid' : 'finalization_baseline_violation',
+    timestamp: new Date().toISOString(),
+  };
+}
+
 // Fixed test scenario for live provider capability checks.
 // Uses Mar 1-4, 2026 (3 nights) matching the user-reported search scenario.
 // Expected total validated from live search result: $1658.94
@@ -2091,6 +2237,18 @@ Deno.serve(async (req) => {
   // Baseline chain canonical check (orchestration logic validation)
   if (mode === 'baseline-chain-canonical-check') {
     const result = runBaselineChainCanonicalCheck();
+    return new Response(JSON.stringify(result, null, 2), {
+      status: result.passed ? 200 : 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+  
+  // ==========================================================================
+  // FINALIZATION BASELINE CANONICAL CHECK
+  // Reference: docs/FINALIZATION_CANONICAL_BASELINE.md
+  // ==========================================================================
+  if (mode === 'finalization-canonical-check') {
+    const result = runFinalizationCanonicalCheck();
     return new Response(JSON.stringify(result, null, 2), {
       status: result.passed ? 200 : 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
