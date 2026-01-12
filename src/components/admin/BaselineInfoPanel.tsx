@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip';
-import { Shield, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Clock, GitCommit, Tag, RefreshCw, ShieldCheck, ShieldAlert, Zap, Activity } from 'lucide-react';
+import { Shield, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Clock, GitCommit, Tag, RefreshCw, ShieldCheck, ShieldAlert, Zap, Activity, FileCheck2 } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
 import { BASELINE_EXPECTATIONS, CATEGORY_LABELS, getExpectationsByCategory } from '@/lib/baselineExpectations';
@@ -62,6 +62,39 @@ interface CanaryCheckResult {
   }>;
 }
 
+// System Logic Baseline definition - array-driven for future extensibility
+interface SystemLogicBaseline {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  checkMode: string; // Edge function mode to call
+  invariants: Array<{
+    id: string;
+    label: string;
+    description: string;
+  }>;
+}
+
+// Array of system-level baselines - add new ones here
+const SYSTEM_LOGIC_BASELINES: SystemLogicBaseline[] = [
+  {
+    id: 'finalization',
+    name: 'Finalization & Deterministic Results',
+    version: '1.0.0',
+    description: 'Ensures results are never shown until fully finalized, snapshots are immutable, and refreshes are deterministic.',
+    checkMode: 'finalization-canonical-check',
+    invariants: [
+      { id: 'no_early_render', label: 'No results before all platforms finalised', description: 'Results page never renders until finalised_at and final_results_snapshot are set' },
+      { id: 'immutable_snapshot', label: 'Completed search has immutable snapshot', description: 'Once finalised_at is set, final_results_snapshot never changes' },
+      { id: 'deterministic_refresh', label: 'Page refresh is deterministic', description: 'Refreshing a completed search shows identical results every time' },
+      { id: 'all_platforms_included', label: 'All discovered platforms in final snapshot', description: 'Every platform in search_platforms appears in final_results_snapshot' },
+      { id: 'no_post_mutation', label: 'No post-finalisation UI mutation', description: 'After terminal freeze, no background polling or SSE updates mutate displayed results' },
+      { id: 'progress_observable', label: 'Finalisation progress is observable (X/Y)', description: 'Users see real-time count of platforms reaching terminal status during finalization' },
+    ],
+  },
+];
+
 export function BaselineInfoPanel() {
   const { getToken } = useAdminAuth();
   const [baseline, setBaseline] = useState<BaselineData | null>(null);
@@ -69,6 +102,8 @@ export function BaselineInfoPanel() {
   const [error, setError] = useState<string | null>(null);
   const [showExpectations, setShowExpectations] = useState(false);
   const [showLogicChecks, setShowLogicChecks] = useState(false);
+  const [showSystemLogicBaselines, setShowSystemLogicBaselines] = useState(true);
+  const [expandedSystemBaselines, setExpandedSystemBaselines] = useState<Set<string>>(new Set());
   
   // Provider CANARY checks (live capability)
   const [browserlessCanary, setBrowserlessCanary] = useState<CanaryCheckResult | null>(null);
@@ -772,6 +807,174 @@ export function BaselineInfoPanel() {
           <CollapsibleContent className="mt-2">
             <div className="text-[10px] text-muted-foreground p-2 bg-muted/30 rounded">
               Deterministic unit tests (B=Browserless, Z=Zyte, F=Firecrawl, C=Chain) validating extraction logic with mock data.
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+
+        {/* System Logic Baselines - array-driven */}
+        <Collapsible open={showSystemLogicBaselines} onOpenChange={setShowSystemLogicBaselines}>
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" className="w-full justify-between px-2 py-1 h-auto">
+              <div className="flex items-center gap-2">
+                <FileCheck2 className="h-3.5 w-3.5 text-primary" />
+                <span className="text-xs font-medium">System Logic Baselines</span>
+              </div>
+              <div className="flex items-center gap-1">
+                {/* Summary status badges */}
+                {SYSTEM_LOGIC_BASELINES.map((baseline) => {
+                  const isFinalization = baseline.id === 'finalization';
+                  const check = isFinalization ? finalizationLogic : null;
+                  const checking = isFinalization ? checkingFinalizationLogic : false;
+                  const error = isFinalization ? finalizationLogicError : null;
+                  
+                  return (
+                    <Badge 
+                      key={baseline.id}
+                      variant={check?.passed ? 'default' : (error || (check && !check.passed)) ? 'destructive' : 'outline'}
+                      className="text-[9px] px-1.5 py-0 h-4"
+                    >
+                      {checking ? '...' : check?.passed ? 'PASS' : error ? 'ERR' : check ? 'FAIL' : '—'}
+                    </Badge>
+                  );
+                })}
+                {showSystemLogicBaselines ? (
+                  <ChevronDown className="h-3 w-3 ml-1" />
+                ) : (
+                  <ChevronRight className="h-3 w-3 ml-1" />
+                )}
+              </div>
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-2 space-y-2">
+            {SYSTEM_LOGIC_BASELINES.map((sysBaseline) => {
+              const isFinalization = sysBaseline.id === 'finalization';
+              const check = isFinalization ? finalizationLogic : null;
+              const checking = isFinalization ? checkingFinalizationLogic : false;
+              const error = isFinalization ? finalizationLogicError : null;
+              const isExpanded = expandedSystemBaselines.has(sysBaseline.id);
+              
+              const toggleExpanded = () => {
+                setExpandedSystemBaselines(prev => {
+                  const next = new Set(prev);
+                  if (next.has(sysBaseline.id)) {
+                    next.delete(sysBaseline.id);
+                  } else {
+                    next.add(sysBaseline.id);
+                  }
+                  return next;
+                });
+              };
+              
+              return (
+                <div 
+                  key={sysBaseline.id}
+                  className={`rounded-lg border ${
+                    check?.passed 
+                      ? 'bg-green-500/10 border-green-500/30' 
+                      : error || (check && !check.passed)
+                        ? 'bg-destructive/10 border-destructive/30'
+                        : 'bg-muted/50 border-border'
+                  }`}
+                >
+                  {/* Baseline Header */}
+                  <button 
+                    onClick={toggleExpanded}
+                    className="w-full p-2.5 flex items-center justify-between hover:bg-muted/30 rounded-t-lg transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      {checking ? (
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                      ) : check?.passed ? (
+                        <ShieldCheck className="h-3.5 w-3.5 text-green-500" />
+                      ) : error || (check && !check.passed) ? (
+                        <ShieldAlert className="h-3.5 w-3.5 text-destructive" />
+                      ) : (
+                        <Shield className="h-3.5 w-3.5 text-muted-foreground" />
+                      )}
+                      <span className="text-xs font-medium">{sysBaseline.name}</span>
+                      <Badge 
+                        variant="outline" 
+                        className="text-[9px] px-1 py-0 h-4 border-muted-foreground/30"
+                      >
+                        v{sysBaseline.version}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge 
+                        variant={check?.passed ? 'default' : (error || (check && !check.passed)) ? 'destructive' : 'secondary'}
+                        className="text-[9px] px-1.5 py-0 h-4"
+                      >
+                        {checking ? 'Checking...' : check?.passed ? 'PASS' : error ? 'ERROR' : check ? 'FAIL' : 'Pending'}
+                      </Badge>
+                      {isExpanded ? (
+                        <ChevronDown className="h-3 w-3" />
+                      ) : (
+                        <ChevronRight className="h-3 w-3" />
+                      )}
+                    </div>
+                  </button>
+                  
+                  {/* Baseline Details (expanded) */}
+                  {isExpanded && (
+                    <div className="px-2.5 pb-2.5 space-y-2">
+                      <p className="text-[10px] text-muted-foreground">{sysBaseline.description}</p>
+                      
+                      {/* Timestamp */}
+                      {check?.timestamp && (
+                        <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                          <Clock className="h-2.5 w-2.5" />
+                          <span>Last checked: {formatTimestamp(check.timestamp)}</span>
+                        </div>
+                      )}
+                      
+                      {/* Error display */}
+                      {error && (
+                        <div className="text-[10px] text-destructive bg-destructive/10 rounded px-2 py-1">
+                          ✗ {error}
+                        </div>
+                      )}
+                      
+                      {/* Invariant checks */}
+                      <div className="space-y-1.5 pt-1 border-t border-border/50">
+                        <span className="text-[10px] font-medium text-muted-foreground">Invariant Checks:</span>
+                        <ul className="space-y-1">
+                          {sysBaseline.invariants.map((inv) => {
+                            // Find matching check result
+                            const matchingCheck = check?.checks?.find(c => 
+                              c.name.toLowerCase().includes(inv.id.replace(/_/g, ' ').toLowerCase()) ||
+                              inv.label.toLowerCase().includes(c.name.toLowerCase().split(' ')[0])
+                            );
+                            const invPassed = matchingCheck?.passed ?? (check?.passed ?? null);
+                            
+                            return (
+                              <li 
+                                key={inv.id}
+                                className="flex items-start gap-2 text-[10px]"
+                                title={inv.description}
+                              >
+                                {invPassed === true ? (
+                                  <CheckCircle2 className="h-3 w-3 text-green-500 mt-0.5 shrink-0" />
+                                ) : invPassed === false ? (
+                                  <AlertCircle className="h-3 w-3 text-destructive mt-0.5 shrink-0" />
+                                ) : (
+                                  <div className="h-3 w-3 rounded-full border border-muted-foreground/30 mt-0.5 shrink-0" />
+                                )}
+                                <span className={invPassed === false ? 'text-destructive' : ''}>
+                                  {inv.label}
+                                </span>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            
+            <div className="text-[9px] text-muted-foreground pt-1">
+              System-level invariants that protect core behaviour across all searches.
             </div>
           </CollapsibleContent>
         </Collapsible>
