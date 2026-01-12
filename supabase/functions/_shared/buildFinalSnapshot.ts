@@ -236,24 +236,68 @@ export async function finalizeAndCompleteSearch(
       // Non-fatal - continue without extractions
     }
 
+    // -----------------------------
+    // FINALIZATION GATE (CRITICAL)
+    // -----------------------------
+    // We must NOT finalize until every matched platform has reached a terminal extraction state.
+    // Otherwise the snapshot will capture "pending" and the UI will appear to "miss" platforms
+    // (e.g. Expedia), or show incorrect bucket counts.
+    const NON_TERMINAL_EXTRACTION_STATUSES = new Set([
+      'pending',
+      'queued',
+      'running',
+      'in_progress',
+      'started',
+    ]);
+
+    const isTerminalExtractionStatus = (status: unknown): boolean => {
+      if (!status || typeof status !== 'string') return false;
+      return !NON_TERMINAL_EXTRACTION_STATUSES.has(status);
+    };
+
     // Create lookup maps for enrichment
     const extractionByResultId = new Map<string, any>();
     const extractionByPlatform = new Map<string, any>();
     const extractionByUrl = new Map<string, any>();
+    const terminalPlatforms = new Set<string>();
+
     extractionsData?.forEach((e: any) => {
+      const platformKey = typeof e.platform_name === 'string' ? e.platform_name.toLowerCase() : '';
       if (e.search_result_id) {
         extractionByResultId.set(e.search_result_id, e);
       }
-      extractionByPlatform.set(e.platform_name.toLowerCase(), e);
+      if (platformKey) {
+        extractionByPlatform.set(platformKey, e);
+        if (isTerminalExtractionStatus(e.extraction_status)) {
+          terminalPlatforms.add(platformKey);
+        }
+      }
       if (e.deep_link) {
         extractionByUrl.set(e.deep_link, e);
       }
     });
 
-    // Create lookup map for search_results by URL
+    if (authoritativePlatforms.length > 0) {
+      const expected = authoritativePlatforms.length;
+      const terminal = terminalPlatforms.size;
+      if (terminal < expected) {
+        const msg = `Not ready to finalize: ${terminal}/${expected} platforms terminal`;
+        console.log(`[finalizeAndComplete] ${msg}`);
+        await logActivity(supabase, searchId, 'Finalization waiting', msg);
+        return {
+          success: false,
+          alreadyFinalized: false,
+          finalisedAt: null,
+          resultCount: 0,
+          error: msg,
+        };
+      }
+    }
+
+    // Create lookup map for search_results by URL (used to enrich authoritative platform rows)
     const resultByUrl = new Map<string, any>();
     resultsData?.forEach((r: any) => {
-      resultByUrl.set(r.listing_url, r);
+      if (r?.listing_url) resultByUrl.set(r.listing_url, r);
     });
 
     // Step 5: Build the final snapshot from AUTHORITATIVE platform set
