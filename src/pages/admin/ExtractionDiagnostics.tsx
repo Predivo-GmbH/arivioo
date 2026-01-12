@@ -349,7 +349,7 @@ function DiagnosticRow({ diagnostic }: { diagnostic: ExtractionDiagnostic }) {
                   )}
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Confidence:</span>
-                    <span>{diagnostic.confidence_score !== null ? `${(diagnostic.confidence_score * 100).toFixed(0)}%` : 'N/A'}</span>
+                    <span>{diagnostic.confidence_score !== null ? `${Math.min(100, Math.round(diagnostic.confidence_score))}%` : 'N/A'}</span>
                   </div>
                 </div>
               </div>
