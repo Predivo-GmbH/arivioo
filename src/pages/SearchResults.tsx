@@ -1757,6 +1757,29 @@ export default function SearchResults() {
   const supportedResults = results.filter((r) => !r.is_tier_c_blocked);
   const tierCResults = results.filter((r) => r.is_tier_c_blocked);
 
+  // ============================================================================
+  // IMAGE VERIFICATION GATE - CORE PRODUCT INVARIANT
+  // ============================================================================
+  // The platform's primary KPI is reverse image verification. Only listings
+  // that have been visually verified (match_type='visual') with adequate
+  // confidence may be shown as alternatives. Text-only matches are NEVER valid.
+  // ============================================================================
+  const IMAGE_VERIFICATION_THRESHOLD = 75;
+  
+  const isImageVerified = (result: SearchResult): boolean => {
+    // STRICT: Only 'visual' match types are valid alternatives
+    if (result.match_type !== 'visual') {
+      return false;
+    }
+    
+    // STRICT: Must have confidence score above threshold
+    if (typeof result.confidence_score !== 'number' || result.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
+      return false;
+    }
+    
+    return true;
+  };
+
   // CRITICAL: A match MUST have comparison photos to be considered valid
   // Results without photos cannot be verified and must not be shown as "matches"
   const hasComparisonPhotos = (result: SearchResult): boolean => {
@@ -1771,7 +1794,15 @@ export default function SearchResults() {
   // Use the canonical price model for comparison and categorization
   // This ensures verified totals are properly classified
   
-  const resultsWithPhotos = supportedResults.filter(hasComparisonPhotos);
+  // Filter chain: Tier C blocked → Image verified → Has comparison photos
+  const imageVerifiedResults = supportedResults.filter(isImageVerified);
+  const resultsWithPhotos = imageVerifiedResults.filter(hasComparisonPhotos);
+  
+  // Track rejected results for debugging/logging
+  const textOnlyRejectedCount = supportedResults.filter(r => !isImageVerified(r)).length;
+  if (textOnlyRejectedCount > 0) {
+    console.log(`[ImageGate] Filtered ${textOnlyRejectedCount} non-visual matches from display`);
+  }
 
   // Create baseline (Airbnb) canonical price for comparison
   // Note: Not using useMemo here to avoid hook order issues with early returns

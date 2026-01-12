@@ -2825,3 +2825,155 @@ describe('Test Q: Finalization Baseline Regression Guard', () => {
     })).toBe(false);
   });
 });
+
+// =============================================================================
+// TEST R: Image Verification Gate - Core Product Invariant
+// =============================================================================
+describe('Test R: Image Verification Gate', () => {
+  const IMAGE_VERIFICATION_THRESHOLD = 75;
+
+  interface MockResult {
+    id: string;
+    platform_name: string;
+    match_type: string | null;
+    confidence_score: number | null;
+    images: string[];
+  }
+
+  const isImageVerified = (result: MockResult): boolean => {
+    if (result.match_type !== 'visual') {
+      return false;
+    }
+    if (typeof result.confidence_score !== 'number' || result.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
+      return false;
+    }
+    return true;
+  };
+
+  it('R1: text-only matches are never valid alternatives', () => {
+    const textOnlyResult: MockResult = {
+      id: '1',
+      platform_name: 'Booking.com',
+      match_type: 'text',
+      confidence_score: null,
+      images: ['https://example.com/image.jpg'],
+    };
+
+    expect(isImageVerified(textOnlyResult)).toBe(false);
+  });
+
+  it('R2: visual matches with high confidence are valid', () => {
+    const visualResult: MockResult = {
+      id: '2',
+      platform_name: 'Vrbo',
+      match_type: 'visual',
+      confidence_score: 92,
+      images: ['https://example.com/property.jpg'],
+    };
+
+    expect(isImageVerified(visualResult)).toBe(true);
+  });
+
+  it('R3: visual matches with low confidence are rejected', () => {
+    const lowConfidenceVisual: MockResult = {
+      id: '3',
+      platform_name: 'Expedia',
+      match_type: 'visual',
+      confidence_score: 60,
+      images: ['https://example.com/image.jpg'],
+    };
+
+    expect(isImageVerified(lowConfidenceVisual)).toBe(false);
+  });
+
+  it('R4: null match_type is rejected', () => {
+    const nullMatchType: MockResult = {
+      id: '4',
+      platform_name: 'TripAdvisor',
+      match_type: null,
+      confidence_score: 85,
+      images: ['https://example.com/image.jpg'],
+    };
+
+    expect(isImageVerified(nullMatchType)).toBe(false);
+  });
+
+  it('R5: null confidence_score is rejected even for visual matches', () => {
+    const nullConfidence: MockResult = {
+      id: '5',
+      platform_name: 'Agoda',
+      match_type: 'visual',
+      confidence_score: null,
+      images: ['https://example.com/image.jpg'],
+    };
+
+    expect(isImageVerified(nullConfidence)).toBe(false);
+  });
+
+  it('R6: edge case - exactly threshold confidence is valid', () => {
+    const thresholdResult: MockResult = {
+      id: '6',
+      platform_name: 'Hotels.com',
+      match_type: 'visual',
+      confidence_score: 75,
+      images: ['https://example.com/image.jpg'],
+    };
+
+    expect(isImageVerified(thresholdResult)).toBe(true);
+  });
+
+  it('R7: edge case - just below threshold is rejected', () => {
+    const belowThreshold: MockResult = {
+      id: '7',
+      platform_name: 'Rentbyowner',
+      match_type: 'visual',
+      confidence_score: 74,
+      images: ['https://example.com/image.jpg'],
+    };
+
+    expect(isImageVerified(belowThreshold)).toBe(false);
+  });
+
+  it('R8: text-only matches are filtered from results array', () => {
+    const mixedResults: MockResult[] = [
+      { id: '1', platform_name: 'Booking.com', match_type: 'visual', confidence_score: 90, images: ['img1'] },
+      { id: '2', platform_name: 'Vrbo', match_type: 'text', confidence_score: null, images: ['img2'] },
+      { id: '3', platform_name: 'Expedia', match_type: 'visual', confidence_score: 85, images: ['img3'] },
+      { id: '4', platform_name: 'Rentbyowner', match_type: 'text', confidence_score: null, images: [] },
+      { id: '5', platform_name: 'TripAdvisor', match_type: 'visual', confidence_score: 50, images: ['img5'] },
+    ];
+
+    const imageVerifiedResults = mixedResults.filter(isImageVerified);
+
+    expect(imageVerifiedResults.length).toBe(2);
+    expect(imageVerifiedResults.map(r => r.platform_name)).toEqual(['Booking.com', 'Expedia']);
+  });
+
+  it('R9: empty results when all matches are text-only (valid outcome)', () => {
+    const textOnlyResults: MockResult[] = [
+      { id: '1', platform_name: 'Booking.com', match_type: 'text', confidence_score: null, images: ['img1'] },
+      { id: '2', platform_name: 'Vrbo', match_type: 'text', confidence_score: null, images: ['img2'] },
+      { id: '3', platform_name: 'Rentbyowner', match_type: 'text', confidence_score: null, images: [] },
+    ];
+
+    const imageVerifiedResults = textOnlyResults.filter(isImageVerified);
+
+    // "No verified alternatives found" is a valid outcome, not an error
+    expect(imageVerifiedResults.length).toBe(0);
+  });
+
+  it('R10: platform deduplication - same platform cannot appear multiple times unless each is image-verified', () => {
+    const duplicatePlatformResults: MockResult[] = [
+      { id: '1', platform_name: 'Booking.com', match_type: 'visual', confidence_score: 90, images: ['img1'] },
+      { id: '2', platform_name: 'Booking.com', match_type: 'text', confidence_score: null, images: ['img2'] },
+      { id: '3', platform_name: 'Booking.com', match_type: 'visual', confidence_score: 88, images: ['img3'] },
+    ];
+
+    const imageVerifiedResults = duplicatePlatformResults.filter(isImageVerified);
+
+    // Both visual matches should be kept (different listings on same platform)
+    expect(imageVerifiedResults.length).toBe(2);
+    expect(imageVerifiedResults.every(r => r.match_type === 'visual')).toBe(true);
+    expect(imageVerifiedResults.every(r => r.confidence_score !== null && r.confidence_score >= IMAGE_VERIFICATION_THRESHOLD)).toBe(true);
+  });
+});

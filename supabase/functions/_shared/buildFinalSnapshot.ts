@@ -586,6 +586,40 @@ export async function finalizeAndCompleteSearch(
       finalizedPlatformCount = finalResults.length;
     }
 
+    // ============================================================================
+    // IMAGE VERIFICATION GATE (Defense-in-Depth)
+    // ============================================================================
+    // Only image-verified matches (match_type='visual') may appear in the final
+    // snapshot. This is a critical invariant: text-only matches are NEVER valid
+    // alternatives regardless of how they entered the database.
+    // ============================================================================
+    const IMAGE_VERIFICATION_THRESHOLD = 75;
+    const preFilterCount = finalResults.length;
+    
+    finalResults = finalResults.filter((result) => {
+      // STRICT: Only 'visual' match types are valid for display
+      if (result.match_type !== 'visual') {
+        console.log(`[SnapshotGate] REJECTED text-only match: ${result.platform_name} - match_type=${result.match_type}`);
+        return false;
+      }
+      
+      // STRICT: Must have adequate confidence score
+      if (typeof result.confidence_score !== 'number' || result.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
+        console.log(`[SnapshotGate] REJECTED low-confidence match: ${result.platform_name} - confidence=${result.confidence_score}`);
+        return false;
+      }
+      
+      return true;
+    });
+    
+    const filteredOutCount = preFilterCount - finalResults.length;
+    if (filteredOutCount > 0) {
+      console.log(`[SnapshotGate] Filtered out ${filteredOutCount} non-visual matches from final snapshot`);
+    }
+    
+    // Update finalized count after filtering
+    finalizedPlatformCount = finalResults.length;
+
     const finalisedAt = new Date().toISOString();
     const snapshot: FinalSnapshot = {
       version: 2, // Version 2 = authoritative platform set
@@ -607,7 +641,7 @@ export async function finalizeAndCompleteSearch(
       finalized_platform_count: finalizedPlatformCount,
     };
 
-    console.log(`[finalizeAndComplete] Built snapshot: ${finalResults.length} results, expected=${expectedPlatformCount}, finalized=${finalizedPlatformCount}`);
+    console.log(`[finalizeAndComplete] Built snapshot: ${finalResults.length} results (${filteredOutCount} non-visual filtered), expected=${expectedPlatformCount}, finalized=${finalizedPlatformCount}`);
 
     // Step 6: ATOMIC UPDATE - Set snapshot + finalised_at + status='completed' in ONE call
     // This ensures the invariant: completed status = snapshot exists

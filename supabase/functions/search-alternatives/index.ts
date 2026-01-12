@@ -4412,7 +4412,17 @@ function extractLocationFromTitle(title: string): { city: string | null; country
   return { city: null, country: null };
 }
 
-// Targeted text search fallback (used when visual matches are missing/insufficient)
+// ============================================================================
+// DEPRECATED: Text search fallback - NO LONGER SURFACES RESULTS TO USERS
+// ============================================================================
+// Text search may still be called for logging/analytics purposes, but NEVER
+// populates the alternatives array. Only image-verified matches are valid.
+//
+// Core Product Principle (Non-Negotiable):
+// The platform exists to identify the same property using reverse image search.
+// If images do not clearly match with high probability, the candidate is NOT
+// a valid alternative, regardless of text similarity, naming, or location.
+// ============================================================================
 async function addTargetedTextMatches(opts: {
   serpApiKey: string;
   title: string;
@@ -4424,7 +4434,8 @@ async function addTargetedTextMatches(opts: {
   errorTracker?: ApiErrorTracker;
   checkSkip?: () => Promise<boolean>;
 }) {
-  const { serpApiKey, title, cityHint, imageUrlForVerification, alternatives, foundUrls, controller, errorTracker, checkSkip } = opts;
+  const { serpApiKey, title, cityHint, imageUrlForVerification, foundUrls, controller, errorTracker, checkSkip } = opts;
+  // NOTE: `alternatives` parameter is intentionally NOT used - text matches must never be surfaced
 
   const cleanTitle = title.replace(/\s+/g, " ").trim();
   const queries = [
@@ -4432,6 +4443,10 @@ async function addTargetedTextMatches(opts: {
     `${cleanTitle} ${cityHint ?? ""} site:booking.com`,
     `${cleanTitle} ${cityHint ?? ""} site:tripadvisor.`,
   ].map(q => q.replace(/\s+/g, " ").trim());
+
+  // Track text matches found for logging purposes only (never surfaced to users)
+  let textMatchesFound = 0;
+  let visuallyVerifiedFromText = 0;
 
   for (const q of queries) {
     // Check if skip was requested
@@ -4448,17 +4463,14 @@ async function addTargetedTextMatches(opts: {
       break;
     }
 
-    controller && sendProgress(controller, "Running text search", q);
+    // Log that text search is running (for internal analytics only)
+    console.log(`[TextSearch] Running query for analytics: ${q.slice(0, 100)}`);
 
     const result = await fetchSerpApi(`engine=google&q=${encodeURIComponent(q)}&num=10`, serpApiKey);
     
     if (!result.success) {
       if (errorTracker && result.error) {
         recordApiError(errorTracker, result.error);
-        controller && sendProgress(controller, "Search API issue", result.error.message, { 
-          errorType: result.error.type,
-          isQuotaError: result.error.type === 'quota_exceeded'
-        });
       }
       continue;
     }
@@ -4481,45 +4493,62 @@ async function addTargetedTextMatches(opts: {
       
       // Validate URL is an actual bookable property page (not category/search page)
       const urlValidation = isValidBookablePropertyUrl(url);
-      if (!urlValidation.valid) {
-        console.log(`Text search: Skipping non-bookable URL: ${urlValidation.reason} - ${url.slice(0, 100)}`);
-        continue;
-      }
+      if (!urlValidation.valid) continue;
 
-      // If we have an image thumbnail + a reference Airbnb image, try to visually verify it.
+      textMatchesFound++;
+
+      // ============================================================================
+      // TEXT MATCHES ARE LOGGED BUT NEVER ADDED TO ALTERNATIVES
+      // Only if AI visual verification passes with high confidence would we add it
+      // ============================================================================
       const thumb: string | null = r.thumbnail || null;
-      let match_type: 'visual' | 'text' = 'text';
-      let confidence_score: number | null = null;
-
+      
+      // If we have both reference image and thumbnail, attempt visual verification
+      // ONLY visually verified matches from text search may be added
       if (imageUrlForVerification && thumb) {
-        // Check skip before expensive AI comparison
         if (checkSkip && await checkSkip()) {
           console.log("Text search: Skip requested during AI verification, aborting");
-          controller && sendProgress(controller, "Skipped verification", "Moving to results");
-          return; // Exit the function early
+          return;
         }
+        
         const ai = await compareImagesWithAI(imageUrlForVerification, thumb);
+        
+        // STRICT: Only high-confidence visual matches (90%+) are valid
         if (ai.isMatch && ai.score >= 90) {
-          match_type = 'visual';
-          confidence_score = ai.score;
+          visuallyVerifiedFromText++;
+          foundUrls.add(url);
+          
+          // This is the ONLY path where text search can produce a result:
+          // when AI visual verification confirms it's the same property
+          opts.alternatives.push({
+            platform_name: getPlatformName(url),
+            listing_url: url,
+            listing_title: r.title || r.snippet || null,
+            price: null,
+            confidence_score: ai.score,
+            image_url: thumb,
+            images: thumb ? [thumb] : [],
+            match_type: 'visual', // CRITICAL: Must be 'visual' since AI verified it
+            source_airbnb_image: imageUrlForVerification || null,
+          });
+          
+          controller && sendProgress(controller, "Visual match from text search", `${getPlatformName(url)} · ${ai.score}% verified`);
+        } else {
+          // Log but do NOT add to alternatives - text-only matches are never surfaced
+          console.log(`[TextSearch] Rejected text match (no visual verification): ${getPlatformName(url)} - ${url.slice(0, 80)}`);
         }
+      } else {
+        // No thumbnail or no reference image - cannot visually verify, do NOT add
+        console.log(`[TextSearch] Skipped text match (no images for verification): ${getPlatformName(url)} - ${url.slice(0, 80)}`);
       }
-
-      foundUrls.add(url);
-      alternatives.push({
-        platform_name: getPlatformName(url),
-        listing_url: url,
-        listing_title: r.title || r.snippet || null,
-        price: null,
-        confidence_score,
-        image_url: thumb,
-        images: thumb ? [thumb] : [],
-        match_type,
-        source_airbnb_image: imageUrlForVerification || null,
-      });
-
-      controller && sendProgress(controller, "Found candidate listing", `${getPlatformName(url)} · ${match_type === 'visual' ? `${confidence_score}% verified` : 'text-only'}`);
     }
+  }
+
+  // Log summary for analytics/debugging
+  console.log(`[TextSearch] Summary: ${textMatchesFound} text matches found, ${visuallyVerifiedFromText} visually verified and added`);
+  if (textMatchesFound > 0 && visuallyVerifiedFromText === 0) {
+    controller && sendProgress(controller, "No visual matches from text search", 
+      `Found ${textMatchesFound} text candidates but none passed image verification`);
   }
 }
 
@@ -6738,8 +6767,42 @@ async function runSearchWithStreaming(
     }
   }
 
-  // Calculate savings for all alternatives (including those without prices)
-  const allResultsWithMeta = alternatives.map((alt) => ({
+  // ============================================================================
+  // IMAGE VERIFICATION GATE - CORE PRODUCT INVARIANT
+  // ============================================================================
+  // Only image-verified matches (match_type='visual') may be saved as results.
+  // Text-only matches are NEVER valid alternatives regardless of quantity.
+  // This is the platform's primary KPI: reverse image verification is the
+  // mandatory source of truth for identifying valid alternative listings.
+  // ============================================================================
+  const IMAGE_VERIFICATION_THRESHOLD = 75; // Minimum confidence score for visual matches
+  
+  const imageVerifiedAlternatives = alternatives.filter((alt) => {
+    // STRICT: Only 'visual' match types are valid
+    if (alt.match_type !== 'visual') {
+      console.log(`[ImageGate] REJECTED text-only match: ${alt.platform_name} - ${alt.listing_url.slice(0, 80)}`);
+      return false;
+    }
+    
+    // STRICT: Must have confidence score above threshold
+    if (typeof alt.confidence_score !== 'number' || alt.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
+      console.log(`[ImageGate] REJECTED low-confidence match: ${alt.platform_name} (${alt.confidence_score ?? 'null'}%) - ${alt.listing_url.slice(0, 80)}`);
+      return false;
+    }
+    
+    return true;
+  });
+  
+  const rejectedCount = alternatives.length - imageVerifiedAlternatives.length;
+  console.log(`[ImageGate] Passed: ${imageVerifiedAlternatives.length}, Rejected: ${rejectedCount} (text-only or low-confidence)`);
+  
+  if (rejectedCount > 0 && imageVerifiedAlternatives.length === 0) {
+    sendProgress(controller, "No verified alternatives found", 
+      `Found ${rejectedCount} candidate${rejectedCount > 1 ? 's' : ''} but none passed image verification`);
+  }
+
+  // Calculate savings for VERIFIED alternatives only
+  const allResultsWithMeta = imageVerifiedAlternatives.map((alt) => ({
     ...alt,
     original_price: airbnbPrice,
     savings_amount: airbnbPrice && alt.price && alt.price < airbnbPrice ? airbnbPrice - alt.price : null,
@@ -6756,8 +6819,8 @@ async function runSearchWithStreaming(
   // Combine: priced results first, then priceless results (still valuable photo matches)
   const allResultsSorted = [...resultsWithPrices, ...resultsWithoutPrices];
 
-  // Save ALL results to DB (including those without prices - they're still valuable photo matches)
-  console.log(`Attempting to save ${allResultsSorted.length} results to DB (${resultsWithPrices.length} with prices, ${resultsWithoutPrices.length} without) for search ${searchId}`);
+  // Save only IMAGE-VERIFIED results to DB
+  console.log(`[ImageGate] Saving ${allResultsSorted.length} image-verified results to DB (${resultsWithPrices.length} with prices, ${resultsWithoutPrices.length} without) for search ${searchId}`);
   if (allResultsSorted.length > 0) {
     // BACKEND GUARD: Tier C platforms must NEVER have prices persisted
     // This is defense-in-depth - even if upstream logic fails, prices cannot leak
