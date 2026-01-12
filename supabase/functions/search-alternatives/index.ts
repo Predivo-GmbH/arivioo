@@ -2008,8 +2008,18 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
       
       // CRITICAL: Check for book/stays checkout page payment patterns (HIGHEST PRIORITY)
       // These are the all-in totals including taxes and fees
-      const hasPayNowPattern = /\bpay\s*\$[\d,]+(?:\.\d{2})?\s*now\b/i.test(context);
-      const hasTotalUsdPattern = /\btotal\s*\(?\s*USD\s*\)?\s*\$[\d,]+(?:\.\d{2})?/i.test(context);
+      // IMPORTANT: We must verify the CURRENT matched amount is the one in the total pattern,
+      // not just that the pattern exists in the context window (which could include nearby totals)
+      
+      // Check if this specific amount appears directly after "Pay $X now" or "Total USD $X"
+      const payNowMatch = context.match(/\bpay\s*\$([\d,]+(?:\.\d{2})?)\s*now\b/i);
+      const payNowAmount = payNowMatch ? normalizeAmount(payNowMatch[1] || '') : null;
+      const hasPayNowPattern = payNowAmount !== null && Math.abs(payNowAmount - amount) < 0.01;
+      
+      const totalUsdMatch = context.match(/\btotal\s*\(?\s*USD\s*\)?\s*\$([\d,]+(?:\.\d{2})?)/i);
+      const totalUsdAmount = totalUsdMatch ? normalizeAmount(totalUsdMatch[1] || '') : null;
+      const hasTotalUsdPattern = totalUsdAmount !== null && Math.abs(totalUsdAmount - amount) < 0.01;
+      
       const hasDueToday = /\bdue\s+today\b/i.test(context);
       const hasAmountDue = /\bamount\s+due\b/i.test(context);
       const hasCheckoutTotal = hasPayNowPattern || hasTotalUsdPattern || hasDueToday || hasAmountDue;
