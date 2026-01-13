@@ -6583,6 +6583,20 @@ async function runSearchWithStreaming(
           addedFromCache++;
           
           console.log(`[FallbackMerge] Added cached match: ${cached.platform_name} - ${cached.platform_url.slice(0, 80)}`);
+          
+          // ============================================================================
+          // PARALLEL PIPELINE: Trigger immediate price extraction for cached matches too
+          // Cached matches are already VERIFIED (confidence 95%), so trigger extraction now
+          // ============================================================================
+          if (!platformsInPriceExtraction.has(platformKey)) {
+            const extractionPromise = triggerImmediatePriceExtraction(cachedAlternative);
+            extractionPromises.push(extractionPromise);
+            sendProgress(controller, `Starting price extraction for ${cached.platform_name}`, "Running in parallel (from cache)", {
+              platform: cached.platform_name,
+              parallelExtraction: true,
+              fromCache: true,
+            });
+          }
         } else {
           dedupedFromCache++;
         }
@@ -7180,7 +7194,60 @@ async function runSearchWithStreaming(
 
   const FINALIZE_MAX_WAIT_MS = 60_000;
   const FINALIZE_POLL_MS = 2_000;
+  const EXTRACTION_TIMEOUT_MS = 45_000; // Per-platform extraction timeout guard
   const finalizeStart = Date.now();
+
+  // ============================================================================
+  // TIMEOUT GUARD: Mark any extraction stuck in pending/running as FAILED after timeout
+  // This ensures deterministic terminal convergence even when workers fail silently.
+  // ============================================================================
+  async function enforceExtractionTimeouts(): Promise<number> {
+    const cutoffTime = new Date(Date.now() - EXTRACTION_TIMEOUT_MS).toISOString();
+    
+    const { data: stuckExtractions, error: fetchError } = await supabase
+      .from('price_extractions')
+      .select('id, platform_name, extraction_status, created_at')
+      .eq('search_id', searchId)
+      .in('extraction_status', ['pending', 'queued', 'running', 'in_progress', 'started'])
+      .lt('created_at', cutoffTime);
+    
+    if (fetchError || !stuckExtractions || stuckExtractions.length === 0) {
+      return 0;
+    }
+    
+    console.log(`[TimeoutGuard] Found ${stuckExtractions.length} stuck extractions to mark as failed`);
+    
+    for (const extraction of stuckExtractions) {
+      const { error: updateError } = await supabase
+        .from('price_extractions')
+        .update({
+          extraction_status: 'timeout',
+          extraction_error: `Extraction timed out after ${EXTRACTION_TIMEOUT_MS / 1000}s`,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', extraction.id);
+      
+      if (!updateError) {
+        console.log(`[TimeoutGuard] Marked ${extraction.platform_name} (${extraction.id}) as timeout`);
+        
+        // Also update search_platforms terminal status
+        await supabase
+          .from('search_platforms')
+          .update({
+            extraction_status_terminal: 'timeout',
+            last_error: `Extraction timed out after ${EXTRACTION_TIMEOUT_MS / 1000}s`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('search_id', searchId)
+          .eq('extraction_id_latest', extraction.id);
+      }
+    }
+    
+    return stuckExtractions.length;
+  }
+
+  // Track last progress message to avoid duplicates in UI
+  let lastProgressMsg = '';
 
   let finalizationResult = await finalizeAndCompleteSearch({
     supabase,
@@ -7197,11 +7264,38 @@ async function runSearchWithStreaming(
 
   while (!finalizationResult.success && !finalizationResult.alreadyFinalized) {
     const elapsed = Date.now() - finalizeStart;
-    if (elapsed > FINALIZE_MAX_WAIT_MS) break;
+    if (elapsed > FINALIZE_MAX_WAIT_MS) {
+      // Final timeout reached - force stuck extractions to terminal state
+      const forcedCount = await enforceExtractionTimeouts();
+      if (forcedCount > 0) {
+        console.log(`[Finalization] Forced ${forcedCount} stuck extractions to timeout, retrying finalization`);
+        finalizationResult = await finalizeAndCompleteSearch({
+          supabase,
+          searchId,
+          airbnbTitle,
+          airbnbPrice,
+          airbnbCurrency: search.airbnb_currency || 'USD',
+          airbnbImageUrl: imageUrls[0] || null,
+          airbnbImages: imageUrls.slice(0, 5),
+          checkIn,
+          checkOut,
+          nights,
+        });
+      }
+      break;
+    }
 
     // The shared helper returns "Not ready to finalize" while extractions are still running.
     if (finalizationResult.error?.includes('Not ready to finalize')) {
-      sendProgress(controller, "Finalizing results", finalizationResult.error);
+      // DE-DUPLICATION: Only send progress if message changed
+      if (finalizationResult.error !== lastProgressMsg) {
+        sendProgress(controller, "Finalizing results", finalizationResult.error);
+        lastProgressMsg = finalizationResult.error;
+      }
+      
+      // Check for and fix stuck extractions mid-loop
+      await enforceExtractionTimeouts();
+      
       await new Promise((r) => setTimeout(r, FINALIZE_POLL_MS));
       finalizationResult = await finalizeAndCompleteSearch({
         supabase,

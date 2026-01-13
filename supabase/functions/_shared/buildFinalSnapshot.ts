@@ -211,6 +211,9 @@ async function logActivity(
   }
 }
 
+// Track the last logged terminal count per search to avoid duplicate log entries
+const lastLoggedTerminalCount = new Map<string, number>();
+
 /**
  * ATOMIC finalize-and-complete helper.
  * 
@@ -376,8 +379,15 @@ export async function finalizeAndCompleteSearch(
       if (terminal < expected) {
         const msg = `Not ready to finalize: ${terminal}/${expected} platforms terminal`;
         console.log(`[finalizeAndComplete] ${msg}`);
-        // Note: Activity log is intentionally NOT written here to avoid duplicate entries
-        // The calling SSE loop handles progress updates at a higher level
+        
+        // ACTIVITY LOG DE-DUPLICATION: Only log if terminal count increased since last check
+        const lastLogged = lastLoggedTerminalCount.get(searchId) ?? -1;
+        if (terminal > lastLogged) {
+          lastLoggedTerminalCount.set(searchId, terminal);
+          await logActivity(supabase, searchId, 'Finalizing results', msg);
+        }
+        // (If terminal count unchanged, skip log to prevent spam)
+        
         return {
           success: false,
           alreadyFinalized: false,
@@ -387,6 +397,9 @@ export async function finalizeAndCompleteSearch(
         };
       }
     }
+    
+    // Finalization succeeded path - clean up the de-duplication tracker
+    lastLoggedTerminalCount.delete(searchId);
 
     // Create lookup map for search_results by URL (used to enrich authoritative platform rows)
     const resultByUrl = new Map<string, any>();
