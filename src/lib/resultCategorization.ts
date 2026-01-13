@@ -31,7 +31,8 @@ export type ResultBucket =
   | 'blocked'           // Found but access was blocked (captcha, bot detection)
   | 'requires_action'   // Found but requires user action (login, confirmation)
   | 'service_error'     // True error (timeout, 5xx, etc.)
-  | 'platform_blocked'; // Tier C - platform explicitly not supported
+  | 'platform_blocked'  // Tier C - platform explicitly not supported
+  | 'additional_issues'; // Unmapped/unknown terminal outcomes - catch-all bucket
 
 /**
  * Detailed categorization result for a single search result
@@ -135,6 +136,13 @@ export const BUCKET_DISPLAY: Record<ResultBucket, {
     color: 'muted',
     severity: 8,
   },
+  additional_issues: {
+    label: 'Additional issues detected',
+    description: 'We found this property, but we could not classify the pricing outcome',
+    icon: 'HelpCircle',
+    color: 'warning',
+    severity: 9,
+  },
 };
 
 // ============================================
@@ -225,8 +233,16 @@ export function categorizeResult(
     return createResult('sold_out', input, null);
   }
   
-  // No price at all
+  // No price at all - but distinguish from unmapped errors
   if (!input.price || input.price <= 0) {
+    // Check if we have an extraction_status that wasn't mapped above
+    const unmappedStatus = input.extraction_status && 
+      !['pending', 'running', 'success', 'price_extracted'].includes(input.extraction_status.toLowerCase());
+    
+    if (unmappedStatus) {
+      // Unknown terminal status - use additional_issues bucket
+      return createResult('additional_issues', input, null);
+    }
     return createResult('price_not_found', input, null);
   }
   
@@ -400,6 +416,7 @@ export interface BatchCategorizationResult {
   requires_action: CategorizedResult[];
   service_error: CategorizedResult[];
   platform_blocked: CategorizedResult[];
+  additional_issues: CategorizedResult[];
   
   // Summary stats
   cheapest: CategorizedResult | null;
@@ -425,6 +442,7 @@ export function categorizeAllResults(
     requires_action: [],
     service_error: [],
     platform_blocked: [],
+    additional_issues: [],
     cheapest: null,
     cheapest_savings: null,
     comparable_count: 0,
@@ -464,6 +482,9 @@ export function categorizeAllResults(
         break;
       case 'platform_blocked':
         buckets.platform_blocked.push(categorized);
+        break;
+      case 'additional_issues':
+        buckets.additional_issues.push(categorized);
         break;
     }
   }

@@ -67,6 +67,7 @@ A result with low confidence but structural verification is still "verified"—t
 | `requires_action` | "Requires action" | Login needed, confirmation required |
 | `service_error` | "Temporary error" | Timeout, 5xx, provider error |
 | `platform_blocked` | "Platform not supported" | Tier C blocked |
+| `additional_issues` | "Additional issues detected" | Unmapped/unknown terminal outcomes |
 
 ## Regression Test
 
