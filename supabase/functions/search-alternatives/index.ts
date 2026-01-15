@@ -6077,9 +6077,26 @@ async function runSearchWithStreaming(
   }
 
   const searchStartTime = Date.now();
-  const MAX_TIME = 120000;
-  const MAX_AI = 30;
+  
+  // ============================================================================
+  // DISCOVERY CAPS AND BUDGETS
+  // 
+  // NON-NEGOTIABLE INVARIANT: Discovery MUST attempt all 5 images.
+  // Caps and budgets NEVER stop the outer loop. They only reduce DEPTH (work per image).
+  // 
+  // Global budgets become "soft caps" that trigger degraded modes:
+  // - AI budget exhausted → continue with NO_AI mode (collect + dedupe only)
+  // - Time budget low → continue with fast path (fewer candidates per image)
+  // ============================================================================
+  const MAX_TIME = 120000; // 2 minutes total
+  const MAX_AI = 30; // Global AI verification budget
+  const MAX_AI_PER_IMAGE = 8; // Per-image AI verification cap (depth control)
+  const MAX_CANDIDATES_PER_IMAGE = 40; // Max reverse search results to process per image
+  const TIME_DEGRADED_THRESHOLD = 90000; // After 90s, enter time-degraded mode
+  
   let aiCount = 0;
+  let degradedMode: 'normal' | 'no_ai' | 'fast_path' = 'normal';
+  let degradedModeReason: string | null = null;
 
   // Track proof of an explicit skip request in THIS run.
   // This is required to truthfully label a stop as "User skipped".
@@ -6287,65 +6304,95 @@ async function runSearchWithStreaming(
   }
 
   // ============================================================================
-  // DISCOVERY LOOP: Process all images via reverse image search
-  // Tracks stop reason for truthful logging
+  // DISCOVERY LOOP: Process ALL images via reverse image search
+  // 
+  // NON-NEGOTIABLE INVARIANT: Discovery MUST attempt all 5 images.
+  // 
+  // The ONLY valid early stops are:
+  // 1. Fatal technical error (crash, unrecoverable exception)
+  // 2. User explicitly skips (with same-run proof)
+  // 
+  // Caps, budgets, and heuristics NEVER abort the outer loop.
+  // They only reduce DEPTH (work per image) via degraded modes.
   // ============================================================================
   let discoveryAttempted = false;
-  let discoveryStopReason: 'complete' | 'user_action' | 'cap_reached' | 'api_error' | 'timeout' | 'unknown' = 'complete';
+  let discoveryStopReason: 'complete' | 'user_action' | 'fatal_error' = 'complete';
   let discoveryStopDetail: string | null = null;
   let imagesProcessed = 0;
   
-  // GLOBAL CAP TRACKING: Only global caps (MAX_AI) can stop discovery
-  // Per-image caps (per_image_verification_limit) only stop within-image verification
-  let globalCapReached = false;
-  let globalCapName: string | null = null;
-  let globalCapValue: number | null = null;
-  let globalCapTriggerIteration: number | null = null;
+  // Track degraded mode transitions for logging
+  let enteredDegradedModeAt: number | null = null;
   
   for (let idx = 0; idx < imageUrls.length; idx++) {
-    // Check MAX_TIME timeout
-    if (Date.now() - searchStartTime >= MAX_TIME) {
-      discoveryStopReason = 'timeout';
-      discoveryStopDetail = `Pipeline timeout after ${Math.round((Date.now() - searchStartTime) / 1000)}s`;
-      console.log(`[DiscoveryStop] Timeout reached after image ${idx}: ${discoveryStopDetail}`);
-      sendProgress(controller, "Discovery stopped — timeout", `Completed ${idx} of ${imageUrls.length} images (${discoveryStopDetail})`, {
-        discovery_stop_reason: 'timeout',
-        imagesCompleted: idx,
-        totalImages: imageUrls.length,
+    // ============================================================================
+    // TIME BUDGET CHECK: Degrade, don't stop
+    // After TIME_DEGRADED_THRESHOLD, enter fast_path mode (fewer candidates, no AI)
+    // Only hard stop if we exceed MAX_TIME (fatal timeout)
+    // ============================================================================
+    const elapsed = Date.now() - searchStartTime;
+    
+    if (elapsed >= MAX_TIME) {
+      // HARD TIMEOUT: This is a fatal error condition - system cannot complete
+      // Log it but DON'T break - continue with remaining images in minimal mode
+      console.log(`[DiscoveryDegraded] HARD TIMEOUT at image ${idx + 1}/${imageUrls.length} (${Math.round(elapsed / 1000)}s elapsed)`);
+      if (degradedMode !== 'fast_path') {
+        degradedMode = 'fast_path';
+        degradedModeReason = `Timeout exceeded at ${Math.round(elapsed / 1000)}s`;
+        enteredDegradedModeAt = idx;
+        sendProgress(controller, "Degraded mode: fast path", `Time limit exceeded — continuing with reduced depth for remaining images`, {
+          degraded_mode: 'fast_path',
+          reason: degradedModeReason,
+          images_remaining: imageUrls.length - idx,
+        });
+      }
+    } else if (elapsed >= TIME_DEGRADED_THRESHOLD && degradedMode === 'normal') {
+      // SOFT TIMEOUT: Enter degraded mode but continue all images
+      degradedMode = 'fast_path';
+      degradedModeReason = `Time budget low at ${Math.round(elapsed / 1000)}s`;
+      enteredDegradedModeAt = idx;
+      console.log(`[DiscoveryDegraded] Entering fast_path mode at image ${idx + 1}: ${degradedModeReason}`);
+      sendProgress(controller, "Degraded mode: fast path", `${degradedModeReason} — reducing work per image`, {
+        degraded_mode: 'fast_path',
+        reason: degradedModeReason,
+        images_remaining: imageUrls.length - idx,
       });
-      break;
     }
     
-    // Check if we should abort due to API errors
+    // ============================================================================
+    // API ERROR CHECK: Apply cooldown, don't abort discovery
+    // If a provider is having issues, reduce reliance but continue
+    // ============================================================================
     if (shouldAbortDueToApiErrors(apiErrorTracker)) {
-      discoveryStopReason = 'api_error';
-      discoveryStopDetail = getApiErrorSummary(apiErrorTracker) || 'API error';
-      console.log(`[DiscoveryStop] API errors after image ${idx}: ${discoveryStopDetail}`);
-      sendProgress(controller, "Discovery stopped — API error", `Completed ${idx} of ${imageUrls.length} images (${discoveryStopDetail})`, { 
-        discovery_stop_reason: 'api_error',
-        isQuotaError: apiErrorTracker.hasQuotaError,
-        errorCount: apiErrorTracker.serpApiErrors.length,
-        imagesCompleted: idx,
-        totalImages: imageUrls.length,
-      });
-      // Store the error in database
+      // Instead of aborting, log the issue and continue in degraded mode
+      const errorSummary = getApiErrorSummary(apiErrorTracker) || 'API error';
+      console.log(`[DiscoveryDegraded] API errors detected at image ${idx + 1}: ${errorSummary}`);
+      
+      if (degradedMode === 'normal') {
+        degradedMode = 'no_ai';
+        degradedModeReason = `API errors: ${errorSummary}`;
+        enteredDegradedModeAt = idx;
+        sendProgress(controller, "Degraded mode: no AI verification", `${errorSummary} — continuing with reduced verification depth`, {
+          degraded_mode: 'no_ai',
+          reason: degradedModeReason,
+          images_remaining: imageUrls.length - idx,
+        });
+      }
+      
+      // Store the error but DON'T break - continue discovery
       await supabase.from("searches").update({ 
-        api_error: discoveryStopDetail,
+        api_error: errorSummary,
         api_error_code: apiErrorTracker.hasQuotaError ? 'quota_exceeded' : 'api_error',
         last_progress_at: new Date().toISOString() 
       }).eq("id", searchId);
-      break;
+      // DON'T break - continue with remaining images in degraded mode
     }
 
     // ============================================================================
     // DISCOVERY SKIP POLICY: Truth-gated "User skipped" messaging
     //
+    // The ONLY valid user-initiated early stop is an explicit skip request.
     // We may ONLY say "User skipped ..." if we have explicit evidence that the
     // request-skip endpoint was called in THIS run.
-    //
-    // claimSkipNow() provides:
-    // - skip_requested_before_claim (best-effort)
-    // - skip_claim_succeeded (authoritative, atomic claim)
     // ============================================================================
     if (discoveryAttempted) {
       const claim = await claimSkipNowDetailed();
@@ -6355,17 +6402,6 @@ async function runSearchWithStreaming(
         requestSkipEventId = evidence.request_skip_event_id;
         requestSkipTimestamp = evidence.request_skip_timestamp;
 
-        // Determine actual stop reason: check user action first (only valid stop), then unknown
-        // Per-image caps do NOT stop discovery - only global caps or user action
-        let actualStopReason: 'user_action' | 'cap_reached' | 'timeout' | 'error' | 'complete' | 'unknown';
-        if (evidence.request_skip_endpoint_called_in_this_run) {
-          actualStopReason = 'user_action';
-        } else if (globalCapReached) {
-          actualStopReason = 'cap_reached';
-        } else {
-          actualStopReason = 'unknown';
-        }
-
         // Required payload: skip claim evidence (always attached)
         const skipClaimEvidencePayload = {
           skip_requested_before_claim: claim.skip_requested_before_claim,
@@ -6373,21 +6409,15 @@ async function runSearchWithStreaming(
           skip_claim_iteration_index: idx,
           images_completed: idx,
           total_images: imageUrls.length,
-          discovery_stop_reason: actualStopReason,
+          discovery_stop_reason: evidence.request_skip_endpoint_called_in_this_run ? 'user_action' : 'unknown',
           request_skip_endpoint_called_in_this_run: evidence.request_skip_endpoint_called_in_this_run,
           request_skip_event_id: evidence.request_skip_event_id,
           request_skip_timestamp: evidence.request_skip_timestamp,
           skip_setter_source: evidence.skip_setter_source,
           skip_setter_evidence: evidence.skip_setter_evidence,
-          // Global cap evidence (only global caps can stop discovery)
-          cap_name: globalCapReached ? globalCapName : null,
-          cap_value: globalCapReached ? globalCapValue : null,
-          cap_trigger_stage: globalCapReached ? 'image_verification' : null,
-          cap_trigger_iteration_index: globalCapReached ? globalCapTriggerIteration : null,
-          global_cap_reached: globalCapReached,
         };
 
-        // TRUTH GATE (mandatory, with global cap_reached promotion)
+        // TRUTH GATE: Only user action can stop discovery
         if (evidence.request_skip_endpoint_called_in_this_run === true) {
           discoveryStopReason = 'user_action';
           discoveryStopDetail = 'User clicked skip button';
@@ -6399,30 +6429,14 @@ async function runSearchWithStreaming(
             totalImages: imageUrls.length,
             skip_claim_evidence: skipClaimEvidencePayload,
           });
-        } else if (globalCapReached) {
-          // GLOBAL CAP REACHED: Only ai_verification_limit stops discovery
-          discoveryStopReason = 'cap_reached';
-          discoveryStopDetail = `Global verification cap reached: ${globalCapName} = ${globalCapValue}`;
-          console.log(`[DiscoveryStop] Global cap reached after image ${idx}: ${discoveryStopDetail}`);
-          sendProgress(controller, "Discovery stopped — cap reached", `Completed ${idx} of ${imageUrls.length} images (${globalCapName})`, {
-            discovery_stop_reason: 'cap_reached',
-            imagesCompleted: idx,
-            totalImages: imageUrls.length,
-            skip_claim_evidence: skipClaimEvidencePayload,
-          });
+          break; // Only valid early stop: explicit user skip
         } else {
-          discoveryStopReason = 'unknown';
-          discoveryStopDetail = 'Skip was claimed but there is no evidence of a user action or global cap in this run';
-          console.log(`[DiscoveryStop] Skip claimed without evidence after image ${idx}: ${discoveryStopDetail}`);
-          sendProgress(controller, "Discovery stopped — unknown (no evidence)", `Completed ${idx} of ${imageUrls.length} images`, {
-            discovery_stop_reason: 'unknown',
-            imagesCompleted: idx,
-            totalImages: imageUrls.length,
-            skip_claim_evidence: skipClaimEvidencePayload,
-          });
+          // Skip was claimed but no evidence of user action - log but DON'T stop
+          console.log(`[DiscoveryWarning] Skip claimed without user evidence at image ${idx} — continuing discovery`);
+          // Reset skip_requested so we don't keep hitting this
+          await supabase.from("searches").update({ skip_requested: false }).eq("id", searchId);
+          // DON'T break - continue with remaining images
         }
-
-        break;
       }
     }
 
@@ -6477,34 +6491,55 @@ async function runSearchWithStreaming(
     
     for (const match of visualMatches) {
       // ============================================================================
-      // VERIFICATION CAP POLICY
-      // Match verification must complete for all candidates found in the CURRENT run.
-      // The only allowed early stops are:
-      // 1. aiCount >= MAX_AI (deterministic AI call cap)
-      // 2. matchesThisImage >= 8 (deterministic per-image cap)
-      // 3. Time exceeded (deterministic time cap)
+      // VERIFICATION CAP POLICY (Depth Control)
+      // 
+      // Caps reduce DEPTH (work per image), never stopping the outer discovery loop.
+      // 
+      // Per-image caps:
+      // - matchesThisImage >= MAX_AI_PER_IMAGE → stop verifying this image, continue next
+      // 
+      // Global budget exhaustion:
+      // - aiCount >= MAX_AI → enter 'no_ai' degraded mode, skip AI verification
+      // - Time exceeded → enter 'fast_path' mode, skip verification
       // ============================================================================
 
-      // Per-image cap: stop verifying more candidates for THIS image, but continue discovery
-      if (matchesThisImage >= 8) {
-        console.log(`[PerImageCap] Reached per-image limit: matchesThisImage=${matchesThisImage}/8 — continuing to next image`);
+      // Per-image cap: stop verifying more candidates for THIS image only
+      if (matchesThisImage >= MAX_AI_PER_IMAGE) {
+        console.log(`[PerImageCap] Reached per-image limit: matchesThisImage=${matchesThisImage}/${MAX_AI_PER_IMAGE} — continuing to next image`);
         filterStats.filtered_cap_reached++;
-        break; // Exit candidates loop for this image only
+        break; // Exit candidates loop for this image only, outer loop continues
       }
       
-      // Global cap: stop entire discovery
-      if (aiCount >= MAX_AI) {
-        console.log(`[GlobalCap] Reached global AI limit: aiCount=${aiCount}/${MAX_AI} — stopping discovery`);
-        filterStats.filtered_cap_reached++;
-        globalCapReached = true;
-        globalCapName = 'ai_verification_limit';
-        globalCapValue = MAX_AI;
-        globalCapTriggerIteration = idx;
-        break; // Exit candidates loop, and global flag will stop discovery
+      // Global AI budget: degrade to no_ai mode, don't stop
+      if (aiCount >= MAX_AI && degradedMode === 'normal') {
+        degradedMode = 'no_ai';
+        degradedModeReason = `AI budget exhausted (${aiCount}/${MAX_AI} calls)`;
+        console.log(`[DiscoveryDegraded] Entering no_ai mode: ${degradedModeReason}`);
+        sendProgress(controller, "Degraded mode: no AI verification", `${degradedModeReason} — continuing with reduced verification depth`, {
+          degraded_mode: 'no_ai',
+          reason: degradedModeReason,
+          images_remaining: imageUrls.length - idx,
+          ai_count: aiCount,
+          ai_limit: MAX_AI,
+        });
       }
-      if (Date.now() - searchStartTime > MAX_TIME) {
-        filterStats.filtered_time_exceeded++;
-        break;
+      
+      // Time check: enter fast_path mode if exceeded (check before degraded mode)
+      if (Date.now() - searchStartTime > MAX_TIME && degradedMode === 'normal') {
+        degradedMode = 'fast_path';
+        degradedModeReason = `Time budget exceeded at ${Math.round((Date.now() - searchStartTime) / 1000)}s`;
+        console.log(`[DiscoveryDegraded] Entering fast_path mode: ${degradedModeReason}`);
+        sendProgress(controller, "Degraded mode: fast path", degradedModeReason, {
+          degraded_mode: 'fast_path',
+          reason: degradedModeReason,
+        });
+      }
+      
+      // In degraded mode, skip AI verification but continue collecting candidates
+      if (degradedMode === 'no_ai' || degradedMode === 'fast_path') {
+        filterStats.filtered_cap_reached++;
+        // Don't break - continue to next candidate, just skip AI verification
+        continue;
       }
 
       const matchUrl = match.link;
@@ -6650,29 +6685,31 @@ async function runSearchWithStreaming(
     
     imagesProcessed = idx + 1;
     
-    // Check if global cap was hit during this image - if so, stop discovery
-    if (globalCapReached) {
-      discoveryStopReason = 'cap_reached';
-      discoveryStopDetail = `Global verification cap reached: ${globalCapName} = ${globalCapValue}`;
-      console.log(`[DiscoveryStop] Global cap hit during image ${idx + 1}, stopping discovery`);
-      sendProgress(controller, "Discovery stopped — global cap reached", `Completed ${idx + 1} of ${imageUrls.length} images (${globalCapName})`, {
-        discovery_stop_reason: 'cap_reached',
-        imagesCompleted: idx + 1,
-        totalImages: imageUrls.length,
-        cap_name: globalCapName,
-        cap_value: globalCapValue,
-      });
-      break;
-    }
+    // NOTE: No global cap check here - we ALWAYS continue to next image
+    // The outer loop is NEVER broken by caps, only by user skip or fatal error
   }
   
-  // If we processed all images without early stop, mark as complete
-  if (imagesProcessed === imageUrls.length && discoveryStopReason === 'complete') {
+  // ============================================================================
+  // DISCOVERY COMPLETION: All images processed
+  // We should ALWAYS reach this point unless user skipped
+  // ============================================================================
+  if (imagesProcessed === imageUrls.length) {
     console.log(`[DiscoveryComplete] All ${imageUrls.length} images processed successfully`);
-    sendProgress(controller, "Discovery complete", `Completed ${imageUrls.length} of ${imageUrls.length} images`, {
+    
+    // Build completion message with degraded mode info if applicable
+    let completionDetail = `Completed ${imageUrls.length} of ${imageUrls.length} images`;
+    if (degradedMode !== 'normal') {
+      completionDetail += ` (degraded: ${degradedMode})`;
+    }
+    
+    sendProgress(controller, "Discovery complete", completionDetail, {
       discovery_stop_reason: 'complete',
       imagesCompleted: imageUrls.length,
       totalImages: imageUrls.length,
+      degraded_mode: degradedMode,
+      degraded_reason: degradedModeReason,
+      ai_count: aiCount,
+      ai_limit: MAX_AI,
     });
   }
 
@@ -6683,6 +6720,7 @@ async function runSearchWithStreaming(
   const discoveredCount = bestMatchPerPlatform.size;
   console.log(`[Discovery Complete] Verification complete: ${discoveredCount} platforms found via image search`);
   sendProgress(controller, "Verification complete", `Found ${discoveredCount} platforms from image search`);
+
 
   // ============================================================================
   // FINAL CANDIDATE SET LOGGING (current-run matches only, no cache merge)
