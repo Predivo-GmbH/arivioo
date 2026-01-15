@@ -4537,13 +4537,16 @@ async function runSearchWithStreaming(
   };
 
   // IMPORTANT: Save dates immediately after extraction so they're available even if search stalls
+  // CRITICAL: Reset skip_requested to false at start of pipeline to prevent stale flags from previous runs
   console.log(`Extracted dates from URL: checkIn=${checkIn}, checkOut=${checkOut}, nights=${nights}`);
   await supabase.from("searches").update({ 
     check_in_date: checkIn, 
     check_out_date: checkOut, 
     nights_count: nights,
+    skip_requested: false, // Reset any stale skip flag from previous run/reconnect
     last_progress_at: new Date().toISOString() 
   }).eq("id", searchId);
+  console.log(`[Pipeline] Reset skip_requested=false for fresh search run`);
 
   // If user already confirmed the Airbnb total, reuse it and continue.
   try {
@@ -6195,20 +6198,42 @@ async function runSearchWithStreaming(
 
   // ============================================================================
   // DISCOVERY LOOP: Process all images via reverse image search
+  // Tracks stop reason for truthful logging
   // ============================================================================
   let discoveryAttempted = false;
+  let discoveryStopReason: 'complete' | 'user_action' | 'api_error' | 'timeout' | 'unknown' = 'complete';
+  let discoveryStopDetail: string | null = null;
+  let imagesProcessed = 0;
   
-  for (let idx = 0; idx < imageUrls.length && Date.now() - searchStartTime < MAX_TIME; idx++) {
+  for (let idx = 0; idx < imageUrls.length; idx++) {
+    // Check MAX_TIME timeout
+    if (Date.now() - searchStartTime >= MAX_TIME) {
+      discoveryStopReason = 'timeout';
+      discoveryStopDetail = `Pipeline timeout after ${Math.round((Date.now() - searchStartTime) / 1000)}s`;
+      console.log(`[DiscoveryStop] Timeout reached after image ${idx}: ${discoveryStopDetail}`);
+      sendProgress(controller, "Discovery stopped — timeout", `Completed ${idx} of ${imageUrls.length} images (${discoveryStopDetail})`, {
+        discovery_stop_reason: 'timeout',
+        imagesCompleted: idx,
+        totalImages: imageUrls.length,
+      });
+      break;
+    }
+    
     // Check if we should abort due to API errors
     if (shouldAbortDueToApiErrors(apiErrorTracker)) {
-      console.log("Aborting visual search due to API errors:", getApiErrorSummary(apiErrorTracker));
-      sendProgress(controller, "Search API issue", getApiErrorSummary(apiErrorTracker) || "API error", { 
+      discoveryStopReason = 'api_error';
+      discoveryStopDetail = getApiErrorSummary(apiErrorTracker) || 'API error';
+      console.log(`[DiscoveryStop] API errors after image ${idx}: ${discoveryStopDetail}`);
+      sendProgress(controller, "Discovery stopped — API error", `Completed ${idx} of ${imageUrls.length} images (${discoveryStopDetail})`, { 
+        discovery_stop_reason: 'api_error',
         isQuotaError: apiErrorTracker.hasQuotaError,
-        errorCount: apiErrorTracker.serpApiErrors.length
+        errorCount: apiErrorTracker.serpApiErrors.length,
+        imagesCompleted: idx,
+        totalImages: imageUrls.length,
       });
       // Store the error in database
       await supabase.from("searches").update({ 
-        api_error: getApiErrorSummary(apiErrorTracker),
+        api_error: discoveryStopDetail,
         api_error_code: apiErrorTracker.hasQuotaError ? 'quota_exceeded' : 'api_error',
         last_progress_at: new Date().toISOString() 
       }).eq("id", searchId);
@@ -6217,13 +6242,15 @@ async function runSearchWithStreaming(
 
     // ============================================================================
     // DISCOVERY SKIP POLICY: User-requested skip allowed only for explicit user action
-    // Skip is ONLY allowed if:
-    // 1. User explicitly clicked "skip" button, AND
-    // 2. At least one full image discovery pass completed
+    // claimSkipNow() atomically checks AND resets skip_requested flag
+    // Skip is ONLY logged as "user skip" if this returns true
     // ============================================================================
     if (discoveryAttempted && await claimSkipNow()) {
-      console.log(`[DiscoverySkip] User-requested skip after image ${idx}`);
+      discoveryStopReason = 'user_action';
+      discoveryStopDetail = 'User clicked skip button';
+      console.log(`[DiscoveryStop] User-requested skip after image ${idx}: ${discoveryStopDetail}`);
       sendProgress(controller, "User skipped remaining discovery", `Completed ${idx} of ${imageUrls.length} images`, {
+        discovery_stop_reason: 'user_action',
         skipped: true,
         imagesCompleted: idx,
         totalImages: imageUrls.length,
