@@ -4597,8 +4597,29 @@ async function runSearchWithStreaming(
 
   // Allow UI to request skipping a stuck step (via skip_requested column)
   // IMPORTANT: This must only skip ONE upcoming check, not the entire remainder of the run.
-  // We implement this as an atomic "claim" operation: if skip_requested=true, flip it to false and return true.
-  const claimSkipNow = async (): Promise<boolean> => {
+  // We implement this as an atomic "claim" operation: if skip_requested=true, flip it to false.
+  //
+  // Compatibility: some helpers expect `checkSkip?: () => Promise<boolean>`.
+  // We keep `claimSkipNow(): Promise<boolean>` for those call sites and provide
+  // `claimSkipNowDetailed()` for evidence payloads.
+  type SkipClaimResult = {
+    skip_requested_before_claim: boolean;
+    skip_claim_succeeded: boolean;
+  };
+
+  const claimSkipNowDetailed = async (): Promise<SkipClaimResult> => {
+    const { data: beforeRow, error: beforeErr } = await supabase
+      .from("searches")
+      .select("skip_requested")
+      .eq("id", searchId)
+      .maybeSingle();
+
+    if (beforeErr) {
+      console.log("claimSkipNow read error:", beforeErr.message || beforeErr);
+    }
+
+    const skipRequestedBefore = beforeRow?.skip_requested === true;
+
     const { data, error } = await supabase
       .from("searches")
       .update({ skip_requested: false })
@@ -4607,11 +4628,17 @@ async function runSearchWithStreaming(
       .select("id");
 
     if (error) {
-      console.log("claimSkipNow error:", error.message || error);
-      return false;
+      console.log("claimSkipNow update error:", error.message || error);
+      return { skip_requested_before_claim: skipRequestedBefore, skip_claim_succeeded: false };
     }
 
-    return Array.isArray(data) && data.length > 0;
+    const succeeded = Array.isArray(data) && data.length > 0;
+    return { skip_requested_before_claim: skipRequestedBefore, skip_claim_succeeded: succeeded };
+  };
+
+  const claimSkipNow = async (): Promise<boolean> => {
+    const claim = await claimSkipNowDetailed();
+    return claim.skip_claim_succeeded;
   };
 
   // Heartbeat on start
@@ -6054,6 +6081,69 @@ async function runSearchWithStreaming(
   const MAX_AI = 30;
   let aiCount = 0;
 
+  // Track proof of an explicit skip request in THIS run.
+  // This is required to truthfully label a stop as "User skipped".
+  let requestSkipEndpointCalledInThisRun = false;
+  let requestSkipEventId: string | null = null;
+  let requestSkipTimestamp: number | null = null;
+
+  const getSkipRequestEvidenceForThisRun = async (): Promise<{
+    request_skip_endpoint_called_in_this_run: boolean;
+    request_skip_event_id: string | null;
+    request_skip_timestamp: number | null;
+    skip_setter_source: 'frontend' | 'api' | 'backend' | 'unknown';
+    skip_setter_evidence: string;
+  }> => {
+    try {
+      const sinceIso = new Date(searchStartTime).toISOString();
+      const { data, error } = await supabase
+        .from('api_request_logs')
+        .select('endpoint_type, request_timestamp, metadata')
+        .eq('search_id', searchId)
+        .in('endpoint_type', ['request-skip-step', 'skip_requested_set_true'])
+        .gte('request_timestamp', sinceIso)
+        .order('request_timestamp', { ascending: false })
+        .limit(1);
+
+      if (error) {
+        console.log('[SkipEvidence] query error:', error.message || error);
+        return {
+          request_skip_endpoint_called_in_this_run: false,
+          request_skip_event_id: null,
+          request_skip_timestamp: null,
+          skip_setter_source: 'unknown',
+          skip_setter_evidence: 'no evidence',
+        };
+      }
+
+      const row = Array.isArray(data) ? data[0] : null;
+      const meta = (row?.metadata && typeof row.metadata === 'object') ? (row.metadata as Record<string, any>) : null;
+
+      const eventId = typeof meta?.event_id === 'string' ? meta.event_id : null;
+      const tsMs = typeof meta?.timestamp_ms === 'number' ? meta.timestamp_ms : null;
+      const called = !!row;
+
+      return {
+        request_skip_endpoint_called_in_this_run: called,
+        request_skip_event_id: eventId,
+        request_skip_timestamp: tsMs,
+        skip_setter_source: called ? 'api' : 'unknown',
+        skip_setter_evidence: called
+          ? (row?.endpoint_type === 'request-skip-step' ? 'request-skip-step called' : 'skip_requested_set_true logged')
+          : 'no evidence',
+      };
+    } catch (e) {
+      console.log('[SkipEvidence] unexpected error:', (e as Error)?.message || e);
+      return {
+        request_skip_endpoint_called_in_this_run: false,
+        request_skip_event_id: null,
+        request_skip_timestamp: null,
+        skip_setter_source: 'unknown',
+        skip_setter_evidence: 'no evidence',
+      };
+    }
+  };
+
   // Initialize API error tracker
   const apiErrorTracker = createApiErrorTracker();
 
@@ -6241,21 +6331,70 @@ async function runSearchWithStreaming(
     }
 
     // ============================================================================
-    // DISCOVERY SKIP POLICY: User-requested skip allowed only for explicit user action
-    // claimSkipNow() atomically checks AND resets skip_requested flag
-    // Skip is ONLY logged as "user skip" if this returns true
+    // DISCOVERY SKIP POLICY: Truth-gated "User skipped" messaging
+    //
+    // We may ONLY say "User skipped ..." if we have explicit evidence that the
+    // request-skip endpoint was called in THIS run.
+    //
+    // claimSkipNow() provides:
+    // - skip_requested_before_claim (best-effort)
+    // - skip_claim_succeeded (authoritative, atomic claim)
     // ============================================================================
-    if (discoveryAttempted && await claimSkipNow()) {
-      discoveryStopReason = 'user_action';
-      discoveryStopDetail = 'User clicked skip button';
-      console.log(`[DiscoveryStop] User-requested skip after image ${idx}: ${discoveryStopDetail}`);
-      sendProgress(controller, "User skipped remaining discovery", `Completed ${idx} of ${imageUrls.length} images`, {
-        discovery_stop_reason: 'user_action',
-        skipped: true,
-        imagesCompleted: idx,
-        totalImages: imageUrls.length,
-      });
-      break;
+    if (discoveryAttempted) {
+      const claim = await claimSkipNowDetailed();
+      if (claim.skip_claim_succeeded) {
+        const evidence = await getSkipRequestEvidenceForThisRun();
+        requestSkipEndpointCalledInThisRun = evidence.request_skip_endpoint_called_in_this_run;
+        requestSkipEventId = evidence.request_skip_event_id;
+        requestSkipTimestamp = evidence.request_skip_timestamp;
+
+        // Required payload: skip claim evidence (always attached)
+        const skipClaimEvidencePayload = {
+          skip_requested_before_claim: claim.skip_requested_before_claim,
+          skip_claim_succeeded: claim.skip_claim_succeeded,
+          skip_claim_iteration_index: idx,
+          images_completed: idx,
+          total_images: imageUrls.length,
+          discovery_stop_reason: (evidence.request_skip_endpoint_called_in_this_run ? 'user_action' : 'unknown') as
+            | 'user_action'
+            | 'cap_reached'
+            | 'timeout'
+            | 'error'
+            | 'complete'
+            | 'unknown',
+          request_skip_endpoint_called_in_this_run: evidence.request_skip_endpoint_called_in_this_run,
+          request_skip_event_id: evidence.request_skip_event_id,
+          request_skip_timestamp: evidence.request_skip_timestamp,
+          skip_setter_source: evidence.skip_setter_source,
+          skip_setter_evidence: evidence.skip_setter_evidence,
+        };
+
+        // TRUTH GATE (mandatory)
+        if (evidence.request_skip_endpoint_called_in_this_run === true) {
+          discoveryStopReason = 'user_action';
+          discoveryStopDetail = 'User clicked skip button';
+          console.log(`[DiscoveryStop] User-requested skip after image ${idx}: ${discoveryStopDetail}`);
+          sendProgress(controller, "User skipped remaining discovery", `Completed ${idx} of ${imageUrls.length} images`, {
+            discovery_stop_reason: 'user_action',
+            skipped: true,
+            imagesCompleted: idx,
+            totalImages: imageUrls.length,
+            skip_claim_evidence: skipClaimEvidencePayload,
+          });
+        } else {
+          discoveryStopReason = 'unknown';
+          discoveryStopDetail = 'Skip was claimed but there is no evidence of a user action in this run';
+          console.log(`[DiscoveryStop] Skip claimed without evidence after image ${idx}: ${discoveryStopDetail}`);
+          sendProgress(controller, "Discovery stopped — unknown (no evidence)", `Completed ${idx} of ${imageUrls.length} images`, {
+            discovery_stop_reason: 'unknown',
+            imagesCompleted: idx,
+            totalImages: imageUrls.length,
+            skip_claim_evidence: skipClaimEvidencePayload,
+          });
+        }
+
+        break;
+      }
     }
 
     await heartbeat();
