@@ -6291,9 +6291,15 @@ async function runSearchWithStreaming(
   // Tracks stop reason for truthful logging
   // ============================================================================
   let discoveryAttempted = false;
-  let discoveryStopReason: 'complete' | 'user_action' | 'api_error' | 'timeout' | 'unknown' = 'complete';
+  let discoveryStopReason: 'complete' | 'user_action' | 'cap_reached' | 'api_error' | 'timeout' | 'unknown' = 'complete';
   let discoveryStopDetail: string | null = null;
   let imagesProcessed = 0;
+  
+  // CUMULATIVE CAP TRACKING: Track cap hits across all images for truthful classification
+  let cumulativeCapReached = 0;
+  let lastCapName: string | null = null;
+  let lastCapValue: number | null = null;
+  let lastCapTriggerIteration: number | null = null;
   
   for (let idx = 0; idx < imageUrls.length; idx++) {
     // Check MAX_TIME timeout
@@ -6348,6 +6354,17 @@ async function runSearchWithStreaming(
         requestSkipEventId = evidence.request_skip_event_id;
         requestSkipTimestamp = evidence.request_skip_timestamp;
 
+        // Determine actual stop reason: check cap evidence first, then user action, then unknown
+        const hasCapEvidence = cumulativeCapReached > 0;
+        let actualStopReason: 'user_action' | 'cap_reached' | 'timeout' | 'error' | 'complete' | 'unknown';
+        if (evidence.request_skip_endpoint_called_in_this_run) {
+          actualStopReason = 'user_action';
+        } else if (hasCapEvidence) {
+          actualStopReason = 'cap_reached';
+        } else {
+          actualStopReason = 'unknown';
+        }
+
         // Required payload: skip claim evidence (always attached)
         const skipClaimEvidencePayload = {
           skip_requested_before_claim: claim.skip_requested_before_claim,
@@ -6355,21 +6372,21 @@ async function runSearchWithStreaming(
           skip_claim_iteration_index: idx,
           images_completed: idx,
           total_images: imageUrls.length,
-          discovery_stop_reason: (evidence.request_skip_endpoint_called_in_this_run ? 'user_action' : 'unknown') as
-            | 'user_action'
-            | 'cap_reached'
-            | 'timeout'
-            | 'error'
-            | 'complete'
-            | 'unknown',
+          discovery_stop_reason: actualStopReason,
           request_skip_endpoint_called_in_this_run: evidence.request_skip_endpoint_called_in_this_run,
           request_skip_event_id: evidence.request_skip_event_id,
           request_skip_timestamp: evidence.request_skip_timestamp,
           skip_setter_source: evidence.skip_setter_source,
           skip_setter_evidence: evidence.skip_setter_evidence,
+          // Cap-specific evidence (enriched payload per requirements)
+          cap_name: hasCapEvidence ? lastCapName : null,
+          cap_value: hasCapEvidence ? lastCapValue : null,
+          cap_trigger_stage: hasCapEvidence ? 'image_verification' : null,
+          cap_trigger_iteration_index: hasCapEvidence ? lastCapTriggerIteration : null,
+          cumulative_cap_reached_count: cumulativeCapReached,
         };
 
-        // TRUTH GATE (mandatory)
+        // TRUTH GATE (mandatory, with cap_reached promotion)
         if (evidence.request_skip_endpoint_called_in_this_run === true) {
           discoveryStopReason = 'user_action';
           discoveryStopDetail = 'User clicked skip button';
@@ -6381,9 +6398,20 @@ async function runSearchWithStreaming(
             totalImages: imageUrls.length,
             skip_claim_evidence: skipClaimEvidencePayload,
           });
+        } else if (hasCapEvidence) {
+          // CAP REACHED: Promote to first-class stop reason
+          discoveryStopReason = 'cap_reached';
+          discoveryStopDetail = `Verification cap reached: ${lastCapName} = ${lastCapValue}`;
+          console.log(`[DiscoveryStop] Cap reached after image ${idx}: ${discoveryStopDetail}`);
+          sendProgress(controller, "Discovery stopped — cap reached", `Completed ${idx} of ${imageUrls.length} images (${lastCapName})`, {
+            discovery_stop_reason: 'cap_reached',
+            imagesCompleted: idx,
+            totalImages: imageUrls.length,
+            skip_claim_evidence: skipClaimEvidencePayload,
+          });
         } else {
           discoveryStopReason = 'unknown';
-          discoveryStopDetail = 'Skip was claimed but there is no evidence of a user action in this run';
+          discoveryStopDetail = 'Skip was claimed but there is no evidence of a user action or cap in this run';
           console.log(`[DiscoveryStop] Skip claimed without evidence after image ${idx}: ${discoveryStopDetail}`);
           sendProgress(controller, "Discovery stopped — unknown (no evidence)", `Completed ${idx} of ${imageUrls.length} images`, {
             discovery_stop_reason: 'unknown',
@@ -6457,8 +6485,15 @@ async function runSearchWithStreaming(
       // ============================================================================
 
       if (aiCount >= MAX_AI || matchesThisImage >= 8) {
+        const capHitName = aiCount >= MAX_AI ? 'ai_verification_limit' : 'per_image_verification_limit';
+        const capHitValue = aiCount >= MAX_AI ? MAX_AI : 8;
         console.log(`[VerificationCap] Reached cap: aiCount=${aiCount}/${MAX_AI}, matchesThisImage=${matchesThisImage}/8`);
         filterStats.filtered_cap_reached++;
+        // Track cumulative cap hits for truthful stop reason classification
+        cumulativeCapReached++;
+        lastCapName = capHitName;
+        lastCapValue = capHitValue;
+        lastCapTriggerIteration = idx;
         break;
       }
       if (Date.now() - searchStartTime > MAX_TIME) {
