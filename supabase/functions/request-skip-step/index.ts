@@ -143,6 +143,10 @@ serve(async (req) => {
       );
     }
 
+    // Structured write-trace for skip_requested=true
+    const eventId = crypto.randomUUID();
+    const timestampMs = Date.now();
+
     // Set skip_requested = true (backend will check this and skip current phase)
     const { error: updErr } = await admin
       .from("searches")
@@ -157,9 +161,64 @@ serve(async (req) => {
       });
     }
 
+    // Mandatory: instrument the write moment
+    const tracePayload = {
+      event: 'skip_requested_set_true',
+      search_id: searchId,
+      setter_source: 'api',
+      reason: 'button_click',
+      timestamp_ms: timestampMs,
+      request_id: eventId,
+      user_id: userId,
+      origin: origin,
+      user_agent: req.headers.get('user-agent'),
+    };
+
+    console.log(JSON.stringify(tracePayload));
+
+    // Persist trace to backend logs table (does not affect user-visible activity log)
+    try {
+      await admin.from('api_request_logs').insert([
+        {
+          provider_name: 'internal',
+          endpoint_type: 'request-skip-step',
+          search_id: searchId,
+          success: true,
+          response_status: 200,
+          request_url: null,
+          error_message: null,
+          correlation_id: eventId,
+          cost_units: 0,
+          metadata: {
+            event_id: eventId,
+            timestamp_ms: timestampMs,
+            setter_source: 'api',
+            reason: 'button_click',
+          },
+        },
+        {
+          provider_name: 'internal',
+          endpoint_type: 'skip_requested_set_true',
+          search_id: searchId,
+          success: true,
+          response_status: 200,
+          request_url: null,
+          error_message: null,
+          correlation_id: eventId,
+          cost_units: 0,
+          metadata: {
+            ...tracePayload,
+            event_id: eventId,
+          },
+        },
+      ]);
+    } catch (e) {
+      console.error('Failed to persist skip trace:', e);
+    }
+
     console.log(`Skip requested for search ${searchId} by user ${userId}`);
 
-    return new Response(JSON.stringify({ ok: true, status: searchRow.status, skipped: true }), {
+    return new Response(JSON.stringify({ ok: true, status: searchRow.status, skipped: true, eventId, timestampMs }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
