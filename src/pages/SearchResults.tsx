@@ -1799,10 +1799,43 @@ export default function SearchResults() {
     };
   })();
 
-  // Categorize ALL final candidates using the canonical model
-  // (No filtering based on photos, unknown outcomes, or missing fields.)
+  // ============================================================================
+  // CATEGORIZATION: Use frozen snapshot bucket if available, else compute
+  // CRITICAL: For refresh determinism, snapshot-based buckets are authoritative
+  // ============================================================================
   const categorizedResults = finalCandidates.map((r) => {
-    // EXPEDIA-SPECIFIC: Use canonical total_price if available
+    // CHECK IF WE HAVE A FROZEN BUCKET FROM THE SNAPSHOT
+    // If final_bucket exists, use it directly (immutable on refresh)
+    const frozenBucket = (r as any).final_bucket as string | undefined;
+    
+    if (frozenBucket) {
+      // Use the frozen bucket from snapshot - no re-computation
+      const bucketLabel = (r as any).final_bucket_label || BUCKET_DISPLAY[frozenBucket as ResultBucket]?.label || 'Unknown';
+      const bucketDisplay = BUCKET_DISPLAY[frozenBucket as ResultBucket];
+      
+      // Build a minimal categorization object from frozen data
+      const frozenCategorization: CategorizedResult = {
+        bucket: frozenBucket as ResultBucket,
+        bucket_label: bucketLabel,
+        bucket_description: bucketDisplay?.description || '',
+        is_comparable: frozenBucket === 'cheaper' || frozenBucket === 'more_expensive',
+        comparison_result: null,
+        savings_amount: r.savings_amount || null,
+        savings_percentage: r.savings_percentage || null,
+        is_verified: frozenBucket === 'cheaper' || frozenBucket === 'more_expensive',
+        verification_label: frozenBucket === 'cheaper' || frozenBucket === 'more_expensive' ? 'Verified' : 'Not Available',
+        has_low_confidence: false,
+        non_comparable_reasons: [],
+        non_comparable_user_message: null,
+        price_type: ((r as any).canonical_price?.price_type || null) as PriceType | null,
+        outcome_category: ((r as any).outcome_category || null) as OutcomeCategory | null,
+      };
+      
+      return { result: r, categorization: frozenCategorization };
+    }
+    
+    // FALLBACK: Compute categorization for legacy data without frozen bucket
+    // This path is for backwards compatibility only
     const isExpedia = r.platform_name.toLowerCase().includes('expedia');
     const effectivePrice = (isExpedia && (r.canonical_price as any)?.total_price && (r.canonical_price as any).total_price > 0)
       ? ((r.canonical_price as any).total_price as number)
@@ -1825,7 +1858,7 @@ export default function SearchResults() {
     return { result: r, categorization };
   });
 
-  // Organize results by bucket
+  // Organize results by bucket (using frozen or computed bucket)
   const cheaperResults = categorizedResults
     .filter(({ categorization }) => categorization.bucket === 'cheaper')
     .sort((a, b) => (b.categorization.savings_amount ?? 0) - (a.categorization.savings_amount ?? 0))
