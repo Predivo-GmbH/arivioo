@@ -6295,11 +6295,12 @@ async function runSearchWithStreaming(
   let discoveryStopDetail: string | null = null;
   let imagesProcessed = 0;
   
-  // CUMULATIVE CAP TRACKING: Track cap hits across all images for truthful classification
-  let cumulativeCapReached = 0;
-  let lastCapName: string | null = null;
-  let lastCapValue: number | null = null;
-  let lastCapTriggerIteration: number | null = null;
+  // GLOBAL CAP TRACKING: Only global caps (MAX_AI) can stop discovery
+  // Per-image caps (per_image_verification_limit) only stop within-image verification
+  let globalCapReached = false;
+  let globalCapName: string | null = null;
+  let globalCapValue: number | null = null;
+  let globalCapTriggerIteration: number | null = null;
   
   for (let idx = 0; idx < imageUrls.length; idx++) {
     // Check MAX_TIME timeout
@@ -6354,12 +6355,12 @@ async function runSearchWithStreaming(
         requestSkipEventId = evidence.request_skip_event_id;
         requestSkipTimestamp = evidence.request_skip_timestamp;
 
-        // Determine actual stop reason: check cap evidence first, then user action, then unknown
-        const hasCapEvidence = cumulativeCapReached > 0;
+        // Determine actual stop reason: check user action first (only valid stop), then unknown
+        // Per-image caps do NOT stop discovery - only global caps or user action
         let actualStopReason: 'user_action' | 'cap_reached' | 'timeout' | 'error' | 'complete' | 'unknown';
         if (evidence.request_skip_endpoint_called_in_this_run) {
           actualStopReason = 'user_action';
-        } else if (hasCapEvidence) {
+        } else if (globalCapReached) {
           actualStopReason = 'cap_reached';
         } else {
           actualStopReason = 'unknown';
@@ -6378,15 +6379,15 @@ async function runSearchWithStreaming(
           request_skip_timestamp: evidence.request_skip_timestamp,
           skip_setter_source: evidence.skip_setter_source,
           skip_setter_evidence: evidence.skip_setter_evidence,
-          // Cap-specific evidence (enriched payload per requirements)
-          cap_name: hasCapEvidence ? lastCapName : null,
-          cap_value: hasCapEvidence ? lastCapValue : null,
-          cap_trigger_stage: hasCapEvidence ? 'image_verification' : null,
-          cap_trigger_iteration_index: hasCapEvidence ? lastCapTriggerIteration : null,
-          cumulative_cap_reached_count: cumulativeCapReached,
+          // Global cap evidence (only global caps can stop discovery)
+          cap_name: globalCapReached ? globalCapName : null,
+          cap_value: globalCapReached ? globalCapValue : null,
+          cap_trigger_stage: globalCapReached ? 'image_verification' : null,
+          cap_trigger_iteration_index: globalCapReached ? globalCapTriggerIteration : null,
+          global_cap_reached: globalCapReached,
         };
 
-        // TRUTH GATE (mandatory, with cap_reached promotion)
+        // TRUTH GATE (mandatory, with global cap_reached promotion)
         if (evidence.request_skip_endpoint_called_in_this_run === true) {
           discoveryStopReason = 'user_action';
           discoveryStopDetail = 'User clicked skip button';
@@ -6398,12 +6399,12 @@ async function runSearchWithStreaming(
             totalImages: imageUrls.length,
             skip_claim_evidence: skipClaimEvidencePayload,
           });
-        } else if (hasCapEvidence) {
-          // CAP REACHED: Promote to first-class stop reason
+        } else if (globalCapReached) {
+          // GLOBAL CAP REACHED: Only ai_verification_limit stops discovery
           discoveryStopReason = 'cap_reached';
-          discoveryStopDetail = `Verification cap reached: ${lastCapName} = ${lastCapValue}`;
-          console.log(`[DiscoveryStop] Cap reached after image ${idx}: ${discoveryStopDetail}`);
-          sendProgress(controller, "Discovery stopped — cap reached", `Completed ${idx} of ${imageUrls.length} images (${lastCapName})`, {
+          discoveryStopDetail = `Global verification cap reached: ${globalCapName} = ${globalCapValue}`;
+          console.log(`[DiscoveryStop] Global cap reached after image ${idx}: ${discoveryStopDetail}`);
+          sendProgress(controller, "Discovery stopped — cap reached", `Completed ${idx} of ${imageUrls.length} images (${globalCapName})`, {
             discovery_stop_reason: 'cap_reached',
             imagesCompleted: idx,
             totalImages: imageUrls.length,
@@ -6411,7 +6412,7 @@ async function runSearchWithStreaming(
           });
         } else {
           discoveryStopReason = 'unknown';
-          discoveryStopDetail = 'Skip was claimed but there is no evidence of a user action or cap in this run';
+          discoveryStopDetail = 'Skip was claimed but there is no evidence of a user action or global cap in this run';
           console.log(`[DiscoveryStop] Skip claimed without evidence after image ${idx}: ${discoveryStopDetail}`);
           sendProgress(controller, "Discovery stopped — unknown (no evidence)", `Completed ${idx} of ${imageUrls.length} images`, {
             discovery_stop_reason: 'unknown',
@@ -6484,17 +6485,22 @@ async function runSearchWithStreaming(
       // 3. Time exceeded (deterministic time cap)
       // ============================================================================
 
-      if (aiCount >= MAX_AI || matchesThisImage >= 8) {
-        const capHitName = aiCount >= MAX_AI ? 'ai_verification_limit' : 'per_image_verification_limit';
-        const capHitValue = aiCount >= MAX_AI ? MAX_AI : 8;
-        console.log(`[VerificationCap] Reached cap: aiCount=${aiCount}/${MAX_AI}, matchesThisImage=${matchesThisImage}/8`);
+      // Per-image cap: stop verifying more candidates for THIS image, but continue discovery
+      if (matchesThisImage >= 8) {
+        console.log(`[PerImageCap] Reached per-image limit: matchesThisImage=${matchesThisImage}/8 — continuing to next image`);
         filterStats.filtered_cap_reached++;
-        // Track cumulative cap hits for truthful stop reason classification
-        cumulativeCapReached++;
-        lastCapName = capHitName;
-        lastCapValue = capHitValue;
-        lastCapTriggerIteration = idx;
-        break;
+        break; // Exit candidates loop for this image only
+      }
+      
+      // Global cap: stop entire discovery
+      if (aiCount >= MAX_AI) {
+        console.log(`[GlobalCap] Reached global AI limit: aiCount=${aiCount}/${MAX_AI} — stopping discovery`);
+        filterStats.filtered_cap_reached++;
+        globalCapReached = true;
+        globalCapName = 'ai_verification_limit';
+        globalCapValue = MAX_AI;
+        globalCapTriggerIteration = idx;
+        break; // Exit candidates loop, and global flag will stop discovery
       }
       if (Date.now() - searchStartTime > MAX_TIME) {
         filterStats.filtered_time_exceeded++;
@@ -6640,6 +6646,33 @@ async function runSearchWithStreaming(
       totalImages: imageUrls.length,
       verificationSummary: filterStats,
       totalPlatformsDiscovered: bestMatchPerPlatform.size,
+    });
+    
+    imagesProcessed = idx + 1;
+    
+    // Check if global cap was hit during this image - if so, stop discovery
+    if (globalCapReached) {
+      discoveryStopReason = 'cap_reached';
+      discoveryStopDetail = `Global verification cap reached: ${globalCapName} = ${globalCapValue}`;
+      console.log(`[DiscoveryStop] Global cap hit during image ${idx + 1}, stopping discovery`);
+      sendProgress(controller, "Discovery stopped — global cap reached", `Completed ${idx + 1} of ${imageUrls.length} images (${globalCapName})`, {
+        discovery_stop_reason: 'cap_reached',
+        imagesCompleted: idx + 1,
+        totalImages: imageUrls.length,
+        cap_name: globalCapName,
+        cap_value: globalCapValue,
+      });
+      break;
+    }
+  }
+  
+  // If we processed all images without early stop, mark as complete
+  if (imagesProcessed === imageUrls.length && discoveryStopReason === 'complete') {
+    console.log(`[DiscoveryComplete] All ${imageUrls.length} images processed successfully`);
+    sendProgress(controller, "Discovery complete", `Completed ${imageUrls.length} of ${imageUrls.length} images`, {
+      discovery_stop_reason: 'complete',
+      imagesCompleted: imageUrls.length,
+      totalImages: imageUrls.length,
     });
   }
 
