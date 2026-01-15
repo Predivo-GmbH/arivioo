@@ -1760,57 +1760,24 @@ export default function SearchResults() {
   const tierCResults = results.filter((r) => r.is_tier_c_blocked);
 
   // ============================================================================
-  // IMAGE VERIFICATION GATE - CORE PRODUCT INVARIANT
+  // FINAL CANDIDATES (Single Source of Truth)
   // ============================================================================
-  // The platform's primary KPI is reverse image verification. Only listings
-  // that have been visually verified (match_type='visual') with adequate
-  // confidence may be shown as alternatives. Text-only matches are NEVER valid.
-  // ============================================================================
-  const IMAGE_VERIFICATION_THRESHOLD = 75;
-  
-  const isImageVerified = (result: SearchResult): boolean => {
-    // STRICT: Only 'visual' match types are valid alternatives
-    if (result.match_type !== 'visual') {
-      return false;
-    }
-    
-    // STRICT: Must have confidence score above threshold
-    if (typeof result.confidence_score !== 'number' || result.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
-      return false;
-    }
-    
-    return true;
-  };
-
-  // CRITICAL: A match MUST have comparison photos to be considered valid
-  // Results without photos cannot be verified and must not be shown as "matches"
-  const hasComparisonPhotos = (result: SearchResult): boolean => {
-    const resultImages = toStringArray(result.images);
-    // Must have at least one alternative image AND at least one Airbnb image for comparison
-    return resultImages.length > 0 && airbnbImages.length > 0;
-  };
-
-  // =========================================
-  // CANONICAL PRICE MODEL & BUCKET CATEGORIZATION
-  // =========================================
-  // Use the canonical price model for comparison and categorization
-  // This ensures verified totals are properly classified
-  
-  // Filter chain: Tier C blocked → Image verified → Has comparison photos
-  const imageVerifiedResults = supportedResults.filter(isImageVerified);
-  const resultsWithPhotos = imageVerifiedResults.filter(hasComparisonPhotos);
-  
-  // Track rejected results for debugging/logging
-  const textOnlyRejectedCount = supportedResults.filter(r => !isImageVerified(r)).length;
-  if (textOnlyRejectedCount > 0) {
-    console.log(`[ImageGate] Filtered ${textOnlyRejectedCount} non-visual matches from display`);
-  }
+  // The canonical set that drives:
+  // - final rendering
+  // - banner counts
+  // - section counts
+  // This must include discovered + cached candidates after merge.
+  //
+  // IMPORTANT: Do not drop candidates for missing photos, missing price, or
+  // incomplete extraction metadata. Categorization will force them into an
+  // appropriate bucket (additional_issues as catch-all).
+  const finalCandidates = results;
 
   // Create baseline (Airbnb) canonical price for comparison
   // Note: Not using useMemo here to avoid hook order issues with early returns
   const baselineCanonicalPrice: CanonicalPriceType | null = (() => {
     if (!airbnbTotal) return null;
-    
+
     return {
       platform_id: 'airbnb',
       source_url: search?.airbnb_url || '',
@@ -1832,27 +1799,28 @@ export default function SearchResults() {
     };
   })();
 
-  // Categorize all results using the canonical model
-  const categorizedResults = resultsWithPhotos.map(r => {
+  // Categorize ALL final candidates using the canonical model
+  // (No filtering based on photos, unknown outcomes, or missing fields.)
+  const categorizedResults = finalCandidates.map((r) => {
     // EXPEDIA-SPECIFIC: Use canonical total_price if available
     const isExpedia = r.platform_name.toLowerCase().includes('expedia');
-    const effectivePrice = (isExpedia && r.canonical_price?.total_price && r.canonical_price.total_price > 0)
-      ? r.canonical_price.total_price
+    const effectivePrice = (isExpedia && (r.canonical_price as any)?.total_price && (r.canonical_price as any).total_price > 0)
+      ? ((r.canonical_price as any).total_price as number)
       : r.price;
-    
+
     const input: CategorizationInput = {
       price: effectivePrice,
-      canonical_price: r.canonical_price || null,
-      outcome_category: r.outcome_category || null,
+      canonical_price: (r.canonical_price as any) || null,
+      outcome_category: (r.outcome_category as any) || null,
       extraction_status: r.extraction_status || null,
       extraction_error: r.extraction_error || null,
       is_tier_c_blocked: r.is_tier_c_blocked || false,
-      coverage_tier: r.coverage_tier || null,
+      coverage_tier: (r.coverage_tier as any) || null,
       price_status: r.price_status || 'unavailable',
       eligible_for_comparison: r.eligible_for_comparison || false,
       verification_failures: r.verification_failures || [],
     };
-    
+
     const categorization = categorizeResultFn(input, baselineCanonicalPrice);
     return { result: r, categorization };
   });
@@ -1943,7 +1911,10 @@ export default function SearchResults() {
     | 'prices_unavailable';
 
   const computeResultState = (): ResultState => {
-    if (resultsWithPhotos.length === 0) {
+    // Canonical: if backend proceeded with N candidates, we must not claim
+    // "No Alternative Listings Found" just because some candidates lack photos
+    // or complete extraction metadata.
+    if (finalCandidates.length === 0) {
       return 'no_platforms_found';
     }
     if (cheaperResults.length > 0) {
