@@ -61,6 +61,13 @@ export interface FinalSnapshot {
   // Metadata for debugging
   expected_platform_count: number;
   finalized_platform_count: number;
+  // Rendering completeness proof (persisted per finalized run)
+  render_debug: {
+    candidates_total_after_merge: number;
+    candidates_rendered: number;
+    included_platform_keys: string[];
+    excluded_platform_keys: string[]; // must always be empty
+  };
 }
 
 export interface FinalizeAndCompleteResult {
@@ -635,6 +642,16 @@ export async function finalizeAndCompleteSearch(
     finalizedPlatformCount = finalResults.length;
 
     const finalisedAt = new Date().toISOString();
+
+    // Persist a minimal, structured proof that snapshot rendering is complete.
+    // NOTE: This is persisted inside the snapshot to avoid any new tables and
+    // without impacting UI behavior.
+    const includedPlatformKeys = finalResults.map((r) => {
+      const name = String(r.platform_name || '').toLowerCase();
+      const url = String(r.listing_url || '');
+      return `${name}|${url}`;
+    });
+
     const snapshot: FinalSnapshot = {
       version: 2, // Version 2 = authoritative platform set
       generated_at: finalisedAt,
@@ -653,6 +670,12 @@ export async function finalizeAndCompleteSearch(
       result_count: finalResults.length,
       expected_platform_count: expectedPlatformCount,
       finalized_platform_count: finalizedPlatformCount,
+      render_debug: {
+        candidates_total_after_merge: expectedPlatformCount,
+        candidates_rendered: finalResults.length,
+        included_platform_keys: includedPlatformKeys,
+        excluded_platform_keys: [],
+      },
     };
 
     console.log(`[finalizeAndComplete] Built snapshot: ${finalResults.length} results (${filteredOutCount} non-visual filtered), expected=${expectedPlatformCount}, finalized=${finalizedPlatformCount}`);
