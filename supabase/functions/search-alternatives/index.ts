@@ -246,88 +246,10 @@ function extractEvidenceSnippet(content: string, priceValue?: number): string {
   return cleaned.slice(0, 200);
 }
 
-// ============================================================================
-// Known Property Matches Cache - Ensures consistent results for same property
-// ============================================================================
-
-interface KnownMatch {
-  platform_name: string;
-  platform_url: string;
-  listing_title: string | null;
-}
-
-// Extract Airbnb room ID from URL for cache key
-function extractAirbnbRoomId(url: string): string | null {
-  const roomsMatch = url.match(/\/rooms\/(\d+)/);
-  if (roomsMatch) return roomsMatch[1];
-  const bookStaysMatch = url.match(/\/book\/stays\/(\d+)/);
-  if (bookStaysMatch) return bookStaysMatch[1];
-  return null;
-}
-
-// Fetch previously found matches for this Airbnb property
-async function fetchKnownMatches(supabase: any, airbnbRoomId: string): Promise<KnownMatch[]> {
-  try {
-    const { data, error } = await supabase
-      .from('known_property_matches')
-      .select('platform_name, platform_url, listing_title')
-      .eq('airbnb_room_id', airbnbRoomId)
-      .eq('is_active', true);
-    
-    if (error) {
-      console.error('Failed to fetch known matches:', error);
-      return [];
-    }
-    
-    console.log(`[KnownMatches] Found ${data?.length || 0} cached matches for room ${airbnbRoomId}`);
-    return data || [];
-  } catch (e) {
-    console.error('Known matches lookup error:', e);
-    return [];
-  }
-}
-
-// Save newly discovered matches to the cache
-async function saveKnownMatches(
-  supabase: any,
-  airbnbRoomId: string,
-  matches: Array<{ platform_name: string; listing_url: string; listing_title?: string | null }>
-): Promise<void> {
-  if (!airbnbRoomId || matches.length === 0) return;
-  
-  try {
-    // Upsert each match (update last_verified_at and match_count if exists)
-    for (const match of matches) {
-      const { error } = await supabase
-        .from('known_property_matches')
-        .upsert({
-          airbnb_room_id: airbnbRoomId,
-          platform_name: match.platform_name,
-          platform_url: match.listing_url,
-          listing_title: match.listing_title || null,
-          last_verified_at: new Date().toISOString(),
-          is_active: true,
-        }, {
-          onConflict: 'airbnb_room_id,platform_url',
-          ignoreDuplicates: false,
-        });
-      
-      if (error) {
-        console.error(`Failed to save known match for ${match.platform_name}:`, error);
-      }
-    }
-    
-    // Also increment match_count for existing matches
-    await supabase.rpc('increment_match_count_noop').catch(() => {
-      // RPC doesn't exist, just log
-      console.log(`[KnownMatches] Saved ${matches.length} matches for room ${airbnbRoomId}`);
-    });
-    
-    console.log(`[KnownMatches] Cached ${matches.length} matches for room ${airbnbRoomId}`);
-  } catch (e) {
-    console.error('Failed to save known matches:', e);
-  }
-}
+// NOTE: Known Property Matches Cache has been removed.
+// Search results are now based ONLY on matches discovered and verified in the current run.
+// This ensures strict adherence to the visual verification contract and prevents
+// cached matches (which may lack photos) from appearing in results.
 
 // ============================================================================
 // Bot/Captcha Detection - Shared across all providers
@@ -6272,15 +6194,7 @@ async function runSearchWithStreaming(
   }
 
   // ============================================================================
-  // CACHED MATCHES: Loaded ONLY after discovery completes as fallback merge
-  // CRITICAL: Do NOT load cached matches here - they are merged AFTER the
-  // 5-image discovery loop completes. See "FALLBACK MERGE" section below.
-  // ============================================================================
-  const airbnbRoomId = extractAirbnbRoomId(search.airbnb_url);
-  
-  // ============================================================================
-  // DISCOVERY LOOP: Process all images without any cache influence
-  // Cached matches must NEVER influence whether discovery continues.
+  // DISCOVERY LOOP: Process all images via reverse image search
   // ============================================================================
   let discoveryAttempted = false;
   
@@ -6303,14 +6217,13 @@ async function runSearchWithStreaming(
 
     // ============================================================================
     // DISCOVERY SKIP POLICY: User-requested skip allowed only for explicit user action
-    // Cached matches must NEVER influence whether discovery continues.
     // Skip is ONLY allowed if:
     // 1. User explicitly clicked "skip" button, AND
     // 2. At least one full image discovery pass completed
     // ============================================================================
     if (discoveryAttempted && await claimSkipNow()) {
-      console.log(`[DiscoverySkip] User-requested skip after image ${idx}. (Cached matches not loaded until discovery ends)`);
-      sendProgress(controller, "User skipped remaining discovery", `Completed ${idx} of ${imageUrls.length} images`, { 
+      console.log(`[DiscoverySkip] User-requested skip after image ${idx}`);
+      sendProgress(controller, "User skipped remaining discovery", `Completed ${idx} of ${imageUrls.length} images`, {
         skipped: true,
         imagesCompleted: idx,
         totalImages: imageUrls.length,
@@ -6369,10 +6282,8 @@ async function runSearchWithStreaming(
     
     for (const match of visualMatches) {
       // ============================================================================
-      // CRITICAL: No cache-influenced skip logic here
+      // VERIFICATION CAP POLICY
       // Match verification must complete for all candidates found in the CURRENT run.
-      // Cached matches are supplemental fallback only and must never affect whether
-      // we continue verifying current-run discoveries.
       // The only allowed early stops are:
       // 1. aiCount >= MAX_AI (deterministic AI call cap)
       // 2. matchesThisImage >= 8 (deterministic per-image cap)
@@ -6532,97 +6443,19 @@ async function runSearchWithStreaming(
   }
 
   // After all verification, collect best matches into alternatives array
-  // This is the CURRENT RUN discovered matches ONLY - cached matches not loaded yet
+  // This is the CURRENT RUN discovered matches ONLY
   alternatives.push(...bestMatchPerPlatform.values());
   
   const discoveredCount = bestMatchPerPlatform.size;
-  console.log(`[Discovery Complete] Verification complete for current run: ${discoveredCount} platforms found`);
-  sendProgress(controller, "Verification complete for current run", `Found ${discoveredCount} platforms from image search`);
+  console.log(`[Discovery Complete] Verification complete: ${discoveredCount} platforms found via image search`);
+  sendProgress(controller, "Verification complete", `Found ${discoveredCount} platforms from image search`);
 
   // ============================================================================
-  // FALLBACK MERGE: Load cached matches ONLY AFTER discovery completes
-  // Cached matches are supplemental fallback - they do NOT influence discovery.
+  // FINAL CANDIDATE SET LOGGING (current-run matches only, no cache merge)
   // ============================================================================
-  let cachedMatchCount = 0;
-  
-  if (airbnbRoomId) {
-    sendProgress(controller, "Loading cached matches (fallback)", "Checking for previously discovered platforms...");
-    const cachedMatches = await fetchKnownMatches(supabase, airbnbRoomId);
-    
-    if (cachedMatches.length > 0) {
-      let addedFromCache = 0;
-      let dedupedFromCache = 0;
-      
-      for (const cached of cachedMatches) {
-        // Skip if already discovered in current run or blocked
-        if (foundUrls.has(cached.platform_url)) {
-          dedupedFromCache++;
-          continue;
-        }
-        if (isBlockedNonBookingPlatform(cached.platform_url)) continue;
-        
-        const platformKey = cached.platform_name.toLowerCase().replace(/[^a-z0-9]/g, '');
-        
-        // Only add if we don't already have a match for this platform from current run
-        if (!bestMatchPerPlatform.has(platformKey)) {
-          const cachedAlternative = {
-            platform_name: cached.platform_name,
-            listing_url: cached.platform_url,
-            listing_title: cached.listing_title,
-            price: null,
-            confidence_score: 95, // High confidence since it was previously verified (0-100 scale)
-            image_url: null,
-            images: [],
-            match_type: 'visual' as const, // Use 'visual' for type compatibility
-            source_airbnb_image: null,
-          };
-          
-          bestMatchPerPlatform.set(platformKey, cachedAlternative);
-          foundUrls.add(cached.platform_url);
-          alternatives.push(cachedAlternative);
-          addedFromCache++;
-          
-          console.log(`[FallbackMerge] Added cached match: ${cached.platform_name} - ${cached.platform_url.slice(0, 80)}`);
-          
-          // ============================================================================
-          // PARALLEL PIPELINE: Trigger immediate price extraction for cached matches too
-          // Cached matches are already VERIFIED (confidence 95%), so trigger extraction now
-          // ============================================================================
-          if (!platformsInPriceExtraction.has(platformKey)) {
-            const extractionPromise = triggerImmediatePriceExtraction(cachedAlternative);
-            extractionPromises.push(extractionPromise);
-            sendProgress(controller, `Starting price extraction for ${cached.platform_name}`, "Running in parallel (from cache)", {
-              platform: cached.platform_name,
-              parallelExtraction: true,
-              fromCache: true,
-            });
-          }
-        } else {
-          dedupedFromCache++;
-        }
-      }
-      
-      cachedMatchCount = addedFromCache;
-      console.log(`[FallbackMerge] Merged cached matches — added ${addedFromCache}, deduped ${dedupedFromCache}`);
-      sendProgress(controller, `Merged cached matches`, `Added ${addedFromCache}, deduped ${dedupedFromCache}`, {
-        addedFromCache,
-        dedupedFromCache,
-        totalCachedAvailable: cachedMatches.length,
-      });
-    } else {
-      console.log(`[FallbackMerge] No cached matches available for room ${airbnbRoomId}`);
-    }
-  }
-
-  // ============================================================================
-  // FINAL CANDIDATE SET LOGGING
-  // ============================================================================
-  const totalPlatforms = bestMatchPerPlatform.size;
-  console.log(`[Pipeline] Proceeding with combined candidate set: ${discoveredCount} discovered + ${cachedMatchCount} from cache = ${totalPlatforms} total`);
-  sendProgress(controller, `Proceeding with ${totalPlatforms} candidate listings`, 
-    cachedMatchCount > 0 
-      ? `${discoveredCount} newly discovered + ${cachedMatchCount} from cache`
-      : `${discoveredCount} verified from current run`);
+  const totalPlatforms = discoveredCount;
+  console.log(`[Pipeline] Proceeding with ${totalPlatforms} candidate listings (current-run verified only)`);
+  sendProgress(controller, `Proceeding with ${totalPlatforms} candidate listings`, `${totalPlatforms} verified from current run`);
 
   // If we got no visual matches, run a targeted text search across likely platforms
   if (totalPlatforms === 0) {
@@ -7166,24 +6999,8 @@ async function runSearchWithStreaming(
       console.log(`[ParallelPipeline] All platforms already have price extraction running`);
     }
     
-    // ============================================================================
-    // SAVE TO KNOWN MATCHES CACHE: Store matches for future consistency
-    // This ensures subsequent searches for the same property find the same platforms
-    // ============================================================================
-    if (airbnbRoomId && allResultsSorted.length > 0) {
-      const matchesToCache = allResultsSorted
-        .filter((r: any) => r.confidence_score >= 85) // Only cache high-confidence matches (0-100 scale)
-        .map((r: any) => ({
-          platform_name: r.platform_name,
-          listing_url: r.listing_url,
-          listing_title: r.listing_title,
-        }));
-      
-      if (matchesToCache.length > 0) {
-        saveKnownMatches(supabase, airbnbRoomId, matchesToCache);
-        console.log(`[KnownMatches] Scheduled caching of ${matchesToCache.length} matches for room ${airbnbRoomId}`);
-      }
-    }
+    // NOTE: Caching of matches to known_property_matches has been removed.
+    // Search results are now based ONLY on current-run verified matches.
   }
 
   // Step 4: ATOMIC FINALIZATION
