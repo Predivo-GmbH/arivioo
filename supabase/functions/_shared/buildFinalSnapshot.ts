@@ -14,6 +14,33 @@
 
 // Note: We use 'any' for supabase client type to allow flexibility across different edge functions
 
+// Result bucket types - must match frontend ResultBucket
+export type ResultBucket =
+  | 'cheaper'
+  | 'more_expensive'
+  | 'not_comparable'
+  | 'sold_out'
+  | 'price_not_found'
+  | 'blocked'
+  | 'requires_action'
+  | 'service_error'
+  | 'platform_blocked'
+  | 'additional_issues';
+
+// Bucket display labels - frozen at finalization time
+const BUCKET_LABELS: Record<ResultBucket, string> = {
+  cheaper: 'Found and cheaper',
+  more_expensive: 'Found but more expensive',
+  not_comparable: 'Price not comparable',
+  sold_out: 'Not available for these dates',
+  price_not_found: 'Price not found',
+  blocked: 'Blocked access',
+  requires_action: 'Action required',
+  service_error: 'Service error',
+  platform_blocked: 'Platform not supported',
+  additional_issues: 'Additional issues detected',
+};
+
 export interface FinalResultRow {
   id: string;
   platform_name: string;
@@ -40,6 +67,9 @@ export interface FinalResultRow {
   dates_validated?: boolean;
   // Outcome category for UI bucketing
   outcome_category?: string | null;
+  // FROZEN BUCKET: Determined at finalization, immutable on refresh
+  final_bucket: ResultBucket;
+  final_bucket_label: string;
 }
 
 export interface FinalSnapshot {
@@ -169,6 +199,106 @@ function determinePriceTypeFromExtraction(extraction: any): string {
   }
   
   return 'unknown';
+}
+
+// ============================================
+// RESULT CATEGORIZATION (Backend-side)
+// ============================================
+
+/**
+ * Categorize a result into a bucket at finalization time.
+ * This is the SINGLE SOURCE OF TRUTH - the bucket is frozen into the snapshot
+ * and NEVER re-computed by the frontend.
+ * 
+ * Must match the categorization logic in src/lib/resultCategorization.ts
+ */
+function categorizeResultForSnapshot(
+  result: {
+    price: number | null;
+    outcome_category: string | null;
+    extraction_status: string | null;
+    extraction_error: string | null;
+    canonical_price: Record<string, unknown> | null;
+    is_tier_c_blocked?: boolean;
+    coverage_tier?: string | null;
+  },
+  airbnbPrice: number | null
+): ResultBucket {
+  // 1. Tier C platforms are always blocked
+  if (result.is_tier_c_blocked || result.coverage_tier === 'C') {
+    return 'platform_blocked';
+  }
+  
+  // 2. Check outcome category for non-price states
+  const outcomeCategory = result.outcome_category?.toLowerCase() || '';
+  
+  if (outcomeCategory === 'unavailable_for_dates' || outcomeCategory === 'sold_out') {
+    return 'sold_out';
+  }
+  
+  if (outcomeCategory === 'access_blocked' || outcomeCategory === 'blocked') {
+    return 'blocked';
+  }
+  
+  if (outcomeCategory === 'requires_action') {
+    return 'requires_action';
+  }
+  
+  if (outcomeCategory === 'service_error') {
+    return 'service_error';
+  }
+  
+  // 3. Check extraction status for sold out
+  const extractionStatus = result.extraction_status?.toLowerCase() || '';
+  const soldOutStatuses = ['dates_unavailable', 'sold_out', 'expedia_dates_unavailable_for_target'];
+  if (soldOutStatuses.includes(extractionStatus)) {
+    return 'sold_out';
+  }
+  
+  // 4. Check extraction status for blocked
+  const blockedStatuses = ['blocked', 'blocked_captcha_or_bot', 'access_denied', 'bot_detected'];
+  if (blockedStatuses.includes(extractionStatus)) {
+    return 'blocked';
+  }
+  
+  // 5. No price - check if it's an unmapped error
+  if (!result.price || result.price <= 0) {
+    const pendingStatuses = ['pending', 'running', 'in_progress'];
+    const successStatuses = ['success', 'price_extracted', 'completed'];
+    
+    if (extractionStatus && !pendingStatuses.includes(extractionStatus) && !successStatuses.includes(extractionStatus)) {
+      // Unknown terminal status - additional_issues
+      return 'additional_issues';
+    }
+    return 'price_not_found';
+  }
+  
+  // 6. Has price - check comparability
+  const canonicalPrice = result.canonical_price;
+  if (!canonicalPrice || !airbnbPrice) {
+    return 'not_comparable';
+  }
+  
+  // Check if this is a comparable total
+  const priceType = String(canonicalPrice.price_type || '').toLowerCase();
+  const isComparable = canonicalPrice.is_comparable === true;
+  const isTotalType = priceType === 'total_proven' || priceType === 'total_derived';
+  
+  if (!isComparable || !isTotalType) {
+    return 'not_comparable';
+  }
+  
+  // 7. Compare prices
+  const totalPrice = canonicalPrice.total_price as number | null;
+  if (!totalPrice || totalPrice <= 0) {
+    return 'not_comparable';
+  }
+  
+  if (totalPrice < airbnbPrice) {
+    return 'cheaper';
+  } else {
+    return 'more_expensive';
+  }
 }
 
 export interface FinalizeAndCompleteParams {
@@ -497,6 +627,20 @@ export async function finalizeAndCompleteSearch(
           outcomeCategory = effectivePrice ? 'price_extracted' : 'no_price';
         }
 
+        // CRITICAL: Determine final bucket at finalization time (frozen forever)
+        const finalBucket = categorizeResultForSnapshot(
+          {
+            price: effectivePrice,
+            outcome_category: outcomeCategory,
+            extraction_status: extraction?.extraction_status || platform.extraction_status_terminal || null,
+            extraction_error: extraction?.extraction_error || platform.last_error || null,
+            canonical_price: canonicalPrice,
+            is_tier_c_blocked: false,
+            coverage_tier: null,
+          },
+          airbnbPrice
+        );
+
         return {
           id: result?.id || platform.id,
           platform_name: platform.platform_name,
@@ -521,6 +665,8 @@ export async function finalizeAndCompleteSearch(
           includes_taxes_fees: extraction?.includes_taxes_fees || false,
           dates_validated: extraction?.dates_validated || false,
           outcome_category: outcomeCategory,
+          final_bucket: finalBucket,
+          final_bucket_label: BUCKET_LABELS[finalBucket],
         };
       });
       
@@ -577,6 +723,21 @@ export async function finalizeAndCompleteSearch(
           };
         }
 
+        // CRITICAL: Determine final bucket at finalization time (frozen forever) - legacy path
+        const outcomeCategory = effectivePrice ? 'price_extracted' : 'no_price';
+        const finalBucket = categorizeResultForSnapshot(
+          {
+            price: effectivePrice,
+            outcome_category: outcomeCategory,
+            extraction_status: extraction?.extraction_status || null,
+            extraction_error: extraction?.extraction_error || null,
+            canonical_price: canonicalPrice,
+            is_tier_c_blocked: false,
+            coverage_tier: null,
+          },
+          airbnbPrice
+        );
+
         return {
           id: result.id,
           platform_name: result.platform_name,
@@ -600,7 +761,9 @@ export async function finalizeAndCompleteSearch(
           price_type: canonicalPrice?.price_type || 'unknown',
           includes_taxes_fees: extraction?.includes_taxes_fees || false,
           dates_validated: extraction?.dates_validated || false,
-          outcome_category: null,
+          outcome_category: outcomeCategory,
+          final_bucket: finalBucket,
+          final_bucket_label: BUCKET_LABELS[finalBucket],
         };
       });
       
