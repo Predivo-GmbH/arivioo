@@ -62,7 +62,7 @@ export function ImageComparison({
   const sliderRef = useRef<HTMLDivElement>(null);
   const altImageRef = useRef<HTMLDivElement>(null);
 
-  const hasAirbnbImages = airbnbImages.length > 0;
+  const hasAirbnbImages = airbnbImages.length > 0 || !!sourceAirbnbImage;
   const hasAltImages = alternativeImages.length > 0;
   
   const currentAltImage = hasAltImages ? alternativeImages[altIndex] : null;

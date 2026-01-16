@@ -2654,7 +2654,7 @@ export default function SearchResults() {
                                     {isExpanded && (
                                       <tr className="border-b border-border/50">
                                         <td colSpan={5} className="p-4 bg-muted/30">
-                                          {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                          {resultImages.length > 0 || airbnbImages.length > 0 || result.source_airbnb_image ? (
                                             <ImageComparison
                                               airbnbImages={airbnbImages}
                                               alternativeImages={resultImages}
@@ -3131,7 +3131,7 @@ export default function SearchResults() {
                                           {isExpanded && (
                                             <tr className="border-b border-border/50">
                                               <td colSpan={4} className="p-4 bg-muted/30">
-                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
+                                                {resultImages.length > 0 || airbnbImages.length > 0 || result.source_airbnb_image ? (
                                                   <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
                                                 ) : (
                                                   <div className="text-center py-6 text-muted-foreground">
