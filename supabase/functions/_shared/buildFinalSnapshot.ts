@@ -771,28 +771,86 @@ export async function finalizeAndCompleteSearch(
     }
 
     // ============================================================================
-    // IMAGE VERIFICATION GATE (Defense-in-Depth)
+    // IMAGE EVIDENCE GATE (AUTHORITATIVE INVARIANT)
     // ============================================================================
-    // Only image-verified matches (match_type='visual') may appear in the final
-    // snapshot. This is a critical invariant: text-only matches are NEVER valid
-    // alternatives regardless of how they entered the database.
+    // A listing may only appear in the final snapshot if:
+    // 1. match_type === 'visual' (not text-only)
+    // 2. confidence_score >= 75 (image verification threshold)
+    // 3. source_airbnb_image exists (Airbnb reference image for comparison)
+    // 4. images array has >=1 valid URL (alternative platform image for comparison)
+    //
+    // If ANY of these conditions fail, the result is EXCLUDED from the snapshot.
+    // This ensures that every result shown has photo comparison available.
     // ============================================================================
     const IMAGE_VERIFICATION_THRESHOLD = 75;
     const preFilterCount = finalResults.length;
     
+    /**
+     * Helper to check if a value is a non-empty string URL
+     */
+    const isValidImageUrl = (url: unknown): boolean => {
+      if (typeof url !== 'string') return false;
+      const trimmed = url.trim();
+      return trimmed.length > 0 && (trimmed.startsWith('http://') || trimmed.startsWith('https://'));
+    };
+    
+    /**
+     * Helper to extract valid images from an images array (handles various formats)
+     */
+    const extractValidImages = (images: unknown): string[] => {
+      if (!images) return [];
+      if (Array.isArray(images)) {
+        return images.filter(isValidImageUrl) as string[];
+      }
+      // Handle case where images might be a JSON string
+      if (typeof images === 'string') {
+        try {
+          const parsed = JSON.parse(images);
+          if (Array.isArray(parsed)) {
+            return parsed.filter(isValidImageUrl) as string[];
+          }
+        } catch {
+          // Not valid JSON, check if it's a single URL
+          if (isValidImageUrl(images)) {
+            return [images];
+          }
+        }
+      }
+      return [];
+    };
+    
     finalResults = finalResults.filter((result) => {
-      // STRICT: Only 'visual' match types are valid for display
+      const platformName = result.platform_name || 'Unknown';
+      
+      // GATE 1: Only 'visual' match types are valid for display
       if (result.match_type !== 'visual') {
-        console.log(`[SnapshotGate] REJECTED text-only match: ${result.platform_name} - match_type=${result.match_type}`);
+        console.log(`[ImageEvidenceGate] REJECTED text-only match: ${platformName} - match_type=${result.match_type}`);
         return false;
       }
       
-      // STRICT: Must have adequate confidence score
+      // GATE 2: Must have adequate confidence score
       if (typeof result.confidence_score !== 'number' || result.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
-        console.log(`[SnapshotGate] REJECTED low-confidence match: ${result.platform_name} - confidence=${result.confidence_score}`);
+        console.log(`[ImageEvidenceGate] REJECTED low-confidence match: ${platformName} - confidence=${result.confidence_score}`);
         return false;
       }
       
+      // GATE 3: Must have source Airbnb image (required for photo comparison)
+      if (!isValidImageUrl(result.source_airbnb_image)) {
+        console.log(`[ImageEvidenceGate] REJECTED missing source_airbnb_image: ${platformName} - source_airbnb_image=${result.source_airbnb_image}`);
+        return false;
+      }
+      
+      // GATE 4: Must have at least one alternative platform image (required for photo comparison)
+      const alternativeImages = extractValidImages(result.images);
+      if (alternativeImages.length === 0) {
+        // Also check image_url as fallback
+        if (!isValidImageUrl(result.image_url)) {
+          console.log(`[ImageEvidenceGate] REJECTED missing alternative images: ${platformName} - images=${JSON.stringify(result.images)}, image_url=${result.image_url}`);
+          return false;
+        }
+      }
+      
+      // All gates passed - this result has complete photo comparison evidence
       return true;
     });
     
