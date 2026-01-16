@@ -7414,8 +7414,37 @@ async function runSearchWithStreaming(
     return;
   }
 
+  // ============================================================================
+  // FIX: Compute "with prices" from DB (price_extractions) instead of in-memory
+  // Parallel extraction writes to DB asynchronously, so in-memory alt.price
+  // may be stale. Query the authoritative source for the final summary.
+  // ============================================================================
+  let dbPriceCount = 0;
+  try {
+    const { data: pricedExtractions, error: priceCountError } = await supabase
+      .from('price_extractions')
+      .select('id, extracted_price, extraction_status')
+      .eq('search_id', searchId)
+      .not('extracted_price', 'is', null)
+      .gte('extracted_price', 10);
+    
+    if (!priceCountError && pricedExtractions) {
+      dbPriceCount = pricedExtractions.length;
+    }
+    
+    // Debug log: compare in-memory vs DB counts for validation
+    console.log(`[PriceCountDebug] search=${searchId} inMemory=${resultsWithPrices.length} db=${dbPriceCount}`);
+  } catch (err) {
+    console.error(`[PriceCountDebug] Failed to query DB price count:`, err);
+    // Fall back to in-memory count if DB query fails
+    dbPriceCount = resultsWithPrices.length;
+  }
+  
+  // Use DB count for final summary (authoritative source)
+  const finalPriceCount = dbPriceCount;
+  
   console.log(`[search-alternatives/SSE] Finalized search ${searchId} with ${finalizationResult.resultCount} results`);
-  sendProgress(controller, "Search complete", allResultsSorted.length > 0 ? `Found ${allResultsSorted.length} alternatives (${resultsWithPrices.length} with prices)` : "No alternatives found");
+  sendProgress(controller, "Search complete", allResultsSorted.length > 0 ? `Found ${allResultsSorted.length} alternatives (${finalPriceCount} with prices)` : "No alternatives found");
   sendSSE(controller, "complete", {
     success: true,
     results: allResultsSorted,
