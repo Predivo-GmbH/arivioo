@@ -7081,25 +7081,67 @@ async function runSearchWithStreaming(
   }
 
   // ============================================================================
-  // IMAGE VERIFICATION GATE - CORE PRODUCT INVARIANT
+  // IMAGE EVIDENCE GATE - CORE PRODUCT INVARIANT (HARD ENFORCEMENT)
   // ============================================================================
-  // Only image-verified matches (match_type='visual') may be saved as results.
-  // Text-only matches are NEVER valid alternatives regardless of quantity.
-  // This is the platform's primary KPI: reverse image verification is the
-  // mandatory source of truth for identifying valid alternative listings.
+  // A result is ONLY eligible for display if it has BOTH:
+  // 1. At least 1 Airbnb/source image reference (source_airbnb_image)
+  // 2. At least 1 alternative image reference (image_url or non-empty images array)
+  //
+  // Additional requirements:
+  // - match_type MUST be 'visual' (text-only matches are NEVER valid)
+  // - confidence_score MUST be >= 75 (low-confidence matches are rejected)
+  //
+  // If a result lacks image evidence, it MUST NOT be inserted into the 
+  // authoritative result set (search_platforms/search_results) or appear
+  // in the final snapshot. No result = acceptable. Invalid result = unacceptable.
   // ============================================================================
   const IMAGE_VERIFICATION_THRESHOLD = 75; // Minimum confidence score for visual matches
   
-  const imageVerifiedAlternatives = alternatives.filter((alt) => {
-    // STRICT: Only 'visual' match types are valid
-    if (alt.match_type !== 'visual') {
-      console.log(`[ImageGate] REJECTED text-only match: ${alt.platform_name} - ${alt.listing_url.slice(0, 80)}`);
-      return false;
+  /**
+   * Check if a candidate has valid image evidence for photo comparison.
+   * Returns { valid: boolean, reason: string } for logging.
+   */
+  const validateImageEvidence = (alt: typeof alternatives[0]): { valid: boolean; reason: string } => {
+    // Check 1: Must have source Airbnb image
+    const hasSourceImage = !!alt.source_airbnb_image && 
+                          typeof alt.source_airbnb_image === 'string' && 
+                          alt.source_airbnb_image.trim().length > 0;
+    
+    if (!hasSourceImage) {
+      return { valid: false, reason: 'missing_source_airbnb_image' };
     }
     
-    // STRICT: Must have confidence score above threshold
+    // Check 2: Must have at least one alternative image
+    const hasImageUrl = !!alt.image_url && 
+                        typeof alt.image_url === 'string' && 
+                        alt.image_url.trim().length > 0;
+    
+    const hasImagesArray = Array.isArray(alt.images) && 
+                           alt.images.length > 0 && 
+                           alt.images.some((img: unknown) => typeof img === 'string' && img.trim().length > 0);
+    
+    if (!hasImageUrl && !hasImagesArray) {
+      return { valid: false, reason: 'missing_alternative_images' };
+    }
+    
+    // Check 3: Must be visual match type
+    if (alt.match_type !== 'visual') {
+      return { valid: false, reason: 'not_visual_match' };
+    }
+    
+    // Check 4: Must have adequate confidence score
     if (typeof alt.confidence_score !== 'number' || alt.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
-      console.log(`[ImageGate] REJECTED low-confidence match: ${alt.platform_name} (${alt.confidence_score ?? 'null'}%) - ${alt.listing_url.slice(0, 80)}`);
+      return { valid: false, reason: `low_confidence_${alt.confidence_score ?? 'null'}` };
+    }
+    
+    return { valid: true, reason: 'passed' };
+  };
+  
+  const imageVerifiedAlternatives = alternatives.filter((alt) => {
+    const validation = validateImageEvidence(alt);
+    
+    if (!validation.valid) {
+      console.log(`[ImageEvidenceGate] REJECTED: ${alt.platform_name} - reason: ${validation.reason} - ${alt.listing_url.slice(0, 80)}`);
       return false;
     }
     
