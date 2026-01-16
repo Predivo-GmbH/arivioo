@@ -2939,7 +2939,7 @@ export default function SearchResults() {
                                               <span className="text-sm text-orange-600">{failureDisplay.text}</span>
                                             </td>
                                             <td className="py-4 px-4 text-center">
-                                              <div className="flex items-center justify-center gap-2">
+                                              <div className="flex flex-col gap-1.5 items-center">
                                                 <Button variant="outline" size="sm" asChild>
                                                   <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
                                                     View <ExternalLink className="w-3 h-3 ml-1" />
