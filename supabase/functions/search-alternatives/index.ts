@@ -8517,13 +8517,14 @@ serve(async (req) => {
 
     console.log(`Search phase complete. AI comparisons used: ${aiComparisonCount}/${MAX_AI_COMPARISONS}, Time: ${Date.now() - searchStartTime}ms`);
 
-    // If no visual matches were found, do a targeted text search on major platforms
-    // so we can still surface obvious alternatives (even if not photo-verified).
+    // If no visual matches were found, run text search for logging/analytics only.
+    // Text matches are NO LONGER surfaced to users - only AI-verified visual matches
+    // from addTargetedTextMatches (which performs visual verification) can be valid.
     const visualMatchCount = alternatives.filter(a => a.match_type === 'visual').length;
     console.log(`Visual search complete: found ${visualMatchCount} AI-verified matches`);
 
     if (visualMatchCount === 0) {
-      console.log("No visual matches found - running targeted text search fallback");
+      console.log("No visual matches found - text search runs for analytics but produces no valid listings");
 
       const location = extractLocationFromTitle(airbnbTitle);
       await addTargetedTextMatches({
@@ -8539,8 +8540,65 @@ serve(async (req) => {
       const airbnbImageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
       const airbnbImages = imageUrls.slice(0, 5);
 
-      // Filter to only results with valid prices before persisting
-      const resultsWithValidPrices = alternatives.filter(a => a.price && a.price >= 10);
+      // ============================================================================
+      // INSERTION-TIME IMAGE EVIDENCE GATE (AUTHORITATIVE INVARIANT)
+      // ============================================================================
+      // Per the system invariant: "A listing may ONLY exist if a successful photo
+      // comparison has occurred." We enforce this BEFORE any DB insertion.
+      // 
+      // Required conditions for a valid listing:
+      // 1. match_type === 'visual' (not text-only)
+      // 2. confidence_score >= 75 (verified threshold)
+      // 3. source_airbnb_image is a valid URL
+      // 4. images[] contains >=1 valid alternative image URL
+      // ============================================================================
+      const IMAGE_EVIDENCE_THRESHOLD = 75;
+      
+      const isValidImageUrl = (url: unknown): boolean => {
+        if (typeof url !== 'string') return false;
+        const trimmed = url.trim();
+        return trimmed.length > 0 && (trimmed.startsWith('http://') || trimmed.startsWith('https://'));
+      };
+      
+      const hasValidAlternativeImages = (images: unknown, imageUrl: unknown): boolean => {
+        if (Array.isArray(images) && images.some(isValidImageUrl)) return true;
+        if (isValidImageUrl(imageUrl)) return true;
+        return false;
+      };
+      
+      const isValidListing = (alt: typeof alternatives[0]): boolean => {
+        // Gate 1: Must be visual match
+        if (alt.match_type !== 'visual') {
+          console.log(`[InsertGate] REJECTED: ${alt.platform_name} - match_type=${alt.match_type} (not visual)`);
+          return false;
+        }
+        // Gate 2: Must have adequate confidence
+        if (typeof alt.confidence_score !== 'number' || alt.confidence_score < IMAGE_EVIDENCE_THRESHOLD) {
+          console.log(`[InsertGate] REJECTED: ${alt.platform_name} - confidence=${alt.confidence_score} (below ${IMAGE_EVIDENCE_THRESHOLD})`);
+          return false;
+        }
+        // Gate 3: Must have source Airbnb image
+        if (!isValidImageUrl(alt.source_airbnb_image)) {
+          console.log(`[InsertGate] REJECTED: ${alt.platform_name} - missing source_airbnb_image`);
+          return false;
+        }
+        // Gate 4: Must have at least one alternative image
+        if (!hasValidAlternativeImages(alt.images, alt.image_url)) {
+          console.log(`[InsertGate] REJECTED: ${alt.platform_name} - missing alternative images`);
+          return false;
+        }
+        return true;
+      };
+      
+      // Filter alternatives through the evidence gate BEFORE any DB operations
+      const validAlternatives = alternatives.filter(isValidListing);
+      const rejectedCount = alternatives.length - validAlternatives.length;
+      if (rejectedCount > 0) {
+        console.log(`[InsertGate] Rejected ${rejectedCount} listings that failed image evidence requirements`);
+      }
+      
+      // Now apply price filter on validated alternatives only
+      const resultsWithValidPrices = validAlternatives.filter(a => a.price && a.price >= 10);
       
       if (resultsWithValidPrices.length > 0) {
         const { data: insertedResults } = await supabase.from("search_results").insert(
@@ -8710,41 +8768,36 @@ serve(async (req) => {
             continue;
           }
           
+          // ============================================================================
+          // TEXT MATCHES BLOCKED: INVARIANT ENFORCEMENT
+          // ============================================================================
+          // Per the authoritative invariant: "A listing may ONLY exist if a successful
+          // photo comparison has occurred." Text matches have NO visual verification
+          // and must NEVER be added to the alternatives array or persisted to DB.
+          //
+          // This code path previously added text matches with match_type='text' and
+          // confidence_score=null - which violates the image evidence gate.
+          // Now we log for analytics but DO NOT add to alternatives.
+          // ============================================================================
           const textData = textResult.data;
           const results = textData?.organic_results || [];
           
+          let textMatchesLogged = 0;
           for (const result of results) {
             const url = result.link;
             if (!url || url.toLowerCase().includes("airbnb.") || foundUrls.has(url)) continue;
             if (isBlockedNonBookingPlatform(url)) continue;
             
-            if (isBookingPlatform(url) || isRegionalHotelSite(url)) {
-              foundUrls.add(url);
-              alternatives.push({
-                platform_name: getPlatformName(url),
-                listing_url: url,
-                listing_title: result.title || null,
-                price: null,
-                confidence_score: null, // TEXT MATCH = NO VISUAL CONFIRMATION = NO TRUST SCORE
-                image_url: result.thumbnail || null,
-                images: result.thumbnail ? [result.thumbnail] : [],
-                match_type: 'text',
-              });
-              console.log("Text match found (no visual confirmation):", getPlatformName(url));
-            } else if (isDirectPropertySite(url)) {
-              foundUrls.add(url);
-              alternatives.push({
-                platform_name: getPlatformName(url) + " (Direct)",
-                listing_url: url,
-                listing_title: result.title || null,
-                price: null,
-                confidence_score: null, // TEXT MATCH = NO VISUAL CONFIRMATION = NO TRUST SCORE
-                image_url: result.thumbnail || null,
-                images: result.thumbnail ? [result.thumbnail] : [],
-                match_type: 'text',
-              });
-              console.log("Direct site text match (no visual confirmation):", url.slice(0, 80));
+            if (isBookingPlatform(url) || isRegionalHotelSite(url) || isDirectPropertySite(url)) {
+              // LOG for analytics but DO NOT ADD to alternatives
+              // Text matches have no visual verification = no photo comparison = invalid
+              console.log(`[INVARIANT] BLOCKED text match (no visual verification): ${getPlatformName(url)} - ${url.slice(0, 60)}`);
+              textMatchesLogged++;
             }
+          }
+          
+          if (textMatchesLogged > 0) {
+            console.log(`[INVARIANT] Blocked ${textMatchesLogged} text matches from this query (no photo comparison available)`);
           }
           
           await new Promise(r => setTimeout(r, 300));
@@ -8883,8 +8936,58 @@ serve(async (req) => {
       }));
     }
 
-    // Calculate savings based on Airbnb price
-    const resultsWithSavings = resultsWithPriceAttempts.map(alt => {
+    // ============================================================================
+    // INSERTION-TIME IMAGE EVIDENCE GATE (AUTHORITATIVE INVARIANT) - PATH 2
+    // ============================================================================
+    // This is the main insertion path. Apply the same evidence gate as above.
+    // ============================================================================
+    const IMAGE_EVIDENCE_THRESHOLD = 75;
+    
+    const isValidImageUrl = (url: unknown): boolean => {
+      if (typeof url !== 'string') return false;
+      const trimmed = url.trim();
+      return trimmed.length > 0 && (trimmed.startsWith('http://') || trimmed.startsWith('https://'));
+    };
+    
+    const hasValidAlternativeImages = (images: unknown, imageUrl: unknown): boolean => {
+      if (Array.isArray(images) && images.some(isValidImageUrl)) return true;
+      if (isValidImageUrl(imageUrl)) return true;
+      return false;
+    };
+    
+    const isValidListingForInsert = (alt: typeof resultsWithPriceAttempts[0]): boolean => {
+      // Gate 1: Must be visual match
+      if (alt.match_type !== 'visual') {
+        console.log(`[InsertGate] REJECTED: ${alt.platform_name} - match_type=${alt.match_type} (not visual)`);
+        return false;
+      }
+      // Gate 2: Must have adequate confidence
+      if (typeof alt.confidence_score !== 'number' || alt.confidence_score < IMAGE_EVIDENCE_THRESHOLD) {
+        console.log(`[InsertGate] REJECTED: ${alt.platform_name} - confidence=${alt.confidence_score} (below ${IMAGE_EVIDENCE_THRESHOLD})`);
+        return false;
+      }
+      // Gate 3: Must have source Airbnb image
+      if (!isValidImageUrl(alt.source_airbnb_image)) {
+        console.log(`[InsertGate] REJECTED: ${alt.platform_name} - missing source_airbnb_image`);
+        return false;
+      }
+      // Gate 4: Must have at least one alternative image
+      if (!hasValidAlternativeImages(alt.images, alt.image_url)) {
+        console.log(`[InsertGate] REJECTED: ${alt.platform_name} - missing alternative images`);
+        return false;
+      }
+      return true;
+    };
+    
+    // Filter through evidence gate BEFORE calculating savings
+    const validatedResults = resultsWithPriceAttempts.filter(isValidListingForInsert);
+    const rejectedCount = resultsWithPriceAttempts.length - validatedResults.length;
+    if (rejectedCount > 0) {
+      console.log(`[InsertGate] Rejected ${rejectedCount} listings that failed image evidence requirements`);
+    }
+    
+    // Calculate savings based on Airbnb price (only for validated results)
+    const resultsWithSavings = validatedResults.map(alt => {
       let savingsAmount: number | null = null;
       let savingsPercentage: number | null = null;
       
@@ -8902,24 +9005,21 @@ serve(async (req) => {
     });
 
     // Sort by savings (best deals first), then by confidence
+    // Note: All results are now visual matches, so match_type comparison is unnecessary
     resultsWithSavings.sort((a, b) => {
       // First, prioritize results with actual savings
       const savingsA = a.savings_percentage ?? 0;
       const savingsB = b.savings_percentage ?? 0;
       if (savingsA !== savingsB) return savingsB - savingsA;
       
-      // Then by match type (visual first)
-      if (a.match_type === 'visual' && b.match_type === 'text') return -1;
-      if (a.match_type === 'text' && b.match_type === 'visual') return 1;
-      
-      // Finally by confidence
+      // Then by confidence
       const scoreA = a.confidence_score ?? 0;
       const scoreB = b.confidence_score ?? 0;
       return scoreB - scoreA;
     });
 
     if (resultsWithSavings.length > 0) {
-      console.log(`Storing ${resultsWithSavings.length} results with valid prices`);
+      console.log(`Storing ${resultsWithSavings.length} validated results (all have photo comparison available)`);
       const { data: insertedResults } = await supabase.from("search_results").insert(
         resultsWithSavings.map(r => ({
           search_id: searchId,
