@@ -7415,32 +7415,50 @@ async function runSearchWithStreaming(
   }
 
   // ============================================================================
-  // FIX: Compute "with prices" from DB (price_extractions) instead of in-memory
-  // Parallel extraction writes to DB asynchronously, so in-memory alt.price
-  // may be stale. Query the authoritative source for the final summary.
+  // STRICT TOTAL_STAY PRICING: Only count prices that are confirmed TOTAL_STAY
+  // This enforces the canonical rule that only total stay prices are valid.
+  // No >=10 threshold needed - classification already filters invalid prices.
   // ============================================================================
   let dbPriceCount = 0;
   try {
+    // Query for extractions with TOTAL_STAY classification
+    // Valid statuses: 'success_total_stay' (new), 'success' with TOTAL_STAY price_type (legacy)
     const { data: pricedExtractions, error: priceCountError } = await supabase
       .from('price_extractions')
-      .select('id, extracted_price, extraction_status')
+      .select('id, extracted_price, extraction_status, price_type')
       .eq('search_id', searchId)
-      .not('extracted_price', 'is', null)
-      .gte('extracted_price', 10);
+      .not('extracted_price', 'is', null);
     
     if (!priceCountError && pricedExtractions) {
-      dbPriceCount = pricedExtractions.length;
+      // Count only TOTAL_STAY prices (strict enforcement)
+      dbPriceCount = pricedExtractions.filter((ext: any) => {
+        const status = (ext.extraction_status || '').toLowerCase();
+        const priceType = (ext.price_type || '').toUpperCase();
+        const price = ext.extracted_price;
+        
+        // Must have a positive price
+        if (!price || price <= 0) return false;
+        
+        // New status: success_total_stay is always valid
+        if (status === 'success_total_stay') return true;
+        
+        // Legacy status: success with TOTAL_STAY price_type
+        if (status === 'success' && priceType === 'TOTAL_STAY') return true;
+        
+        // Reject all other combinations
+        return false;
+      }).length;
     }
     
     // Debug log: compare in-memory vs DB counts for validation
-    console.log(`[PriceCountDebug] search=${searchId} inMemory=${resultsWithPrices.length} db=${dbPriceCount}`);
+    console.log(`[PriceCountDebug] search=${searchId} inMemory=${resultsWithPrices.length} db_totalStay=${dbPriceCount}`);
   } catch (err) {
     console.error(`[PriceCountDebug] Failed to query DB price count:`, err);
-    // Fall back to in-memory count if DB query fails
-    dbPriceCount = resultsWithPrices.length;
+    // Fall back to 0 if DB query fails (strict: don't claim prices we can't verify)
+    dbPriceCount = 0;
   }
   
-  // Use DB count for final summary (authoritative source)
+  // Use DB count for final summary (authoritative source, TOTAL_STAY only)
   const finalPriceCount = dbPriceCount;
   
   console.log(`[search-alternatives/SSE] Finalized search ${searchId} with ${finalizationResult.resultCount} results`);
