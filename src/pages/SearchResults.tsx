@@ -2939,13 +2939,43 @@ export default function SearchResults() {
                                               <span className="text-sm text-orange-600">{failureDisplay.text}</span>
                                             </td>
                                             <td className="py-4 px-4 text-center">
-                                              <Button variant="outline" size="sm" asChild>
-                                                <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                                  View <ExternalLink className="w-3 h-3 ml-1" />
-                                                </a>
-                                              </Button>
+                                              <div className="flex items-center justify-center gap-2">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
                                             </td>
                                           </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 || result.source_airbnb_image ? (
+                                                  <ImageComparison
+                                                    airbnbImages={airbnbImages}
+                                                    alternativeImages={resultImages}
+                                                    airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                                    alternativeTitle={result.listing_title || "Alternative Listing"}
+                                                    platformName={result.platform_name}
+                                                    sourceAirbnbImage={result.source_airbnb_image}
+                                                  />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
                                         </React.Fragment>
                                       );
                                     })}
