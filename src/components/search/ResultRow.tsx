@@ -155,18 +155,6 @@ export function ResultRow({
 
   // Render trust score cell
   const renderTrustScoreCell = () => {
-    // Special case for sold_out
-    if (variant === 'sold_out') {
-      return (
-        <td className="py-4 px-4 text-center">
-          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-orange-500/10 text-orange-600 text-xs font-medium">
-            <Calendar className="w-3 h-3" />
-            Unavailable
-          </span>
-        </td>
-      );
-    }
-    
     const hasVisualMatch = result.match_type === "visual" && result.confidence_score;
     const score = result.confidence_score ? Math.min(100, Math.round(result.confidence_score)) : null;
     
@@ -180,14 +168,14 @@ export function ResultRow({
         return 'bg-amber-500/10 text-amber-600';
       }
       
-      // Visual match with score
-      if (variant === 'cheaper' && score && score >= 90) {
+      // Visual match with score - use consistent styling across all variants
+      if (score && score >= 90) {
         return 'bg-success/20 text-success';
       }
-      if (variant === 'cheaper') {
-        return 'bg-primary/20 text-primary';
+      if (score && score >= 75) {
+        return 'bg-green-500/10 text-green-600';
       }
-      return 'bg-green-500/10 text-green-600';
+      return 'bg-amber-500/10 text-amber-600';
     };
     
     return (
