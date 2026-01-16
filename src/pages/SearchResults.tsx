@@ -15,6 +15,7 @@ import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmati
 import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
 import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
 import { ResultBucketSection } from "@/components/search/ResultBucketSection";
+import { ResultRow, type ResultRowResult, type RowVariant } from "@/components/search/ResultRow";
 import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
 import {
   normalizeExtraction,
@@ -2817,71 +2818,20 @@ export default function SearchResults() {
                                 <table className="w-full text-sm">
                                   <tbody>
                                     {blockedResults.map((result) => {
-                                      const resultImages = toStringArray(result.images);
-                                      const isExpanded = expandedComparison === result.id;
                                       const failureDisplay = getFailureDisplay(result);
-                                      
                                       return (
-                                        <React.Fragment key={result.id}>
-                                          <tr className="border-b border-border/50 hover:bg-muted/30">
-                                            <td className="py-4 px-4">
-                                              <div className="flex items-center gap-2">
-                                                <span className="w-2 h-2 rounded-full bg-red-500" />
-                                                <span className="font-medium text-foreground">{result.platform_name}</span>
-                                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
-                                                  <Ban className="w-2.5 h-2.5" />
-                                                  Blocked
-                                                </span>
-                                              </div>
-                                            </td>
-                                            <td className="py-4 px-4 text-center">
-                                              {result.match_type === "visual" && result.confidence_score ? (
-                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-500/10 text-green-600 text-xs font-medium">
-                                                  <Shield className="w-3 h-3" />
-                                                  {Math.min(100, Math.round(result.confidence_score))}%
-                                                </span>
-                                              ) : (
-                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 text-amber-600 text-xs font-medium">
-                                                  <Info className="w-3 h-3" />
-                                                  Text
-                                                </span>
-                                              )}
-                                            </td>
-                                            <td className="py-4 px-4 text-right text-muted-foreground">
-                                              <span className="text-sm text-red-500">{failureDisplay.text}</span>
-                                            </td>
-                                            <td className="py-4 px-4 text-center">
-                                              <div className="flex flex-col gap-1.5 items-center">
-                                                <Button variant="outline" size="sm" asChild>
-                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                                    View <ExternalLink className="w-3 h-3 ml-1" />
-                                                  </a>
-                                                </Button>
-                                                <button
-                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
-                                                >
-                                                  <ArrowLeftRight className="w-3 h-3" />
-                                                  {isExpanded ? 'Hide' : 'Photos'}
-                                                </button>
-                                              </div>
-                                            </td>
-                                          </tr>
-                                          {isExpanded && (
-                                            <tr className="border-b border-border/50">
-                                              <td colSpan={4} className="p-4 bg-muted/30">
-                                                {resultImages.length > 0 || airbnbImages.length > 0 ? (
-                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
-                                                ) : (
-                                                  <div className="text-center py-6 text-muted-foreground">
-                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                    <p className="text-sm">No photos available for comparison</p>
-                                                  </div>
-                                                )}
-                                              </td>
-                                            </tr>
-                                          )}
-                                        </React.Fragment>
+                                        <ResultRow
+                                          key={result.id}
+                                          result={result as ResultRowResult}
+                                          variant="blocked"
+                                          isExpanded={expandedComparison === result.id}
+                                          onToggleExpand={(id) => setExpandedComparison(expandedComparison === id ? null : id)}
+                                          airbnbImages={airbnbImages}
+                                          airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                          currencySymbol={currencySymbol}
+                                          failureDisplayText={failureDisplay.text}
+                                          colSpan={4}
+                                        />
                                       );
                                     })}
                                   </tbody>
@@ -2916,67 +2866,20 @@ export default function SearchResults() {
                                 <table className="w-full text-sm">
                                   <tbody>
                                     {soldOutResults.map((result) => {
-                                      const resultImages = toStringArray(result.images);
-                                      const isExpanded = expandedComparison === result.id;
                                       const failureDisplay = getFailureDisplay(result);
-                                      
                                       return (
-                                        <React.Fragment key={result.id}>
-                                          <tr className="border-b border-border/50 hover:bg-muted/30">
-                                            <td className="py-4 px-4">
-                                              <div className="flex items-center gap-2">
-                                                <span className="w-2 h-2 rounded-full bg-orange-500" />
-                                                <span className="font-medium text-foreground">{result.platform_name}</span>
-                                              </div>
-                                            </td>
-                                            <td className="py-4 px-4 text-center">
-                                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-orange-500/10 text-orange-600 text-xs font-medium">
-                                                <Calendar className="w-3 h-3" />
-                                                Unavailable
-                                              </span>
-                                            </td>
-                                            <td className="py-4 px-4 text-right text-muted-foreground">
-                                              <span className="text-sm text-orange-600">{failureDisplay.text}</span>
-                                            </td>
-                                            <td className="py-4 px-4 text-center">
-                                              <div className="flex flex-col gap-1.5 items-center">
-                                                <Button variant="outline" size="sm" asChild>
-                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
-                                                    View <ExternalLink className="w-3 h-3 ml-1" />
-                                                  </a>
-                                                </Button>
-                                                <button
-                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
-                                                >
-                                                  <ArrowLeftRight className="w-3 h-3" />
-                                                  {isExpanded ? 'Hide' : 'Photos'}
-                                                </button>
-                                              </div>
-                                            </td>
-                                          </tr>
-                                          {isExpanded && (
-                                            <tr className="border-b border-border/50">
-                                              <td colSpan={4} className="p-4 bg-muted/30">
-                                                {resultImages.length > 0 || airbnbImages.length > 0 || result.source_airbnb_image ? (
-                                                  <ImageComparison
-                                                    airbnbImages={airbnbImages}
-                                                    alternativeImages={resultImages}
-                                                    airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
-                                                    alternativeTitle={result.listing_title || "Alternative Listing"}
-                                                    platformName={result.platform_name}
-                                                    sourceAirbnbImage={result.source_airbnb_image}
-                                                  />
-                                                ) : (
-                                                  <div className="text-center py-6 text-muted-foreground">
-                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                    <p className="text-sm">No photos available for comparison</p>
-                                                  </div>
-                                                )}
-                                              </td>
-                                            </tr>
-                                          )}
-                                        </React.Fragment>
+                                        <ResultRow
+                                          key={result.id}
+                                          result={result as ResultRowResult}
+                                          variant="sold_out"
+                                          isExpanded={expandedComparison === result.id}
+                                          onToggleExpand={(id) => setExpandedComparison(expandedComparison === id ? null : id)}
+                                          airbnbImages={airbnbImages}
+                                          airbnbTitle={search?.airbnb_title || "Airbnb Listing"}
+                                          currencySymbol={currencySymbol}
+                                          failureDisplayText={failureDisplay.text}
+                                          colSpan={4}
+                                        />
                                       );
                                     })}
                                   </tbody>
