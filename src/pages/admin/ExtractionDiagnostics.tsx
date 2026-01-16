@@ -544,6 +544,35 @@ function CopyButton({ text, className = '' }: { text: string; className?: string
   );
 }
 
+function CopyActivityLogButton({ activityLog }: { activityLog: Array<{ ts: number; message: string; detail?: string }> }) {
+  const [copied, setCopied] = useState(false);
+  
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const formattedLog = activityLog.map((item, idx) => {
+      const line = `${idx + 1}. ${item.message}`;
+      return item.detail ? `${line} — ${item.detail}` : line;
+    }).join('\n');
+    await navigator.clipboard.writeText(formattedLog);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="outline" size="sm" onClick={handleCopy}>
+          {copied ? <Check className="h-3 w-3 text-green-500 mr-1" /> : <Copy className="h-3 w-3 mr-1" />}
+          {copied ? 'Copied!' : 'Copy All'}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>
+        <span>Copy entire activity log to clipboard</span>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function TruncatedId({ id, className = '' }: { id: string; className?: string }) {
   const truncated = `${id.slice(0, 8)}...${id.slice(-4)}`;
   return (
@@ -750,11 +779,14 @@ export default function ExtractionDiagnostics() {
                       {selectedSearch.activity_log.length} events captured during search
                     </CardDescription>
                   </div>
-                  <CollapsibleTrigger asChild>
-                    <Button variant="ghost" size="sm">
-                      <ChevronRight className="h-4 w-4" />
-                    </Button>
-                  </CollapsibleTrigger>
+                  <div className="flex items-center gap-2">
+                    <CopyActivityLogButton activityLog={selectedSearch.activity_log} />
+                    <CollapsibleTrigger asChild>
+                      <Button variant="ghost" size="sm">
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </CollapsibleTrigger>
+                  </div>
                 </div>
               </CardHeader>
               <CollapsibleContent>
