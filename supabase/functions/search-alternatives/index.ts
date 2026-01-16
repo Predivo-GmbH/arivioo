@@ -1438,7 +1438,7 @@ async function compareImagesWithAI(
   }
   
   try {
-    // Enhanced prompt with strict, evidence-driven comparison
+    // Enhanced prompt with strict, evidence-driven comparison + insufficient evidence rules
     const prompt = `You are a strict forensic image analyst. Your task is to determine whether these two property photos show the EXACT SAME real-world property (same apartment, room, house, building).
 
 CRITICAL RULES - BE CONSERVATIVE:
@@ -1446,6 +1446,7 @@ CRITICAL RULES - BE CONSERVATIVE:
 2. It is BETTER to rate a match too LOW than to incorrectly confirm different properties as the same
 3. If you have ANY doubt, reduce the score significantly
 4. Similar-looking properties are NOT the same property
+5. If there is NOT enough visible structural evidence in BOTH images, you MUST treat this as insufficient evidence and score LOW
 
 FOCUS ON FIXED/PERMANENT FEATURES (these rarely change):
 - Room geometry: exact wall angles, ceiling height, room shape
@@ -1466,6 +1467,17 @@ DO NOT rely heavily on:
 
 STRUCTURAL DIFFERENCES = NOT THE SAME:
 If you see ANY structural difference (different window positions, different room shape, different ceiling, different floor plan), the score MUST be below 70%.
+
+INSUFFICIENT EVIDENCE RULE (MANDATORY):
+If fixed structural features (room shape, windows, layout) are NOT clearly visible and comparable in BOTH images, you MUST:
+- set score <= 60
+- set isMatch = false
+- explicitly state "insufficient structural evidence" in the explanation
+
+ROOM / VIEWPOINT CONSISTENCY RULE:
+If the images appear to show DIFFERENT room types or viewpoints (e.g. bedroom vs living room, interior vs exterior), they MUST be treated as NOT the same property:
+- score <= 40
+- isMatch = false
 
 SCORING GUIDELINES:
 - 95-100%: Absolutely certain - identical structural features, unmistakable match
