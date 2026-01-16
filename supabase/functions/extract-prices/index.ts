@@ -25,15 +25,30 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Import price classification module
+import {
+  type PriceClassification,
+  type ClassificationResult,
+  extractAndClassifyPrices,
+  validateExtractedPriceAsTotalStay,
+  getExtractionStatusFromClassification,
+} from '../_shared/priceClassification.ts';
+
 // Extraction status lifecycle states (Phase B: only after dates validated)
+// CRITICAL: Only 'success_total_stay' indicates a valid, comparable price
 type ExtractionStatus = 
   | 'pending'                      // Initial state
   | 'awaiting_validation'          // Waiting for Phase A
   | 'running'                      // Phase B in progress
-  | 'success'                      // Price extracted successfully
+  | 'success_total_stay'           // VALID: Total stay price extracted
+  | 'success'                      // Legacy: Price extracted (being phased out)
   | 'dates_not_applied'            // Phase A failed - dates not applied
   | 'no_availability_for_dates'    // Phase A found dates unavailable
   | 'price_not_found_after_dates_applied'  // Phase B: dates OK but no price
+  | 'price_not_total_stay'         // Price found but NOT a total stay
+  | 'price_not_total_stay_nightly_only'    // Only per-night rate found
+  | 'price_not_total_stay_subtotal_only'   // Only subtotal (excl. taxes) found
+  | 'price_not_found_hallucination_guard'  // Price not verified in content
   | 'blocked_captcha_or_bot'       // Blocked by anti-bot
   | 'blocked_rate_limit'           // Rate limited
   | 'render_failed'                // Page didn't render
@@ -1163,16 +1178,59 @@ Deno.serve(async (req) => {
             const datesMatched = result.data?.checkin_date_detected === requestedCheckIn;
             const confidence = calculateConfidence(result, datesMatched);
 
-            // Update extraction record
+            // ============================================================================
+            // STRICT TOTAL_STAY ENFORCEMENT:
+            // Only persist extracted_price if classification confirms TOTAL_STAY.
+            // All other price types are noise and must NOT be stored as prices.
+            // ============================================================================
+            let finalPrice: number | null = null;
+            let finalStatus: string = result.status;
+            let finalPriceType: string = result.data?.price_type || 'UNKNOWN';
+            let classificationDebug: any = null;
+            
+            if (result.success && result.data?.total_price) {
+              // Parse price to number (may be string from extraction)
+              const rawPrice = typeof result.data.total_price === 'string'
+                ? parseFloat(result.data.total_price.replace(/[^0-9.]/g, ''))
+                : result.data.total_price;
+              
+              // Validate that this is actually a TOTAL_STAY price
+              const classification = validateExtractedPriceAsTotalStay(
+                rawPrice,
+                result.data.price_type,
+                result.data.includes_taxes_fees,
+                result.evidence || null,
+                '' // Content not available here, rely on extractor classification
+              );
+              
+              classificationDebug = classification.debugInfo;
+              
+              if (classification.isValid && classification.classification === 'TOTAL_STAY') {
+                // VALID: This is a confirmed TOTAL_STAY price
+                finalPrice = rawPrice;
+                finalStatus = 'success_total_stay';
+                finalPriceType = 'TOTAL_STAY';
+                console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: TOTAL_STAY confirmed - $${finalPrice}`);
+              } else {
+                // INVALID: Price is not a total stay - do NOT persist as extracted_price
+                finalPrice = null;
+                finalStatus = getExtractionStatusFromClassification(classification, datesMatched);
+                console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: Rejected - ${classification.rejectionReason}`);
+              }
+            }
+
+            // Update extraction record with enforced classification
             await supabaseClient
               .from('price_extractions')
               .update({
-                extracted_price: result.data?.total_price || null,
+                extracted_price: finalPrice, // Only TOTAL_STAY prices are persisted
                 currency: result.data?.currency || 'USD',
-                price_type: result.data?.price_type || 'UNKNOWN',
+                price_type: finalPriceType,
                 includes_taxes_fees: result.data?.includes_taxes_fees || false,
-                extraction_status: result.status,
-                extraction_error: result.error,
+                extraction_status: finalStatus,
+                extraction_error: result.error || (finalPrice === null && result.data?.total_price 
+                  ? `Price $${result.data.total_price} rejected: not a TOTAL_STAY` 
+                  : null),
                 provider_used: result.provider,
                 evidence_snippets: result.evidence || [],
                 final_resolved_url: result.finalUrl,
@@ -1183,15 +1241,17 @@ Deno.serve(async (req) => {
                   extracted_at: new Date().toISOString(),
                   provider: result.provider,
                   dates_matched: datesMatched,
+                  classification_debug: classificationDebug,
+                  raw_extracted_price: result.data?.total_price || null, // For debugging
                 },
               })
               .eq('id', extraction.id);
 
-            // Update search result price if successful
-            if (result.success && result.data?.total_price) {
+            // Update search result price ONLY if TOTAL_STAY confirmed
+            if (finalPrice !== null) {
               await supabaseClient
                 .from('search_results')
-                .update({ price: result.data.total_price })
+                .update({ price: finalPrice })
                 .eq('id', extraction.search_result_id);
             }
 
@@ -1271,15 +1331,50 @@ Deno.serve(async (req) => {
           const datesMatched = result.data?.checkin_date_detected === requestedCheckIn;
           const confidence = calculateConfidence(result, datesMatched);
 
+          // ============================================================================
+          // STRICT TOTAL_STAY ENFORCEMENT (batch mode)
+          // ============================================================================
+          let finalPrice: number | null = null;
+          let finalStatus: string = result.status;
+          let finalPriceType: string = result.data?.price_type || 'UNKNOWN';
+          let classificationDebug: any = null;
+          
+          if (result.success && result.data?.total_price) {
+            const rawPrice = typeof result.data.total_price === 'string'
+              ? parseFloat(result.data.total_price.replace(/[^0-9.]/g, ''))
+              : result.data.total_price;
+            
+            const classification = validateExtractedPriceAsTotalStay(
+              rawPrice,
+              result.data.price_type,
+              result.data.includes_taxes_fees,
+              result.evidence || null,
+              ''
+            );
+            
+            classificationDebug = classification.debugInfo;
+            
+            if (classification.isValid && classification.classification === 'TOTAL_STAY') {
+              finalPrice = rawPrice;
+              finalStatus = 'success_total_stay';
+              finalPriceType = 'TOTAL_STAY';
+            } else {
+              finalPrice = null;
+              finalStatus = getExtractionStatusFromClassification(classification, datesMatched);
+            }
+          }
+
           await supabaseClient
             .from('price_extractions')
             .update({
-              extracted_price: result.data?.total_price || null,
+              extracted_price: finalPrice,
               currency: result.data?.currency || 'USD',
-              price_type: result.data?.price_type || 'UNKNOWN',
+              price_type: finalPriceType,
               includes_taxes_fees: result.data?.includes_taxes_fees || false,
-              extraction_status: result.status,
-              extraction_error: result.error,
+              extraction_status: finalStatus,
+              extraction_error: result.error || (finalPrice === null && result.data?.total_price 
+                ? `Price rejected: not a TOTAL_STAY` 
+                : null),
               provider_used: result.provider,
               evidence_snippets: result.evidence || [],
               final_resolved_url: result.finalUrl,
@@ -1290,26 +1385,28 @@ Deno.serve(async (req) => {
                 extracted_at: new Date().toISOString(),
                 provider: result.provider,
                 dates_matched: datesMatched,
+                classification_debug: classificationDebug,
+                raw_extracted_price: result.data?.total_price || null,
               },
             })
             .eq('id', extraction.id);
 
-          if (result.success && result.data?.total_price) {
+          if (finalPrice !== null) {
             await supabaseClient
               .from('search_results')
-              .update({ price: result.data.total_price })
+              .update({ price: finalPrice })
               .eq('id', extraction.search_result_id);
           }
 
-          console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: ${result.status} via ${result.provider} - ${result.data?.total_price}`);
+          console.log(`[EXTRACT-PRICES] ${extraction.platform_name}: ${finalStatus} via ${result.provider} - ${finalPrice !== null ? '$' + finalPrice : 'no TOTAL_STAY'}`);
 
           return {
             resultId: extraction.search_result_id,
             platformName: extraction.platform_name,
-            price: result.data?.total_price,
+            price: finalPrice,
             currency: result.data?.currency,
-            success: result.success,
-            status: result.status,
+            success: finalPrice !== null,
+            status: finalStatus,
             provider: result.provider,
           };
         })
