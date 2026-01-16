@@ -771,66 +771,25 @@ export async function finalizeAndCompleteSearch(
     }
 
     // ============================================================================
-    // IMAGE EVIDENCE GATE (Defense-in-Depth) - HARD ENFORCEMENT
+    // IMAGE VERIFICATION GATE (Defense-in-Depth)
     // ============================================================================
-    // A result is ONLY eligible for the final snapshot if it has:
-    // 1. source_airbnb_image (non-empty string) - the Airbnb reference image
-    // 2. image_url OR non-empty images array - the alternative platform image(s)
-    // 3. match_type = 'visual' - must be visually verified
-    // 4. confidence_score >= 75 - must have adequate confidence
-    //
-    // This is defense-in-depth: even if upstream discovery failed to enforce
-    // the gate, NO result without image comparison evidence may leak into
-    // the final snapshot. "No results" is acceptable; "invalid results" is not.
+    // Only image-verified matches (match_type='visual') may appear in the final
+    // snapshot. This is a critical invariant: text-only matches are NEVER valid
+    // alternatives regardless of how they entered the database.
     // ============================================================================
     const IMAGE_VERIFICATION_THRESHOLD = 75;
     const preFilterCount = finalResults.length;
     
-    /**
-     * Validate that a result has complete image evidence for photo comparison.
-     */
-    const hasValidImageEvidence = (result: FinalResultRow): { valid: boolean; reason: string } => {
-      // Check 1: Must have source Airbnb image
-      const hasSourceImage = !!result.source_airbnb_image && 
-                            typeof result.source_airbnb_image === 'string' && 
-                            result.source_airbnb_image.trim().length > 0;
-      
-      if (!hasSourceImage) {
-        return { valid: false, reason: 'missing_source_airbnb_image' };
-      }
-      
-      // Check 2: Must have at least one alternative image
-      const hasImageUrl = !!result.image_url && 
-                          typeof result.image_url === 'string' && 
-                          result.image_url.trim().length > 0;
-      
-      const imagesArray = result.images;
-      const hasImagesArray = Array.isArray(imagesArray) && 
-                             imagesArray.length > 0 && 
-                             imagesArray.some((img: unknown) => typeof img === 'string' && (img as string).trim().length > 0);
-      
-      if (!hasImageUrl && !hasImagesArray) {
-        return { valid: false, reason: 'missing_alternative_images' };
-      }
-      
-      // Check 3: Must be visual match type
-      if (result.match_type !== 'visual') {
-        return { valid: false, reason: `not_visual_match_type=${result.match_type}` };
-      }
-      
-      // Check 4: Must have adequate confidence score
-      if (typeof result.confidence_score !== 'number' || result.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
-        return { valid: false, reason: `low_confidence_${result.confidence_score ?? 'null'}` };
-      }
-      
-      return { valid: true, reason: 'passed' };
-    };
-    
     finalResults = finalResults.filter((result) => {
-      const validation = hasValidImageEvidence(result);
+      // STRICT: Only 'visual' match types are valid for display
+      if (result.match_type !== 'visual') {
+        console.log(`[SnapshotGate] REJECTED text-only match: ${result.platform_name} - match_type=${result.match_type}`);
+        return false;
+      }
       
-      if (!validation.valid) {
-        console.log(`[SnapshotImageGate] REJECTED: ${result.platform_name} - reason: ${validation.reason}`);
+      // STRICT: Must have adequate confidence score
+      if (typeof result.confidence_score !== 'number' || result.confidence_score < IMAGE_VERIFICATION_THRESHOLD) {
+        console.log(`[SnapshotGate] REJECTED low-confidence match: ${result.platform_name} - confidence=${result.confidence_score}`);
         return false;
       }
       
@@ -839,7 +798,7 @@ export async function finalizeAndCompleteSearch(
     
     const filteredOutCount = preFilterCount - finalResults.length;
     if (filteredOutCount > 0) {
-      console.log(`[SnapshotImageGate] Filtered out ${filteredOutCount} results without complete image evidence`);
+      console.log(`[SnapshotGate] Filtered out ${filteredOutCount} non-visual matches from final snapshot`);
     }
     
     // Update finalized count after filtering
