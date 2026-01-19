@@ -1336,6 +1336,7 @@ export type Database = {
       }
       search_platforms: {
         Row: {
+          confidence_score: number | null
           extraction_id_latest: string | null
           extraction_status_terminal: string | null
           id: string
@@ -1353,6 +1354,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          confidence_score?: number | null
           extraction_id_latest?: string | null
           extraction_status_terminal?: string | null
           id?: string
@@ -1370,6 +1372,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          confidence_score?: number | null
           extraction_id_latest?: string | null
           extraction_status_terminal?: string | null
           id?: string

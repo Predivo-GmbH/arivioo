@@ -1734,10 +1734,10 @@ export default function SearchResults() {
     const fetchRejectedPlatforms = async () => {
       const { data, error } = await supabase
         .from('search_platforms')
-        .select('id, platform_name, listing_url, listing_title, images, source_airbnb_image')
+        .select('id, platform_name, listing_url, listing_title, images, source_airbnb_image, confidence_score')
         .eq('search_id', searchId)
         .eq('outcome_category', 'rejected')
-        .order('platform_name');
+        .order('confidence_score', { ascending: false, nullsFirst: false });
 
       if (error) {
         console.error('[LowTrustScore] Error fetching rejected platforms:', error);
@@ -1745,11 +1745,7 @@ export default function SearchResults() {
       }
 
       if (data) {
-        // Map to expected format - these don't have confidence scores stored, so we'll show "< 75%"
-        setLowTrustScoreResults(data.map(p => ({
-          ...p,
-          confidence_score: null, // Score not stored for rejected platforms
-        })));
+        setLowTrustScoreResults(data);
       }
     };
 
@@ -3164,24 +3160,56 @@ export default function SearchResults() {
                                     {lowTrustScoreResults.map((result) => {
                                       const resultImages = toStringArray(result.images);
                                       const isExpanded = expandedComparison === result.id;
+                                      const score = typeof result.confidence_score === 'number' ? Math.round(result.confidence_score) : null;
+                                      
+                                      // Determine badge color based on score range
+                                      const getBadgeStyle = (s: number | null) => {
+                                        if (s === null) return 'bg-muted text-muted-foreground';
+                                        if (s >= 50) return 'bg-amber-500/10 text-amber-600'; // Close to threshold
+                                        if (s >= 25) return 'bg-orange-500/10 text-orange-600'; // Medium
+                                        return 'bg-destructive/10 text-destructive'; // Low
+                                      };
+                                      
+                                      const getTooltipText = (s: number | null) => {
+                                        if (s === null) return 'Score not available for this candidate';
+                                        if (s >= 50) return `${s}% confidence - Close to threshold but still uncertain. Compare photos to verify.`;
+                                        if (s >= 25) return `${s}% confidence - Some visual similarities but key structural differences detected.`;
+                                        return `${s}% confidence - Different property or significant structural differences detected.`;
+                                      };
                                       
                                       return (
                                         <React.Fragment key={result.id}>
-                                          <tr className="border-b border-border/50 hover:bg-muted/30 opacity-60">
+                                          <tr className="border-b border-border/50 hover:bg-muted/30 opacity-70">
                                             <td className="py-4 px-4">
-                                              <div className="flex items-center gap-2">
+                                              <div className="flex items-center gap-2 flex-wrap">
                                                 <span className="w-2 h-2 rounded-full bg-muted-foreground" />
                                                 <span className="font-medium text-foreground">{result.platform_name}</span>
+                                                {/* Rejected badge with tooltip */}
+                                                <span 
+                                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-medium cursor-help"
+                                                  title="Failed image verification. Photos may look similar but structural analysis didn't confirm same property."
+                                                >
+                                                  <AlertTriangle className="w-2.5 h-2.5" />
+                                                  Rejected
+                                                </span>
                                               </div>
                                             </td>
                                             <td className="py-4 px-4 text-center">
-                                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-destructive/10 text-destructive text-xs font-medium">
-                                                <AlertTriangle className="w-3 h-3" />
-                                                &lt; 75%
+                                              <span 
+                                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium cursor-help ${getBadgeStyle(score)}`}
+                                                title={getTooltipText(score)}
+                                              >
+                                                <Shield className="w-3 h-3" />
+                                                {score !== null ? `${score}%` : '?'}
                                               </span>
                                             </td>
                                             <td className="py-4 px-4 text-right text-muted-foreground">
-                                              <span className="text-sm">Not verified</span>
+                                              <span 
+                                                className="text-sm cursor-help"
+                                                title="This candidate did not pass the 75% confidence threshold required for verification."
+                                              >
+                                                Below threshold
+                                              </span>
                                             </td>
                                             <td className="py-4 px-4 text-center">
                                               <div className="flex flex-col gap-1.5 items-center">
