@@ -1800,41 +1800,57 @@ isSame must be true ONLY if confidence >= 90 AND you found multiple matching str
   }
 }
 
-// TWO-PASS VERIFICATION: Combines PASS 1 (standard) + PASS 2 (adversarial)
-// WORKING BASELINE RESTORATION: Pass 1 >= 75 is sufficient for inclusion
-// Pass 2 is advisory only - it affects confidence display but NOT inclusion
+// TWO-PASS VERIFICATION SYSTEM
+// ============================
+// PASS 1: Discovery gate (high recall) - "Is this possibly the same property?"
+//   - Threshold: 75% (ImageGate)
+//   - >= 75% → Candidate discovered, persisted, shown in results
+//   - < 75% → Rejected
+//
+// PASS 2: Authority gate (high precision) - "Would we bet product trust on this?"
+//   - Threshold: 90% (Authoritative)
+//   - >= 90% → Authoritative / Verified (high trust)
+//   - 75-89% → Discovered but not authoritative ("Needs Review")
+//   - < 75% → Only Pass 1 score used
+//
 // OPTIMIZATION: Images are fetched once in PASS 1 and reused in PASS 2
 async function compareImagesWithTwoPass(
   airbnbImageUrl: string,
   alternativeImageUrl: string
-): Promise<{ score: number; isMatch: boolean; explanation: string; pass2Failed?: boolean }> {
+): Promise<{ score: number; isMatch: boolean; explanation: string; isAuthoritative?: boolean; needsReview?: boolean }> {
+  const DISCOVERY_THRESHOLD = 75;   // PASS 1: existence/discovery
+  const AUTHORITY_THRESHOLD = 90;   // PASS 2: trust/authority
+  
   // PASS 1: Standard verification (fetches and encodes images)
   const pass1 = await compareImagesWithAI(airbnbImageUrl, alternativeImageUrl);
   
-  // WORKING BASELINE: Pass 1 threshold is 75 (ImageGate threshold)
-  // Candidates >= 75 are INCLUDED regardless of Pass 2 outcome
-  const INCLUSION_THRESHOLD = 75;
-  
-  // If PASS 1 fails the inclusion threshold, reject
-  if (!pass1.isMatch || pass1.score < INCLUSION_THRESHOLD) {
-    console.log(`[TWO_PASS] PASS 1 failed inclusion threshold: score=${pass1.score}, isMatch=${pass1.isMatch} - REJECTED`);
+  // If PASS 1 fails the discovery threshold, reject completely
+  if (!pass1.isMatch || pass1.score < DISCOVERY_THRESHOLD) {
+    console.log(`[TWO_PASS] PASS 1 failed discovery threshold: score=${pass1.score}, isMatch=${pass1.isMatch} - REJECTED`);
     return { score: pass1.score, isMatch: false, explanation: pass1.explanation };
   }
   
-  // PASS 1 passed inclusion threshold - candidate WILL be included
-  // Try PASS 2 to potentially boost confidence, but DON'T reject if it fails
-  console.log(`[TWO_PASS] PASS 1 passed (${pass1.score}%) - running advisory PASS 2`);
+  // PASS 1 passed discovery threshold - candidate is DISCOVERED
+  console.log(`[TWO_PASS] PASS 1 DISCOVERED (${pass1.score}%) - running PASS 2 for authority check`);
   
   // REUSE encoded images from PASS 1 (avoids duplicate fetch/encode)
   if (!pass1.encodedImages) {
-    console.log(`[TWO_PASS] PASS 2 skipped: no encoded images - using PASS 1 result as verified`);
-    return { score: pass1.score, isMatch: true, explanation: pass1.explanation };
+    // No encoded images available - use PASS 1 score to determine authority
+    const isAuthoritative = pass1.score >= AUTHORITY_THRESHOLD;
+    console.log(`[TWO_PASS] PASS 2 skipped (no encoded images) - authority based on PASS 1: ${isAuthoritative ? 'AUTHORITATIVE' : 'NEEDS_REVIEW'}`);
+    return { 
+      score: pass1.score, 
+      isMatch: true, 
+      explanation: pass1.explanation,
+      isAuthoritative,
+      needsReview: !isAuthoritative
+    };
   }
   
   const { airbnbDataUrl, altDataUrl, airbnbUrlHash, altUrlHash } = pass1.encodedImages;
   console.log(`[TWO_PASS] Reusing PASS 1 encoded images for PASS 2 (no re-fetch)`);
   
-  // PASS 2: Adversarial verification (uses pre-encoded images)
+  // PASS 2: Adversarial verification for authority (uses pre-encoded images)
   const pass2 = await compareImagesWithAI_Adversarial(
     airbnbDataUrl,
     altDataUrl,
@@ -1842,25 +1858,31 @@ async function compareImagesWithTwoPass(
     altUrlHash
   );
   
-  // WORKING BASELINE: Pass 2 is ADVISORY only
-  // If Pass 2 agrees, use combined confidence (higher trust)
-  // If Pass 2 disagrees, still include but with Pass 1 score and flag
-  if (pass2.isSame && pass2.confidence >= 75) {
-    const combinedScore = Math.min(pass1.score, pass2.confidence);
-    console.log(`[TWO_PASS] BOTH PASSES AGREE: PASS1=${pass1.score}%, PASS2=${pass2.confidence}% - VERIFIED (${combinedScore}%)`);
+  // Determine authority based on PASS 2 score
+  const pass2Score = pass2.isSame ? pass2.confidence : 0;
+  const isAuthoritative = pass2.isSame && pass2Score >= AUTHORITY_THRESHOLD;
+  const needsReview = !isAuthoritative; // 75-89% or Pass 2 disagreed
+  
+  // Use the lower of the two scores for final confidence (conservative)
+  const finalScore = pass2.isSame ? Math.min(pass1.score, pass2Score) : pass1.score;
+  
+  if (isAuthoritative) {
+    console.log(`[TWO_PASS] AUTHORITATIVE: PASS1=${pass1.score}%, PASS2=${pass2Score}% - HIGH TRUST (${finalScore}%)`);
     return {
-      score: combinedScore,
+      score: finalScore,
       isMatch: true,
-      explanation: `Two-pass verified: ${pass1.explanation} | Adversarial: ${pass2.differences}`
+      explanation: `Authoritative match: ${pass1.explanation} | Confirmed: ${pass2.differences}`,
+      isAuthoritative: true,
+      needsReview: false
     };
   } else {
-    // WORKING BASELINE: Still include, but note Pass 2 disagreement
-    console.log(`[TWO_PASS] PASS 2 ADVISORY DISAGREEMENT: isSame=${pass2.isSame}, confidence=${pass2.confidence} - STILL INCLUDED (${pass1.score}%)`);
+    console.log(`[TWO_PASS] DISCOVERED (NEEDS REVIEW): PASS1=${pass1.score}%, PASS2=${pass2Score}% - included but not authoritative`);
     return {
-      score: pass1.score, // Use Pass 1 score
-      isMatch: true, // WORKING BASELINE: Still include the match
-      explanation: `Pass 1 verified (${pass1.score}%), advisory Pass 2 disagreed: ${pass2.differences}`,
-      pass2Failed: true // Flag for UI to show advisory warning
+      score: finalScore,
+      isMatch: true, // Still included - passed discovery threshold
+      explanation: `Discovered match (${pass1.score}%), needs review: ${pass2.differences || 'Pass 2 confidence below authority threshold'}`,
+      isAuthoritative: false,
+      needsReview: true
     };
   }
 }
@@ -6930,16 +6952,26 @@ async function runSearchWithStreaming(
       
       // WORKING BASELINE: Candidate state based on ImageGate threshold (75%)
       // NOT the stricter 90% threshold - that was causing mass rejections
+      // TWO-PASS VERIFICATION RESULTS
+      // PASS 1 >= 75% → Discovered (included)
+      // PASS 2 >= 90% → Authoritative/Verified
+      // PASS 2 75-89% → Discovered but needs review
       const IMAGE_GATE_THRESHOLD = 75;
-      const candidateState = aiResult.isMatch && aiResult.score >= IMAGE_GATE_THRESHOLD
-        ? 'verified' 
-        : 'rejected';
+      const isDiscovered = aiResult.isMatch && aiResult.score >= IMAGE_GATE_THRESHOLD;
+      const isAuthoritative = aiResult.isAuthoritative === true;
+      const needsReview = aiResult.needsReview === true;
       
+      const candidateState = isDiscovered ? 'verified' : 'rejected';
       const candidateConfidence = aiResult.score;
-      const hasPass2Warning = aiResult.pass2Failed === true;
-      const candidateReason = candidateState === 'verified' 
-        ? (hasPass2Warning ? `Advisory: Pass 2 disagreed, manual check recommended` : null)
-        : `AI verification failed: ${aiResult.isMatch ? `score ${aiResult.score}% below threshold` : 'not a match'}`;
+      
+      // Generate reason based on two-pass outcome
+      let candidateReason: string | null = null;
+      if (!isDiscovered) {
+        candidateReason = `AI verification failed: ${aiResult.isMatch ? `score ${aiResult.score}% below discovery threshold` : 'not a match'}`;
+      } else if (needsReview) {
+        candidateReason = `Discovered but needs review: Pass 2 confidence below authority threshold (90%)`;
+      }
+      // isAuthoritative candidates have no reason/warning
       
       // WORKING BASELINE: Always persist candidate to search_platforms with state
       // This ensures ALL discovered candidates are in the authoritative set
@@ -6952,7 +6984,7 @@ async function runSearchWithStreaming(
         images: match.thumbnail ? [match.thumbnail] : [],
         match_type: candidateState === 'verified' ? 'visual' : 'visual_unverified',
         source_airbnb_image: imageUrl,
-        outcome_category: candidateState,
+        outcome_category: isAuthoritative ? 'authoritative' : (isDiscovered ? 'needs_review' : 'rejected'),
         last_error: candidateReason,
         // Mark rejected candidates as terminal (no extraction needed)
         extraction_status_terminal: candidateState !== 'verified' ? 'verification_rejected' : null,
@@ -6962,7 +6994,7 @@ async function runSearchWithStreaming(
       await supabase
         .from("search_platforms")
         .upsert(candidateRecord, { onConflict: 'search_id,listing_url' });
-      console.log(`[WorkingBaseline] Persisted candidate: ${platformName} (${candidateState}, ${candidateConfidence}%)${hasPass2Warning ? ' [Pass2 advisory warning]' : ''}`);
+      console.log(`[TWO_PASS] Persisted candidate: ${platformName} (${isAuthoritative ? 'AUTHORITATIVE' : isDiscovered ? 'NEEDS_REVIEW' : 'REJECTED'}, ${candidateConfidence}%)`);
 
       if (aiResult.isMatch && aiResult.score >= 90) {
         const newConfidence = aiResult.score;
