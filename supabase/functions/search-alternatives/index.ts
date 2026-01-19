@@ -1476,10 +1476,12 @@ async function fetchImageAsBase64(imageUrl: string, timeoutMs: number = 10_000):
 
 // Use Lovable AI to compare two images and return similarity score (0-100)
 // STRICT COMPARISON: Prefers false negatives over false positives
+// Accepts optional pre-encoded base64 images to avoid duplicate fetches in two-pass verification
 async function compareImagesWithAI(
   airbnbImageUrl: string, 
-  alternativeImageUrl: string
-): Promise<{ score: number; isMatch: boolean; explanation: string }> {
+  alternativeImageUrl: string,
+  preEncodedImages?: { airbnbDataUrl: string; altDataUrl: string; airbnbUrlHash: string; altUrlHash: string }
+): Promise<{ score: number; isMatch: boolean; explanation: string; encodedImages?: { airbnbDataUrl: string; altDataUrl: string; airbnbUrlHash: string; altUrlHash: string } }> {
   const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
   if (!lovableApiKey) {
     console.log("LOVABLE_API_KEY not available for AI image comparison");
@@ -1487,30 +1489,42 @@ async function compareImagesWithAI(
   }
   
   // Create URL hashes for logging (first 16 chars of filename)
-  const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
-  const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+  const airbnbUrlHash = preEncodedImages?.airbnbUrlHash || airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+  const altUrlHash = preEncodedImages?.altUrlHash || alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
   const trustScoreModel = "google/gemini-2.5-flash";
   
   try {
-    // STEP 1: Convert both images to base64 data URLs for vision model
-    console.log(`[TRUST_SCORE] Fetching images for base64 encoding...`);
+    // STEP 1: Use pre-encoded images or fetch and convert to base64
+    let airbnbDataUrl: string;
+    let altDataUrl: string;
     
-    const [airbnbResult, altResult] = await Promise.all([
-      fetchImageAsBase64(airbnbImageUrl, 10_000),
-      fetchImageAsBase64(alternativeImageUrl, 10_000),
-    ]);
-    
-    if (!airbnbResult.dataUrl) {
-      console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=0 | status=IMAGE_FETCH_ERROR_AIRBNB | error=${airbnbResult.error}`);
-      return { score: 0, isMatch: false, explanation: `Airbnb image fetch failed: ${airbnbResult.error}` };
+    if (preEncodedImages) {
+      console.log(`[TRUST_SCORE] Using pre-encoded base64 images (skipping fetch)`);
+      airbnbDataUrl = preEncodedImages.airbnbDataUrl;
+      altDataUrl = preEncodedImages.altDataUrl;
+    } else {
+      console.log(`[TRUST_SCORE] Fetching images for base64 encoding...`);
+      
+      const [airbnbResult, altResult] = await Promise.all([
+        fetchImageAsBase64(airbnbImageUrl, 10_000),
+        fetchImageAsBase64(alternativeImageUrl, 10_000),
+      ]);
+      
+      if (!airbnbResult.dataUrl) {
+        console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=0 | status=IMAGE_FETCH_ERROR_AIRBNB | error=${airbnbResult.error}`);
+        return { score: 0, isMatch: false, explanation: `Airbnb image fetch failed: ${airbnbResult.error}` };
+      }
+      
+      if (!altResult.dataUrl) {
+        console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=0 | status=IMAGE_FETCH_ERROR_ALT | error=${altResult.error}`);
+        return { score: 0, isMatch: false, explanation: `Alternative image fetch failed: ${altResult.error}` };
+      }
+      
+      airbnbDataUrl = airbnbResult.dataUrl;
+      altDataUrl = altResult.dataUrl;
     }
     
-    if (!altResult.dataUrl) {
-      console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=0 | status=IMAGE_FETCH_ERROR_ALT | error=${altResult.error}`);
-      return { score: 0, isMatch: false, explanation: `Alternative image fetch failed: ${altResult.error}` };
-    }
-    
-    console.log(`[TRUST_SCORE] Both images encoded successfully, calling GPT-5...`);
+    console.log(`[TRUST_SCORE] Images ready, calling AI model...`);
     
     // Enhanced prompt with strict, evidence-driven comparison + insufficient evidence rules
     const prompt = `You are a strict forensic image analyst. Your task is to determine whether these two property photos show the EXACT SAME real-world property (same apartment, room, house, building).
@@ -1590,8 +1604,8 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
               role: "user",
               content: [
                 { type: "text", text: prompt },
-                { type: "image_url", image_url: { url: airbnbResult.dataUrl } },
-                { type: "image_url", image_url: { url: altResult.dataUrl } },
+                { type: "image_url", image_url: { url: airbnbDataUrl } },
+                { type: "image_url", image_url: { url: altDataUrl } },
               ],
             },
           ],
@@ -1639,7 +1653,8 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
         return {
           score,
           isMatch,
-          explanation: parsed.explanation || "No explanation provided"
+          explanation: parsed.explanation || "No explanation provided",
+          encodedImages: { airbnbDataUrl, altDataUrl, airbnbUrlHash, altUrlHash }
         };
       }
     } catch (parseError) {
@@ -1787,47 +1802,42 @@ isSame must be true ONLY if confidence >= 90 AND you found multiple matching str
 
 // TWO-PASS VERIFICATION: Combines PASS 1 (standard) + PASS 2 (adversarial)
 // A match is accepted ONLY if BOTH passes agree
+// OPTIMIZATION: Images are fetched once in PASS 1 and reused in PASS 2
 async function compareImagesWithTwoPass(
   airbnbImageUrl: string,
   alternativeImageUrl: string
 ): Promise<{ score: number; isMatch: boolean; explanation: string }> {
-  // PASS 1: Standard verification
+  // PASS 1: Standard verification (fetches and encodes images)
   const pass1 = await compareImagesWithAI(airbnbImageUrl, alternativeImageUrl);
   
   // If PASS 1 fails, no need for PASS 2
   if (!pass1.isMatch || pass1.score < 90) {
     console.log(`[TWO_PASS] PASS 1 failed: score=${pass1.score}, isMatch=${pass1.isMatch} - skipping PASS 2`);
-    return pass1;
+    return { score: pass1.score, isMatch: pass1.isMatch, explanation: pass1.explanation };
   }
   
   console.log(`[TWO_PASS] PASS 1 passed: score=${pass1.score} - running adversarial PASS 2`);
   
-  // Need to re-fetch images as base64 for PASS 2 (since we don't have access to the cached data URLs)
-  const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
-  const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
-  
-  const [airbnbResult, altResult] = await Promise.all([
-    fetchImageAsBase64(airbnbImageUrl, 10_000),
-    fetchImageAsBase64(alternativeImageUrl, 10_000),
-  ]);
-  
-  if (!airbnbResult.dataUrl || !altResult.dataUrl) {
-    console.log(`[TWO_PASS] PASS 2 skipped: image fetch failed - using PASS 1 result`);
-    return pass1;
+  // REUSE encoded images from PASS 1 (avoids duplicate fetch/encode)
+  if (!pass1.encodedImages) {
+    console.log(`[TWO_PASS] PASS 2 skipped: no encoded images from PASS 1 - using PASS 1 result`);
+    return { score: pass1.score, isMatch: pass1.isMatch, explanation: pass1.explanation };
   }
   
-  // PASS 2: Adversarial verification
+  const { airbnbDataUrl, altDataUrl, airbnbUrlHash, altUrlHash } = pass1.encodedImages;
+  console.log(`[TWO_PASS] Reusing PASS 1 encoded images for PASS 2 (no re-fetch)`);
+  
+  // PASS 2: Adversarial verification (uses pre-encoded images)
   const pass2 = await compareImagesWithAI_Adversarial(
-    airbnbResult.dataUrl,
-    altResult.dataUrl,
+    airbnbDataUrl,
+    altDataUrl,
     airbnbUrlHash,
     altUrlHash
   );
   
   // COMBINED GATE: Both passes must agree
-  // PASS 2 threshold lowered to 75 (matches Image Evidence Gate) to reduce false negatives
-  // while still filtering obvious false positives from adversarial check
-  if (pass2.isSame && pass2.confidence >= 75) {
+  // PASS 2 threshold at 90 (matching PASS 1 threshold for consistency)
+  if (pass2.isSame && pass2.confidence >= 90) {
     console.log(`[TWO_PASS] BOTH PASSES AGREE: PASS1 score=${pass1.score}, PASS2 confidence=${pass2.confidence} - VERIFIED MATCH`);
     return {
       score: Math.min(pass1.score, pass2.confidence), // Use the lower of the two
