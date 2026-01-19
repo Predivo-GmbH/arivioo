@@ -1499,6 +1499,13 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
 
     // TRUST_SCORE: Using GPT-5 (vision) for strict forensic image comparison
     // Timeout increased from 15s to 30s to accommodate GPT-5 latency
+    const trustScoreModel = "openai/gpt-5";
+    const startTime = Date.now();
+    
+    // Create URL hashes for logging (first 8 chars of path)
+    const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+    const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+    
     const response = await fetchWithTimeout(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
       {
@@ -1508,7 +1515,7 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "openai/gpt-5",
+          model: trustScoreModel,
           messages: [
             {
               role: "user",
@@ -1525,8 +1532,11 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
       30_000
     );
     
+    const latencyMs = Date.now() - startTime;
+    
     if (!response.ok) {
       console.error("Lovable AI image comparison failed:", response.status);
+      console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=${latencyMs} | status=API_ERROR_${response.status}`);
       return { score: 0, isMatch: false, explanation: "AI comparison request failed" };
     }
     
@@ -1535,6 +1545,7 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
     
     if (!resultText) {
       console.log("AI returned empty response for image comparison");
+      console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=${latencyMs} | status=EMPTY_RESPONSE`);
       return { score: 0, isMatch: false, explanation: "Empty AI response" };
     }
     
@@ -1552,7 +1563,8 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
         const scoreIsHigh = score >= 90;
         const isMatch = aiSaidMatch && scoreIsHigh;
         
-        // Log comparison result for debugging
+        // PROOF LOG: Record model, URLs, score, isMatch, and latency
+        console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=${score} | isMatch=${isMatch} | latency_ms=${latencyMs} | status=OK`);
         console.log(`AI comparison: score=${score}, aiSaidMatch=${aiSaidMatch}, final isMatch=${isMatch}`);
         
         return {
@@ -1563,11 +1575,14 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
       }
     } catch (parseError) {
       console.error("Failed to parse AI comparison response:", resultText);
+      console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=${latencyMs} | status=PARSE_ERROR`);
     }
     
+    console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=${latencyMs} | status=NO_JSON_MATCH`);
     return { score: 0, isMatch: false, explanation: "Failed to parse AI response" };
   } catch (error) {
     console.error("AI image comparison error:", error);
+    console.log(`[TRUST_SCORE_PROOF] model=openai/gpt-5 | score=0 | isMatch=false | status=EXCEPTION`);
     return { score: 0, isMatch: false, explanation: "Comparison error" };
   }
 }
