@@ -7501,7 +7501,15 @@ async function runSearchWithStreaming(
 }
 
 serve(async (req) => {
+  // ENTRY LOG: Capture invocation for debugging
+  const entryTs = new Date().toISOString();
+  const reqPath = new URL(req.url).pathname;
+  const reqMethod = req.method;
+  const hasAuth = !!req.headers.get("Authorization");
+  console.log(`[SEARCH_ALT_ENTRY] ts=${entryTs} path=${reqPath} method=${reqMethod} hasAuth=${hasAuth}`);
+
   if (req.method === "OPTIONS") {
+    console.log(`[SEARCH_ALT_EXIT] reason=OPTIONS_preflight status=200`);
     return new Response(null, { headers: corsHeaders });
   }
 
@@ -7509,6 +7517,7 @@ serve(async (req) => {
     // Extract and verify JWT token
     const authHeader = req.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      console.log(`[SEARCH_ALT_EXIT] reason=missing_auth_header status=401`);
       return new Response(
         JSON.stringify({ error: "Authentication required" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7522,6 +7531,7 @@ serve(async (req) => {
     const firecrawlApiKey = Deno.env.get("FIRECRAWL_API_KEY_1") || Deno.env.get("FIRECRAWL_API_KEY");
 
     if (!serpApiKey) {
+      console.log(`[SEARCH_ALT_EXIT] reason=serpapi_key_missing status=503`);
       return new Response(
         JSON.stringify({ error: "Search service temporarily unavailable" }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7539,6 +7549,7 @@ serve(async (req) => {
     const { data: { user }, error: userError } = await userClient.auth.getUser();
     if (userError || !user) {
       console.error("Auth error:", userError?.message);
+      console.log(`[SEARCH_ALT_EXIT] reason=invalid_auth_token status=401`);
       return new Response(
         JSON.stringify({ error: "Invalid authentication token" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7548,9 +7559,13 @@ serve(async (req) => {
     console.log("Authenticated user:", user.id);
 
     let body;
+    let bodyKeys: string[] = [];
     try {
       body = await req.json();
+      bodyKeys = Object.keys(body || {});
+      console.log(`[SEARCH_ALT_ENTRY] bodyKeys=${bodyKeys.join(",")}`);
     } catch {
+      console.log(`[SEARCH_ALT_EXIT] reason=invalid_request_body status=400`);
       return new Response(
         JSON.stringify({ error: "Invalid request body" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7560,6 +7575,7 @@ serve(async (req) => {
     const { searchId, stream = false, simulateBrowserlessFail = false } = body;
     
     if (!searchId) {
+      console.log(`[SEARCH_ALT_EXIT] reason=missing_searchId status=400`);
       return new Response(
         JSON.stringify({ error: "Search ID is required" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7568,6 +7584,7 @@ serve(async (req) => {
 
     // Validate searchId is a valid UUID
     if (typeof searchId !== "string" || !UUID_REGEX.test(searchId)) {
+      console.log(`[SEARCH_ALT_EXIT] reason=invalid_searchId_format status=400`);
       return new Response(
         JSON.stringify({ error: "Invalid search ID format" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7585,6 +7602,7 @@ serve(async (req) => {
       .single();
 
     if (searchError || !search) {
+      console.log(`[SEARCH_ALT_EXIT] reason=search_not_found status=404`);
       return new Response(
         JSON.stringify({ error: "Search not found" }),
         { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7594,6 +7612,7 @@ serve(async (req) => {
     // CRITICAL: Verify the search belongs to the authenticated user
     if (search.user_id !== user.id) {
       console.error("User", user.id, "attempted to access search owned by", search.user_id);
+      console.log(`[SEARCH_ALT_EXIT] reason=access_denied status=403`);
       return new Response(
         JSON.stringify({ error: "Access denied" }),
         { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -7603,6 +7622,7 @@ serve(async (req) => {
     // Validate the Airbnb URL from the database
     if (!search.airbnb_url || !isValidAirbnbUrl(search.airbnb_url)) {
       console.error("Invalid Airbnb URL in database:", search.airbnb_url);
+      console.log(`[SEARCH_ALT_EXIT] reason=invalid_airbnb_url status=400`);
       return new Response(
         JSON.stringify({ error: "Invalid Airbnb URL" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
