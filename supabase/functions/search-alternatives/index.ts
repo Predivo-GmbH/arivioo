@@ -1656,6 +1656,192 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
   }
 }
 
+// PASS 2: Adversarial verification - runs ONLY if PASS 1 passes
+// Uses the same model but with an adversarial prompt that defaults to NOT SAME
+async function compareImagesWithAI_Adversarial(
+  airbnbDataUrl: string,
+  alternativeDataUrl: string,
+  airbnbUrlHash: string,
+  altUrlHash: string
+): Promise<{ isSame: boolean; confidence: number; differences: string }> {
+  const lovableApiKey = Deno.env.get("LOVABLE_API_KEY");
+  if (!lovableApiKey) {
+    console.log("[ADVERSARIAL] LOVABLE_API_KEY not available");
+    return { isSame: false, confidence: 0, differences: "API key unavailable" };
+  }
+  
+  const trustScoreModel = "google/gemini-2.5-flash";
+  
+  try {
+    // Adversarial prompt: Default assumption is NOT the same property
+    const adversarialPrompt = `You are a skeptical forensic analyst whose DEFAULT assumption is that these two images show DIFFERENT properties.
+
+YOUR TASK: Actively search for STRUCTURAL DIFFERENCES between these two property photos.
+
+CRITICAL RULES - BE ADVERSARIAL:
+1. Your DEFAULT verdict is: NOT THE SAME PROPERTY
+2. You must ACTIVELY SEARCH for any structural differences
+3. If you find ANY structural/layout difference → verdict: NOT SAME
+4. If structural evidence is insufficient in EITHER image → verdict: NOT SAME  
+5. Only conclude SAME if you find MULTIPLE fixed structural anchors that clearly match in BOTH images
+
+STRUCTURAL DIFFERENCES TO LOOK FOR (any of these = NOT SAME):
+- Different window positions, sizes, or counts
+- Different room shape or wall angles
+- Different ceiling height or features
+- Different door placements
+- Different floor plan or layout
+- Different architectural details (columns, beams, moldings)
+- Different kitchen/bathroom fixture positions
+- Different flooring type or pattern
+
+EVIDENCE REQUIREMENTS FOR "SAME" VERDICT:
+- At least 3 matching fixed structural features clearly visible in both images
+- No contradicting structural evidence
+- Same room type and viewpoint
+
+Compare these images:
+Image 1 (Source/Airbnb): [First image provided]
+Image 2 (Alternative): [Second image provided]
+
+List specific structural differences or matching anchors you found.
+
+Return ONLY valid JSON in this format:
+{"isSame": BOOLEAN, "confidence": NUMBER_0_TO_100, "differences": "concise description of differences found or matching anchors"}
+
+isSame must be true ONLY if confidence >= 90 AND you found multiple matching structural anchors with no contradictions.`;
+
+    const startTime = Date.now();
+    
+    const response = await fetchWithTimeout(
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${lovableApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: trustScoreModel,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: adversarialPrompt },
+                { type: "image_url", image_url: { url: airbnbDataUrl } },
+                { type: "image_url", image_url: { url: alternativeDataUrl } },
+              ],
+            },
+          ],
+          max_tokens: 300,
+        }),
+      },
+      30_000
+    );
+    
+    const latencyMs = Date.now() - startTime;
+    
+    if (!response.ok) {
+      console.log(`[ADVERSARIAL_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | isSame=false | confidence=0 | latency_ms=${latencyMs} | status=API_ERROR_${response.status}`);
+      return { isSame: false, confidence: 0, differences: `API error ${response.status}` };
+    }
+    
+    const data = await response.json();
+    const resultText = data.choices?.[0]?.message?.content?.trim();
+    
+    if (!resultText) {
+      console.log(`[ADVERSARIAL_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | isSame=false | confidence=0 | latency_ms=${latencyMs} | status=EMPTY_RESPONSE`);
+      return { isSame: false, confidence: 0, differences: "Empty response" };
+    }
+    
+    // Parse JSON response
+    try {
+      const jsonMatch = resultText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        let confidence = Number(parsed.confidence) || 0;
+        confidence = Math.min(100, Math.max(0, confidence));
+        
+        // Only mark as same if BOTH isSame === true AND confidence >= 90
+        const isSame = parsed.isSame === true && confidence >= 90;
+        
+        console.log(`[ADVERSARIAL_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | isSame=${isSame} | confidence=${confidence} | latency_ms=${latencyMs} | status=OK`);
+        console.log(`Adversarial result: isSame=${isSame}, confidence=${confidence}, differences=${parsed.differences || 'none'}`);
+        
+        return {
+          isSame,
+          confidence,
+          differences: parsed.differences || "No details provided"
+        };
+      }
+    } catch (parseError) {
+      console.log(`[ADVERSARIAL_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | isSame=false | confidence=0 | latency_ms=${latencyMs} | status=PARSE_ERROR`);
+    }
+    
+    return { isSame: false, confidence: 0, differences: "Failed to parse response" };
+  } catch (error) {
+    console.error("[ADVERSARIAL] Error:", error);
+    return { isSame: false, confidence: 0, differences: "Exception occurred" };
+  }
+}
+
+// TWO-PASS VERIFICATION: Combines PASS 1 (standard) + PASS 2 (adversarial)
+// A match is accepted ONLY if BOTH passes agree
+async function compareImagesWithTwoPass(
+  airbnbImageUrl: string,
+  alternativeImageUrl: string
+): Promise<{ score: number; isMatch: boolean; explanation: string }> {
+  // PASS 1: Standard verification
+  const pass1 = await compareImagesWithAI(airbnbImageUrl, alternativeImageUrl);
+  
+  // If PASS 1 fails, no need for PASS 2
+  if (!pass1.isMatch || pass1.score < 90) {
+    console.log(`[TWO_PASS] PASS 1 failed: score=${pass1.score}, isMatch=${pass1.isMatch} - skipping PASS 2`);
+    return pass1;
+  }
+  
+  console.log(`[TWO_PASS] PASS 1 passed: score=${pass1.score} - running adversarial PASS 2`);
+  
+  // Need to re-fetch images as base64 for PASS 2 (since we don't have access to the cached data URLs)
+  const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+  const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+  
+  const [airbnbResult, altResult] = await Promise.all([
+    fetchImageAsBase64(airbnbImageUrl, 10_000),
+    fetchImageAsBase64(alternativeImageUrl, 10_000),
+  ]);
+  
+  if (!airbnbResult.dataUrl || !altResult.dataUrl) {
+    console.log(`[TWO_PASS] PASS 2 skipped: image fetch failed - using PASS 1 result`);
+    return pass1;
+  }
+  
+  // PASS 2: Adversarial verification
+  const pass2 = await compareImagesWithAI_Adversarial(
+    airbnbResult.dataUrl,
+    altResult.dataUrl,
+    airbnbUrlHash,
+    altUrlHash
+  );
+  
+  // COMBINED GATE: Both passes must agree
+  if (pass2.isSame && pass2.confidence >= 90) {
+    console.log(`[TWO_PASS] BOTH PASSES AGREE: PASS1 score=${pass1.score}, PASS2 confidence=${pass2.confidence} - VERIFIED MATCH`);
+    return {
+      score: Math.min(pass1.score, pass2.confidence), // Use the lower of the two
+      isMatch: true,
+      explanation: `Two-pass verified: ${pass1.explanation} | Adversarial: ${pass2.differences}`
+    };
+  } else {
+    console.log(`[TWO_PASS] PASS 2 REJECTED: isSame=${pass2.isSame}, confidence=${pass2.confidence}, differences=${pass2.differences}`);
+    return {
+      score: pass1.score, // Keep original score for logging
+      isMatch: false, // But reject the match
+      explanation: `Adversarial rejected: ${pass2.differences}`
+    };
+  }
+}
+
 // Try to extract price from JSON-LD structured data (most reliable for Airbnb)
 function extractPriceFromJsonLD(content: string): number | null {
   try {
@@ -4531,7 +4717,7 @@ async function addTargetedTextMatches(opts: {
           return;
         }
         
-        const ai = await compareImagesWithAI(imageUrlForVerification, thumb);
+        const ai = await compareImagesWithTwoPass(imageUrlForVerification, thumb);
         
         // STRICT: Only high-confidence visual matches (90%+) are valid
         if (ai.isMatch && ai.score >= 90) {
@@ -6691,7 +6877,7 @@ async function runSearchWithStreaming(
       matchesThisImage++;
       foundUrls.add(matchUrl);
 
-      const aiResult = await compareImagesWithAI(imageUrl, match.thumbnail || matchUrl);
+      const aiResult = await compareImagesWithTwoPass(imageUrl, match.thumbnail || matchUrl);
 
       // IMPORTANT: aiResult.score is expressed in 0-100 "percent" units.
       // We persist confidence_score in the SAME 0-100 scale everywhere.
@@ -8405,9 +8591,9 @@ serve(async (req) => {
             console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS}...`);
             aiComparisonCount++;
             
-            const AI_COMPARISON_TIMEOUT_MS = 20_000;
+            const AI_COMPARISON_TIMEOUT_MS = 70_000; // Increased for two-pass verification
             let aiComparison = await withTimeout(
-              () => compareImagesWithAI(imageUrl, matchImageUrl),
+              () => compareImagesWithTwoPass(imageUrl, matchImageUrl),
               AI_COMPARISON_TIMEOUT_MS,
               { score: 0, isMatch: false, explanation: "Timeout" },
               `AI comparison for ${platformSlug}`
@@ -8436,7 +8622,7 @@ serve(async (req) => {
                 console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (hi-res retry)...`);
                 aiComparisonCount++;
                 aiComparison = await withTimeout(
-                  () => compareImagesWithAI(imageUrl, betterImage),
+                  () => compareImagesWithTwoPass(imageUrl, betterImage),
                   AI_COMPARISON_TIMEOUT_MS,
                   { score: 0, isMatch: false, explanation: "Timeout" },
                   `AI comparison retry for ${platformSlug}`
@@ -8518,7 +8704,7 @@ serve(async (req) => {
                   // AI verify knowledge graph match too
                   console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (knowledge graph)...`);
                   aiComparisonCount++;
-                  const kgComparison = await compareImagesWithAI(imageUrl, kgImage);
+                  const kgComparison = await compareImagesWithTwoPass(imageUrl, kgImage);
 
                   if (kgComparison.isMatch) {
                     foundUrls.add(kgUrl);
@@ -8599,7 +8785,7 @@ serve(async (req) => {
                 // AI verify reverse image match
                 console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (reverse)...`);
                 aiComparisonCount++;
-                const reverseComparison = await compareImagesWithAI(imageUrl, resultImage);
+                const reverseComparison = await compareImagesWithTwoPass(imageUrl, resultImage);
 
                 if (!reverseComparison.isMatch) {
                   console.log("AI rejected reverse image match (score < 90%):", url.slice(0, 60));
