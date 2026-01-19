@@ -1825,7 +1825,9 @@ async function compareImagesWithTwoPass(
   );
   
   // COMBINED GATE: Both passes must agree
-  if (pass2.isSame && pass2.confidence >= 90) {
+  // PASS 2 threshold lowered to 75 (matches Image Evidence Gate) to reduce false negatives
+  // while still filtering obvious false positives from adversarial check
+  if (pass2.isSame && pass2.confidence >= 75) {
     console.log(`[TWO_PASS] BOTH PASSES AGREE: PASS1 score=${pass1.score}, PASS2 confidence=${pass2.confidence} - VERIFIED MATCH`);
     return {
       score: Math.min(pass1.score, pass2.confidence), // Use the lower of the two
@@ -6947,7 +6949,9 @@ async function runSearchWithStreaming(
       filterStats.filtered_time_exceeded > 0 ? `time_exceeded: ${filterStats.filtered_time_exceeded}` : null,
     ].filter(Boolean).join(', ');
     
+    const elapsedSec = Math.round((Date.now() - searchStartTime) / 1000);
     console.log(`[Image ${idx + 1}/${imageUrls.length}] Verification summary: ${filterStats.total_candidates} candidates → ${filterStats.sent_to_verification} verified, ${filteredTotal} filtered [${filterBreakdown || 'none'}]`);
+    console.log(`[DiscoveryBudget] Image ${idx + 1}/${imageUrls.length} | elapsed=${elapsedSec}s/${MAX_TIME/1000}s | mode=${degradedMode} | aiCalls=${aiCount}/${MAX_AI} | cap_reached=${filterStats.filtered_cap_reached}`);
     
     // Build human-readable detail for the activity log
     let summaryDetail: string;
