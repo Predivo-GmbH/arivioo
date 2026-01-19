@@ -6386,10 +6386,13 @@ async function runSearchWithStreaming(
   // ============================================================================
   const MAX_TIME = 120000; // 2 minutes total
   const MAX_AI = 50; // Global AI verification budget (increased for two-pass)
-  const MAX_AI_PER_IMAGE = 6; // Per-image AI verification cap (two-pass = 2 calls each, so ~12 actual calls)
   const MAX_CANDIDATES_PER_IMAGE = 40; // Max reverse search results to process per image
   const TIME_DEGRADED_THRESHOLD = 100000; // After 100s, enter time-degraded mode (was 90s)
   const VERIFIED_PLATFORM_THRESHOLD = 75; // Skip re-verification if platform already has >= this confidence
+  
+  // Weighted AI-budget allocation constants
+  const MIN_CALLS_PER_LATE_IMAGE = 6; // Reserves 3 two-pass candidates per remaining image
+  const IMAGE1_SHARE = 0.70; // Image 1 can spend up to 70% of spendable calls
   
   let aiCount = 0;
   let degradedMode: 'normal' | 'no_ai' | 'fast_path' = 'normal';
@@ -6769,6 +6772,29 @@ async function runSearchWithStreaming(
     sendProgress(controller, `Found ${visualMatches.length} potential matches`, "Verifying with AI comparison", { matchCount: visualMatches.length });
 
     // ============================================================================
+    // WEIGHTED AI-BUDGET ALLOCATION (per-image budget calculation)
+    // Ensures later images always have a reserved minimum of AI calls.
+    // ============================================================================
+    const totalImages = imageUrls.length;
+    const remainingImages = totalImages - idx; // includes current image
+    const remainingCalls = MAX_AI - aiCount;
+    const reservedForLater = (remainingImages - 1) * MIN_CALLS_PER_LATE_IMAGE;
+    const spendableNow = Math.max(0, remainingCalls - reservedForLater);
+    
+    let allowedCallsThisImage: number;
+    if (idx === 0) {
+      // Image 1: can spend up to IMAGE1_SHARE of spendable calls
+      allowedCallsThisImage = Math.min(remainingCalls, Math.max(MIN_CALLS_PER_LATE_IMAGE, Math.floor(spendableNow * IMAGE1_SHARE)));
+    } else {
+      // Later images: even split of remaining spendable calls, with minimum guaranteed
+      allowedCallsThisImage = Math.min(remainingCalls, Math.max(MIN_CALLS_PER_LATE_IMAGE, Math.floor(spendableNow / remainingImages)));
+    }
+    
+    let aiCallsUsedThisImage = 0;
+    
+    console.log(`[AIBudget] Image ${idx + 1}/${totalImages} | allowedCalls=${allowedCallsThisImage} | remainingCalls=${remainingCalls} | reservedForLater=${reservedForLater} | spendableNow=${spendableNow}`);
+    
+    // ============================================================================
     // PER-IMAGE VERIFICATION SUMMARY TRACKING
     // Track filtering reasons for transparent logging
     // ============================================================================
@@ -6782,46 +6808,35 @@ async function runSearchWithStreaming(
       filtered_non_booking_domain: 0,
       filtered_already_high_confidence: 0,
       filtered_cap_reached: 0,
+      filtered_budget_exhausted: 0,
       filtered_time_exceeded: 0,
       sent_to_verification: 0,
     };
     
     for (const match of visualMatches) {
       // ============================================================================
-      // VERIFICATION CAP POLICY (Depth Control)
+      // WEIGHTED AI-BUDGET ENFORCEMENT (Per-Image Budget Cap)
       // 
-      // Caps reduce DEPTH (work per image), never stopping the outer discovery loop.
-      // 
-      // Per-image caps:
-      // - matchesThisImage >= MAX_AI_PER_IMAGE → stop verifying this image, continue next
-      // 
-      // Global budget exhaustion:
-      // - aiCount >= MAX_AI → enter 'no_ai' degraded mode, skip AI verification
-      // - Time exceeded → enter 'fast_path' mode, skip verification
+      // This replaces global no_ai mode with per-image budget allocation.
+      // Each image has a pre-calculated allowedCallsThisImage based on:
+      // - Reserved budget for later images (MIN_CALLS_PER_LATE_IMAGE each)
+      // - IMAGE1_SHARE for first image (70% of spendable)
+      // - Even split for remaining images
+      //
+      // When per-image budget is exhausted, we move to next image (NOT no_ai mode).
+      // This ensures all 5 images get fair AI verification opportunities.
       // ============================================================================
 
-      // Per-image cap: stop verifying more candidates for THIS image only
-      if (matchesThisImage >= MAX_AI_PER_IMAGE) {
-        console.log(`[PerImageCap] Reached per-image limit: matchesThisImage=${matchesThisImage}/${MAX_AI_PER_IMAGE} — continuing to next image`);
-        filterStats.filtered_cap_reached++;
-        break; // Exit candidates loop for this image only, outer loop continues
+      // Per-image budget exhausted: move to next image (preserve budget for later images)
+      const neededCalls = 2; // Two-pass always costs 2 AI calls
+      if (aiCallsUsedThisImage + neededCalls > allowedCallsThisImage) {
+        filterStats.filtered_budget_exhausted++;
+        // Don't break - continue filtering this candidate but skip AI verification
+        // We still want to count it properly, so continue the loop
+        continue;
       }
       
-      // Global AI budget: degrade to no_ai mode, don't stop
-      if (aiCount >= MAX_AI && degradedMode === 'normal') {
-        degradedMode = 'no_ai';
-        degradedModeReason = `AI budget exhausted (${aiCount}/${MAX_AI} calls)`;
-        console.log(`[DiscoveryDegraded] Entering no_ai mode: ${degradedModeReason}`);
-        sendProgress(controller, "Degraded mode: no AI verification", `${degradedModeReason} — continuing with reduced verification depth`, {
-          degraded_mode: 'no_ai',
-          reason: degradedModeReason,
-          images_remaining: imageUrls.length - idx,
-          ai_count: aiCount,
-          ai_limit: MAX_AI,
-        });
-      }
-      
-      // Time check: enter fast_path mode if exceeded (check before degraded mode)
+      // Time check: enter fast_path mode if exceeded (but don't enter no_ai globally)
       if (Date.now() - searchStartTime > MAX_TIME && degradedMode === 'normal') {
         degradedMode = 'fast_path';
         degradedModeReason = `Time budget exceeded at ${Math.round((Date.now() - searchStartTime) / 1000)}s`;
@@ -6832,10 +6847,9 @@ async function runSearchWithStreaming(
         });
       }
       
-      // In degraded mode, skip AI verification but continue collecting candidates
-      if (degradedMode === 'no_ai' || degradedMode === 'fast_path') {
-        filterStats.filtered_cap_reached++;
-        // Don't break - continue to next candidate, just skip AI verification
+      // In fast_path mode, skip AI verification but continue collecting candidates
+      if (degradedMode === 'fast_path') {
+        filterStats.filtered_time_exceeded++;
         continue;
       }
 
@@ -6890,6 +6904,7 @@ async function runSearchWithStreaming(
       // Two-pass verification uses 2 AI calls (PASS 1 + PASS 2 if PASS 1 succeeds)
       // Count 2 upfront since PASS 2 runs when PASS 1 succeeds (common for good candidates)
       aiCount += 2;
+      aiCallsUsedThisImage += 2;
       matchesThisImage++;
       foundUrls.add(matchUrl);
 
@@ -6959,13 +6974,14 @@ async function runSearchWithStreaming(
       filterStats.filtered_blocked_platform > 0 ? `blocked: ${filterStats.filtered_blocked_platform}` : null,
       filterStats.filtered_non_booking_domain > 0 ? `non_booking: ${filterStats.filtered_non_booking_domain}` : null,
       filterStats.filtered_already_high_confidence > 0 ? `already_verified: ${filterStats.filtered_already_high_confidence}` : null,
+      filterStats.filtered_budget_exhausted > 0 ? `budget_exhausted: ${filterStats.filtered_budget_exhausted}` : null,
       filterStats.filtered_cap_reached > 0 ? `cap_reached: ${filterStats.filtered_cap_reached}` : null,
       filterStats.filtered_time_exceeded > 0 ? `time_exceeded: ${filterStats.filtered_time_exceeded}` : null,
     ].filter(Boolean).join(', ');
     
     const elapsedSec = Math.round((Date.now() - searchStartTime) / 1000);
     console.log(`[Image ${idx + 1}/${imageUrls.length}] Verification summary: ${filterStats.total_candidates} candidates → ${filterStats.sent_to_verification} verified, ${filteredTotal} filtered [${filterBreakdown || 'none'}]`);
-    console.log(`[DiscoveryBudget] Image ${idx + 1}/${imageUrls.length} | elapsed=${elapsedSec}s/${MAX_TIME/1000}s | mode=${degradedMode} | aiCalls=${aiCount}/${MAX_AI} | cap_reached=${filterStats.filtered_cap_reached}`);
+    console.log(`[DiscoveryBudget] Image ${idx + 1}/${imageUrls.length} | elapsed=${elapsedSec}s/${MAX_TIME/1000}s | mode=${degradedMode} | aiCalls=${aiCount}/${MAX_AI} | aiUsedThisImage=${aiCallsUsedThisImage}/${allowedCallsThisImage} | budgetExhausted=${filterStats.filtered_budget_exhausted}`);
     
     // Build human-readable detail for the activity log
     let summaryDetail: string;
