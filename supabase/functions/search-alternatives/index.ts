@@ -6913,6 +6913,47 @@ async function runSearchWithStreaming(
       // IMPORTANT: aiResult.score is expressed in 0-100 "percent" units.
       // We persist confidence_score in the SAME 0-100 scale everywhere.
       // (Previously some code stored 0-1 which caused ImageGate to reject 95% as 0.95.)
+      // ============================================================================
+      // WORKING BASELINE: Persist ALL discovered candidates to search_platforms
+      // This is the authoritative candidate set - candidates are persisted with their
+      // actual state/confidence regardless of whether they pass ImageGate.
+      // ============================================================================
+      
+      // Determine candidate state based on AI result
+      const candidateState = aiResult.isMatch && aiResult.score >= 90
+        ? 'verified' 
+        : aiResult.isMatch && aiResult.score >= 50 
+          ? 'low_confidence'
+          : 'rejected';
+      
+      const candidateConfidence = aiResult.score;
+      const candidateReason = candidateState === 'verified' 
+        ? null 
+        : candidateState === 'low_confidence'
+          ? `Confidence ${aiResult.score}% below verification threshold (90%)`
+          : `AI verification failed: ${aiResult.isMatch ? `score ${aiResult.score}%` : 'not a match'}`;
+      
+      // WORKING BASELINE: Always persist candidate to search_platforms with state
+      // This ensures ALL discovered candidates are in the authoritative set
+      const candidateRecord = {
+        search_id: searchId,
+        platform_name: platformName,
+        listing_url: matchUrl,
+        listing_title: match.title || null,
+        image_url: match.thumbnail || null,
+        images: match.thumbnail ? [match.thumbnail] : [],
+        match_type: candidateState === 'verified' ? 'visual' : 'visual_unverified',
+        source_airbnb_image: imageUrl,
+        outcome_category: candidateState,
+        last_error: candidateReason,
+      };
+      
+      // Persist immediately (Working Baseline behavior)
+      await supabase
+        .from("search_platforms")
+        .upsert(candidateRecord, { onConflict: 'search_id,listing_url' });
+      console.log(`[WorkingBaseline] Persisted candidate: ${platformName} (${candidateState}, ${candidateConfidence}%)`);
+      
       if (aiResult.isMatch && aiResult.score >= 90) {
         const newConfidence = aiResult.score;
 
