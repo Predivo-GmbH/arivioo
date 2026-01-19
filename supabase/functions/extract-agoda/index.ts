@@ -2,26 +2,19 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 /**
  * ============================================================================
- * AGODA GOLDEN PATH EXTRACTOR v3.0
+ * AGODA GOLDEN PATH EXTRACTOR v3.1
  * ============================================================================
  * 
- * GOLDEN PATH: Navigate to /book/ checkout page for TOTAL price with taxes
+ * NEW APPROACH: Use the actual hotel URL as entrypoint, find the real checkout 
+ * link on the page, and extract total from the checkout page.
  * 
- * This mirrors the Expedia Golden Path approach:
- * 1. Parse property ID from original Agoda URL
- * 2. Build /book/ checkout URL with dates, guests, currency
- * 3. Extract "Total Price" from checkout page (includes taxes/service)
- * 4. Fall back to property page nightly rate if /book/ fails
+ * FLOW:
+ * 1. Append date/occupancy params to the original hotel URL
+ * 2. Fetch hotel page, locate the real checkout/book CTA href
+ * 3. Follow that href to get the checkout page
+ * 4. Extract "Total Price" from the checkout page
  * 
- * KEY INSIGHT:
- * - Property page shows "Per night before taxes" (e.g., USD 902)
- * - /book/ page shows "Total Price USD 5,095.34" with taxes/service
- * - We MUST extract from /book/ for directly comparable totals
- * 
- * VERIFIED PATTERNS (from user-provided /book/ URL):
- * - "Total Price" label with adjacent amount
- * - "Room price (X nights)" for subtotal
- * - Currency before amount: "USD 5,095.34"
+ * NO LONGER BUILDS FAKE /book/{slug}/ URLs
  */
 
 // Secure CORS
@@ -37,18 +30,20 @@ type TerminalStatus =
   | 'dates_unavailable'
   | 'blocked_captcha_or_bot'
   | 'blocked_rate_limit'
-  | 'book_page_not_reached'
+  | 'hotel_page_not_reached'
+  | 'checkout_link_not_found'
+  | 'checkout_page_not_reached'
   | 'total_price_not_found'
   | 'price_not_found'
   | 'render_failed'
-  | 'validation_error'
-  | 'property_id_not_found';
+  | 'validation_error';
 
 // Failure category for admin dashboard
 type FailureCategory = 
   | 'blocked'
   | 'params_missing'
   | 'selector_not_found'
+  | 'missing_checkout_link'
   | 'no_price'
   | 'unavailable'
   | 'render_error'
@@ -70,24 +65,25 @@ interface ProviderAttemptTrace {
 }
 
 interface StructuralProof {
-  book_page_reached: boolean;
-  property_page_fallback: boolean;
+  hotel_page_reached: boolean;
+  checkout_link_found: boolean;
+  checkout_url_found: string | null;
+  checkout_page_reached: boolean;
   dates_injected: boolean;
   dates_visible_on_page: boolean;
   total_price_label_found: boolean;
-  total_price_from_book_page: boolean;
   room_price_nights_found: boolean;
   taxes_service_visible: boolean;
   directly_comparable: boolean;
   proof_version: string;
   currency_detected: string | null;
   nights_detected: number | null;
-  property_id: string | null;
-  book_url_used: string | null;
-  property_url_used: string | null;
+  entry_hotel_url_used: string | null;
+  final_url_fetched: string | null;
   content_hash: string | null;
   failure_category: FailureCategory;
   extraction_method: string | null;
+  selector_matched: string | null;
 }
 
 interface ExtractionRequest {
@@ -164,142 +160,152 @@ function parseCurrencyAmount(amountStr: string): number | null {
 }
 
 // ============================================================================
-// PROPERTY ID EXTRACTION
+// URL BUILDING - ADDS PARAMS TO HOTEL URL (NO FAKE /book/ URLS)
 // ============================================================================
 
-interface PropertyIdResult {
-  found: boolean;
-  propertyId: string | null;
-  propertySlug: string | null;
-}
-
-function extractPropertyId(url: string): PropertyIdResult {
-  const result: PropertyIdResult = {
-    found: false,
-    propertyId: null,
-    propertySlug: null,
-  };
-  
-  try {
-    // Pattern 1: Property ID in URL path as h{digits}
-    // e.g., /sapphire-elegance-h47632023/
-    const pathMatch = url.match(/\/([^\/]+-h(\d{6,12}))\//i);
-    if (pathMatch) {
-      result.found = true;
-      result.propertyId = pathMatch[2];
-      result.propertySlug = pathMatch[1].replace(/-h\d+$/, '');
-      console.log(`[AGODA] Property ID: ${result.propertyId}, slug: ${result.propertySlug}`);
-      return result;
-    }
-    
-    // Pattern 2: Property ID as query parameter
-    const urlObj = new URL(url);
-    const propertyIdParam = urlObj.searchParams.get('propertyId') || 
-                            urlObj.searchParams.get('hotel_id') ||
-                            urlObj.searchParams.get('hotelId');
-    if (propertyIdParam && /^\d{5,12}$/.test(propertyIdParam)) {
-      result.found = true;
-      result.propertyId = propertyIdParam;
-      console.log(`[AGODA] Property ID from param: ${result.propertyId}`);
-      return result;
-    }
-    
-    // Pattern 3: Look for digits in path that might be property ID
-    const digitsMatch = url.match(/\/(\d{7,10})\//);
-    if (digitsMatch) {
-      result.found = true;
-      result.propertyId = digitsMatch[1];
-      console.log(`[AGODA] Property ID from path digits: ${result.propertyId}`);
-      return result;
-    }
-    
-    console.log('[AGODA] Property ID not found in URL');
-    return result;
-    
-  } catch (e) {
-    console.error('[AGODA] Error parsing URL:', e);
-    return result;
-  }
-}
-
-// ============================================================================
-// URL BUILDERS
-// ============================================================================
-
-interface AgodaUrls {
-  bookPageUrl: string;
-  propertyPageUrl: string;
-  propertyId: string | null;
+interface AgodaHotelUrl {
+  hotelUrlWithParams: string;
   nights: number;
 }
 
 /**
- * Build Agoda /book/ checkout URL for total price extraction
+ * Build hotel URL with date/occupancy params
  * 
- * Book page URL format (verified from user example):
- * https://www.agoda.com/en-sg/book/{property-slug}-h{property-id}/
- *   ?checkIn=2026-06-23&checkOut=2026-06-28&adults=2&children=0&rooms=1
- *   &currency=USD&cid=-1
+ * Example input: https://www.agoda.com/en-sg/sapphire-elegance/hotel/cashiers-us.html
+ * Example output: https://www.agoda.com/en-sg/sapphire-elegance/hotel/cashiers-us.html?checkIn=2026-06-23&checkOut=2026-06-28&adults=2&rooms=1&currency=USD
  */
-function buildAgodaUrls(
+function buildHotelUrlWithParams(
   originalUrl: string,
   checkIn: string,
   checkOut: string,
   adults: number = 2,
   children: number = 0,
   rooms: number = 1
-): AgodaUrls {
+): AgodaHotelUrl {
   const nights = calculateNights(checkIn, checkOut);
-  const propertyInfo = extractPropertyId(originalUrl);
   
-  // Parse original URL components
-  const urlObj = new URL(originalUrl);
-  let pathname = urlObj.pathname;
-  
-  // Extract locale (e.g., /en-sg/)
-  const localeMatch = pathname.match(/^\/(en-[a-z]{2})\//i);
-  const locale = localeMatch ? localeMatch[1] : 'en-us';
-  
-  // Extract property path segment (e.g., sapphire-elegance-h47632023)
-  const propertyPathMatch = pathname.match(/\/([^\/]+-h\d+)\//i) || 
-                            pathname.match(/\/([^\/]+)\/hotel\//i);
-  const propertyPath = propertyPathMatch ? propertyPathMatch[1] : '';
-  
-  // Build common query params
-  const params = new URLSearchParams();
-  params.set('checkIn', checkIn);
-  params.set('checkOut', checkOut);
-  params.set('los', String(nights));
-  params.set('adults', String(adults));
-  params.set('children', String(children));
-  params.set('rooms', String(rooms));
-  params.set('cid', '-1');
-  params.set('currency', 'USD');
-  
-  // Build /book/ URL (primary target)
-  // Format: /en-sg/book/sapphire-elegance-h47632023/
-  const bookPageUrl = `https://www.agoda.com/${locale}/book/${propertyPath}/?${params.toString()}`;
-  
-  // Build property page URL (fallback)
-  const propertyPageUrl = `https://www.agoda.com/${locale}/${propertyPath}/hotel/sapphire-nc-us.html?${params.toString()}`;
-  
-  console.log(`[AGODA] Book page URL: ${bookPageUrl}`);
-  console.log(`[AGODA] Property page URL: ${propertyPageUrl}`);
-  console.log(`[AGODA] Nights: ${nights}, Adults: ${adults}`);
-  
-  return {
-    bookPageUrl,
-    propertyPageUrl,
-    propertyId: propertyInfo.propertyId,
-    nights,
-  };
+  try {
+    const urlObj = new URL(originalUrl);
+    
+    // Set required booking params
+    urlObj.searchParams.set('checkIn', checkIn);
+    urlObj.searchParams.set('checkOut', checkOut);
+    urlObj.searchParams.set('los', String(nights));
+    urlObj.searchParams.set('adults', String(adults));
+    urlObj.searchParams.set('children', String(children));
+    urlObj.searchParams.set('rooms', String(rooms));
+    urlObj.searchParams.set('currency', 'USD');
+    urlObj.searchParams.set('locale', 'en-us');
+    
+    console.log(`[AGODA] entry_hotel_url_used: ${urlObj.toString()}`);
+    console.log(`[AGODA] Nights: ${nights}, Adults: ${adults}`);
+    
+    return {
+      hotelUrlWithParams: urlObj.toString(),
+      nights,
+    };
+  } catch (e) {
+    // If URL parsing fails, just append as query string
+    const separator = originalUrl.includes('?') ? '&' : '?';
+    const params = `checkIn=${checkIn}&checkOut=${checkOut}&los=${nights}&adults=${adults}&children=${children}&rooms=${rooms}&currency=USD&locale=en-us`;
+    const hotelUrlWithParams = `${originalUrl}${separator}${params}`;
+    
+    console.log(`[AGODA] entry_hotel_url_used: ${hotelUrlWithParams}`);
+    return { hotelUrlWithParams, nights };
+  }
 }
 
 // ============================================================================
-// PRICE EXTRACTION FROM /BOOK/ PAGE
+// CHECKOUT LINK FINDER
 // ============================================================================
 
-interface BookPagePriceResult {
+interface CheckoutLinkResult {
+  found: boolean;
+  checkoutUrl: string | null;
+  method: string | null;
+}
+
+/**
+ * Find the real checkout/book link from hotel page HTML content
+ * 
+ * Looks for patterns like:
+ * - href="/book/..." or href="https://www.agoda.com/book/..."
+ * - Book Now, Reserve, etc. button hrefs
+ */
+function findCheckoutLink(html: string, baseUrl: string): CheckoutLinkResult {
+  const result: CheckoutLinkResult = {
+    found: false,
+    checkoutUrl: null,
+    method: null,
+  };
+  
+  // Pattern 1: Direct /book/ links in href
+  const bookLinkPatterns = [
+    // href="/en-us/book/..." or href="/book/..."
+    /href=["']([^"']*\/book\/[^"']+)["']/gi,
+    // Full URL book links
+    /href=["'](https?:\/\/[^"']*agoda[^"']*\/book\/[^"']+)["']/gi,
+  ];
+  
+  for (const pattern of bookLinkPatterns) {
+    const matches = [...html.matchAll(pattern)];
+    if (matches.length > 0) {
+      let checkoutUrl = matches[0][1];
+      
+      // Make absolute if relative
+      if (checkoutUrl.startsWith('/')) {
+        try {
+          const baseUrlObj = new URL(baseUrl);
+          checkoutUrl = `${baseUrlObj.origin}${checkoutUrl}`;
+        } catch {
+          checkoutUrl = `https://www.agoda.com${checkoutUrl}`;
+        }
+      }
+      
+      result.found = true;
+      result.checkoutUrl = checkoutUrl;
+      result.method = 'book_href_pattern';
+      console.log(`[AGODA] checkout_url_found: ${checkoutUrl} (method: ${result.method})`);
+      return result;
+    }
+  }
+  
+  // Pattern 2: Look for booking-related data attributes or onclick handlers
+  const dataBookPatterns = [
+    /data-selenium="book-button"[^>]*href=["']([^"']+)["']/gi,
+    /class="[^"]*book[^"]*"[^>]*href=["']([^"']+)["']/gi,
+  ];
+  
+  for (const pattern of dataBookPatterns) {
+    const matches = [...html.matchAll(pattern)];
+    if (matches.length > 0) {
+      let checkoutUrl = matches[0][1];
+      if (checkoutUrl.startsWith('/')) {
+        try {
+          const baseUrlObj = new URL(baseUrl);
+          checkoutUrl = `${baseUrlObj.origin}${checkoutUrl}`;
+        } catch {
+          checkoutUrl = `https://www.agoda.com${checkoutUrl}`;
+        }
+      }
+      
+      result.found = true;
+      result.checkoutUrl = checkoutUrl;
+      result.method = 'data_attribute_pattern';
+      console.log(`[AGODA] checkout_url_found: ${checkoutUrl} (method: ${result.method})`);
+      return result;
+    }
+  }
+  
+  console.log('[AGODA] checkout_url_found: NOT FOUND');
+  return result;
+}
+
+// ============================================================================
+// PRICE EXTRACTION FROM CHECKOUT/HOTEL PAGE
+// ============================================================================
+
+interface PriceExtractionResult {
   extracted: boolean;
   totalPrice: number | null;
   roomPriceNights: number | null;
@@ -311,22 +317,18 @@ interface BookPagePriceResult {
   evidenceSnippet: string | null;
   extractionMethod: string;
   totalLabelFound: boolean;
+  selectorMatched: string | null;
 }
 
 /**
- * Extract TOTAL price from Agoda /book/ checkout page
+ * Extract TOTAL price from page content
  * 
- * Expected patterns on /book/ page:
+ * Expected patterns:
  * - "Total Price" followed by "USD 5,095.34" or "CHF 4,530.00"
  * - "Room price (5 nights)" followed by subtotal
- * - Taxes/service fees listed separately
- * 
- * Priority:
- * 1. "Total Price" with adjacent currency+amount (directly comparable)
- * 2. "Room price (X nights)" as fallback (not directly comparable - missing taxes)
  */
-function extractBookPagePrice(content: string, expectedNights: number): BookPagePriceResult {
-  const result: BookPagePriceResult = {
+function extractPrice(content: string, expectedNights: number): PriceExtractionResult {
+  const result: PriceExtractionResult = {
     extracted: false,
     totalPrice: null,
     roomPriceNights: null,
@@ -338,31 +340,27 @@ function extractBookPagePrice(content: string, expectedNights: number): BookPage
     evidenceSnippet: null,
     extractionMethod: 'none',
     totalLabelFound: false,
+    selectorMatched: null,
   };
   
   // Normalize whitespace for pattern matching
   const normalized = content.replace(/\s+/g, ' ');
-  const lower = normalized.toLowerCase();
   
   // ==========================================================================
   // PATTERN 1: TOTAL PRICE (highest priority, directly comparable)
-  // Look for "Total Price" followed by currency + amount
   // ==========================================================================
   
-  const totalPricePatterns = [
-    // "Total Price ... USD 5,095.34" - most reliable
-    /total\s*price[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i,
-    // "Total Price ... $ 5,095.34"  
-    /total\s*price[^$€£¥]*?\$\s*([\d,\.]+)/i,
-    // "Total ... USD 5,095.34"
-    /\btotal[^$€£¥]{0,30}([A-Z]{3})\s*([\d,\.]+)/i,
-    // "Grand Total USD 5,095.34"
-    /grand\s*total[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i,
-    // Look for "Total Price" then currency code on next line
-    /total\s*price[\s\S]{0,50}?([A-Z]{3})\s*([\d,\.]+)/i,
+  const totalPricePatterns: Array<{ pattern: RegExp; name: string }> = [
+    { pattern: /total\s*price[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'total_price_currency_amount' },
+    { pattern: /total\s*price[^$€£¥]*?\$\s*([\d,\.]+)/i, name: 'total_price_dollar' },
+    { pattern: /\btotal[^$€£¥]{0,30}([A-Z]{3})\s*([\d,\.]+)/i, name: 'total_currency_amount' },
+    { pattern: /grand\s*total[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'grand_total_currency' },
+    { pattern: /total\s*price[\s\S]{0,50}?([A-Z]{3})\s*([\d,\.]+)/i, name: 'total_price_nearby' },
+    { pattern: /pay\s*now[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'pay_now_currency' },
+    { pattern: /amount\s*due[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'amount_due_currency' },
   ];
   
-  for (const pattern of totalPricePatterns) {
+  for (const { pattern, name } of totalPricePatterns) {
     const match = normalized.match(pattern);
     if (match) {
       let currency: string;
@@ -389,6 +387,7 @@ function extractBookPagePrice(content: string, expectedNights: number): BookPage
         result.includesTaxesFees = true;
         result.extractionMethod = 'total_price_label';
         result.totalLabelFound = true;
+        result.selectorMatched = name;
         
         // Extract evidence snippet
         const matchIndex = normalized.indexOf(match[0]);
@@ -396,7 +395,8 @@ function extractBookPagePrice(content: string, expectedNights: number): BookPage
         const end = Math.min(normalized.length, matchIndex + match[0].length + 40);
         result.evidenceSnippet = normalized.slice(start, end).trim();
         
-        console.log(`[AGODA] Total Price found: ${currency} ${amount} (method: total_price_label)`);
+        console.log(`[AGODA] selector_matched: ${name}`);
+        console.log(`[AGODA] Total Price found: ${currency} ${amount}`);
         return result;
       }
     }
@@ -404,17 +404,15 @@ function extractBookPagePrice(content: string, expectedNights: number): BookPage
   
   // ==========================================================================
   // PATTERN 2: Room price (X nights) - fallback, NOT directly comparable
-  // This is subtotal without taxes
   // ==========================================================================
   
-  const roomPricePatterns = [
-    // "Room price (5 nights) USD 4,510.00"
-    /room\s*price\s*\((\d+)\s*nights?\)[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i,
-    // "Room price (5 nights) $ 4,510.00"
-    /room\s*price\s*\((\d+)\s*nights?\)[^$]*?\$\s*([\d,\.]+)/i,
+  const roomPricePatterns: Array<{ pattern: RegExp; name: string }> = [
+    { pattern: /room\s*price\s*\((\d+)\s*nights?\)[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'room_price_nights_currency' },
+    { pattern: /room\s*price\s*\((\d+)\s*nights?\)[^$]*?\$\s*([\d,\.]+)/i, name: 'room_price_nights_dollar' },
+    { pattern: /(\d+)\s*nights?[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'nights_currency_amount' },
   ];
   
-  for (const pattern of roomPricePatterns) {
+  for (const { pattern, name } of roomPricePatterns) {
     const match = normalized.match(pattern);
     if (match) {
       const nightsFound = parseInt(match[1], 10);
@@ -434,94 +432,76 @@ function extractBookPagePrice(content: string, expectedNights: number): BookPage
       if (amount && amount >= 50 && amount <= 100000) {
         result.extracted = true;
         result.roomPriceNights = amount;
-        result.totalPrice = amount; // Use as price but mark not comparable
+        result.totalPrice = amount;
         result.nightsDetected = nightsFound;
         result.currency = currency;
         result.directlyComparable = false; // Missing taxes!
         result.includesTaxesFees = false;
         result.extractionMethod = 'room_price_nights';
+        result.selectorMatched = name;
         
         const matchIndex = normalized.indexOf(match[0]);
         const start = Math.max(0, matchIndex - 10);
         const end = Math.min(normalized.length, matchIndex + match[0].length + 30);
         result.evidenceSnippet = normalized.slice(start, end).trim();
         
-        console.log(`[AGODA] Room price found: ${currency} ${amount} for ${nightsFound} nights (NOT directly comparable - missing taxes)`);
+        console.log(`[AGODA] selector_matched: ${name}`);
+        console.log(`[AGODA] Room price found: ${currency} ${amount} for ${nightsFound} nights (NOT directly comparable)`);
         return result;
       }
     }
   }
   
   // ==========================================================================
-  // PATTERN 3: Look for taxes/service to see if we're on checkout page
+  // PATTERN 3: Nightly rate × nights (property page fallback)
   // ==========================================================================
   
-  const taxPatterns = [
-    /taxes?\s*(?:&|and)?\s*service[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i,
-    /service\s*(?:charge|fee)[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i,
+  const nightlyPatterns: Array<{ pattern: RegExp; name: string }> = [
+    { pattern: /(?:USD|US\$)\s*([\d,]+(?:\.\d{2})?)\s*(?:\n\s*)?per\s*night/i, name: 'usd_per_night' },
+    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:per\s*night|\/\s*night)/i, name: 'dollar_per_night' },
+    { pattern: /per\s*night[:\s]*(?:USD|US\$|)\s*([\d,]+(?:\.\d{2})?)/i, name: 'per_night_amount' },
+    { pattern: /([A-Z]{3})\s*([\d,]+(?:\.\d{2})?)\s*\/\s*night/i, name: 'currency_slash_night' },
   ];
   
-  for (const pattern of taxPatterns) {
-    const match = normalized.match(pattern);
+  for (const { pattern, name } of nightlyPatterns) {
+    const match = content.match(pattern);
     if (match) {
-      const amount = parseCurrencyAmount(match[2]);
-      if (amount) {
-        result.taxesServiceAmount = amount;
-        console.log(`[AGODA] Taxes/service found: ${match[1]} ${amount}`);
+      let currency = 'USD';
+      let amountStr: string;
+      
+      if (match[2]) {
+        currency = match[1].toUpperCase();
+        amountStr = match[2];
+      } else {
+        amountStr = match[1];
+      }
+      
+      const nightlyRate = parseCurrencyAmount(amountStr);
+      
+      if (nightlyRate && nightlyRate >= 10 && nightlyRate <= 20000) {
+        const totalFromNightly = nightlyRate * expectedNights;
+        
+        result.extracted = true;
+        result.totalPrice = totalFromNightly;
+        result.currency = currency;
+        result.directlyComparable = false;
+        result.includesTaxesFees = false;
+        result.extractionMethod = 'nightly_rate_computed';
+        result.selectorMatched = name;
+        
+        const matchIndex = content.indexOf(match[0]);
+        const start = Math.max(0, matchIndex - 20);
+        const end = Math.min(content.length, matchIndex + match[0].length + 30);
+        result.evidenceSnippet = content.slice(start, end).replace(/\s+/g, ' ').trim();
+        
+        console.log(`[AGODA] selector_matched: ${name}`);
+        console.log(`[AGODA] Nightly rate: ${currency} ${nightlyRate} × ${expectedNights} = ${totalFromNightly}`);
+        return result;
       }
     }
   }
   
-  // ==========================================================================
-  // PATTERN 4: Generic currency + amount on book page
-  // Only use if we see booking-related context
-  // ==========================================================================
-  
-  if (lower.includes('book') || lower.includes('checkout') || lower.includes('confirm')) {
-    const currencyAmountPattern = /([A-Z]{3})\s*([\d,\.]{4,12})/g;
-    const matches = [...normalized.matchAll(currencyAmountPattern)];
-    
-    // Find largest reasonable price (likely total)
-    let bestPrice: number | null = null;
-    let bestCurrency: string | null = null;
-    let bestMatch: string | null = null;
-    
-    for (const match of matches) {
-      const currency = match[1].toUpperCase();
-      // Only process known currencies
-      if (!['USD', 'EUR', 'GBP', 'CHF', 'SGD', 'AUD', 'CAD', 'JPY'].includes(currency)) {
-        continue;
-      }
-      
-      const amount = parseCurrencyAmount(match[2]);
-      if (amount && amount >= 100 && amount <= 100000) {
-        if (!bestPrice || amount > bestPrice) {
-          bestPrice = amount;
-          bestCurrency = currency;
-          bestMatch = match[0];
-        }
-      }
-    }
-    
-    if (bestPrice && bestCurrency && bestMatch) {
-      result.extracted = true;
-      result.totalPrice = bestPrice;
-      result.currency = bestCurrency;
-        result.directlyComparable = false; // Can't confirm it's total
-        result.includesTaxesFees = false; // Unknown - assume not included
-      result.extractionMethod = 'book_page_largest_amount';
-      
-      const matchIndex = normalized.indexOf(bestMatch);
-      const start = Math.max(0, matchIndex - 20);
-      const end = Math.min(normalized.length, matchIndex + bestMatch.length + 30);
-      result.evidenceSnippet = normalized.slice(start, end).trim();
-      
-      console.log(`[AGODA] Book page amount found: ${bestCurrency} ${bestPrice} (method: largest_amount)`);
-      return result;
-    }
-  }
-  
-  console.log('[AGODA] No price found on book page');
+  console.log('[AGODA] No price found');
   return result;
 }
 
@@ -529,11 +509,18 @@ function extractBookPagePrice(content: string, expectedNights: number): BookPage
 // PROVIDER FETCHING
 // ============================================================================
 
-async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise<{ content: string; error?: string; httpStatus?: number }> {
+interface FetchResult {
+  content: string;
+  html: string;
+  error?: string;
+  httpStatus?: number;
+}
+
+async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise<FetchResult> {
   const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
   
   if (!browserlessApiKey) {
-    return { content: '', error: 'Browserless API key not configured' };
+    return { content: '', html: '', error: 'Browserless API key not configured' };
   }
   
   try {
@@ -555,7 +542,7 @@ async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`[AGODA] Browserless error ${response.status}: ${errorText.substring(0, 200)}`);
-      return { content: '', error: `Browserless error: ${response.status}`, httpStatus: response.status };
+      return { content: '', html: '', error: `Browserless error: ${response.status}`, httpStatus: response.status };
     }
     
     const html = await response.text();
@@ -568,20 +555,20 @@ async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise
       .replace(/\s+/g, ' ')
       .trim();
     
-    console.log(`[AGODA] Browserless fetched ${text.length} chars`);
-    return { content: text, httpStatus: response.status };
+    console.log(`[AGODA] Browserless fetched contentLength: ${html.length} (text: ${text.length})`);
+    return { content: text, html, httpStatus: response.status };
     
   } catch (error) {
     console.error('[AGODA] Browserless fetch error:', error);
-    return { content: '', error: error instanceof Error ? error.message : 'Browserless fetch failed' };
+    return { content: '', html: '', error: error instanceof Error ? error.message : 'Browserless fetch failed' };
   }
 }
 
-async function fetchWithZyte(url: string): Promise<{ content: string; error?: string; httpStatus?: number }> {
+async function fetchWithZyte(url: string): Promise<FetchResult> {
   const zyteApiKey = Deno.env.get('ZYTE_API_KEY');
   
   if (!zyteApiKey) {
-    return { content: '', error: 'Zyte API key not configured' };
+    return { content: '', html: '', error: 'Zyte API key not configured' };
   }
   
   try {
@@ -606,7 +593,7 @@ async function fetchWithZyte(url: string): Promise<{ content: string; error?: st
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`[AGODA] Zyte error ${response.status}: ${errorText.substring(0, 200)}`);
-      return { content: '', error: `Zyte error: ${response.status}`, httpStatus: response.status };
+      return { content: '', html: '', error: `Zyte error: ${response.status}`, httpStatus: response.status };
     }
     
     const data = await response.json();
@@ -619,20 +606,20 @@ async function fetchWithZyte(url: string): Promise<{ content: string; error?: st
       .replace(/\s+/g, ' ')
       .trim();
     
-    console.log(`[AGODA] Zyte fetched ${text.length} chars`);
-    return { content: text, httpStatus: response.status };
+    console.log(`[AGODA] Zyte fetched contentLength: ${html.length} (text: ${text.length})`);
+    return { content: text, html, httpStatus: response.status };
     
   } catch (error) {
     console.error('[AGODA] Zyte fetch error:', error);
-    return { content: '', error: error instanceof Error ? error.message : 'Zyte fetch failed' };
+    return { content: '', html: '', error: error instanceof Error ? error.message : 'Zyte fetch failed' };
   }
 }
 
-async function fetchWithFirecrawl(url: string, waitMs: number = 5000): Promise<{ content: string; error?: string; httpStatus?: number }> {
+async function fetchWithFirecrawl(url: string, waitMs: number = 5000): Promise<FetchResult> {
   const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
   
   if (!firecrawlApiKey) {
-    return { content: '', error: 'Firecrawl API key not configured' };
+    return { content: '', html: '', error: 'Firecrawl API key not configured' };
   }
   
   try {
@@ -646,27 +633,29 @@ async function fetchWithFirecrawl(url: string, waitMs: number = 5000): Promise<{
       },
       body: JSON.stringify({
         url,
-        formats: ['markdown'],
+        formats: ['markdown', 'html'],
         onlyMainContent: false,
         waitFor: waitMs,
+        timeout: Math.max(15000, waitMs * 2.5),
       }),
     });
     
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`[AGODA] Firecrawl error ${response.status}: ${errorText.substring(0, 200)}`);
-      return { content: '', error: `Firecrawl error: ${response.status}`, httpStatus: response.status };
+      return { content: '', html: '', error: `Firecrawl error: ${response.status}`, httpStatus: response.status };
     }
     
     const data = await response.json();
     const markdown = data.data?.markdown || data.markdown || '';
+    const html = data.data?.html || data.html || '';
     
-    console.log(`[AGODA] Firecrawl fetched ${markdown.length} chars`);
-    return { content: markdown, httpStatus: response.status };
+    console.log(`[AGODA] Firecrawl fetched contentLength: ${markdown.length}`);
+    return { content: markdown, html, httpStatus: response.status };
     
   } catch (error) {
     console.error('[AGODA] Firecrawl fetch error:', error);
-    return { content: '', error: error instanceof Error ? error.message : 'Firecrawl fetch failed' };
+    return { content: '', html: '', error: error instanceof Error ? error.message : 'Firecrawl fetch failed' };
   }
 }
 
@@ -675,7 +664,7 @@ async function fetchWithFirecrawl(url: string, waitMs: number = 5000): Promise<{
 // ============================================================================
 
 interface PageStateResult {
-  isBookPage: boolean;
+  isCheckoutPage: boolean;
   isPropertyPage: boolean;
   botBlocked: boolean;
   soldOut: boolean;
@@ -687,15 +676,15 @@ function analyzePageState(content: string, url: string): PageStateResult {
   const lower = content.toLowerCase();
   
   const result: PageStateResult = {
-    isBookPage: url.includes('/book/') || lower.includes('booking confirmation') || lower.includes('complete your booking'),
-    isPropertyPage: !url.includes('/book/') && (lower.includes('room type') || lower.includes('per night')),
+    isCheckoutPage: url.includes('/book/') || lower.includes('booking confirmation') || lower.includes('complete your booking') || lower.includes('total price'),
+    isPropertyPage: !url.includes('/book/') && (lower.includes('room type') || lower.includes('per night') || lower.includes('select room')),
     botBlocked: false,
     soldOut: false,
     datesVisible: false,
     contentLength: content.length,
   };
   
-  // Bot detection (explicit only)
+  // Bot detection
   const botIndicators = [
     'access denied',
     'please verify you are human',
@@ -725,8 +714,8 @@ function analyzePageState(content: string, url: string): PageStateResult {
 // MAIN EXTRACTION FUNCTION
 // ============================================================================
 
-const PROVIDER_ORDER: Provider[] = ['browserless', 'zyte', 'firecrawl'];
-const MIN_CONTENT_LENGTH = 3000;
+const PROVIDER_ORDER: Provider[] = ['firecrawl', 'browserless', 'zyte'];
+const MIN_CONTENT_LENGTH = 2000;
 
 async function extractFromAgoda(
   originalUrl: string,
@@ -751,24 +740,25 @@ async function extractFromAgoda(
     directlyComparable: false,
     evidenceSnippet: null,
     structuralProof: {
-      book_page_reached: false,
-      property_page_fallback: false,
+      hotel_page_reached: false,
+      checkout_link_found: false,
+      checkout_url_found: null,
+      checkout_page_reached: false,
       dates_injected: true,
       dates_visible_on_page: false,
       total_price_label_found: false,
-      total_price_from_book_page: false,
       room_price_nights_found: false,
       taxes_service_visible: false,
       directly_comparable: false,
-      proof_version: 'agoda-golden-path-v3.0',
+      proof_version: 'agoda-golden-path-v3.1',
       currency_detected: null,
       nights_detected: nights,
-      property_id: null,
-      book_url_used: null,
-      property_url_used: null,
+      entry_hotel_url_used: null,
+      final_url_fetched: null,
       content_hash: null,
       failure_category: 'render_error',
       extraction_method: null,
+      selector_matched: null,
     },
     durationMs: 0,
     error: null,
@@ -777,20 +767,19 @@ async function extractFromAgoda(
   };
   
   try {
-    // Build URLs
-    const urls = buildAgodaUrls(originalUrl, checkIn, checkOut, adults, children, rooms);
-    result.structuralProof.property_id = urls.propertyId;
-    result.structuralProof.book_url_used = urls.bookPageUrl;
-    result.structuralProof.property_url_used = urls.propertyPageUrl;
+    // Build hotel URL with params (NO FAKE /book/ URLS)
+    const urlData = buildHotelUrlWithParams(originalUrl, checkIn, checkOut, adults, children, rooms);
+    result.structuralProof.entry_hotel_url_used = urlData.hotelUrlWithParams;
     
     // ========================================================================
-    // PHASE 1: Try /book/ page first (for Total Price with taxes)
+    // PHASE 1: Fetch hotel page to find checkout link
     // ========================================================================
     
-    console.log('[AGODA] Phase 1: Attempting /book/ page extraction');
+    console.log('[AGODA] Phase 1: Fetching hotel page to find checkout link');
     
-    let bookPageContent = '';
-    let bookPageProvider: Provider | null = null;
+    let hotelPageContent = '';
+    let hotelPageHtml = '';
+    let hotelPageProvider: Provider | null = null;
     
     for (const provider of PROVIDER_ORDER) {
       const attemptTrace: ProviderAttemptTrace = {
@@ -803,20 +792,20 @@ async function extractFromAgoda(
         httpStatus: null,
         contentLength: null,
         errorMessage: null,
-        urlUsed: urls.bookPageUrl,
+        urlUsed: urlData.hotelUrlWithParams,
       };
       
-      let fetchResult: { content: string; error?: string; httpStatus?: number };
+      let fetchResult: FetchResult;
       
       switch (provider) {
         case 'browserless':
-          fetchResult = await fetchWithBrowserless(urls.bookPageUrl, 6000);
+          fetchResult = await fetchWithBrowserless(urlData.hotelUrlWithParams, 6000);
           break;
         case 'zyte':
-          fetchResult = await fetchWithZyte(urls.bookPageUrl);
+          fetchResult = await fetchWithZyte(urlData.hotelUrlWithParams);
           break;
         case 'firecrawl':
-          fetchResult = await fetchWithFirecrawl(urls.bookPageUrl, 5000);
+          fetchResult = await fetchWithFirecrawl(urlData.hotelUrlWithParams, 5000);
           break;
       }
       
@@ -828,7 +817,7 @@ async function extractFromAgoda(
         attemptTrace.errorMessage = fetchResult.error;
         attemptTrace.outcome = 'navigation_failed';
         providerAttempts.push(attemptTrace);
-        console.log(`[AGODA] ${provider} failed for /book/: ${fetchResult.error}`);
+        console.log(`[AGODA] ${provider} failed for hotel page: ${fetchResult.error}`);
         continue;
       }
       
@@ -839,7 +828,7 @@ async function extractFromAgoda(
         continue;
       }
       
-      const pageState = analyzePageState(fetchResult.content, urls.bookPageUrl);
+      const pageState = analyzePageState(fetchResult.content, urlData.hotelUrlWithParams);
       
       if (pageState.botBlocked) {
         attemptTrace.outcome = 'bot_blocked';
@@ -861,20 +850,170 @@ async function extractFromAgoda(
         return result;
       }
       
-      // Success - got book page content
+      // Success - got hotel page content
       attemptTrace.outcome = 'success';
       providerAttempts.push(attemptTrace);
-      bookPageContent = fetchResult.content;
-      bookPageProvider = provider;
-      result.structuralProof.book_page_reached = true;
+      hotelPageContent = fetchResult.content;
+      hotelPageHtml = fetchResult.html;
+      hotelPageProvider = provider;
+      result.structuralProof.hotel_page_reached = true;
+      result.structuralProof.dates_visible_on_page = pageState.datesVisible;
       result.structuralProof.content_hash = simpleHash(fetchResult.content);
-      console.log(`[AGODA] ${provider} succeeded for /book/ page: ${bookPageContent.length} chars`);
+      console.log(`[AGODA] ${provider} succeeded for hotel page: ${hotelPageContent.length} chars`);
       break;
     }
     
-    // Try to extract from /book/ page
-    if (bookPageContent) {
-      const priceResult = extractBookPagePrice(bookPageContent, nights);
+    if (!hotelPageContent) {
+      // All providers failed for hotel page
+      result.status = 'hotel_page_not_reached';
+      result.error = 'Could not reach hotel page';
+      result.failureCategory = providerAttempts.every(a => a.outcome === 'bot_blocked') ? 'blocked' : 'render_error';
+      result.structuralProof.failure_category = result.failureCategory;
+      result.durationMs = Date.now() - startTime;
+      result.providerAttempts = providerAttempts;
+      return result;
+    }
+    
+    // ========================================================================
+    // PHASE 2: Find checkout link in hotel page
+    // ========================================================================
+    
+    console.log('[AGODA] Phase 2: Looking for checkout link in hotel page');
+    
+    const checkoutLinkResult = findCheckoutLink(hotelPageHtml || hotelPageContent, urlData.hotelUrlWithParams);
+    
+    if (checkoutLinkResult.found && checkoutLinkResult.checkoutUrl) {
+      result.structuralProof.checkout_link_found = true;
+      result.structuralProof.checkout_url_found = checkoutLinkResult.checkoutUrl;
+      
+      // ======================================================================
+      // PHASE 3: Fetch checkout page and extract price
+      // ======================================================================
+      
+      console.log('[AGODA] Phase 3: Fetching checkout page');
+      console.log(`[AGODA] final_url_fetched: ${checkoutLinkResult.checkoutUrl}`);
+      result.structuralProof.final_url_fetched = checkoutLinkResult.checkoutUrl;
+      
+      let checkoutPageContent = '';
+      
+      for (const provider of PROVIDER_ORDER) {
+        const attemptTrace: ProviderAttemptTrace = {
+          provider,
+          attempted: true,
+          attemptIndex: providerAttempts.length,
+          startedAt: new Date().toISOString(),
+          endedAt: null,
+          outcome: 'navigation_failed',
+          httpStatus: null,
+          contentLength: null,
+          errorMessage: null,
+          urlUsed: checkoutLinkResult.checkoutUrl,
+        };
+        
+        let fetchResult: FetchResult;
+        
+        switch (provider) {
+          case 'browserless':
+            fetchResult = await fetchWithBrowserless(checkoutLinkResult.checkoutUrl, 7000);
+            break;
+          case 'zyte':
+            fetchResult = await fetchWithZyte(checkoutLinkResult.checkoutUrl);
+            break;
+          case 'firecrawl':
+            fetchResult = await fetchWithFirecrawl(checkoutLinkResult.checkoutUrl, 6000);
+            break;
+        }
+        
+        attemptTrace.endedAt = new Date().toISOString();
+        attemptTrace.httpStatus = fetchResult.httpStatus || null;
+        attemptTrace.contentLength = fetchResult.content.length;
+        
+        if (fetchResult.error) {
+          attemptTrace.errorMessage = fetchResult.error;
+          attemptTrace.outcome = 'navigation_failed';
+          providerAttempts.push(attemptTrace);
+          continue;
+        }
+        
+        if (fetchResult.content.length < MIN_CONTENT_LENGTH) {
+          attemptTrace.outcome = 'insufficient_content';
+          attemptTrace.errorMessage = `Content too short: ${fetchResult.content.length}`;
+          providerAttempts.push(attemptTrace);
+          continue;
+        }
+        
+        const pageState = analyzePageState(fetchResult.content, checkoutLinkResult.checkoutUrl);
+        
+        if (pageState.botBlocked) {
+          attemptTrace.outcome = 'bot_blocked';
+          attemptTrace.errorMessage = 'Bot detection triggered';
+          providerAttempts.push(attemptTrace);
+          continue;
+        }
+        
+        attemptTrace.outcome = 'success';
+        providerAttempts.push(attemptTrace);
+        checkoutPageContent = fetchResult.content;
+        result.structuralProof.checkout_page_reached = true;
+        console.log(`[AGODA] ${provider} succeeded for checkout page: contentLength: ${checkoutPageContent.length}`);
+        break;
+      }
+      
+      // Try to extract from checkout page
+      if (checkoutPageContent) {
+        const priceResult = extractPrice(checkoutPageContent, nights);
+        
+        if (priceResult.extracted && priceResult.totalPrice) {
+          result.success = true;
+          result.status = priceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+          result.failureCategory = 'success';
+          result.extractedPrice = priceResult.totalPrice;
+          result.currency = priceResult.currency;
+          result.includesTaxesFees = priceResult.includesTaxesFees;
+          result.directlyComparable = priceResult.directlyComparable;
+          result.evidenceSnippet = priceResult.evidenceSnippet;
+          
+          result.structuralProof.total_price_label_found = priceResult.totalLabelFound;
+          result.structuralProof.room_price_nights_found = priceResult.roomPriceNights !== null;
+          result.structuralProof.directly_comparable = priceResult.directlyComparable;
+          result.structuralProof.currency_detected = priceResult.currency;
+          result.structuralProof.failure_category = 'success';
+          result.structuralProof.extraction_method = priceResult.extractionMethod;
+          result.structuralProof.selector_matched = priceResult.selectorMatched;
+          
+          result.durationMs = Date.now() - startTime;
+          result.providerAttempts = providerAttempts;
+          
+          console.log(`[AGODA] SUCCESS from checkout page: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+          return result;
+        }
+      }
+      
+      // Checkout page reached but no price found
+      if (checkoutPageContent) {
+        result.status = 'total_price_not_found';
+        result.error = 'Checkout page reached but Total Price not found';
+        result.failureCategory = 'selector_not_found';
+      } else {
+        result.status = 'checkout_page_not_reached';
+        result.error = 'Could not fetch checkout page';
+        result.failureCategory = providerAttempts.filter(a => a.urlUsed === checkoutLinkResult.checkoutUrl).every(a => a.outcome === 'bot_blocked') ? 'blocked' : 'render_error';
+      }
+    } else {
+      // No checkout link found - try to extract from hotel page directly
+      console.log('[AGODA] No checkout link found, trying to extract from hotel page');
+      result.structuralProof.checkout_link_found = false;
+      result.structuralProof.final_url_fetched = urlData.hotelUrlWithParams;
+    }
+    
+    // ========================================================================
+    // PHASE 4: Fallback - extract from hotel page if no checkout
+    // ========================================================================
+    
+    if (!result.success && hotelPageContent) {
+      console.log('[AGODA] Phase 4: Attempting extraction from hotel page');
+      
+      const priceResult = extractPrice(hotelPageContent, nights);
       
       if (priceResult.extracted && priceResult.totalPrice) {
         result.success = true;
@@ -887,162 +1026,50 @@ async function extractFromAgoda(
         result.evidenceSnippet = priceResult.evidenceSnippet;
         
         result.structuralProof.total_price_label_found = priceResult.totalLabelFound;
-        result.structuralProof.total_price_from_book_page = true;
         result.structuralProof.room_price_nights_found = priceResult.roomPriceNights !== null;
-        result.structuralProof.taxes_service_visible = priceResult.taxesServiceAmount !== null;
         result.structuralProof.directly_comparable = priceResult.directlyComparable;
         result.structuralProof.currency_detected = priceResult.currency;
         result.structuralProof.failure_category = 'success';
         result.structuralProof.extraction_method = priceResult.extractionMethod;
+        result.structuralProof.selector_matched = priceResult.selectorMatched;
         
         result.durationMs = Date.now() - startTime;
         result.providerAttempts = providerAttempts;
         
-        console.log(`[AGODA] SUCCESS from /book/ page: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+        console.log(`[AGODA] SUCCESS from hotel page: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
         return result;
+      }
+    }
+    
+    // ========================================================================
+    // PHASE 5: All extraction attempts failed
+    // ========================================================================
+    
+    if (!result.status || result.status === 'validation_error') {
+      if (providerAttempts.every(a => a.outcome === 'bot_blocked')) {
+        result.status = 'blocked_captcha_or_bot';
+        result.error = 'All providers blocked by bot detection';
+        result.failureCategory = 'blocked';
+      } else if (!result.structuralProof.checkout_link_found) {
+        result.status = 'checkout_link_not_found';
+        result.error = 'Could not find checkout/book link on hotel page';
+        result.failureCategory = 'missing_checkout_link';
+      } else if (!hotelPageContent) {
+        result.status = 'hotel_page_not_reached';
+        result.error = 'Could not reach hotel page';
+        result.failureCategory = 'render_error';
       } else {
-        console.log('[AGODA] /book/ page reached but price not found, trying property page fallback');
+        result.status = 'total_price_not_found';
+        result.error = 'Could not find Total Price on page';
+        result.failureCategory = 'selector_not_found';
       }
-    }
-    
-    // ========================================================================
-    // PHASE 2: Fallback to property page (nightly rate × nights)
-    // ========================================================================
-    
-    console.log('[AGODA] Phase 2: Fallback to property page');
-    result.structuralProof.property_page_fallback = true;
-    
-    let propertyPageContent = '';
-    
-    for (const provider of PROVIDER_ORDER) {
-      // Skip if already tried this provider for book page
-      if (providerAttempts.some(a => a.provider === provider && a.outcome === 'success')) {
-        continue;
-      }
-      
-      const attemptTrace: ProviderAttemptTrace = {
-        provider,
-        attempted: true,
-        attemptIndex: providerAttempts.length,
-        startedAt: new Date().toISOString(),
-        endedAt: null,
-        outcome: 'navigation_failed',
-        httpStatus: null,
-        contentLength: null,
-        errorMessage: null,
-        urlUsed: urls.propertyPageUrl,
-      };
-      
-      let fetchResult: { content: string; error?: string; httpStatus?: number };
-      
-      switch (provider) {
-        case 'browserless':
-          fetchResult = await fetchWithBrowserless(urls.propertyPageUrl, 5000);
-          break;
-        case 'zyte':
-          fetchResult = await fetchWithZyte(urls.propertyPageUrl);
-          break;
-        case 'firecrawl':
-          fetchResult = await fetchWithFirecrawl(urls.propertyPageUrl, 4000);
-          break;
-      }
-      
-      attemptTrace.endedAt = new Date().toISOString();
-      attemptTrace.httpStatus = fetchResult.httpStatus || null;
-      attemptTrace.contentLength = fetchResult.content.length;
-      
-      if (fetchResult.error || fetchResult.content.length < MIN_CONTENT_LENGTH) {
-        attemptTrace.errorMessage = fetchResult.error || `Content too short: ${fetchResult.content.length}`;
-        attemptTrace.outcome = fetchResult.error ? 'navigation_failed' : 'insufficient_content';
-        providerAttempts.push(attemptTrace);
-        continue;
-      }
-      
-      attemptTrace.outcome = 'success';
-      providerAttempts.push(attemptTrace);
-      propertyPageContent = fetchResult.content;
-      break;
-    }
-    
-    result.providerAttempts = providerAttempts;
-    
-    if (propertyPageContent) {
-      // Extract nightly rate and compute total
-      const nightlyPatterns = [
-        /(?:USD|US\$)\s*([\d,]+(?:\.\d{2})?)\s*(?:\n\s*)?per\s*night/gi,
-        /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:per\s*night|\/\s*night)/gi,
-        /per\s*night[:\s]*(?:USD|US\$|)\s*([\d,]+(?:\.\d{2})?)/gi,
-      ];
-      
-      for (const pattern of nightlyPatterns) {
-        const matches = [...propertyPageContent.matchAll(pattern)];
-        if (matches.length > 0) {
-          // Find lowest nightly rate
-          let lowestNightly = Infinity;
-          let bestMatch = matches[0];
-          
-          for (const match of matches) {
-            const priceStr = match[1].replace(/,/g, '');
-            const price = parseFloat(priceStr);
-            if (price >= 10 && price < lowestNightly && price <= 20000) {
-              lowestNightly = price;
-              bestMatch = match;
-            }
-          }
-          
-          if (lowestNightly !== Infinity) {
-            const totalFromNightly = lowestNightly * nights;
-            
-            result.success = true;
-            result.status = 'success_partial';
-            result.failureCategory = 'success';
-            result.extractedPrice = totalFromNightly;
-            result.currency = 'USD';
-            result.includesTaxesFees = false;
-            result.directlyComparable = false; // Nightly rate doesn't include taxes
-            
-            const matchIndex = propertyPageContent.indexOf(bestMatch[0]);
-            const start = Math.max(0, matchIndex - 30);
-            const end = Math.min(propertyPageContent.length, matchIndex + bestMatch[0].length + 50);
-            result.evidenceSnippet = propertyPageContent.slice(start, end).replace(/\s+/g, ' ').trim();
-            
-            result.structuralProof.directly_comparable = false;
-            result.structuralProof.failure_category = 'success';
-            result.structuralProof.extraction_method = 'nightly_rate_computed';
-            result.structuralProof.content_hash = simpleHash(propertyPageContent);
-            
-            result.durationMs = Date.now() - startTime;
-            
-            console.log(`[AGODA] Fallback: $${lowestNightly}/night × ${nights} = $${totalFromNightly} (NOT directly comparable)`);
-            return result;
-          }
-        }
-      }
-    }
-    
-    // ========================================================================
-    // PHASE 3: All extraction attempts failed
-    // ========================================================================
-    
-    if (providerAttempts.every(a => a.outcome === 'bot_blocked')) {
-      result.status = 'blocked_captcha_or_bot';
-      result.error = 'All providers blocked by bot detection';
-      result.failureCategory = 'blocked';
-    } else if (!bookPageContent && !propertyPageContent) {
-      result.status = 'book_page_not_reached';
-      result.error = 'Could not reach book page or property page';
-      result.failureCategory = 'render_error';
-    } else {
-      result.status = 'total_price_not_found';
-      result.error = 'Could not find Total Price on book page';
-      result.failureCategory = 'selector_not_found';
     }
     
     result.structuralProof.failure_category = result.failureCategory;
     result.durationMs = Date.now() - startTime;
     result.providerAttempts = providerAttempts;
     
-    console.log(`[AGODA] Extraction failed: ${result.status}`);
+    console.log(`[AGODA] Extraction failed: ${result.status} - ${result.failureCategory}`);
     return result;
     
   } catch (error) {
@@ -1070,7 +1097,7 @@ Deno.serve(async (req) => {
     const body = await req.json() as ExtractionRequest;
     const { url, extractionId, checkIn, checkOut, adults = 2, children = 0, rooms = 1 } = body;
     
-    console.log('[AGODA] Golden Path v3.0 extraction request');
+    console.log('[AGODA] Golden Path v3.1 extraction request');
     
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -1140,7 +1167,7 @@ Deno.serve(async (req) => {
         extraction_metadata: {
           goldenPath: true,
           platform: 'agoda',
-          version: 'agoda-golden-path-v3.0',
+          version: 'agoda-golden-path-v3.1',
           failureCategory: result.failureCategory,
           directlyComparable: result.directlyComparable,
           structuralProof: result.structuralProof,
