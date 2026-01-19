@@ -6935,6 +6935,7 @@ async function runSearchWithStreaming(
       
       // WORKING BASELINE: Always persist candidate to search_platforms with state
       // This ensures ALL discovered candidates are in the authoritative set
+      // NOTE: extraction_status_terminal is set for rejected/low_confidence so finalization gate recognizes them as terminal
       const candidateRecord = {
         search_id: searchId,
         platform_name: platformName,
@@ -6946,6 +6947,8 @@ async function runSearchWithStreaming(
         source_airbnb_image: imageUrl,
         outcome_category: candidateState,
         last_error: candidateReason,
+        // Mark non-verified candidates as terminal (no extraction needed)
+        extraction_status_terminal: candidateState !== 'verified' ? 'verification_rejected' : null,
       };
       
       // Persist immediately (Working Baseline behavior)

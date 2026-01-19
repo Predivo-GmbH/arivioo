@@ -472,9 +472,13 @@ export async function finalizeAndCompleteSearch(
     // -----------------------------
     // FINALIZATION GATE (CRITICAL)
     // -----------------------------
-    // We must NOT finalize until every matched platform has reached a terminal extraction state.
+    // We must NOT finalize until every VERIFIED matched platform has reached a terminal extraction state.
     // Otherwise the snapshot will capture "pending" and the UI will appear to "miss" platforms
     // (e.g. Expedia), or show incorrect bucket counts.
+    //
+    // IMPORTANT: Rejected/low_confidence candidates from Working Baseline are considered terminal
+    // by definition - they don't need price extractions since they failed image verification.
+    // Only 'verified' outcome_category platforms need extraction completion.
     const NON_TERMINAL_EXTRACTION_STATUSES = new Set([
       'pending',
       'queued',
@@ -486,6 +490,17 @@ export async function finalizeAndCompleteSearch(
     const isTerminalExtractionStatus = (status: unknown): boolean => {
       if (!status || typeof status !== 'string') return false;
       return !NON_TERMINAL_EXTRACTION_STATUSES.has(status);
+    };
+    
+    // WORKING BASELINE: outcome_category values that are terminal without extraction
+    const TERMINAL_OUTCOME_CATEGORIES = new Set([
+      'rejected',
+      'low_confidence',
+    ]);
+    
+    const isTerminalOutcomeCategory = (category: unknown): boolean => {
+      if (!category || typeof category !== 'string') return false;
+      return TERMINAL_OUTCOME_CATEGORIES.has(category);
     };
 
     // Create lookup maps for enrichment
@@ -507,6 +522,15 @@ export async function finalizeAndCompleteSearch(
       }
       if (e.deep_link) {
         extractionByUrl.set(e.deep_link, e);
+      }
+    });
+    
+    // WORKING BASELINE: Add platforms with terminal outcome_category to terminalPlatforms
+    // These are rejected/low_confidence candidates that don't need extractions
+    authoritativePlatforms.forEach((p: any) => {
+      const platformKey = typeof p.platform_name === 'string' ? p.platform_name.toLowerCase() : '';
+      if (platformKey && isTerminalOutcomeCategory(p.outcome_category)) {
+        terminalPlatforms.add(platformKey);
       }
     });
 
