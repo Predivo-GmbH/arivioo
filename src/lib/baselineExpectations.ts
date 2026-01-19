@@ -1,5 +1,5 @@
 /**
- * Canonical Stable Baseline Expectations - v2.0.0
+ * Canonical Stable Baseline Expectations - v2.1.0
  * 
  * This file defines the observable behaviours expected from the system
  * when operating at the declared stable baseline.
@@ -9,14 +9,25 @@
  * 
  * Baseline changes must be EXPLICIT and INTENTIONAL.
  * Do not auto-update on deploy.
+ * 
+ * WORKING BASELINE: image-verification-two-pass-v1 (2026-01-19)
+ * - PASS 1 (≥75%) discovers and persists candidates
+ * - PASS 2 (≥90%) determines authoritative/verified status
+ * - All candidates persisted to search_platforms regardless of score
+ * - Balanced prompt prevents false negatives while maintaining precision
  */
 
 export const BASELINE_NAME = 'search-results-finalization-baseline-v1';
 export const BASELINE_VERSION = '1.0.0';
 
+// Image Verification Working Baseline
+export const IMAGE_VERIFICATION_BASELINE_NAME = 'image-verification-two-pass-v1';
+export const IMAGE_VERIFICATION_BASELINE_VERSION = '1.0.0';
+export const IMAGE_VERIFICATION_BASELINE_DATE = '2026-01-19';
+
 export interface BaselineExpectation {
   id: string;
-  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization';
+  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization' | 'image_verification';
   description: string;
   observable: string;
   critical: boolean;
@@ -227,6 +238,50 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     observable: '"X/Y platforms finalized" shown during terminalHydrating state',
     critical: false,
   },
+
+  // Image Verification Contract (Working Baseline v1.0.0 - 2026-01-19)
+  {
+    id: 'pass1_discovery_threshold',
+    category: 'image_verification',
+    description: 'PASS 1 uses ≥75% threshold for discovery',
+    observable: 'Candidates with confidence ≥75% appear in main results',
+    critical: true,
+  },
+  {
+    id: 'pass2_authority_threshold',
+    category: 'image_verification',
+    description: 'PASS 2 uses ≥90% threshold for authority',
+    observable: 'Only candidates with confidence ≥90% receive "Verified" badge',
+    critical: true,
+  },
+  {
+    id: 'all_candidates_persisted',
+    category: 'image_verification',
+    description: 'All discovered candidates persisted',
+    observable: 'All platforms saved to search_platforms with outcome_category and confidence_score',
+    critical: true,
+  },
+  {
+    id: 'rejected_candidates_terminal',
+    category: 'image_verification',
+    description: 'Rejected candidates marked terminal',
+    observable: 'Low-score candidates have extraction_status_terminal=verification_rejected',
+    critical: true,
+  },
+  {
+    id: 'balanced_prompt_no_false_negatives',
+    category: 'image_verification',
+    description: 'Balanced prompt prevents false negatives',
+    observable: 'Same property with different angles/lighting still matches',
+    critical: true,
+  },
+  {
+    id: 'low_trust_section_visible',
+    category: 'image_verification',
+    description: 'Below threshold section shows rejected candidates',
+    observable: 'Collapsible section displays <75% candidates with actual scores',
+    critical: false,
+  },
 ];
 
 /**
@@ -257,4 +312,5 @@ export const CATEGORY_LABELS: Record<string, string> = {
   access_control: 'Access Control',
   admin: 'Admin Dashboard',
   finalization: 'Finalization Contract',
+  image_verification: 'Image Verification (Working Baseline v1.0.0)',
 };
