@@ -1526,71 +1526,56 @@ async function compareImagesWithAI(
     
     console.log(`[TRUST_SCORE] Images ready, calling AI model...`);
     
-    // ADVERSARIAL IDENTITY VERIFICATION PROMPT
-    // Purpose: Determine if two images show the EXACT SAME physical building, not just "similar style"
-    // Key insight: Log cabins, luxury rentals, etc. often share aesthetic (wood ceilings, stone fireplaces)
-    // but are DIFFERENT PROPERTIES. We must verify IDENTITY, not SIMILARITY.
-    const prompt = `You are a forensic property verification expert. Your SOLE task is to determine: 
-"Are these two photos of the EXACT SAME PHYSICAL BUILDING?"
+    // BALANCED IDENTITY VERIFICATION PROMPT
+    // Purpose: Determine if two images show the EXACT SAME physical building
+    // Key insight: Same properties can look slightly different due to camera angle, lighting, or staging
+    // But DIFFERENT properties will have fundamental structural differences
+    const prompt = `You are a property verification expert. Determine if these two photos show the EXACT SAME PHYSICAL PROPERTY.
 
-This is NOT a similarity test. Two luxury log cabins can look 90% similar but be COMPLETELY DIFFERENT PROPERTIES located miles apart. 
-Your job is to find PROOF OF IDENTITY - specific unique features that could ONLY exist in one physical location.
+## KEY PRINCIPLE: Focus on FIXED STRUCTURAL ELEMENTS
 
-## CRITICAL ANTI-FALSE-POSITIVE RULES
+Photos of the SAME property may have differences from:
+- Different camera angle or position
+- Different time of day (lighting changes)  
+- Minor furniture/decoration changes
+- One photo being a cropped version of the other
 
-1. SIMILAR STYLE ≠ SAME PROPERTY
-   - Many vacation rentals share "log cabin aesthetic" (wood ceilings, stone fireplaces, rustic kitchens)
-   - Similar design does NOT prove same building
-   - Score <= 50 if you only see style similarity without unique identifiers
+Focus on elements that CANNOT change between photos:
+- Stone fireplace pattern (stone patterns are unique like fingerprints)
+- Ceiling beam layout and spacing
+- Window positions and frame styles
+- Kitchen cabinet layout and counter shape
+- Floor material and pattern
+- Built-in architectural features
 
-2. REQUIRE UNIQUE IDENTIFIERS
-   To score above 70%, you MUST find at least 2-3 of these EXACT matches:
-   - Identical unusual architectural detail (specific beam placement, unique molding pattern)
-   - Same window configuration AND view through window
-   - Identical light fixture in same position
-   - Same unique floor pattern/tiles with matching layout
-   - Identical counter edge profile AND exact cabinet handle positions
-   - Same fireplace stone pattern (stone patterns are unique like fingerprints)
+## COMPARISON PROCESS
 
-3. DISQUALIFYING DIFFERENCES (instant score <= 40):
-   - Different kitchen counter material, color, or edge style
-   - Different cabinet style, color, or arrangement
-   - Different ceiling beam pattern or spacing
-   - Different flooring material or direction
-   - Different window frame style or placement
-   - Different backsplash pattern
-   - Different appliance positions or models
-   - Different light fixture styles or positions
+1. Identify 3-5 FIXED structural elements visible in BOTH images
+2. For each element, determine: Is this the SAME structure or DIFFERENT?
+3. If structural elements match, it's the SAME property regardless of staging
 
-4. KITCHEN/LIVING ROOM SPECIFIC CHECKS:
-   For kitchens: Compare counter shape, island position, cabinet arrangement, backsplash, appliance layout
-   For living rooms: Compare fireplace design, ceiling beam pattern, window wall configuration, built-in shelving
+## SCORING GUIDE
 
-## ANALYSIS PROCESS
+- 90-100%: Clearly same property - Multiple structural elements match exactly
+- 75-89%: Very likely same property - Key structural elements match, minor staging differences
+- 60-74%: Uncertain - Some structural similarities but can't confirm same building  
+- 40-59%: Unlikely same property - Style similar but structural elements differ
+- 0-39%: Different properties - Clear structural differences
 
-Step 1: Identify 3-5 fixed structural elements visible in BOTH images
-Step 2: For EACH element, ask "Is this IDENTICAL or just SIMILAR?"
-Step 3: If ANY element is different (not just similar), score <= 50
-Step 4: Only if ALL examined elements are PROVABLY IDENTICAL, score >= 75
+## CRITICAL: Avoid false negatives
 
-## SCORING (STRICT)
+If you see the SAME distinctive fireplace, SAME ceiling beam pattern, SAME window configuration, and SAME floor - these are strong evidence of the SAME property even if furniture or camera angle differs.
 
-- 90-100%: PROOF OF IDENTITY - Multiple unique identifiers match exactly (rare)
-- 75-89%: STRONG EVIDENCE - Same structure with 2-3 unique matching details
-- 50-74%: SIMILAR BUT UNCONFIRMED - Style matches but no unique identifiers (NOT A MATCH)
-- 25-49%: DIFFERENT PROPERTIES - Visible structural differences
-- 0-24%: CLEARLY DIFFERENT - Obvious different buildings
+A luxury log cabin from Image 1 matching the EXACT stone fireplace pattern, beam layout, and window wall from Image 2 = SAME PROPERTY (score >= 80).
 
 ## OUTPUT
 
-Analyze Image 1 (Airbnb) and Image 2 (Alternative).
-List specific structural elements you compared.
-For each, state if IDENTICAL or just SIMILAR.
+Compare structural elements and determine if this is the same physical property.
 
 Return ONLY valid JSON:
-{"score": NUMBER_0_TO_100, "isMatch": BOOLEAN, "explanation": "List structural elements compared and verdict for each"}
+{"score": NUMBER_0_TO_100, "isMatch": BOOLEAN, "explanation": "Brief structural comparison"} 
 
-isMatch = true ONLY if score >= 75 AND you found unique identifiers proving same physical building.`;
+isMatch = true if score >= 75.`;
 
     // TRUST_SCORE: Using GPT-5 (vision) for strict forensic image comparison
     // Timeout at 30s to accommodate GPT-5 latency + base64 payload size
@@ -6996,6 +6981,8 @@ async function runSearchWithStreaming(
         source_airbnb_image: imageUrl,
         outcome_category: isAuthoritative ? 'authoritative' : (isDiscovered ? 'needs_review' : 'rejected'),
         last_error: candidateReason,
+        // Store confidence score for ALL candidates (including rejected) for testing UI
+        confidence_score: candidateConfidence,
         // Mark rejected candidates as terminal (no extraction needed)
         extraction_status_terminal: candidateState !== 'verified' ? 'verification_rejected' : null,
       };
