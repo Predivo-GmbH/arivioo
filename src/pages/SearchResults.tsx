@@ -103,6 +103,10 @@ interface SearchResult {
   // Result categorization bucket
   result_bucket?: ResultBucket | null;
   categorization?: CategorizedResult | null;
+  // TWO-PASS IMAGE VERIFICATION: Authority status
+  // is_authoritative = true means PASS 2 >= 90% (high trust, "Verified")
+  // is_authoritative = false means PASS 1 passed but needs review
+  is_authoritative?: boolean;
 }
 
 interface PriceExtraction {

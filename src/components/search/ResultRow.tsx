@@ -1,6 +1,6 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { Shield, Info, ExternalLink, ArrowLeftRight, Camera, Ban, Calendar, Lock, Check, CheckCircle, Sparkles } from "lucide-react";
+import { Shield, Info, ExternalLink, ArrowLeftRight, Camera, Ban, Calendar, Lock, Check, CheckCircle, Sparkles, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImageComparison } from "@/components/ImageComparison";
 import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
@@ -23,6 +23,10 @@ export interface ResultRowResult {
   canonical_price?: CanonicalPrice | null;
   dates_differ?: boolean | null;
   eligible_for_comparison?: boolean;
+  // TWO-PASS IMAGE VERIFICATION: Authority status
+  // is_authoritative = true means PASS 2 >= 90% (high trust, "Verified")
+  // is_authoritative = false/undefined means PASS 1 passed but needs review
+  is_authoritative?: boolean;
 }
 
 export type RowVariant = 
@@ -119,6 +123,12 @@ export function ResultRow({
   const renderPlatformCell = () => {
     const accentColor = getAccentColor();
     
+    // Determine image verification authority status
+    // is_authoritative = true → PASS 2 >= 90% (high trust)
+    // is_authoritative = false/undefined → PASS 1 passed but needs review
+    const isAuthoritative = result.is_authoritative === true;
+    const needsReview = result.is_authoritative === false;
+    
     return (
       <td className="py-4 px-4">
         <div className="flex items-center gap-2 flex-wrap">
@@ -133,11 +143,20 @@ export function ResultRow({
             </span>
           )}
           
-          {/* Verified badge for comparable prices */}
-          {variant === 'cheaper' && result.eligible_for_comparison && (
+          {/* TWO-PASS IMAGE VERIFICATION BADGES */}
+          {/* Authoritative badge (PASS 2 >= 90%): High trust, verified match */}
+          {isAuthoritative && (
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-500/10 text-green-600 text-[10px] font-medium">
               <CheckCircle className="w-2.5 h-2.5" />
               Verified
+            </span>
+          )}
+          
+          {/* Needs Review badge (PASS 1 passed, PASS 2 < 90%): Discovered but lower confidence */}
+          {needsReview && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 text-[10px] font-medium">
+              <AlertTriangle className="w-2.5 h-2.5" />
+              Needs Review
             </span>
           )}
           
