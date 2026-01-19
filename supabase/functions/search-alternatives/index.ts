@@ -1489,7 +1489,7 @@ async function compareImagesWithAI(
   // Create URL hashes for logging (first 16 chars of filename)
   const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
   const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
-  const trustScoreModel = "google/gemini-2.5-pro";
+  const trustScoreModel = "google/gemini-2.5-flash";
   
   try {
     // STEP 1: Convert both images to base64 data URLs for vision model
