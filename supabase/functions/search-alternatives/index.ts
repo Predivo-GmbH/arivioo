@@ -37,6 +37,32 @@ function getCorsHeaders(request: Request): Record<string, string> {
   };
 }
 
+// ============================================================================
+// TEST MODE TOGGLE: Agoda-only extraction for debugging
+// Set to true to restrict pipeline to Agoda candidates ONLY
+// MUST BE SET BACK TO false BEFORE PRODUCTION USE
+// ============================================================================
+const AGODA_ONLY_TEST_MODE = true;
+
+function isAgodaPlatform(url: string): boolean {
+  return url.toLowerCase().includes('agoda.com');
+}
+
+function filterCandidatesForTestMode<T extends { listing_url: string; platform_name: string }>(
+  candidates: T[],
+  testModeEnabled: boolean
+): T[] {
+  if (!testModeEnabled) {
+    return candidates;
+  }
+  
+  console.log(`[TEST_MODE] Agoda-only enabled - filtering ${candidates.length} candidates`);
+  const filtered = candidates.filter(c => isAgodaPlatform(c.listing_url));
+  console.log(`[TEST_MODE] Kept ${filtered.length} Agoda candidates, skipped ${candidates.length - filtered.length} other platforms`);
+  
+  return filtered;
+}
+
 // Legacy corsHeaders for backwards compatibility in some response paths
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7154,9 +7180,27 @@ async function runSearchWithStreaming(
   }
 
   const visualCountAfterFallback = alternatives.filter(a => a.match_type === 'visual').length;
+  
+  // ============================================================================
+  // TEST MODE FILTER: Apply Agoda-only restriction if enabled
+  // ============================================================================
+  if (AGODA_ONLY_TEST_MODE) {
+    console.log(`[TEST_MODE] Agoda-only enabled - filtering alternatives before processing`);
+    const beforeCount = alternatives.length;
+    const filteredAlternatives = filterCandidatesForTestMode(alternatives, AGODA_ONLY_TEST_MODE);
+    // Replace alternatives array contents
+    alternatives.length = 0;
+    alternatives.push(...filteredAlternatives);
+    console.log(`[TEST_MODE] Filtered: ${beforeCount} -> ${alternatives.length} candidates`);
+    sendProgress(controller, "[TEST_MODE] Agoda-only filter applied", `Kept ${alternatives.length} Agoda candidates, skipped ${beforeCount - alternatives.length} other platforms`);
+  }
+  
   const totalCandidates = alternatives.length;
 
   if (totalCandidates === 0) {
+    if (AGODA_ONLY_TEST_MODE) {
+      console.log(`[TEST_MODE] No Agoda candidates found - search will complete with empty results`);
+    }
     await supabase.from("searches").update({ status: "completed", airbnb_title: airbnbTitle, airbnb_price: airbnbPrice }).eq("id", searchId);
     sendSSE(controller, "complete", { success: true, results: [], airbnb: { title: airbnbTitle, price: airbnbPrice, images: imageUrls } });
     return;
