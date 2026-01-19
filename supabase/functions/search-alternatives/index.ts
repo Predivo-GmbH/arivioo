@@ -1425,6 +1425,55 @@ interface SearchResult {
   dates_differ?: boolean; // True if different dates were used due to unavailability
 }
 
+// Helper: Fetch image URL and convert to base64 data URL for GPT-5 vision
+async function fetchImageAsBase64(imageUrl: string, timeoutMs: number = 10_000): Promise<{ dataUrl: string | null; error: string | null }> {
+  try {
+    // Validate URL
+    if (!imageUrl || (!imageUrl.startsWith('http://') && !imageUrl.startsWith('https://'))) {
+      return { dataUrl: null, error: 'Invalid URL scheme' };
+    }
+    
+    const response = await fetchWithTimeout(imageUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'image/*',
+        'User-Agent': 'Mozilla/5.0 (compatible; Arivioo/1.0)',
+      },
+    }, timeoutMs);
+    
+    if (!response.ok) {
+      return { dataUrl: null, error: `HTTP ${response.status}` };
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    
+    // Convert bytes to base64
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+    
+    // Determine MIME type from Content-Type header, fallback to image/jpeg
+    let mimeType = response.headers.get('content-type') || 'image/jpeg';
+    // Clean up mime type (remove charset, etc.)
+    if (mimeType.includes(';')) {
+      mimeType = mimeType.split(';')[0].trim();
+    }
+    // Validate it's an image type
+    if (!mimeType.startsWith('image/')) {
+      mimeType = 'image/jpeg';
+    }
+    
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+    return { dataUrl, error: null };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : 'Unknown error';
+    return { dataUrl: null, error: errMsg };
+  }
+}
+
 // Use Lovable AI to compare two images and return similarity score (0-100)
 // STRICT COMPARISON: Prefers false negatives over false positives
 async function compareImagesWithAI(
@@ -1437,7 +1486,32 @@ async function compareImagesWithAI(
     return { score: 0, isMatch: false, explanation: "AI comparison unavailable" };
   }
   
+  // Create URL hashes for logging (first 16 chars of filename)
+  const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+  const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
+  const trustScoreModel = "openai/gpt-5";
+  
   try {
+    // STEP 1: Convert both images to base64 data URLs (GPT-5 requires inline images)
+    console.log(`[TRUST_SCORE] Fetching images for base64 encoding...`);
+    
+    const [airbnbResult, altResult] = await Promise.all([
+      fetchImageAsBase64(airbnbImageUrl, 10_000),
+      fetchImageAsBase64(alternativeImageUrl, 10_000),
+    ]);
+    
+    if (!airbnbResult.dataUrl) {
+      console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=0 | status=IMAGE_FETCH_ERROR_AIRBNB | error=${airbnbResult.error}`);
+      return { score: 0, isMatch: false, explanation: `Airbnb image fetch failed: ${airbnbResult.error}` };
+    }
+    
+    if (!altResult.dataUrl) {
+      console.log(`[TRUST_SCORE_PROOF] model=${trustScoreModel} | airbnb=${airbnbUrlHash} | alt=${altUrlHash} | score=0 | isMatch=false | latency_ms=0 | status=IMAGE_FETCH_ERROR_ALT | error=${altResult.error}`);
+      return { score: 0, isMatch: false, explanation: `Alternative image fetch failed: ${altResult.error}` };
+    }
+    
+    console.log(`[TRUST_SCORE] Both images encoded successfully, calling GPT-5...`);
+    
     // Enhanced prompt with strict, evidence-driven comparison + insufficient evidence rules
     const prompt = `You are a strict forensic image analyst. Your task is to determine whether these two property photos show the EXACT SAME real-world property (same apartment, room, house, building).
 
@@ -1487,8 +1561,8 @@ SCORING GUIDELINES:
 - 0-39%: Different properties
 
 Compare these images:
-Image 1 (Source/Airbnb): ${airbnbImageUrl}
-Image 2 (Alternative): ${alternativeImageUrl}
+Image 1 (Source/Airbnb): [First image provided]
+Image 2 (Alternative): [Second image provided]
 
 Analyze the STRUCTURAL features carefully. List specific evidence for or against a match.
 
@@ -1498,13 +1572,8 @@ Return ONLY valid JSON in this format:
 isMatch must be true ONLY if score >= 90 AND you have strong structural evidence.`;
 
     // TRUST_SCORE: Using GPT-5 (vision) for strict forensic image comparison
-    // Timeout increased from 15s to 30s to accommodate GPT-5 latency
-    const trustScoreModel = "openai/gpt-5";
+    // Timeout at 30s to accommodate GPT-5 latency + base64 payload size
     const startTime = Date.now();
-    
-    // Create URL hashes for logging (first 8 chars of path)
-    const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
-    const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
     
     const response = await fetchWithTimeout(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
@@ -1521,8 +1590,8 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
               role: "user",
               content: [
                 { type: "text", text: prompt },
-                { type: "image_url", image_url: { url: airbnbImageUrl } },
-                { type: "image_url", image_url: { url: alternativeImageUrl } },
+                { type: "image_url", image_url: { url: airbnbResult.dataUrl } },
+                { type: "image_url", image_url: { url: altResult.dataUrl } },
               ],
             },
           ],
