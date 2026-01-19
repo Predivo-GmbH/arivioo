@@ -6385,10 +6385,11 @@ async function runSearchWithStreaming(
   // - Time budget low → continue with fast path (fewer candidates per image)
   // ============================================================================
   const MAX_TIME = 120000; // 2 minutes total
-  const MAX_AI = 30; // Global AI verification budget
-  const MAX_AI_PER_IMAGE = 8; // Per-image AI verification cap (depth control)
+  const MAX_AI = 50; // Global AI verification budget (increased for two-pass)
+  const MAX_AI_PER_IMAGE = 6; // Per-image AI verification cap (two-pass = 2 calls each, so ~12 actual calls)
   const MAX_CANDIDATES_PER_IMAGE = 40; // Max reverse search results to process per image
-  const TIME_DEGRADED_THRESHOLD = 90000; // After 90s, enter time-degraded mode
+  const TIME_DEGRADED_THRESHOLD = 100000; // After 100s, enter time-degraded mode (was 90s)
+  const VERIFIED_PLATFORM_THRESHOLD = 75; // Skip re-verification if platform already has >= this confidence
   
   let aiCount = 0;
   let degradedMode: 'normal' | 'no_ai' | 'fast_path' = 'normal';
@@ -6863,15 +6864,16 @@ async function runSearchWithStreaming(
       const platformName = getPlatformName(matchUrl);
       const platformKey = platformName.toLowerCase().replace(/[^a-z0-9]/g, '');
       
-      // Check if we already have a match for this platform with high confidence
+      // SHORT-CIRCUIT: Skip if platform already verified (saves AI calls)
+      // Any platform with confidence >= VERIFIED_PLATFORM_THRESHOLD is already verified
       const existingMatch = bestMatchPerPlatform.get(platformKey);
       if (
         existingMatch &&
         typeof existingMatch.confidence_score === "number" &&
-        existingMatch.confidence_score >= 98
+        existingMatch.confidence_score >= VERIFIED_PLATFORM_THRESHOLD
       ) {
-        // Already have an excellent match for this platform, skip
-        console.log(`Skipping ${platformName} verification - already have 98%+ match`);
+        // Already verified this platform - skip additional verification
+        console.log(`[AISkip] ${platformName} already verified (${existingMatch.confidence_score}%) — skipping`);
         filterStats.filtered_already_high_confidence++;
         continue;
       }
@@ -6885,7 +6887,9 @@ async function runSearchWithStreaming(
         .eq("id", searchId);
       await heartbeat();
 
-      aiCount++;
+      // Two-pass verification uses 2 AI calls (PASS 1 + PASS 2 if PASS 1 succeeds)
+      // Count 2 upfront since PASS 2 runs when PASS 1 succeeds (common for good candidates)
+      aiCount += 2;
       matchesThisImage++;
       foundUrls.add(matchUrl);
 
