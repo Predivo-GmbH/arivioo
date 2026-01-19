@@ -42,7 +42,21 @@ function getCorsHeaders(request: Request): Record<string, string> {
 // Set to true to restrict pipeline to Agoda candidates ONLY
 // MUST BE SET BACK TO false BEFORE PRODUCTION USE
 // ============================================================================
-const AGODA_ONLY_TEST_MODE = true;
+const AGODA_ONLY_TEST_MODE = false;
+
+// ============================================================================
+// AGODA EXTRACTOR ONLY TEST MODE (default false)
+// When enabled, completely bypasses the entire search pipeline:
+// - No Airbnb baseline capture
+// - No discovery (SerpAPI/Lens)
+// - No AI verification (PASS 1/PASS 2)
+// - No processing of any other platforms
+// - No parallel extraction orchestration
+// Immediately runs ONLY the Agoda extractor and returns its output.
+// 
+// MUST BE SET BACK TO false BEFORE PRODUCTION USE
+// ============================================================================
+const AGODA_EXTRACTOR_ONLY_TEST_MODE = true;
 
 function isAgodaPlatform(url: string): boolean {
   return url.toLowerCase().includes('agoda.com');
@@ -7985,7 +7999,7 @@ serve(async (req) => {
       );
     }
     
-    const { searchId, stream = false, simulateBrowserlessFail = false } = body;
+    const { searchId, stream = false, simulateBrowserlessFail = false, test_agoda_url } = body;
     
     if (!searchId) {
       console.log(`[SEARCH_ALT_EXIT] reason=missing_searchId status=400`);
@@ -8006,6 +8020,152 @@ serve(async (req) => {
 
     // Use service role client for database operations
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // ============================================================================
+    // AGODA EXTRACTOR ONLY TEST MODE - EARLY SHORT-CIRCUIT
+    // Completely bypasses the entire pipeline and runs ONLY the Agoda extractor
+    // ============================================================================
+    if (AGODA_EXTRACTOR_ONLY_TEST_MODE) {
+      console.log(`[TEST_MODE] AGODA_EXTRACTOR_ONLY enabled - skipping entire pipeline`);
+      
+      // Determine which Agoda URL to use
+      let agodaUrl: string | null = null;
+      
+      // Priority 1: Use test_agoda_url from request if provided
+      if (test_agoda_url && typeof test_agoda_url === 'string' && test_agoda_url.includes('agoda.com')) {
+        agodaUrl = test_agoda_url;
+        console.log(`[TEST_MODE] using agoda url from request: ${agodaUrl.slice(0, 100)}`);
+      }
+      
+      // Priority 2: Look for existing Agoda candidate in search_platforms
+      if (!agodaUrl) {
+        const { data: agodaPlatforms } = await supabase
+          .from('search_platforms')
+          .select('listing_url, confidence_score')
+          .eq('search_id', searchId)
+          .ilike('listing_url', '%agoda.com%')
+          .order('confidence_score', { ascending: false })
+          .limit(1);
+        
+        if (agodaPlatforms && agodaPlatforms.length > 0 && agodaPlatforms[0].listing_url) {
+          const foundUrl = agodaPlatforms[0].listing_url;
+          agodaUrl = foundUrl;
+          console.log(`[TEST_MODE] using agoda url from search_platforms: ${foundUrl.slice(0, 100)}`);
+        }
+      }
+      
+      // Priority 3: Look for existing Agoda candidate in search_results
+      if (!agodaUrl) {
+        const { data: agodaResults } = await supabase
+          .from('search_results')
+          .select('listing_url, confidence_score')
+          .eq('search_id', searchId)
+          .ilike('listing_url', '%agoda.com%')
+          .order('confidence_score', { ascending: false })
+          .limit(1);
+        
+        if (agodaResults && agodaResults.length > 0 && agodaResults[0].listing_url) {
+          const foundUrl = agodaResults[0].listing_url;
+          agodaUrl = foundUrl;
+          console.log(`[TEST_MODE] using agoda url from search_results: ${foundUrl.slice(0, 100)}`);
+        }
+      }
+      
+      // No Agoda URL found - return error
+      if (!agodaUrl) {
+        console.log(`[TEST_MODE] No Agoda URL available - cannot proceed`);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: 'No Agoda URL available. Provide test_agoda_url in request or ensure search has an Agoda candidate.',
+            test_mode: 'AGODA_EXTRACTOR_ONLY',
+          }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      
+      // Fetch search to get dates
+      const { data: searchData } = await supabase
+        .from('searches')
+        .select('check_in_date, check_out_date, airbnb_url')
+        .eq('id', searchId)
+        .single();
+      
+      const checkIn = searchData?.check_in_date || extractDatesFromUrl(searchData?.airbnb_url || '').checkIn;
+      const checkOut = searchData?.check_out_date || extractDatesFromUrl(searchData?.airbnb_url || '').checkOut;
+      
+      if (!checkIn || !checkOut) {
+        console.log(`[TEST_MODE] No dates available for extraction`);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: 'No check-in/check-out dates available for this search.',
+            test_mode: 'AGODA_EXTRACTOR_ONLY',
+          }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      
+      console.log(`[TEST_MODE] Calling extract-agoda with url=${agodaUrl.slice(0, 80)}, checkIn=${checkIn}, checkOut=${checkOut}`);
+      
+      // Call extract-agoda directly
+      try {
+        const extractAgodaResponse = await fetch(`${supabaseUrl}/functions/v1/extract-agoda`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseServiceKey}`,
+          },
+          body: JSON.stringify({
+            url: agodaUrl,
+            checkIn,
+            checkOut,
+            adults: 2,
+            children: 0,
+            rooms: 1,
+          }),
+        });
+        
+        const agodaResult = await extractAgodaResponse.json();
+        console.log(`[TEST_MODE] extract-agoda response:`, JSON.stringify(agodaResult, null, 2));
+        
+        // Return simplified test mode response
+        const testModeResponse = {
+          test_mode: 'AGODA_EXTRACTOR_ONLY',
+          used_url: agodaUrl,
+          extracted_total: agodaResult.price || null,
+          currency: agodaResult.currency || null,
+          outcome_category: agodaResult.status || 'unknown',
+          last_error: agodaResult.error || null,
+          directly_comparable: agodaResult.structuralProof?.directly_comparable ?? false,
+          includes_taxes_fees: agodaResult.includesTaxesFees ?? null,
+          extraction_method: agodaResult.structuralProof?.extraction_method || null,
+          book_page_reached: agodaResult.structuralProof?.book_page_reached ?? false,
+          full_result: agodaResult, // Include full result for debugging
+        };
+        
+        console.log(`[TEST_MODE] Returning test mode response`);
+        return new Response(
+          JSON.stringify(testModeResponse),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+        
+      } catch (extractError) {
+        console.error(`[TEST_MODE] extract-agoda call failed:`, extractError);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: `extract-agoda call failed: ${String(extractError)}`,
+            test_mode: 'AGODA_EXTRACTOR_ONLY',
+            used_url: agodaUrl,
+          }),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+    // ============================================================================
+    // END AGODA EXTRACTOR ONLY TEST MODE
+    // ============================================================================
 
     // Fetch the search and verify ownership
     const { data: search, error: searchError } = await supabase
