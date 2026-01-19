@@ -1489,10 +1489,10 @@ async function compareImagesWithAI(
   // Create URL hashes for logging (first 16 chars of filename)
   const airbnbUrlHash = airbnbImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
   const altUrlHash = alternativeImageUrl.split('/').pop()?.substring(0, 16) || 'unknown';
-  const trustScoreModel = "openai/gpt-5";
+  const trustScoreModel = "google/gemini-2.5-pro";
   
   try {
-    // STEP 1: Convert both images to base64 data URLs (GPT-5 requires inline images)
+    // STEP 1: Convert both images to base64 data URLs for vision model
     console.log(`[TRUST_SCORE] Fetching images for base64 encoding...`);
     
     const [airbnbResult, altResult] = await Promise.all([
