@@ -325,6 +325,16 @@ export default function SearchResults() {
   const [showFailedExtractions, setShowFailedExtractions] = useState(false);
   const [showSoldOutPlatforms, setShowSoldOutPlatforms] = useState(false);
   const [showAdditionalIssues, setShowAdditionalIssues] = useState(false);
+  const [showLowTrustScore, setShowLowTrustScore] = useState(false);
+  const [lowTrustScoreResults, setLowTrustScoreResults] = useState<Array<{
+    id: string;
+    platform_name: string;
+    listing_url: string;
+    listing_title: string | null;
+    images: Json;
+    source_airbnb_image: string | null;
+    confidence_score: number | null;
+  }>>([]);
   const [streamDisconnected, setStreamDisconnected] = useState(false);
   const [extractingPrices, setExtractingPrices] = useState(false);
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
@@ -1717,6 +1727,35 @@ export default function SearchResults() {
     if (subtotalInfo) setSubtotalInfo(null);
   }, [search, confirmedTotal, showConfirmationModal, subtotalInfo]);
 
+  // Fetch rejected platforms (low trust score) for testing display
+  useEffect(() => {
+    if (!searchId || !isTerminalFrozen) return;
+
+    const fetchRejectedPlatforms = async () => {
+      const { data, error } = await supabase
+        .from('search_platforms')
+        .select('id, platform_name, listing_url, listing_title, images, source_airbnb_image')
+        .eq('search_id', searchId)
+        .eq('outcome_category', 'rejected')
+        .order('platform_name');
+
+      if (error) {
+        console.error('[LowTrustScore] Error fetching rejected platforms:', error);
+        return;
+      }
+
+      if (data) {
+        // Map to expected format - these don't have confidence scores stored, so we'll show "< 75%"
+        setLowTrustScoreResults(data.map(p => ({
+          ...p,
+          confidence_score: null, // Score not stored for rejected platforms
+        })));
+      }
+    };
+
+    fetchRejectedPlatforms();
+  }, [searchId, isTerminalFrozen]);
+
   // Handle confirmation callbacks
   const handleTotalConfirmed = (amount: number, currency: string) => {
     setConfirmedTotal({
@@ -3047,6 +3086,102 @@ export default function SearchResults() {
                                                   {errorDetail}
                                                 </span>
                                               </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'}`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={4} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 || result.source_airbnb_image ? (
+                                                  <ImageComparison airbnbImages={airbnbImages} alternativeImages={resultImages} airbnbTitle={search?.airbnb_title || "Airbnb Listing"} alternativeTitle={result.listing_title || "Alternative Listing"} platformName={result.platform_name} sourceAirbnbImage={result.source_airbnb_image} />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Category 6: Low Trust Score - Candidates that failed image verification (for testing) */}
+                        {lowTrustScoreResults.length > 0 && (
+                          <div className="rounded-xl border border-muted-foreground/20 bg-muted/20 overflow-hidden">
+                            <button
+                              onClick={() => setShowLowTrustScore(!showLowTrustScore)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/40 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                <Shield className="w-4 h-4 text-muted-foreground" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {lowTrustScoreResults.length} candidate{lowTrustScoreResults.length !== 1 ? 's' : ''} below trust threshold
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-medium">
+                                  TESTING
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Trust score &lt; 75%</span>
+                                {showLowTrustScore ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                              </div>
+                            </button>
+                            
+                            {showLowTrustScore && (
+                              <div className="border-t border-muted-foreground/20">
+                                <div className="px-4 py-2 bg-muted/30 border-b border-muted-foreground/10">
+                                  <p className="text-xs text-muted-foreground italic">
+                                    These candidates were found via image search but failed visual verification. 
+                                    They may be similar-looking properties, not the same listing.
+                                  </p>
+                                </div>
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {lowTrustScoreResults.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30 opacity-60">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-destructive/10 text-destructive text-xs font-medium">
+                                                <AlertTriangle className="w-3 h-3" />
+                                                &lt; 75%
+                                              </span>
+                                            </td>
+                                            <td className="py-4 px-4 text-right text-muted-foreground">
+                                              <span className="text-sm">Not verified</span>
                                             </td>
                                             <td className="py-4 px-4 text-center">
                                               <div className="flex flex-col gap-1.5 items-center">
