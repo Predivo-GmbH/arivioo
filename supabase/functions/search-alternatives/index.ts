@@ -1526,64 +1526,71 @@ async function compareImagesWithAI(
     
     console.log(`[TRUST_SCORE] Images ready, calling AI model...`);
     
-    // Enhanced prompt with strict, evidence-driven comparison + insufficient evidence rules
-    const prompt = `You are a strict forensic image analyst. Your task is to determine whether these two property photos show the EXACT SAME real-world property (same apartment, room, house, building).
+    // ADVERSARIAL IDENTITY VERIFICATION PROMPT
+    // Purpose: Determine if two images show the EXACT SAME physical building, not just "similar style"
+    // Key insight: Log cabins, luxury rentals, etc. often share aesthetic (wood ceilings, stone fireplaces)
+    // but are DIFFERENT PROPERTIES. We must verify IDENTITY, not SIMILARITY.
+    const prompt = `You are a forensic property verification expert. Your SOLE task is to determine: 
+"Are these two photos of the EXACT SAME PHYSICAL BUILDING?"
 
-CRITICAL RULES - BE CONSERVATIVE:
-1. High trust scores (90%+) are RARE and require STRONG evidence
-2. It is BETTER to rate a match too LOW than to incorrectly confirm different properties as the same
-3. If you have ANY doubt, reduce the score significantly
-4. Similar-looking properties are NOT the same property
-5. If there is NOT enough visible structural evidence in BOTH images, you MUST treat this as insufficient evidence and score LOW
+This is NOT a similarity test. Two luxury log cabins can look 90% similar but be COMPLETELY DIFFERENT PROPERTIES located miles apart. 
+Your job is to find PROOF OF IDENTITY - specific unique features that could ONLY exist in one physical location.
 
-FOCUS ON FIXED/PERMANENT FEATURES (these rarely change):
-- Room geometry: exact wall angles, ceiling height, room shape
-- Window placement: exact position, size, shape, number
-- Door placement and type
-- Architectural details: columns, beams, moldings, built-in shelving
-- Kitchen layout: counter shape, cabinet arrangement, appliance positions
-- Bathroom fixtures: exact toilet/sink/tub positions
-- Flooring pattern and type
-- View from windows (if visible)
+## CRITICAL ANTI-FALSE-POSITIVE RULES
 
-DO NOT rely heavily on:
-- Colors (can be edited, lighting changes)
-- Lighting conditions (photos at different times)
-- Movable furniture (beds, chairs, tables, decorations)
-- Plants, artwork, curtains, rugs (easily changed)
-- Photo angle alone (similar angles don't prove same property)
+1. SIMILAR STYLE ≠ SAME PROPERTY
+   - Many vacation rentals share "log cabin aesthetic" (wood ceilings, stone fireplaces, rustic kitchens)
+   - Similar design does NOT prove same building
+   - Score <= 50 if you only see style similarity without unique identifiers
 
-STRUCTURAL DIFFERENCES = NOT THE SAME:
-If you see ANY structural difference (different window positions, different room shape, different ceiling, different floor plan), the score MUST be below 70%.
+2. REQUIRE UNIQUE IDENTIFIERS
+   To score above 70%, you MUST find at least 2-3 of these EXACT matches:
+   - Identical unusual architectural detail (specific beam placement, unique molding pattern)
+   - Same window configuration AND view through window
+   - Identical light fixture in same position
+   - Same unique floor pattern/tiles with matching layout
+   - Identical counter edge profile AND exact cabinet handle positions
+   - Same fireplace stone pattern (stone patterns are unique like fingerprints)
 
-INSUFFICIENT EVIDENCE RULE (MANDATORY):
-If fixed structural features (room shape, windows, layout) are NOT clearly visible and comparable in BOTH images, you MUST:
-- set score <= 60
-- set isMatch = false
-- explicitly state "insufficient structural evidence" in the explanation
+3. DISQUALIFYING DIFFERENCES (instant score <= 40):
+   - Different kitchen counter material, color, or edge style
+   - Different cabinet style, color, or arrangement
+   - Different ceiling beam pattern or spacing
+   - Different flooring material or direction
+   - Different window frame style or placement
+   - Different backsplash pattern
+   - Different appliance positions or models
+   - Different light fixture styles or positions
 
-ROOM / VIEWPOINT CONSISTENCY RULE:
-If the images appear to show DIFFERENT room types or viewpoints (e.g. bedroom vs living room, interior vs exterior), they MUST be treated as NOT the same property:
-- score <= 40
-- isMatch = false
+4. KITCHEN/LIVING ROOM SPECIFIC CHECKS:
+   For kitchens: Compare counter shape, island position, cabinet arrangement, backsplash, appliance layout
+   For living rooms: Compare fireplace design, ceiling beam pattern, window wall configuration, built-in shelving
 
-SCORING GUIDELINES:
-- 95-100%: Absolutely certain - identical structural features, unmistakable match
-- 90-94%: Very confident - same structure, minor angle/lighting differences
-- 70-89%: Uncertain - similar but not confirmed (DO NOT mark as match)
-- 40-69%: Unlikely - some similarities but notable differences
-- 0-39%: Different properties
+## ANALYSIS PROCESS
 
-Compare these images:
-Image 1 (Source/Airbnb): [First image provided]
-Image 2 (Alternative): [Second image provided]
+Step 1: Identify 3-5 fixed structural elements visible in BOTH images
+Step 2: For EACH element, ask "Is this IDENTICAL or just SIMILAR?"
+Step 3: If ANY element is different (not just similar), score <= 50
+Step 4: Only if ALL examined elements are PROVABLY IDENTICAL, score >= 75
 
-Analyze the STRUCTURAL features carefully. List specific evidence for or against a match.
+## SCORING (STRICT)
 
-Return ONLY valid JSON in this format:
-{"score": NUMBER_0_TO_100, "isMatch": BOOLEAN, "explanation": "Evidence-based reason citing specific structural features"}
+- 90-100%: PROOF OF IDENTITY - Multiple unique identifiers match exactly (rare)
+- 75-89%: STRONG EVIDENCE - Same structure with 2-3 unique matching details
+- 50-74%: SIMILAR BUT UNCONFIRMED - Style matches but no unique identifiers (NOT A MATCH)
+- 25-49%: DIFFERENT PROPERTIES - Visible structural differences
+- 0-24%: CLEARLY DIFFERENT - Obvious different buildings
 
-isMatch must be true ONLY if score >= 90 AND you have strong structural evidence.`;
+## OUTPUT
+
+Analyze Image 1 (Airbnb) and Image 2 (Alternative).
+List specific structural elements you compared.
+For each, state if IDENTICAL or just SIMILAR.
+
+Return ONLY valid JSON:
+{"score": NUMBER_0_TO_100, "isMatch": BOOLEAN, "explanation": "List structural elements compared and verdict for each"}
+
+isMatch = true ONLY if score >= 75 AND you found unique identifiers proving same physical building.`;
 
     // TRUST_SCORE: Using GPT-5 (vision) for strict forensic image comparison
     // Timeout at 30s to accommodate GPT-5 latency + base64 payload size
@@ -1641,9 +1648,12 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
         let score = Number(parsed.score) || 0;
         score = Math.min(100, Math.max(0, score));
         
-        // Extra conservative check: only mark as match if BOTH score >= 90 AND AI explicitly said isMatch
+        // ADVERSARIAL VERIFICATION: Only mark as match if BOTH:
+        // 1. AI explicitly returned isMatch=true (requires unique identifiers found)
+        // 2. Score >= 75 (lowered from 90 since the new prompt is much stricter)
+        // The new prompt gives 50-74% for "similar style but unconfirmed" which should NOT be matches
         const aiSaidMatch = parsed.isMatch === true;
-        const scoreIsHigh = score >= 90;
+        const scoreIsHigh = score >= 75;
         const isMatch = aiSaidMatch && scoreIsHigh;
         
         // PROOF LOG: Record model, URLs, score, isMatch, and latency
