@@ -1497,6 +1497,8 @@ Return ONLY valid JSON in this format:
 
 isMatch must be true ONLY if score >= 90 AND you have strong structural evidence.`;
 
+    // TRUST_SCORE: Using GPT-5 (vision) for strict forensic image comparison
+    // Timeout increased from 15s to 30s to accommodate GPT-5 latency
     const response = await fetchWithTimeout(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
       {
@@ -1506,7 +1508,7 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
+          model: "openai/gpt-5",
           messages: [
             {
               role: "user",
@@ -1520,7 +1522,7 @@ isMatch must be true ONLY if score >= 90 AND you have strong structural evidence
           max_tokens: 300,
         }),
       },
-      15_000
+      30_000
     );
     
     if (!response.ok) {
