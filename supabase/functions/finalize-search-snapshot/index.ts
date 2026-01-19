@@ -1,6 +1,7 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { finalizeAndCompleteSearch } from "../_shared/buildFinalSnapshot.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,13 +11,11 @@ const corsHeaders = {
 /**
  * finalize-search-snapshot
  * 
- * DEPRECATED: This endpoint is now READ-ONLY.
+ * This endpoint handles finalization in two modes:
  * 
- * Finalization is handled by the backend pipeline (search-alternatives) at TRUE completion.
- * This endpoint exists only for backwards compatibility and returns the existing snapshot
- * without creating or modifying it.
+ * 1. READ-ONLY (default): Returns existing snapshot or error if not finalized
+ * 2. FORCE MODE (force=true): Admin-triggered force finalization for stuck searches
  * 
- * INVARIANT: The frontend must NEVER create or modify the final snapshot.
  * INVARIANT: Once finalised_at is set, the snapshot is immutable.
  */
 serve(async (req) => {
@@ -25,7 +24,7 @@ serve(async (req) => {
   }
 
   try {
-    const { searchId } = await req.json();
+    const { searchId, force } = await req.json();
 
     if (!searchId) {
       return new Response(
@@ -38,9 +37,9 @@ serve(async (req) => {
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    console.log(`[finalize-search-snapshot] READ-ONLY check for search ${searchId}`);
+    console.log(`[finalize-search-snapshot] ${force ? 'FORCE' : 'READ-ONLY'} check for search ${searchId}`);
 
-    // Check if already finalized - this is the only thing we do now
+    // Check if already finalized
     const { data: searchData, error: searchError } = await supabase
       .from("searches")
       .select("id, status, finalised_at, final_results_snapshot")
@@ -72,8 +71,28 @@ serve(async (req) => {
       );
     }
 
-    // NOT FINALIZED - Frontend should NOT call this to create the snapshot
-    // The backend pipeline is responsible for setting finalised_at
+    // FORCE MODE: Admin-triggered finalization for stuck searches
+    if (force === true) {
+      console.log(`[finalize-search-snapshot] Force-finalizing search ${searchId}`);
+      
+      const result = await finalizeAndCompleteSearch({
+        supabase,
+        searchId,
+      });
+      
+      return new Response(
+        JSON.stringify({
+          success: result.success,
+          finalisedAt: result.finalisedAt,
+          resultCount: result.resultCount,
+          error: result.error,
+          alreadyFinalized: result.alreadyFinalized,
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // READ-ONLY MODE: Frontend should NOT call this to create the snapshot
     console.log(`[finalize-search-snapshot] Search ${searchId} not yet finalized by backend (status: ${typedData.status})`);
     
     return new Response(
