@@ -2,6 +2,7 @@ import React from "react";
 import { Link } from "react-router-dom";
 import { Shield, Info, ExternalLink, ArrowLeftRight, Camera, Ban, Calendar, Lock, Check, CheckCircle, Sparkles, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ImageComparison } from "@/components/ImageComparison";
 import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
 import type { CanonicalPrice } from "@/lib/canonicalPrice";
@@ -146,18 +147,36 @@ export function ResultRow({
           {/* TWO-PASS IMAGE VERIFICATION BADGES */}
           {/* Authoritative badge (PASS 2 >= 90%): High trust, verified match */}
           {isAuthoritative && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-500/10 text-green-600 text-[10px] font-medium">
-              <CheckCircle className="w-2.5 h-2.5" />
-              Verified
-            </span>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-500/10 text-green-600 text-[10px] font-medium cursor-help">
+                    <CheckCircle className="w-2.5 h-2.5" />
+                    Verified
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-[200px] text-center">
+                  <p className="text-xs">High-confidence match. Photos verified as the same property through multiple checks.</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           )}
           
           {/* Needs Review badge (PASS 1 passed, PASS 2 < 90%): Discovered but lower confidence */}
           {needsReview && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 text-[10px] font-medium">
-              <AlertTriangle className="w-2.5 h-2.5" />
-              Needs Review
-            </span>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 text-[10px] font-medium cursor-help">
+                    <AlertTriangle className="w-2.5 h-2.5" />
+                    Needs Review
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-[200px] text-center">
+                  <p className="text-xs">Likely match based on photo analysis. We recommend comparing photos before booking.</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           )}
           
           {/* Blocked badge */}
