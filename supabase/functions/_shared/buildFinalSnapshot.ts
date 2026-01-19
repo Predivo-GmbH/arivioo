@@ -67,6 +67,10 @@ export interface FinalResultRow {
   dates_validated?: boolean;
   // Outcome category for UI bucketing
   outcome_category?: string | null;
+  // TWO-PASS IMAGE VERIFICATION: Authority status
+  // is_authoritative = true means PASS 2 >= 90% (high trust)
+  // is_authoritative = false means PASS 1 passed (75-89%) but PASS 2 < 90% (needs review)
+  is_authoritative?: boolean;
   // FROZEN BUCKET: Determined at finalization, immutable on refresh
   final_bucket: ResultBucket;
   final_bucket_label: string;
@@ -665,6 +669,12 @@ export async function finalizeAndCompleteSearch(
           airbnbPrice
         );
 
+        // Determine image verification authority status from two-pass outcome
+        // 'authoritative' = PASS 2 >= 90% (high trust)
+        // 'needs_review' = PASS 1 passed (75%+) but PASS 2 < 90%
+        const imageVerificationCategory = platform.outcome_category;
+        const isAuthoritative = imageVerificationCategory === 'authoritative';
+
         return {
           id: result?.id || platform.id,
           platform_name: platform.platform_name,
@@ -689,6 +699,7 @@ export async function finalizeAndCompleteSearch(
           includes_taxes_fees: extraction?.includes_taxes_fees || false,
           dates_validated: extraction?.dates_validated || false,
           outcome_category: outcomeCategory,
+          is_authoritative: isAuthoritative,
           final_bucket: finalBucket,
           final_bucket_label: BUCKET_LABELS[finalBucket],
         };
@@ -762,6 +773,10 @@ export async function finalizeAndCompleteSearch(
           airbnbPrice
         );
 
+        // Legacy path: assume authoritative if high confidence score (90%+)
+        // This maintains backwards compatibility for older searches
+        const isAuthoritative = (result.confidence_score && result.confidence_score >= 90);
+
         return {
           id: result.id,
           platform_name: result.platform_name,
@@ -786,6 +801,7 @@ export async function finalizeAndCompleteSearch(
           includes_taxes_fees: extraction?.includes_taxes_fees || false,
           dates_validated: extraction?.dates_validated || false,
           outcome_category: outcomeCategory,
+          is_authoritative: isAuthoritative,
           final_bucket: finalBucket,
           final_bucket_label: BUCKET_LABELS[finalBucket],
         };
