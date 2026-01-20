@@ -169,6 +169,13 @@ interface AgodaHotelUrl {
   nights: number;
 }
 
+interface AgodaSearchUrl {
+  searchUrl: string;
+  propertyId: string | null;
+  cityId: string | null;
+  nights: number;
+}
+
 /**
  * Build hotel URL with date/occupancy params
  * 
@@ -214,6 +221,138 @@ function buildHotelUrlWithParams(
     console.log(`[AGODA] entry_hotel_url_used: ${hotelUrlWithParams}`);
     return { hotelUrlWithParams, nights };
   }
+}
+
+/**
+ * Extract property ID from Agoda hotel URL
+ * 
+ * Example URL patterns:
+ * - https://www.agoda.com/en-sg/sapphire-elegance/hotel/cashiers-us.html (slug in path)
+ * - URLs with property_id or hotelId query param
+ */
+function extractPropertyIdFromUrl(url: string): string | null {
+  try {
+    const urlObj = new URL(url);
+    
+    // Check query params first
+    const hotelId = urlObj.searchParams.get('hotelId') || urlObj.searchParams.get('hotel_id') || urlObj.searchParams.get('propertyId');
+    if (hotelId) {
+      console.log(`[AGODA] Property ID from query param: ${hotelId}`);
+      return hotelId;
+    }
+    
+    // Check for selectedproperty in URL
+    const selectedProperty = urlObj.searchParams.get('selectedproperty');
+    if (selectedProperty) {
+      console.log(`[AGODA] Property ID from selectedproperty: ${selectedProperty}`);
+      return selectedProperty;
+    }
+    
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract property ID from hotel page HTML content
+ * Look for data attributes, JSON-LD, or other embedded property identifiers
+ */
+function extractPropertyIdFromContent(html: string): string | null {
+  // Look for property ID in various places
+  const patterns = [
+    // data-hotelid or data-property-id attributes
+    /data-(?:hotel-?id|property-?id)=["'](\d+)["']/i,
+    // hotelId in JavaScript variables
+    /hotelId["']?\s*[:=]\s*["']?(\d+)["']?/i,
+    // propertyId in JSON
+    /"propertyId"\s*:\s*["']?(\d+)["']?/i,
+    /"hotelId"\s*:\s*["']?(\d+)["']?/i,
+    // selectedproperty in links
+    /selectedproperty=(\d+)/i,
+    // hotel ID in canonical URL
+    /hotel-information\?hotelId=(\d+)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match && match[1]) {
+      console.log(`[AGODA] Property ID extracted from content: ${match[1]}`);
+      return match[1];
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Extract city ID from hotel page HTML or URL
+ */
+function extractCityIdFromContent(html: string): string | null {
+  const patterns = [
+    /cityId["']?\s*[:=]\s*["']?(\d+)["']?/i,
+    /"cityId"\s*:\s*["']?(\d+)["']?/i,
+    /city=(\d+)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match && match[1]) {
+      console.log(`[AGODA] City ID extracted: ${match[1]}`);
+      return match[1];
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Build Agoda search URL with selectedproperty parameter
+ * This is the key to getting checkout links with encrypted params!
+ * 
+ * The search page URL format:
+ * https://www.agoda.com/en-sg/search?city=CITY_ID&checkIn=DATE&checkOut=DATE&los=N&rooms=1&adults=2&selectedproperty=PROPERTY_ID
+ */
+function buildSearchUrl(
+  propertyId: string,
+  cityId: string | null,
+  checkIn: string,
+  checkOut: string,
+  adults: number = 2,
+  children: number = 0,
+  rooms: number = 1,
+  locale: string = 'en-sg'
+): AgodaSearchUrl {
+  const nights = calculateNights(checkIn, checkOut);
+  
+  const params = new URLSearchParams({
+    cid: '-1',
+    aid: '130243',
+    checkIn: checkIn,
+    checkOut: checkOut,
+    los: String(nights),
+    rooms: String(rooms),
+    adults: String(adults),
+    children: String(children),
+    travellerType: '-1',
+    selectedproperty: propertyId,
+    currency: 'USD',
+  });
+  
+  if (cityId) {
+    params.set('city', cityId);
+  }
+  
+  const searchUrl = `https://www.agoda.com/${locale}/search?${params.toString()}`;
+  
+  console.log(`[AGODA] Built search URL: ${searchUrl}`);
+  
+  return {
+    searchUrl,
+    propertyId,
+    cityId,
+    nights,
+  };
 }
 
 // ============================================================================
@@ -1120,10 +1259,229 @@ async function extractFromAgoda(
       }
     } else {
       // ======================================================================
-      // PHASE 2B: No static checkout link - try Browserless click navigation
+      // PHASE 2B: No static checkout link - try SEARCH PAGE workflow
       // ======================================================================
+      // 
+      // The hotel page doesn't have direct checkout links (they're JS-generated).
+      // The workflow is:
+      // 1. Extract property ID from hotel page content
+      // 2. Build search URL with selectedproperty param
+      // 3. Scrape search page - it has checkout links with encrypted params!
+      // 4. Follow checkout link to get total price
       
-      console.log('[AGODA] Phase 2B: No static checkout link found, trying Browserless click navigation');
+      console.log('[AGODA] Phase 2B: No static checkout link - trying search page workflow');
+      
+      // Step 1: Extract property ID from hotel page
+      let propertyId = extractPropertyIdFromUrl(urlData.hotelUrlWithParams);
+      if (!propertyId && hotelPageHtml) {
+        propertyId = extractPropertyIdFromContent(hotelPageHtml);
+      }
+      
+      // Also try to get city ID for better search results
+      let cityId: string | null = null;
+      if (hotelPageHtml) {
+        cityId = extractCityIdFromContent(hotelPageHtml);
+      }
+      
+      if (propertyId) {
+        console.log(`[AGODA] Found propertyId: ${propertyId}, cityId: ${cityId}`);
+        
+        // Step 2: Build search URL
+        const searchUrlData = buildSearchUrl(
+          propertyId,
+          cityId,
+          checkIn,
+          checkOut,
+          adults,
+          children,
+          rooms
+        );
+        
+        // Step 3: Fetch search page
+        console.log(`[AGODA] Phase 2B-2: Fetching search page: ${searchUrlData.searchUrl}`);
+        
+        let searchPageContent = '';
+        let searchPageHtml = '';
+        
+        for (const provider of PROVIDER_ORDER) {
+          const attemptTrace: ProviderAttemptTrace = {
+            provider,
+            attempted: true,
+            attemptIndex: providerAttempts.length,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            outcome: 'navigation_failed',
+            httpStatus: null,
+            contentLength: null,
+            errorMessage: null,
+            urlUsed: searchUrlData.searchUrl,
+          };
+          
+          let fetchResult: FetchResult;
+          
+          switch (provider) {
+            case 'browserless':
+              fetchResult = await fetchWithBrowserless(searchUrlData.searchUrl, 8000);
+              break;
+            case 'zyte':
+              fetchResult = await fetchWithZyte(searchUrlData.searchUrl);
+              break;
+            case 'firecrawl':
+              fetchResult = await fetchWithFirecrawl(searchUrlData.searchUrl, 7000);
+              break;
+          }
+          
+          attemptTrace.endedAt = new Date().toISOString();
+          attemptTrace.httpStatus = fetchResult.httpStatus || null;
+          attemptTrace.contentLength = fetchResult.content.length;
+          
+          if (fetchResult.error) {
+            attemptTrace.errorMessage = fetchResult.error;
+            attemptTrace.outcome = 'navigation_failed';
+            providerAttempts.push(attemptTrace);
+            console.log(`[AGODA] ${provider} failed for search page: ${fetchResult.error}`);
+            continue;
+          }
+          
+          if (fetchResult.content.length < MIN_CONTENT_LENGTH) {
+            attemptTrace.outcome = 'insufficient_content';
+            attemptTrace.errorMessage = `Content too short: ${fetchResult.content.length}`;
+            providerAttempts.push(attemptTrace);
+            continue;
+          }
+          
+          const pageState = analyzePageState(fetchResult.content, searchUrlData.searchUrl);
+          
+          if (pageState.botBlocked) {
+            attemptTrace.outcome = 'bot_blocked';
+            attemptTrace.errorMessage = 'Bot detection triggered';
+            providerAttempts.push(attemptTrace);
+            continue;
+          }
+          
+          attemptTrace.outcome = 'success';
+          providerAttempts.push(attemptTrace);
+          searchPageContent = fetchResult.content;
+          searchPageHtml = fetchResult.html;
+          console.log(`[AGODA] ${provider} succeeded for search page: ${searchPageContent.length} chars`);
+          break;
+        }
+        
+        // Step 4: Look for checkout links on search page
+        if (searchPageHtml || searchPageContent) {
+          const searchCheckoutLink = findCheckoutLink(searchPageHtml || searchPageContent, searchUrlData.searchUrl);
+          
+          if (searchCheckoutLink.found && searchCheckoutLink.checkoutUrl) {
+            console.log(`[AGODA] Phase 2B-3: Found checkout link on search page: ${searchCheckoutLink.checkoutUrl.substring(0, 100)}...`);
+            
+            result.structuralProof.checkout_link_found = true;
+            result.structuralProof.checkout_url_found = searchCheckoutLink.checkoutUrl;
+            result.structuralProof.final_url_fetched = searchCheckoutLink.checkoutUrl;
+            
+            // Step 5: Fetch checkout page and extract price
+            console.log('[AGODA] Phase 2B-4: Fetching checkout page from search result');
+            
+            for (const provider of PROVIDER_ORDER) {
+              const attemptTrace: ProviderAttemptTrace = {
+                provider,
+                attempted: true,
+                attemptIndex: providerAttempts.length,
+                startedAt: new Date().toISOString(),
+                endedAt: null,
+                outcome: 'navigation_failed',
+                httpStatus: null,
+                contentLength: null,
+                errorMessage: null,
+                urlUsed: searchCheckoutLink.checkoutUrl,
+              };
+              
+              let fetchResult: FetchResult;
+              
+              switch (provider) {
+                case 'browserless':
+                  fetchResult = await fetchWithBrowserless(searchCheckoutLink.checkoutUrl, 8000);
+                  break;
+                case 'zyte':
+                  fetchResult = await fetchWithZyte(searchCheckoutLink.checkoutUrl);
+                  break;
+                case 'firecrawl':
+                  fetchResult = await fetchWithFirecrawl(searchCheckoutLink.checkoutUrl, 7000);
+                  break;
+              }
+              
+              attemptTrace.endedAt = new Date().toISOString();
+              attemptTrace.httpStatus = fetchResult.httpStatus || null;
+              attemptTrace.contentLength = fetchResult.content.length;
+              
+              if (fetchResult.error) {
+                attemptTrace.errorMessage = fetchResult.error;
+                attemptTrace.outcome = 'navigation_failed';
+                providerAttempts.push(attemptTrace);
+                continue;
+              }
+              
+              if (fetchResult.content.length < MIN_CONTENT_LENGTH) {
+                attemptTrace.outcome = 'insufficient_content';
+                attemptTrace.errorMessage = `Content too short: ${fetchResult.content.length}`;
+                providerAttempts.push(attemptTrace);
+                continue;
+              }
+              
+              const pageState = analyzePageState(fetchResult.content, searchCheckoutLink.checkoutUrl);
+              
+              if (pageState.botBlocked) {
+                attemptTrace.outcome = 'bot_blocked';
+                attemptTrace.errorMessage = 'Bot detection triggered';
+                providerAttempts.push(attemptTrace);
+                continue;
+              }
+              
+              attemptTrace.outcome = 'success';
+              providerAttempts.push(attemptTrace);
+              result.structuralProof.checkout_page_reached = true;
+              
+              console.log(`[AGODA] ${provider} succeeded for checkout page: ${fetchResult.content.length} chars`);
+              
+              // Extract price
+              const priceResult = extractPrice(fetchResult.content, nights);
+              
+              if (priceResult.extracted && priceResult.totalPrice) {
+                result.success = true;
+                result.status = priceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+                result.failureCategory = 'success';
+                result.extractedPrice = priceResult.totalPrice;
+                result.currency = priceResult.currency;
+                result.includesTaxesFees = priceResult.includesTaxesFees;
+                result.directlyComparable = priceResult.directlyComparable;
+                result.evidenceSnippet = priceResult.evidenceSnippet;
+                
+                result.structuralProof.total_price_label_found = priceResult.totalLabelFound;
+                result.structuralProof.room_price_nights_found = priceResult.roomPriceNights !== null;
+                result.structuralProof.directly_comparable = priceResult.directlyComparable;
+                result.structuralProof.currency_detected = priceResult.currency;
+                result.structuralProof.failure_category = 'success';
+                result.structuralProof.extraction_method = `search_page_${priceResult.extractionMethod}`;
+                result.structuralProof.selector_matched = priceResult.selectorMatched;
+                
+                result.durationMs = Date.now() - startTime;
+                result.providerAttempts = providerAttempts;
+                
+                console.log(`[AGODA] SUCCESS via search page workflow: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+                return result;
+              }
+              
+              break;
+            }
+          } else {
+            console.log('[AGODA] No checkout link found on search page either');
+          }
+        }
+      } else {
+        console.log('[AGODA] Could not extract property ID from hotel page - cannot use search workflow');
+      }
+      
+      // Fallback: Try Browserless click navigation as last resort
+      console.log('[AGODA] Phase 2C: Trying Browserless click navigation as last resort');
       
       const clickResult = await fetchWithBrowserlessAndClick(urlData.hotelUrlWithParams);
       
@@ -1187,7 +1545,7 @@ async function extractFromAgoda(
       }
       
       // No checkout link found - fall through to extract from hotel page directly
-      console.log('[AGODA] No checkout link found, trying to extract from hotel page');
+      console.log('[AGODA] No checkout link found via any method');
       result.structuralProof.checkout_link_found = false;
       result.structuralProof.final_url_fetched = urlData.hotelUrlWithParams;
     }
