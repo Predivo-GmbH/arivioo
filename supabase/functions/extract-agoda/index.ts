@@ -678,11 +678,76 @@ function extractPrice(content: string, expectedNights: number): PriceExtractionR
   }
   
   // ==========================================================================
-  // PATTERN 3: DISABLED - No nightly rate computation
-  // We only accept TOTAL prices. Nightly rates are rejected.
+  // PATTERN 3: Nightly rate extraction (search page display format)
+  // Format: "USD 798 Per night before taxes" from search page
+  // We compute: nightlyRate × expectedNights as subtotal (NOT directly comparable)
   // ==========================================================================
   
-  console.log('[AGODA] No TOTAL price found - nightly rate computation disabled');
+  const nightlyRatePatterns: Array<{ pattern: RegExp; name: string }> = [
+    // "USD 798 Per night" - Agoda search page format
+    { pattern: /([A-Z]{3})\s*([\d,\.]+)\s*(?:per|\/)\s*night/i, name: 'currency_amount_per_night' },
+    // "$798 per night"
+    { pattern: /\$\s*([\d,\.]+)\s*(?:per|\/)\s*night/i, name: 'dollar_per_night' },
+    // "€798 /night"
+    { pattern: /€\s*([\d,\.]+)\s*(?:per|\/)\s*night/i, name: 'euro_per_night' },
+    // "798 USD per night"
+    { pattern: /([\d,\.]+)\s*([A-Z]{3})\s*(?:per|\/)\s*night/i, name: 'amount_currency_per_night' },
+    // "from USD 798" (indicates nightly or starting price)
+    { pattern: /from\s+([A-Z]{3})\s*([\d,\.]+)/i, name: 'from_currency_amount' },
+    // Price with "before taxes" (indicates it's pre-tax nightly)
+    { pattern: /([A-Z]{3})\s*([\d,\.]+)[^.]*?before\s*taxes/i, name: 'currency_before_taxes' },
+  ];
+  
+  for (const { pattern, name } of nightlyRatePatterns) {
+    const match = normalized.match(pattern);
+    if (match) {
+      let currency: string;
+      let amountStr: string;
+      
+      if (name === 'dollar_per_night') {
+        currency = 'USD';
+        amountStr = match[1];
+      } else if (name === 'euro_per_night') {
+        currency = 'EUR';
+        amountStr = match[1];
+      } else if (name === 'amount_currency_per_night') {
+        amountStr = match[1];
+        currency = match[2].toUpperCase();
+      } else {
+        currency = match[1].toUpperCase();
+        amountStr = match[2];
+      }
+      
+      const nightlyRate = parseCurrencyAmount(amountStr);
+      
+      // Validate: reasonable nightly rate ($20 to $5000 per night)
+      if (nightlyRate && nightlyRate >= 20 && nightlyRate <= 5000) {
+        // Compute total as nightly × expectedNights
+        const computedTotal = nightlyRate * expectedNights;
+        
+        result.extracted = true;
+        result.roomPriceNights = computedTotal;
+        result.totalPrice = computedTotal;
+        result.nightsDetected = expectedNights;
+        result.currency = currency;
+        result.directlyComparable = false; // Computed from nightly, missing taxes!
+        result.includesTaxesFees = false;
+        result.extractionMethod = 'nightly_rate_computed';
+        result.selectorMatched = name;
+        
+        const matchIndex = normalized.indexOf(match[0]);
+        const start = Math.max(0, matchIndex - 10);
+        const end = Math.min(normalized.length, matchIndex + match[0].length + 50);
+        result.evidenceSnippet = `${normalized.slice(start, end).trim()} (${nightlyRate} × ${expectedNights} nights = ${computedTotal})`;
+        
+        console.log(`[AGODA] selector_matched: ${name}`);
+        console.log(`[AGODA] Nightly rate found: ${currency} ${nightlyRate}/night × ${expectedNights} nights = ${computedTotal} (NOT directly comparable - no taxes)`);
+        return result;
+      }
+    }
+  }
+  
+  console.log('[AGODA] No price pattern matched');
   return result;
 }
 
@@ -1809,7 +1874,49 @@ async function extractFromAgoda(
               break;
             }
           } else {
-            console.log('[AGODA] No static checkout link found on search page - trying click navigation');
+            console.log('[AGODA] No static checkout link found on search page');
+            
+            // ======================================================================
+            // PHASE 2B-3.5: Try to extract nightly rate from search page content
+            // ======================================================================
+            // The search page shows nightly rates even without checkout links
+            // Format: "USD 798 Per night before taxes"
+            // We can compute: nightlyRate × nights (NOT directly comparable - missing taxes)
+            
+            console.log('[AGODA] Phase 2B-3.5: Attempting nightly rate extraction from search page');
+            
+            const searchContent = searchPageHtml || searchPageContent;
+            if (searchContent && searchContent.length >= MIN_CONTENT_LENGTH) {
+              const searchPriceResult = extractPrice(searchContent, nights);
+              
+              if (searchPriceResult.extracted && searchPriceResult.totalPrice) {
+                result.success = true;
+                result.status = searchPriceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+                result.failureCategory = 'success';
+                result.extractedPrice = searchPriceResult.totalPrice;
+                result.currency = searchPriceResult.currency;
+                result.includesTaxesFees = searchPriceResult.includesTaxesFees;
+                result.directlyComparable = searchPriceResult.directlyComparable;
+                result.evidenceSnippet = searchPriceResult.evidenceSnippet;
+                
+                result.structuralProof.total_price_label_found = searchPriceResult.totalLabelFound;
+                result.structuralProof.room_price_nights_found = searchPriceResult.roomPriceNights !== null;
+                result.structuralProof.directly_comparable = searchPriceResult.directlyComparable;
+                result.structuralProof.currency_detected = searchPriceResult.currency;
+                result.structuralProof.failure_category = 'success';
+                result.structuralProof.extraction_method = `search_page_${searchPriceResult.extractionMethod}`;
+                result.structuralProof.selector_matched = searchPriceResult.selectorMatched;
+                result.structuralProof.final_url_fetched = searchUrlData.searchUrl;
+                
+                result.durationMs = Date.now() - startTime;
+                result.providerAttempts = providerAttempts;
+                
+                console.log(`[AGODA] SUCCESS from search page nightly rate: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+                return result;
+              } else {
+                console.log('[AGODA] No price pattern matched in search page content');
+              }
+            }
           }
         }
         
