@@ -776,132 +776,249 @@ export default async ({ page }) => {
   let pageContent = '';
   let pageHtml = '';
   let error = null;
+  let debugInfo = { selectorsChecked: [], elementsFound: {}, timing: {} };
   
   try {
+    // Set viewport and user agent to appear more like real browser
+    await page.setViewport({ width: 1920, height: 1080 });
+    
+    debugInfo.timing.navigationStart = Date.now();
+    
     // Navigate to search page
     await page.goto('${searchUrl.replace(/'/g, "\\'")}', {
-      waitUntil: 'networkidle2',
-      timeout: 45000,
+      waitUntil: 'networkidle0',
+      timeout: 55000,
     });
     
-    // Wait for search results to load - look for property cards
-    await page.waitForSelector('[data-selenium="hotel-item"], .PropertyCard, .hotel-item, [data-hotelid], .SearchResultOuter', {
-      timeout: 15000,
-    }).catch(() => console.log('No property cards found'));
+    debugInfo.timing.navigationEnd = Date.now();
     
-    // Additional wait for JS to fully render booking buttons
-    await new Promise(r => setTimeout(r, 3000));
-    
-    // Selectors for booking buttons (in order of specificity)
-    const bookingSelectors = [
-      // Main booking CTA buttons
-      '[data-selenium="book-button"]',
-      '[data-selenium="reserve-button"]',
-      'button[data-element-name="book-button"]',
-      'a[data-element-name="book-button"]',
-      // Generic book/reserve buttons
-      'button:has-text("Book")',
-      'a:has-text("Book Now")',
-      'button:has-text("Reserve")',
-      'a:has-text("Reserve")',
-      // Property card click areas (often the whole card is clickable)
-      '[data-selenium="hotel-item"] a[href*="/book/"]',
-      '.PropertyCard a[href*="/book/"]',
-      // Price/CTA area buttons
-      '.cta-book-button',
-      '.BookButton',
-      '.book-now-btn',
-      // Fallback: any link with /book/ in it
-      'a[href*="/book/?"]',
+    // CRITICAL: Dismiss cookie consent modal first - it blocks interaction!
+    const consentSelectors = [
+      '[data-element-name="consent-banner-reject-btn"]',
+      'button.BtnPair__RejectBtn',
+      '[data-modal-action="continue"]',
+      'button:has-text("Dismiss")',
+      '.ConsentBannerFunctionalOnly button',
     ];
     
-    // Try to find a booking button
-    let bookingButton = null;
-    for (const selector of bookingSelectors) {
+    for (const sel of consentSelectors) {
       try {
-        bookingButton = await page.$(selector);
-        if (bookingButton) {
-          console.log('Found booking button with selector:', selector);
+        const consentBtn = await page.$(sel);
+        if (consentBtn) {
+          await consentBtn.click();
+          console.log('Dismissed consent modal with:', sel);
+          debugInfo.elementsFound.consentDismissed = sel;
+          await new Promise(r => setTimeout(r, 1000));
           break;
         }
-      } catch (e) {
-        // Selector syntax might not work, try next
+      } catch (e) {}
+    }
+    
+    // Wait for loading spinner to disappear
+    try {
+      await page.waitForSelector('#ModalLoadingSpinner', { hidden: true, timeout: 20000 });
+      console.log('Loading spinner hidden');
+    } catch (e) {
+      console.log('Loading spinner timeout or not found');
+    }
+    
+    // Wait for Agoda-specific property list container
+    const propertyListSelectors = [
+      'ol.hotel-list-container li',
+      'li.PropertyCardItem',
+      '[data-element-name="property-card"]',
+      '.PropertyCard',
+      '[data-hotelid]',
+    ];
+    
+    let foundPropertyList = false;
+    for (const sel of propertyListSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 12000 });
+        foundPropertyList = true;
+        debugInfo.elementsFound.propertyList = sel;
+        console.log('Found property list with:', sel);
+        break;
+      } catch (e) {}
+    }
+    
+    if (!foundPropertyList) {
+      // Wait longer and check for loading spinner to disappear
+      await new Promise(r => setTimeout(r, 5000));
+    }
+    
+    // Additional wait for all JS hydration to complete
+    await new Promise(r => setTimeout(r, 4000));
+    
+    // STRATEGY 1: Find and click the first property card (whole card is clickable)
+    // Agoda property cards navigate to /book/ when clicked
+    const cardSelectors = [
+      'li.PropertyCardItem a[href*="/book/"]',
+      'li.PropertyCardItem[data-hotelid] a',
+      '.PropertyCard a[href*="/book/"]',
+      '[data-element-name="property-card"] a[href*="/book/"]',
+      'a[href*="/book/?cnty="]',
+      'a[href*="/book/?"][href*="secdat="]',
+    ];
+    
+    let clickableElement = null;
+    for (const selector of cardSelectors) {
+      debugInfo.selectorsChecked.push(selector);
+      try {
+        clickableElement = await page.$(selector);
+        if (clickableElement) {
+          debugInfo.elementsFound.cardLink = selector;
+          console.log('Found clickable card with:', selector);
+          break;
+        }
+      } catch (e) {}
+    }
+    
+    // STRATEGY 2: Find book/reserve buttons within property cards
+    if (!clickableElement) {
+      const buttonSelectors = [
+        '[data-selenium="book-button"]',
+        '[data-element-name="book-cta"]',
+        'button[class*="BookButton"]',
+        'button[class*="book"]',
+        '.cta-button',
+        '.PropertyCardPrice button',
+        '.PropertyCard button',
+      ];
+      
+      for (const selector of buttonSelectors) {
+        debugInfo.selectorsChecked.push(selector);
+        try {
+          clickableElement = await page.$(selector);
+          if (clickableElement) {
+            debugInfo.elementsFound.button = selector;
+            console.log('Found book button with:', selector);
+            break;
+          }
+        } catch (e) {}
       }
     }
     
-    // Alternative: find any element that might trigger checkout navigation
-    if (!bookingButton) {
-      // Look for elements with book/reserve text
-      bookingButton = await page.evaluateHandle(() => {
-        const elements = document.querySelectorAll('a, button');
-        for (const el of elements) {
-          const text = (el.textContent || '').toLowerCase();
-          if ((text.includes('book') || text.includes('reserve')) && !text.includes('cancel')) {
+    // STRATEGY 3: Find any /book/ links on the page
+    if (!clickableElement) {
+      const bookLinks = await page.$$('a[href*="/book/"]');
+      debugInfo.elementsFound.bookLinkCount = bookLinks.length;
+      
+      if (bookLinks.length > 0) {
+        clickableElement = bookLinks[0];
+        console.log('Found /book/ link, total count:', bookLinks.length);
+      }
+    }
+    
+    // STRATEGY 4: Click the first property card itself
+    if (!clickableElement) {
+      const propertyCardSelectors = [
+        'li.PropertyCardItem',
+        '.PropertyCard',
+        '[data-element-name="property-card"]',
+      ];
+      
+      for (const selector of propertyCardSelectors) {
+        debugInfo.selectorsChecked.push(selector);
+        try {
+          clickableElement = await page.$(selector);
+          if (clickableElement) {
+            debugInfo.elementsFound.propertyCard = selector;
+            console.log('Will click property card:', selector);
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+    
+    // STRATEGY 5: Use text content search for "Book" or price elements
+    if (!clickableElement) {
+      clickableElement = await page.evaluateHandle(() => {
+        // Look for any element with "Book" text that's likely a button
+        const allElements = document.querySelectorAll('a, button, [role="button"]');
+        for (const el of allElements) {
+          const text = (el.textContent || '').trim().toLowerCase();
+          if (text === 'book' || text === 'book now' || text === 'reserve' || text === 'see deal') {
             return el;
+          }
+        }
+        // Fallback: find first link that might go to booking
+        const links = document.querySelectorAll('a');
+        for (const link of links) {
+          if (link.href && link.href.includes('/book/')) {
+            return link;
           }
         }
         return null;
       });
       
-      if (bookingButton && (await bookingButton.evaluate(el => el !== null))) {
-        console.log('Found booking element via text search');
+      const isValid = await clickableElement.evaluate(el => el !== null);
+      if (!isValid) {
+        clickableElement = null;
       } else {
-        bookingButton = null;
+        console.log('Found element via text/href search');
+        debugInfo.elementsFound.textSearch = true;
       }
     }
     
-    if (bookingButton) {
-      // Set up navigation listener before clicking
-      const navigationPromise = page.waitForNavigation({ 
-        waitUntil: 'networkidle2',
-        timeout: 20000 
-      }).catch(() => null);
+    if (clickableElement) {
+      // Get href if it's a link (to capture checkout URL directly)
+      const href = await clickableElement.evaluate(el => el.href || null).catch(() => null);
       
-      // Click the button
-      await bookingButton.click();
-      console.log('Clicked booking button, waiting for navigation...');
-      
-      // Wait for navigation to complete
-      await navigationPromise;
-      
-      // Capture the current URL (should be checkout URL)
-      checkoutUrl = page.url();
-      console.log('Navigated to:', checkoutUrl);
-      
-      // If we navigated to a /book/ page, wait for content to load
-      if (checkoutUrl && checkoutUrl.includes('/book/')) {
-        await new Promise(r => setTimeout(r, 3000));
-        pageContent = await page.evaluate(() => document.body.innerText);
-        pageHtml = await page.evaluate(() => document.body.innerHTML);
-      }
-    } else {
-      // No button found - try to find checkout links in the static HTML
-      const links = await page.evaluate(() => {
-        const anchors = document.querySelectorAll('a[href*="/book/"]');
-        return Array.from(anchors).slice(0, 5).map(a => a.href);
-      });
-      
-      if (links.length > 0) {
-        checkoutUrl = links[0];
-        console.log('Found checkout link in HTML:', checkoutUrl);
+      if (href && href.includes('/book/')) {
+        // We found the checkout URL directly from href!
+        checkoutUrl = href;
+        console.log('Got checkout URL directly from href:', checkoutUrl.substring(0, 100));
         
-        // Navigate to the checkout page
-        await page.goto(checkoutUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        // Navigate to it to get the page content
+        await page.goto(checkoutUrl, { waitUntil: 'networkidle2', timeout: 35000 });
         await new Promise(r => setTimeout(r, 3000));
         pageContent = await page.evaluate(() => document.body.innerText);
         pageHtml = await page.evaluate(() => document.body.innerHTML);
       } else {
-        error = 'No booking button or checkout link found';
-        // Get current page content for debugging
-        pageContent = await page.evaluate(() => document.body.innerText);
+        // Click and capture navigation
+        const navigationPromise = page.waitForNavigation({ 
+          waitUntil: 'networkidle2',
+          timeout: 25000 
+        }).catch(() => null);
+        
+        await clickableElement.click();
+        console.log('Clicked element, waiting for navigation...');
+        
+        await navigationPromise;
+        
+        checkoutUrl = page.url();
+        console.log('Navigated to:', checkoutUrl);
+        
+        if (checkoutUrl && checkoutUrl.includes('/book/')) {
+          await new Promise(r => setTimeout(r, 3000));
+          pageContent = await page.evaluate(() => document.body.innerText);
+          pageHtml = await page.evaluate(() => document.body.innerHTML);
+        }
       }
+    } else {
+      error = 'No booking button or checkout link found';
+      
+      // Capture debug info about what's on the page
+      const pageDebug = await page.evaluate(() => {
+        return {
+          propertyCards: document.querySelectorAll('li.PropertyCardItem').length,
+          allLinks: document.querySelectorAll('a').length,
+          bookLinks: document.querySelectorAll('a[href*="/book/"]').length,
+          buttons: document.querySelectorAll('button').length,
+          bodyTextPreview: document.body.innerText.substring(0, 500),
+        };
+      });
+      debugInfo.pageState = pageDebug;
+      console.log('Page debug:', JSON.stringify(pageDebug));
+      
+      pageContent = await page.evaluate(() => document.body.innerText);
     }
     
   } catch (err) {
     error = err.message || 'Unknown error during click navigation';
     console.error('Error:', error);
     
-    // Try to get page content even on error
     try {
       pageContent = await page.evaluate(() => document.body.innerText);
     } catch (e) {}
@@ -910,10 +1027,11 @@ export default async ({ page }) => {
   return {
     data: {
       checkoutUrl,
-      pageContent: pageContent.substring(0, 300000), // Limit size
-      pageHtml: pageHtml.substring(0, 300000),
+      pageContent: pageContent.substring(0, 350000),
+      pageHtml: pageHtml.substring(0, 350000),
       error,
       finalUrl: page.url(),
+      debugInfo,
     },
   };
 };
