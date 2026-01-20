@@ -89,6 +89,7 @@ interface StructuralProof {
 interface ExtractionRequest {
   extractionId?: string;
   url?: string;
+  checkoutUrl?: string;  // Direct checkout URL (bypasses hotel page)
   checkIn: string;
   checkOut: string;
   adults?: number;
@@ -228,9 +229,10 @@ interface CheckoutLinkResult {
 /**
  * Find the real checkout/book link from hotel page HTML content
  * 
- * Looks for patterns like:
- * - href="/book/..." or href="https://www.agoda.com/book/..."
- * - Book Now, Reserve, etc. button hrefs
+ * Agoda checkout URLs have this structure:
+ * https://www.agoda.com/en-sg/book/?cnty=181&secdat=...&r0=...&sarg=...
+ * 
+ * The URL contains encrypted session data, NOT simple /book/{slug}/ paths
  */
 function findCheckoutLink(html: string, baseUrl: string): CheckoutLinkResult {
   const result: CheckoutLinkResult = {
@@ -239,7 +241,51 @@ function findCheckoutLink(html: string, baseUrl: string): CheckoutLinkResult {
     method: null,
   };
   
-  // Pattern 1: Direct /book/ links in href
+  // ==========================================================================
+  // PRIORITY 1: Full /book/ URLs with encrypted params (secdat, r0, sarg)
+  // ==========================================================================
+  
+  // Look for href containing /book/ with query params like secdat=, cnty=, r0=
+  const encryptedBookPatterns = [
+    // Full URLs with encrypted booking params
+    /href=["'](https?:\/\/[^"']*agoda[^"']*\/book\/\?[^"']*(?:secdat|cnty|r0|sarg)[^"']+)["']/gi,
+    // Relative /book/ URLs with params
+    /href=["'](\/[^"']*\/book\/\?[^"']*(?:secdat|cnty|r0|sarg)[^"']+)["']/gi,
+    // Any URL containing /book/? with substantial query string
+    /href=["'](https?:\/\/[^"']*\/book\/\?[^"']{50,})["']/gi,
+    /href=["'](\/[^"']*\/book\/\?[^"']{50,})["']/gi,
+  ];
+  
+  for (const pattern of encryptedBookPatterns) {
+    const matches = [...html.matchAll(pattern)];
+    for (const match of matches) {
+      let checkoutUrl = match[1];
+      
+      // Validate it looks like a real checkout URL (has encrypted params)
+      if (checkoutUrl.includes('secdat=') || checkoutUrl.includes('cnty=') || checkoutUrl.includes('r0=')) {
+        // Make absolute if relative
+        if (checkoutUrl.startsWith('/')) {
+          try {
+            const baseUrlObj = new URL(baseUrl);
+            checkoutUrl = `${baseUrlObj.origin}${checkoutUrl}`;
+          } catch {
+            checkoutUrl = `https://www.agoda.com${checkoutUrl}`;
+          }
+        }
+        
+        result.found = true;
+        result.checkoutUrl = checkoutUrl;
+        result.method = 'encrypted_book_url';
+        console.log(`[AGODA] checkout_url_found: ${checkoutUrl.substring(0, 150)}... (method: ${result.method})`);
+        return result;
+      }
+    }
+  }
+  
+  // ==========================================================================
+  // PRIORITY 2: Look for /book/ URLs with less validation
+  // ==========================================================================
+  
   const bookLinkPatterns = [
     // href="/en-us/book/..." or href="/book/..."
     /href=["']([^"']*\/book\/[^"']+)["']/gi,
@@ -265,21 +311,30 @@ function findCheckoutLink(html: string, baseUrl: string): CheckoutLinkResult {
       result.found = true;
       result.checkoutUrl = checkoutUrl;
       result.method = 'book_href_pattern';
-      console.log(`[AGODA] checkout_url_found: ${checkoutUrl} (method: ${result.method})`);
+      console.log(`[AGODA] checkout_url_found: ${checkoutUrl.substring(0, 150)}... (method: ${result.method})`);
       return result;
     }
   }
   
-  // Pattern 2: Look for booking-related data attributes or onclick handlers
-  const dataBookPatterns = [
-    /data-selenium="book-button"[^>]*href=["']([^"']+)["']/gi,
-    /class="[^"]*book[^"]*"[^>]*href=["']([^"']+)["']/gi,
+  // ==========================================================================
+  // PRIORITY 3: Look for JavaScript booking URLs in onclick or data attributes
+  // ==========================================================================
+  
+  const jsBookPatterns = [
+    // data-bookurl or similar attributes
+    /data-(?:book[-_]?url|checkout[-_]?url|reserve[-_]?url)=["']([^"']+)["']/gi,
+    // onclick containing book URL
+    /onclick=["'][^"']*(?:location\.href|window\.open)\s*\(\s*["']([^"']*\/book\/[^"']+)["']/gi,
+    // data-selenium book button with nearby href
+    /data-selenium=["'](?:book|reserve|checkout)[^"']*["'][^>]*href=["']([^"']+)["']/gi,
   ];
   
-  for (const pattern of dataBookPatterns) {
+  for (const pattern of jsBookPatterns) {
     const matches = [...html.matchAll(pattern)];
     if (matches.length > 0) {
       let checkoutUrl = matches[0][1];
+      
+      // Make absolute if relative
       if (checkoutUrl.startsWith('/')) {
         try {
           const baseUrlObj = new URL(baseUrl);
@@ -291,8 +346,39 @@ function findCheckoutLink(html: string, baseUrl: string): CheckoutLinkResult {
       
       result.found = true;
       result.checkoutUrl = checkoutUrl;
-      result.method = 'data_attribute_pattern';
-      console.log(`[AGODA] checkout_url_found: ${checkoutUrl} (method: ${result.method})`);
+      result.method = 'js_book_pattern';
+      console.log(`[AGODA] checkout_url_found: ${checkoutUrl.substring(0, 150)}... (method: ${result.method})`);
+      return result;
+    }
+  }
+  
+  // ==========================================================================
+  // PRIORITY 4: Look for any booking-related anchors
+  // ==========================================================================
+  
+  const bookButtonPatterns = [
+    /class=["'][^"']*(?:book-button|reserve-button|cta-book|btn-book)[^"']*["'][^>]*href=["']([^"']+)["']/gi,
+    /class=["'][^"']*btn[^"']*["'][^>]*href=["']([^"']*book[^"']*)["']/gi,
+  ];
+  
+  for (const pattern of bookButtonPatterns) {
+    const matches = [...html.matchAll(pattern)];
+    if (matches.length > 0) {
+      let checkoutUrl = matches[0][1];
+      
+      if (checkoutUrl.startsWith('/')) {
+        try {
+          const baseUrlObj = new URL(baseUrl);
+          checkoutUrl = `${baseUrlObj.origin}${checkoutUrl}`;
+        } catch {
+          checkoutUrl = `https://www.agoda.com${checkoutUrl}`;
+        }
+      }
+      
+      result.found = true;
+      result.checkoutUrl = checkoutUrl;
+      result.method = 'button_class_pattern';
+      console.log(`[AGODA] checkout_url_found: ${checkoutUrl.substring(0, 150)}... (method: ${result.method})`);
       return result;
     }
   }
@@ -1085,6 +1171,204 @@ async function extractFromAgoda(
 }
 
 // ============================================================================
+// DIRECT CHECKOUT URL EXTRACTION (bypasses hotel page discovery)
+// ============================================================================
+
+async function extractFromCheckoutUrl(
+  checkoutUrl: string,
+  checkIn: string,
+  checkOut: string
+): Promise<ExtractionResult> {
+  const startTime = Date.now();
+  const nights = calculateNights(checkIn, checkOut);
+  const providerAttempts: ProviderAttemptTrace[] = [];
+  
+  // Initialize result
+  const result: ExtractionResult = {
+    success: false,
+    status: 'validation_error',
+    failureCategory: 'render_error',
+    extractedPrice: null,
+    currency: null,
+    includesTaxesFees: null,
+    directlyComparable: false,
+    evidenceSnippet: null,
+    structuralProof: {
+      hotel_page_reached: false,  // Not used in direct checkout mode
+      checkout_link_found: true,   // Direct URL provided
+      checkout_url_found: checkoutUrl,
+      checkout_page_reached: false,
+      dates_injected: true,
+      dates_visible_on_page: false,
+      total_price_label_found: false,
+      room_price_nights_found: false,
+      taxes_service_visible: false,
+      directly_comparable: false,
+      proof_version: 'agoda-golden-path-v3.1-direct',
+      currency_detected: null,
+      nights_detected: nights,
+      entry_hotel_url_used: null,  // Direct mode, no hotel URL
+      final_url_fetched: checkoutUrl,
+      content_hash: null,
+      failure_category: 'render_error',
+      extraction_method: null,
+      selector_matched: null,
+    },
+    durationMs: 0,
+    error: null,
+    providerAttempts: [],
+    goldenPath: true,
+  };
+  
+  console.log('[AGODA] DIRECT CHECKOUT MODE - bypassing hotel page discovery');
+  console.log(`[AGODA] final_url_fetched: ${checkoutUrl}`);
+  
+  try {
+    // Fetch checkout page directly
+    let checkoutPageContent = '';
+    
+    for (const provider of PROVIDER_ORDER) {
+      const attemptTrace: ProviderAttemptTrace = {
+        provider,
+        attempted: true,
+        attemptIndex: providerAttempts.length,
+        startedAt: new Date().toISOString(),
+        endedAt: null,
+        outcome: 'navigation_failed',
+        httpStatus: null,
+        contentLength: null,
+        errorMessage: null,
+        urlUsed: checkoutUrl,
+      };
+      
+      let fetchResult: FetchResult;
+      
+      switch (provider) {
+        case 'browserless':
+          fetchResult = await fetchWithBrowserless(checkoutUrl, 8000);
+          break;
+        case 'zyte':
+          fetchResult = await fetchWithZyte(checkoutUrl);
+          break;
+        case 'firecrawl':
+          fetchResult = await fetchWithFirecrawl(checkoutUrl, 7000);
+          break;
+      }
+      
+      attemptTrace.endedAt = new Date().toISOString();
+      attemptTrace.httpStatus = fetchResult.httpStatus || null;
+      attemptTrace.contentLength = fetchResult.content.length;
+      
+      console.log(`[AGODA] ${provider} checkout fetch: contentLength: ${fetchResult.content.length}`);
+      
+      if (fetchResult.error) {
+        attemptTrace.errorMessage = fetchResult.error;
+        attemptTrace.outcome = 'navigation_failed';
+        providerAttempts.push(attemptTrace);
+        continue;
+      }
+      
+      if (fetchResult.content.length < MIN_CONTENT_LENGTH) {
+        attemptTrace.outcome = 'insufficient_content';
+        attemptTrace.errorMessage = `Content too short: ${fetchResult.content.length}`;
+        providerAttempts.push(attemptTrace);
+        continue;
+      }
+      
+      const pageState = analyzePageState(fetchResult.content, checkoutUrl);
+      
+      if (pageState.botBlocked) {
+        attemptTrace.outcome = 'bot_blocked';
+        attemptTrace.errorMessage = 'Bot detection triggered';
+        providerAttempts.push(attemptTrace);
+        continue;
+      }
+      
+      if (pageState.soldOut) {
+        attemptTrace.outcome = 'sold_out';
+        attemptTrace.errorMessage = 'Property sold out for dates';
+        providerAttempts.push(attemptTrace);
+        result.status = 'dates_unavailable';
+        result.error = 'Property not available for selected dates';
+        result.failureCategory = 'unavailable';
+        result.structuralProof.failure_category = 'unavailable';
+        result.durationMs = Date.now() - startTime;
+        result.providerAttempts = providerAttempts;
+        return result;
+      }
+      
+      attemptTrace.outcome = 'success';
+      providerAttempts.push(attemptTrace);
+      checkoutPageContent = fetchResult.content;
+      result.structuralProof.checkout_page_reached = true;
+      result.structuralProof.content_hash = simpleHash(fetchResult.content);
+      result.structuralProof.dates_visible_on_page = pageState.datesVisible;
+      console.log(`[AGODA] ${provider} succeeded for checkout page: contentLength: ${checkoutPageContent.length}`);
+      break;
+    }
+    
+    if (!checkoutPageContent) {
+      result.status = 'checkout_page_not_reached';
+      result.error = 'Could not reach checkout page';
+      result.failureCategory = providerAttempts.every(a => a.outcome === 'bot_blocked') ? 'blocked' : 'render_error';
+      result.structuralProof.failure_category = result.failureCategory;
+      result.durationMs = Date.now() - startTime;
+      result.providerAttempts = providerAttempts;
+      return result;
+    }
+    
+    // Extract price from checkout page
+    const priceResult = extractPrice(checkoutPageContent, nights);
+    
+    if (priceResult.extracted && priceResult.totalPrice) {
+      result.success = true;
+      result.status = priceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+      result.failureCategory = 'success';
+      result.extractedPrice = priceResult.totalPrice;
+      result.currency = priceResult.currency;
+      result.includesTaxesFees = priceResult.includesTaxesFees;
+      result.directlyComparable = priceResult.directlyComparable;
+      result.evidenceSnippet = priceResult.evidenceSnippet;
+      
+      result.structuralProof.total_price_label_found = priceResult.totalLabelFound;
+      result.structuralProof.room_price_nights_found = priceResult.roomPriceNights !== null;
+      result.structuralProof.directly_comparable = priceResult.directlyComparable;
+      result.structuralProof.currency_detected = priceResult.currency;
+      result.structuralProof.failure_category = 'success';
+      result.structuralProof.extraction_method = priceResult.extractionMethod;
+      result.structuralProof.selector_matched = priceResult.selectorMatched;
+      
+      result.durationMs = Date.now() - startTime;
+      result.providerAttempts = providerAttempts;
+      
+      console.log(`[AGODA] SUCCESS from direct checkout: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+      return result;
+    }
+    
+    // Price not found on checkout page
+    result.status = 'total_price_not_found';
+    result.error = 'Checkout page reached but Total Price not found';
+    result.failureCategory = 'selector_not_found';
+    result.structuralProof.failure_category = 'selector_not_found';
+    result.durationMs = Date.now() - startTime;
+    result.providerAttempts = providerAttempts;
+    
+    console.log(`[AGODA] Direct checkout extraction failed: ${result.status}`);
+    return result;
+    
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : 'Unknown error';
+    result.status = 'validation_error';
+    result.failureCategory = 'render_error';
+    result.structuralProof.failure_category = 'render_error';
+    result.durationMs = Date.now() - startTime;
+    result.providerAttempts = providerAttempts;
+    console.error('[AGODA] Fatal error in direct checkout:', error);
+    return result;
+  }
+}
+
+// ============================================================================
 // HTTP HANDLER
 // ============================================================================
 
@@ -1095,13 +1379,80 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.json() as ExtractionRequest;
-    const { url, extractionId, checkIn, checkOut, adults = 2, children = 0, rooms = 1 } = body;
+    const { url, checkoutUrl, extractionId, checkIn, checkOut, adults = 2, children = 0, rooms = 1 } = body;
     
     console.log('[AGODA] Golden Path v3.1 extraction request');
     
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     const supabaseClient = createClient(supabaseUrl, supabaseKey);
+    
+    if (!checkIn || !checkOut) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'checkIn and checkOut dates required' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    // ==========================================================================
+    // PRIORITY 1: Direct checkout URL provided - bypass hotel page discovery
+    // ==========================================================================
+    
+    if (checkoutUrl) {
+      console.log(`[AGODA] Direct checkout URL provided: ${checkoutUrl.substring(0, 100)}...`);
+      console.log(`[AGODA] Dates: ${checkIn} to ${checkOut}`);
+      
+      const result = await extractFromCheckoutUrl(checkoutUrl, checkIn, checkOut);
+      
+      // Update DB if extractionId provided
+      if (extractionId) {
+        const updateData: Record<string, unknown> = {
+          extraction_status: result.status,
+          extracted_price: result.extractedPrice,
+          currency: result.currency,
+          includes_taxes_fees: result.includesTaxesFees,
+          extraction_error: result.error,
+          page_content_hash: result.structuralProof.content_hash,
+          evidence_snippets: result.evidenceSnippet ? [result.evidenceSnippet] : null,
+          dates_validated: result.structuralProof.dates_visible_on_page,
+          provider_used: result.providerAttempts.find(a => a.outcome === 'success')?.provider || null,
+          price_type: result.directlyComparable ? 'total_proven' : 'UNKNOWN',
+          extraction_metadata: {
+            goldenPath: true,
+            platform: 'agoda',
+            version: 'agoda-golden-path-v3.1-direct',
+            failureCategory: result.failureCategory,
+            directlyComparable: result.directlyComparable,
+            structuralProof: result.structuralProof,
+            durationMs: result.durationMs,
+            providerAttempts: result.providerAttempts,
+          },
+          updated_at: new Date().toISOString(),
+        };
+        
+        await supabaseClient
+          .from('price_extractions')
+          .update(updateData)
+          .eq('id', extractionId);
+        
+        console.log(`[AGODA] Updated extraction ${extractionId}: status=${result.status}, price=${result.extractedPrice}, comparable=${result.directlyComparable}`);
+      }
+      
+      return new Response(
+        JSON.stringify({
+          success: result.success,
+          result,
+          goldenPath: true,
+          directlyComparable: result.directlyComparable,
+          mode: 'direct_checkout',
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    // ==========================================================================
+    // PRIORITY 2: Hotel URL - discovery mode
+    // ==========================================================================
     
     let targetUrl = url;
     let dbExtractionId = extractionId;
@@ -1133,14 +1484,7 @@ Deno.serve(async (req) => {
     
     if (!targetUrl) {
       return new Response(
-        JSON.stringify({ success: false, error: 'URL or extractionId required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-    
-    if (!checkIn || !checkOut) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'checkIn and checkOut dates required' }),
+        JSON.stringify({ success: false, error: 'URL, checkoutUrl, or extractionId required' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -1191,6 +1535,7 @@ Deno.serve(async (req) => {
         result,
         goldenPath: true,
         directlyComparable: result.directlyComparable,
+        mode: 'hotel_discovery',
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
