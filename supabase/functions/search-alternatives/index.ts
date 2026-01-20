@@ -56,7 +56,7 @@ const AGODA_ONLY_TEST_MODE = false;
 // 
 // MUST BE SET BACK TO false BEFORE PRODUCTION USE
 // ============================================================================
-const AGODA_EXTRACTOR_ONLY_TEST_MODE = true;
+const AGODA_EXTRACTOR_ONLY_TEST_MODE = false;
 
 function isAgodaPlatform(url: string): boolean {
   return url.toLowerCase().includes('agoda.com');
