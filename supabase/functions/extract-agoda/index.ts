@@ -747,8 +747,226 @@ async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise
 }
 
 /**
- * Browserless with click action - attempts to click "Book Now" and capture the resulting page
- * Uses the /scrape endpoint with addScriptTag to execute click logic
+ * Browserless /function API - runs custom Puppeteer code to click booking button
+ * and capture the resulting checkout URL with encrypted params
+ * 
+ * This is the KEY to automating Agoda checkout URL discovery!
+ * The search page has JS-rendered booking buttons that generate checkout URLs 
+ * with encrypted secdat/r0/sarg params only when clicked.
+ */
+async function clickBookingButtonWithBrowserless(searchUrl: string): Promise<FetchResult & { checkoutUrlDiscovered?: string }> {
+  const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
+  
+  if (!browserlessApiKey) {
+    return { content: '', html: '', error: 'Browserless API key not configured' };
+  }
+  
+  try {
+    console.log(`[AGODA] Browserless /function API - clicking booking button on: ${searchUrl}`);
+    
+    // Custom Puppeteer code to:
+    // 1. Navigate to search page
+    // 2. Wait for JS to render booking buttons
+    // 3. Click the first "Book Now" / "Reserve" button
+    // 4. Capture the URL it navigates to (checkout URL with encrypted params)
+    // 5. Get page content after navigation
+    const puppeteerCode = `
+export default async ({ page }) => {
+  let checkoutUrl = null;
+  let pageContent = '';
+  let pageHtml = '';
+  let error = null;
+  
+  try {
+    // Navigate to search page
+    await page.goto('${searchUrl.replace(/'/g, "\\'")}', {
+      waitUntil: 'networkidle2',
+      timeout: 45000,
+    });
+    
+    // Wait for search results to load - look for property cards
+    await page.waitForSelector('[data-selenium="hotel-item"], .PropertyCard, .hotel-item, [data-hotelid], .SearchResultOuter', {
+      timeout: 15000,
+    }).catch(() => console.log('No property cards found'));
+    
+    // Additional wait for JS to fully render booking buttons
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // Selectors for booking buttons (in order of specificity)
+    const bookingSelectors = [
+      // Main booking CTA buttons
+      '[data-selenium="book-button"]',
+      '[data-selenium="reserve-button"]',
+      'button[data-element-name="book-button"]',
+      'a[data-element-name="book-button"]',
+      // Generic book/reserve buttons
+      'button:has-text("Book")',
+      'a:has-text("Book Now")',
+      'button:has-text("Reserve")',
+      'a:has-text("Reserve")',
+      // Property card click areas (often the whole card is clickable)
+      '[data-selenium="hotel-item"] a[href*="/book/"]',
+      '.PropertyCard a[href*="/book/"]',
+      // Price/CTA area buttons
+      '.cta-book-button',
+      '.BookButton',
+      '.book-now-btn',
+      // Fallback: any link with /book/ in it
+      'a[href*="/book/?"]',
+    ];
+    
+    // Try to find a booking button
+    let bookingButton = null;
+    for (const selector of bookingSelectors) {
+      try {
+        bookingButton = await page.$(selector);
+        if (bookingButton) {
+          console.log('Found booking button with selector:', selector);
+          break;
+        }
+      } catch (e) {
+        // Selector syntax might not work, try next
+      }
+    }
+    
+    // Alternative: find any element that might trigger checkout navigation
+    if (!bookingButton) {
+      // Look for elements with book/reserve text
+      bookingButton = await page.evaluateHandle(() => {
+        const elements = document.querySelectorAll('a, button');
+        for (const el of elements) {
+          const text = (el.textContent || '').toLowerCase();
+          if ((text.includes('book') || text.includes('reserve')) && !text.includes('cancel')) {
+            return el;
+          }
+        }
+        return null;
+      });
+      
+      if (bookingButton && (await bookingButton.evaluate(el => el !== null))) {
+        console.log('Found booking element via text search');
+      } else {
+        bookingButton = null;
+      }
+    }
+    
+    if (bookingButton) {
+      // Set up navigation listener before clicking
+      const navigationPromise = page.waitForNavigation({ 
+        waitUntil: 'networkidle2',
+        timeout: 20000 
+      }).catch(() => null);
+      
+      // Click the button
+      await bookingButton.click();
+      console.log('Clicked booking button, waiting for navigation...');
+      
+      // Wait for navigation to complete
+      await navigationPromise;
+      
+      // Capture the current URL (should be checkout URL)
+      checkoutUrl = page.url();
+      console.log('Navigated to:', checkoutUrl);
+      
+      // If we navigated to a /book/ page, wait for content to load
+      if (checkoutUrl && checkoutUrl.includes('/book/')) {
+        await new Promise(r => setTimeout(r, 3000));
+        pageContent = await page.evaluate(() => document.body.innerText);
+        pageHtml = await page.evaluate(() => document.body.innerHTML);
+      }
+    } else {
+      // No button found - try to find checkout links in the static HTML
+      const links = await page.evaluate(() => {
+        const anchors = document.querySelectorAll('a[href*="/book/"]');
+        return Array.from(anchors).slice(0, 5).map(a => a.href);
+      });
+      
+      if (links.length > 0) {
+        checkoutUrl = links[0];
+        console.log('Found checkout link in HTML:', checkoutUrl);
+        
+        // Navigate to the checkout page
+        await page.goto(checkoutUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        await new Promise(r => setTimeout(r, 3000));
+        pageContent = await page.evaluate(() => document.body.innerText);
+        pageHtml = await page.evaluate(() => document.body.innerHTML);
+      } else {
+        error = 'No booking button or checkout link found';
+        // Get current page content for debugging
+        pageContent = await page.evaluate(() => document.body.innerText);
+      }
+    }
+    
+  } catch (err) {
+    error = err.message || 'Unknown error during click navigation';
+    console.error('Error:', error);
+    
+    // Try to get page content even on error
+    try {
+      pageContent = await page.evaluate(() => document.body.innerText);
+    } catch (e) {}
+  }
+  
+  return {
+    data: {
+      checkoutUrl,
+      pageContent: pageContent.substring(0, 300000), // Limit size
+      pageHtml: pageHtml.substring(0, 300000),
+      error,
+      finalUrl: page.url(),
+    },
+  };
+};
+`;
+    
+    const response = await fetch(`https://chrome.browserless.io/function?token=${browserlessApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/javascript' },
+      body: puppeteerCode,
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[AGODA] Browserless /function error ${response.status}: ${errorText.substring(0, 500)}`);
+      return { content: '', html: '', error: `Browserless function error: ${response.status}`, httpStatus: response.status };
+    }
+    
+    const result = await response.json();
+    
+    if (result.data) {
+      const { checkoutUrl, pageContent, pageHtml, error: fnError, finalUrl } = result.data;
+      
+      console.log(`[AGODA] Browserless /function result: checkoutUrl=${checkoutUrl?.substring(0, 80) || 'none'}, contentLength=${pageContent?.length || 0}`);
+      
+      if (fnError && !checkoutUrl) {
+        return { 
+          content: pageContent || '', 
+          html: pageHtml || '', 
+          error: fnError,
+          navigatedUrl: finalUrl,
+        };
+      }
+      
+      return {
+        content: pageContent || '',
+        html: pageHtml || '',
+        httpStatus: 200,
+        navigatedUrl: finalUrl,
+        checkoutUrlDiscovered: checkoutUrl && checkoutUrl.includes('/book/') ? checkoutUrl : undefined,
+      };
+    }
+    
+    return { content: '', html: '', error: 'Browserless function returned no data' };
+    
+  } catch (error) {
+    console.error('[AGODA] Browserless /function error:', error);
+    return { content: '', html: '', error: error instanceof Error ? error.message : 'Browserless function failed' };
+  }
+}
+
+/**
+ * Legacy method - fetch with wait selector (doesn't click)
+ * Kept for fallback compatibility
  */
 async function fetchWithBrowserlessAndClick(url: string): Promise<FetchResult> {
   const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
@@ -758,7 +976,7 @@ async function fetchWithBrowserlessAndClick(url: string): Promise<FetchResult> {
   }
   
   try {
-    console.log(`[AGODA] Browserless with CLICK action: ${url}`);
+    console.log(`[AGODA] Browserless legacy scrape: ${url}`);
     
     // Use Browserless /scrape API with waitForSelector instead of waitFor
     const response = await fetch(`https://chrome.browserless.io/scrape?token=${browserlessApiKey}`, {
@@ -782,7 +1000,7 @@ async function fetchWithBrowserlessAndClick(url: string): Promise<FetchResult> {
     
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[AGODA] Browserless scrape+click error ${response.status}: ${errorText.substring(0, 300)}`);
+      console.error(`[AGODA] Browserless scrape error ${response.status}: ${errorText.substring(0, 300)}`);
       return { content: '', html: '', error: `Browserless scrape error: ${response.status}`, httpStatus: response.status };
     }
     
@@ -808,7 +1026,7 @@ async function fetchWithBrowserlessAndClick(url: string): Promise<FetchResult> {
       text = JSON.stringify(result);
     }
     
-    console.log(`[AGODA] Browserless scrape+click result: contentLength: ${text.length}`);
+    console.log(`[AGODA] Browserless scrape result: contentLength: ${text.length}`);
     
     return { 
       content: text.trim(), 
@@ -817,8 +1035,8 @@ async function fetchWithBrowserlessAndClick(url: string): Promise<FetchResult> {
     };
     
   } catch (error) {
-    console.error('[AGODA] Browserless scrape+click error:', error);
-    return { content: '', html: '', error: error instanceof Error ? error.message : 'Browserless scrape+click failed' };
+    console.error('[AGODA] Browserless scrape error:', error);
+    return { content: '', html: '', error: error instanceof Error ? error.message : 'Browserless scrape failed' };
   }
 }
 
@@ -1367,7 +1585,7 @@ async function extractFromAgoda(
           break;
         }
         
-        // Step 4: Look for checkout links on search page
+        // Step 4: First try static link discovery on search page
         if (searchPageHtml || searchPageContent) {
           const searchCheckoutLink = findCheckoutLink(searchPageHtml || searchPageContent, searchUrlData.searchUrl);
           
@@ -1473,43 +1691,196 @@ async function extractFromAgoda(
               break;
             }
           } else {
-            console.log('[AGODA] No checkout link found on search page either');
+            console.log('[AGODA] No static checkout link found on search page - trying click navigation');
           }
         }
-      } else {
-        console.log('[AGODA] Could not extract property ID from hotel page - cannot use search workflow');
-      }
-      
-      // Fallback: Try Browserless click navigation as last resort
-      console.log('[AGODA] Phase 2C: Trying Browserless click navigation as last resort');
-      
-      const clickResult = await fetchWithBrowserlessAndClick(urlData.hotelUrlWithParams);
-      
-      if (!clickResult.error && clickResult.navigatedUrl && clickResult.navigatedUrl.includes('/book/')) {
-        console.log(`[AGODA] Browserless click navigated to: ${clickResult.navigatedUrl.substring(0, 100)}...`);
         
-        result.structuralProof.checkout_link_found = true;
-        result.structuralProof.checkout_url_found = clickResult.navigatedUrl;
-        result.structuralProof.final_url_fetched = clickResult.navigatedUrl;
-        result.structuralProof.checkout_page_reached = true;
+        // ======================================================================
+        // PHASE 2B-5: Browser click navigation on search page
+        // ======================================================================
+        // The search page has JS-rendered booking buttons - click them to discover checkout URL
         
-        const attemptTrace: ProviderAttemptTrace = {
+        console.log('[AGODA] Phase 2B-5: Using Browserless /function API to click booking button');
+        
+        const clickResult = await clickBookingButtonWithBrowserless(searchUrlData.searchUrl);
+        
+        const clickAttemptTrace: ProviderAttemptTrace = {
           provider: 'browserless',
           attempted: true,
           attemptIndex: providerAttempts.length,
           startedAt: new Date().toISOString(),
           endedAt: new Date().toISOString(),
-          outcome: 'success',
-          httpStatus: 200,
-          contentLength: clickResult.content.length,
-          errorMessage: null,
-          urlUsed: clickResult.navigatedUrl,
+          outcome: clickResult.checkoutUrlDiscovered ? 'success' : 'navigation_failed',
+          httpStatus: clickResult.httpStatus || null,
+          contentLength: clickResult.content?.length || null,
+          errorMessage: clickResult.error || null,
+          urlUsed: searchUrlData.searchUrl,
         };
-        providerAttempts.push(attemptTrace);
+        providerAttempts.push(clickAttemptTrace);
+        
+        if (clickResult.checkoutUrlDiscovered) {
+          console.log(`[AGODA] Click navigation discovered checkout URL: ${clickResult.checkoutUrlDiscovered.substring(0, 120)}...`);
+          
+          result.structuralProof.checkout_link_found = true;
+          result.structuralProof.checkout_url_found = clickResult.checkoutUrlDiscovered;
+          result.structuralProof.final_url_fetched = clickResult.checkoutUrlDiscovered;
+          result.structuralProof.checkout_page_reached = true;
+          
+          // Extract price from the page content captured after click
+          if (clickResult.content && clickResult.content.length >= MIN_CONTENT_LENGTH) {
+            const priceResult = extractPrice(clickResult.content, nights);
+            
+            if (priceResult.extracted && priceResult.totalPrice) {
+              result.success = true;
+              result.status = priceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+              result.failureCategory = 'success';
+              result.extractedPrice = priceResult.totalPrice;
+              result.currency = priceResult.currency;
+              result.includesTaxesFees = priceResult.includesTaxesFees;
+              result.directlyComparable = priceResult.directlyComparable;
+              result.evidenceSnippet = priceResult.evidenceSnippet;
+              
+              result.structuralProof.total_price_label_found = priceResult.totalLabelFound;
+              result.structuralProof.room_price_nights_found = priceResult.roomPriceNights !== null;
+              result.structuralProof.directly_comparable = priceResult.directlyComparable;
+              result.structuralProof.currency_detected = priceResult.currency;
+              result.structuralProof.failure_category = 'success';
+              result.structuralProof.extraction_method = `click_discover_${priceResult.extractionMethod}`;
+              result.structuralProof.selector_matched = priceResult.selectorMatched;
+              
+              result.durationMs = Date.now() - startTime;
+              result.providerAttempts = providerAttempts;
+              
+              console.log(`[AGODA] SUCCESS via click discovery: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+              return result;
+            }
+            
+            console.log('[AGODA] Click navigation got checkout page but price extraction failed');
+          } else {
+            // Content too short from click - try fetching the discovered checkout URL separately
+            console.log('[AGODA] Click content insufficient - fetching discovered checkout URL separately');
+            
+            for (const provider of PROVIDER_ORDER) {
+              const attemptTrace: ProviderAttemptTrace = {
+                provider,
+                attempted: true,
+                attemptIndex: providerAttempts.length,
+                startedAt: new Date().toISOString(),
+                endedAt: null,
+                outcome: 'navigation_failed',
+                httpStatus: null,
+                contentLength: null,
+                errorMessage: null,
+                urlUsed: clickResult.checkoutUrlDiscovered,
+              };
+              
+              let fetchResult: FetchResult;
+              
+              switch (provider) {
+                case 'browserless':
+                  fetchResult = await fetchWithBrowserless(clickResult.checkoutUrlDiscovered!, 8000);
+                  break;
+                case 'zyte':
+                  fetchResult = await fetchWithZyte(clickResult.checkoutUrlDiscovered!);
+                  break;
+                case 'firecrawl':
+                  fetchResult = await fetchWithFirecrawl(clickResult.checkoutUrlDiscovered!, 7000);
+                  break;
+              }
+              
+              attemptTrace.endedAt = new Date().toISOString();
+              attemptTrace.httpStatus = fetchResult.httpStatus || null;
+              attemptTrace.contentLength = fetchResult.content.length;
+              
+              if (fetchResult.error) {
+                attemptTrace.errorMessage = fetchResult.error;
+                attemptTrace.outcome = 'navigation_failed';
+                providerAttempts.push(attemptTrace);
+                continue;
+              }
+              
+              if (fetchResult.content.length < MIN_CONTENT_LENGTH) {
+                attemptTrace.outcome = 'insufficient_content';
+                attemptTrace.errorMessage = `Content too short: ${fetchResult.content.length}`;
+                providerAttempts.push(attemptTrace);
+                continue;
+              }
+              
+              attemptTrace.outcome = 'success';
+              providerAttempts.push(attemptTrace);
+              
+              console.log(`[AGODA] ${provider} succeeded for discovered checkout URL: ${fetchResult.content.length} chars`);
+              
+              // Extract price
+              const priceResult = extractPrice(fetchResult.content, nights);
+              
+              if (priceResult.extracted && priceResult.totalPrice) {
+                result.success = true;
+                result.status = priceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+                result.failureCategory = 'success';
+                result.extractedPrice = priceResult.totalPrice;
+                result.currency = priceResult.currency;
+                result.includesTaxesFees = priceResult.includesTaxesFees;
+                result.directlyComparable = priceResult.directlyComparable;
+                result.evidenceSnippet = priceResult.evidenceSnippet;
+                
+                result.structuralProof.total_price_label_found = priceResult.totalLabelFound;
+                result.structuralProof.room_price_nights_found = priceResult.roomPriceNights !== null;
+                result.structuralProof.directly_comparable = priceResult.directlyComparable;
+                result.structuralProof.currency_detected = priceResult.currency;
+                result.structuralProof.failure_category = 'success';
+                result.structuralProof.extraction_method = `click_refetch_${priceResult.extractionMethod}`;
+                result.structuralProof.selector_matched = priceResult.selectorMatched;
+                
+                result.durationMs = Date.now() - startTime;
+                result.providerAttempts = providerAttempts;
+                
+                console.log(`[AGODA] SUCCESS via click discovery + refetch: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+                return result;
+              }
+              
+              break;
+            }
+          }
+        } else if (clickResult.error) {
+          console.log(`[AGODA] Click navigation failed: ${clickResult.error}`);
+        } else {
+          console.log('[AGODA] Click navigation did not discover checkout URL');
+        }
+      } else {
+        console.log('[AGODA] Could not extract property ID from hotel page - cannot use search workflow');
+      }
+      
+      // Fallback: Try Browserless click navigation on hotel page as last resort
+      console.log('[AGODA] Phase 2C: Trying Browserless click navigation on hotel page');
+      
+      const hotelClickResult = await clickBookingButtonWithBrowserless(urlData.hotelUrlWithParams);
+      
+      const hotelClickAttemptTrace: ProviderAttemptTrace = {
+        provider: 'browserless',
+        attempted: true,
+        attemptIndex: providerAttempts.length,
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        outcome: hotelClickResult.checkoutUrlDiscovered ? 'success' : 'navigation_failed',
+        httpStatus: hotelClickResult.httpStatus || null,
+        contentLength: hotelClickResult.content?.length || null,
+        errorMessage: hotelClickResult.error || null,
+        urlUsed: urlData.hotelUrlWithParams,
+      };
+      providerAttempts.push(hotelClickAttemptTrace);
+      
+      if (hotelClickResult.checkoutUrlDiscovered) {
+        console.log(`[AGODA] Hotel page click discovered checkout URL: ${hotelClickResult.checkoutUrlDiscovered.substring(0, 120)}...`);
+        
+        result.structuralProof.checkout_link_found = true;
+        result.structuralProof.checkout_url_found = hotelClickResult.checkoutUrlDiscovered;
+        result.structuralProof.final_url_fetched = hotelClickResult.checkoutUrlDiscovered;
+        result.structuralProof.checkout_page_reached = true;
         
         // Extract price from the page content after click navigation
-        if (clickResult.content && clickResult.content.length >= MIN_CONTENT_LENGTH) {
-          const priceResult = extractPrice(clickResult.content, nights);
+        if (hotelClickResult.content && hotelClickResult.content.length >= MIN_CONTENT_LENGTH) {
+          const priceResult = extractPrice(hotelClickResult.content, nights);
           
           if (priceResult.extracted && priceResult.totalPrice) {
             result.success = true;
@@ -1526,22 +1897,22 @@ async function extractFromAgoda(
             result.structuralProof.directly_comparable = priceResult.directlyComparable;
             result.structuralProof.currency_detected = priceResult.currency;
             result.structuralProof.failure_category = 'success';
-            result.structuralProof.extraction_method = `click_navigate_${priceResult.extractionMethod}`;
+            result.structuralProof.extraction_method = `hotel_click_${priceResult.extractionMethod}`;
             result.structuralProof.selector_matched = priceResult.selectorMatched;
             
             result.durationMs = Date.now() - startTime;
             result.providerAttempts = providerAttempts;
             
-            console.log(`[AGODA] SUCCESS via click navigation: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
+            console.log(`[AGODA] SUCCESS via hotel page click: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
             return result;
           }
         }
         
-        console.log('[AGODA] Click navigated to /book/ but price extraction failed');
-      } else if (clickResult.error) {
-        console.log(`[AGODA] Browserless click failed: ${clickResult.error}`);
+        console.log('[AGODA] Hotel page click navigated to /book/ but price extraction failed');
+      } else if (hotelClickResult.error) {
+        console.log(`[AGODA] Hotel page click failed: ${hotelClickResult.error}`);
       } else {
-        console.log(`[AGODA] Browserless click did not navigate to /book/: ${clickResult.navigatedUrl?.substring(0, 80) || 'no URL'}`);
+        console.log('[AGODA] Hotel page click did not discover checkout URL');
       }
       
       // No checkout link found - fall through to extract from hotel page directly
