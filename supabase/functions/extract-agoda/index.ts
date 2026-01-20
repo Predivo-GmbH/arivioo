@@ -539,55 +539,11 @@ function extractPrice(content: string, expectedNights: number): PriceExtractionR
   }
   
   // ==========================================================================
-  // PATTERN 3: Nightly rate × nights (property page fallback)
+  // PATTERN 3: DISABLED - No nightly rate computation
+  // We only accept TOTAL prices. Nightly rates are rejected.
   // ==========================================================================
   
-  const nightlyPatterns: Array<{ pattern: RegExp; name: string }> = [
-    { pattern: /(?:USD|US\$)\s*([\d,]+(?:\.\d{2})?)\s*(?:\n\s*)?per\s*night/i, name: 'usd_per_night' },
-    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:per\s*night|\/\s*night)/i, name: 'dollar_per_night' },
-    { pattern: /per\s*night[:\s]*(?:USD|US\$|)\s*([\d,]+(?:\.\d{2})?)/i, name: 'per_night_amount' },
-    { pattern: /([A-Z]{3})\s*([\d,]+(?:\.\d{2})?)\s*\/\s*night/i, name: 'currency_slash_night' },
-  ];
-  
-  for (const { pattern, name } of nightlyPatterns) {
-    const match = content.match(pattern);
-    if (match) {
-      let currency = 'USD';
-      let amountStr: string;
-      
-      if (match[2]) {
-        currency = match[1].toUpperCase();
-        amountStr = match[2];
-      } else {
-        amountStr = match[1];
-      }
-      
-      const nightlyRate = parseCurrencyAmount(amountStr);
-      
-      if (nightlyRate && nightlyRate >= 10 && nightlyRate <= 20000) {
-        const totalFromNightly = nightlyRate * expectedNights;
-        
-        result.extracted = true;
-        result.totalPrice = totalFromNightly;
-        result.currency = currency;
-        result.directlyComparable = false;
-        result.includesTaxesFees = false;
-        result.extractionMethod = 'nightly_rate_computed';
-        result.selectorMatched = name;
-        
-        const matchIndex = content.indexOf(match[0]);
-        const start = Math.max(0, matchIndex - 20);
-        const end = Math.min(content.length, matchIndex + match[0].length + 30);
-        result.evidenceSnippet = content.slice(start, end).replace(/\s+/g, ' ').trim();
-        
-        console.log(`[AGODA] selector_matched: ${name}`);
-        console.log(`[AGODA] Nightly rate: ${currency} ${nightlyRate} × ${expectedNights} = ${totalFromNightly}`);
-        return result;
-      }
-    }
-  }
-  
-  console.log('[AGODA] No price found');
+  console.log('[AGODA] No TOTAL price found - nightly rate computation disabled');
   return result;
 }
 
