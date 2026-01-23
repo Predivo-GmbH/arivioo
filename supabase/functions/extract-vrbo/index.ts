@@ -544,9 +544,8 @@ async function extractWithZyte(datedUrl: string, nights: number): Promise<{
 
     console.log(`[VRBO] Sending Zyte request with ${requestBody.actions.length} actions`);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s total timeout
-
+    // No artificial timeout - let Zyte complete naturally
+    // Edge function execution limits are the only constraint
     const response = await fetch('https://api.zyte.com/v1/extract', {
       method: 'POST',
       headers: {
@@ -554,10 +553,7 @@ async function extractWithZyte(datedUrl: string, nights: number): Promise<{
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody),
-      signal: controller.signal,
     });
-
-    clearTimeout(timeoutId);
 
     result.httpStatus = response.status;
 
