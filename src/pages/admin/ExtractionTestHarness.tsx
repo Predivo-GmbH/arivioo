@@ -23,7 +23,7 @@ import {
 import { toast } from 'sonner';
 
 interface ExtractionResult {
-  platform: 'airbnb' | 'expedia';
+  platform: 'airbnb' | 'expedia' | 'agoda';
   status: string;
   terminal_status?: string;
   extracted_price?: number | null;
@@ -58,6 +58,11 @@ interface ExtractionResult {
   expedia_trace?: Record<string, any>;
   date_injection?: Record<string, any>;
   error?: string;
+  // Agoda fields
+  checkout_url_discovered?: string | null;
+  discovery_method?: string | null;
+  html_length?: number;
+  extraction_method?: string;
 }
 
 interface DerivedRequest {
@@ -76,11 +81,13 @@ interface TestRun {
   admin_email: string;
   airbnb_url: string;
   expedia_url: string | null;
+  agoda_url?: string | null;
   request_params: Record<string, any>;
   derived_request?: DerivedRequest;
   results_json: {
     airbnb?: ExtractionResult;
     expedia?: ExtractionResult;
+    agoda?: ExtractionResult;
     request_dates?: { check_in: string; check_out: string; adults: number };
   } | null;
   status: string;
@@ -92,6 +99,7 @@ export default function ExtractionTestHarness() {
   const { getToken, admin } = useAdminAuth();
   const [airbnbUrl, setAirbnbUrl] = useState('');
   const [expediaUrl, setExpediaUrl] = useState('');
+  const [agodaUrl, setAgodaUrl] = useState('');
   const [skipDiscovery, setSkipDiscovery] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
   const [currentResult, setCurrentResult] = useState<TestRun | null>(null);
@@ -137,6 +145,7 @@ export default function ExtractionTestHarness() {
         body: {
           airbnb_url: airbnbUrl.trim(),
           expedia_url: expediaUrl.trim() || null,
+          agoda_url: agodaUrl.trim() || null,
           skip_discovery: skipDiscovery,
         },
       });
@@ -158,12 +167,14 @@ export default function ExtractionTestHarness() {
     setCurrentResult(run);
     setAirbnbUrl(run.airbnb_url);
     setExpediaUrl(run.expedia_url || '');
+    setAgodaUrl(run.agoda_url || '');
     setShowHistory(false);
   };
 
   const rerunTest = async (run: TestRun) => {
     setAirbnbUrl(run.airbnb_url);
     setExpediaUrl(run.expedia_url || '');
+    setAgodaUrl(run.agoda_url || '');
     setShowHistory(false);
     // Trigger run after state updates
     setTimeout(() => runTest(), 100);
@@ -274,6 +285,19 @@ export default function ExtractionTestHarness() {
               </p>
             </div>
 
+            <div className="space-y-2">
+              <Label htmlFor="agoda-url">Agoda URL (optional)</Label>
+              <Input
+                id="agoda-url"
+                placeholder="https://www.agoda.com/... or /book/... checkout URL"
+                value={agodaUrl}
+                onChange={(e) => setAgodaUrl(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Hotel page or direct checkout URL (for total price testing)
+              </p>
+            </div>
+
             <div className="flex items-center space-x-2">
               <Checkbox
                 id="skip-discovery"
@@ -281,7 +305,7 @@ export default function ExtractionTestHarness() {
                 onCheckedChange={(checked) => setSkipDiscovery(!!checked)}
               />
               <Label htmlFor="skip-discovery" className="text-sm">
-                Skip discovery, use provided Expedia URL
+                Skip discovery, use provided URLs directly
               </Label>
             </div>
 
@@ -389,6 +413,26 @@ export default function ExtractionTestHarness() {
                         <RefreshCw className={`h-4 w-4 mr-2 ${isRunning ? 'animate-spin' : ''}`} />
                         Retry Expedia Now
                       </Button>
+                    )}
+                  </div>
+                )}
+
+                {/* Agoda Result */}
+                {currentResult.results_json?.agoda && (
+                  <div className="space-y-3">
+                    <ExtractionResultPanel 
+                      result={currentResult.results_json.agoda} 
+                      title="Agoda Extraction"
+                      onCopy={copyToClipboard}
+                    />
+                    {/* Show discovered checkout URL if available */}
+                    {currentResult.results_json.agoda.checkout_url_discovered && (
+                      <div className="bg-muted/50 rounded-lg p-3 text-sm">
+                        <span className="text-muted-foreground">Checkout URL discovered:</span>
+                        <p className="font-mono text-xs break-all mt-1">
+                          {currentResult.results_json.agoda.checkout_url_discovered}
+                        </p>
+                      </div>
                     )}
                   </div>
                 )}
