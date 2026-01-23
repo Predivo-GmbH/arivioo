@@ -401,7 +401,9 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
 }
 
 // ============================================================================
-// SINGLE-REQUEST ZYTE EXTRACTION WITH ONE CLICK
+// TWO-PHASE ZYTE EXTRACTION
+// Phase 1: Load property page, click "Begin booking"
+// Phase 2: Load resulting checkout page, extract total
 // ============================================================================
 
 async function extractWithZyte(datedUrl: string, nights: number): Promise<{
@@ -438,169 +440,166 @@ async function extractWithZyte(datedUrl: string, nights: number): Promise<{
       return result;
     }
 
-    console.log(`[VRBO] Zyte request: ${datedUrl}`);
-
     const zyteAuth = btoa(apiKey + ':');
 
-    // JavaScript to click "Begin booking" / "Reserve" / "Book" button
-    // This is the ONLY click we need - on the property page with dates
-    const clickBeginBookingJS = `
+    // Helper to make Zyte requests
+    const zyteRequest = async (url: string, actions: any[] = []) => {
+      const body: any = {
+        url,
+        browserHtml: true,
+        javascript: true,
+      };
+      if (actions.length > 0) {
+        body.actions = actions;
+      }
+      const resp = await fetch('https://api.zyte.com/v1/extract', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${zyteAuth}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      return resp;
+    };
+
+    // JavaScript to click booking button
+    const clickBookingJS = `
       (function() {
-        const result = { clicked: false, buttonText: '', foundButtons: [], error: null };
+        const r = { clicked: false, buttonText: '', error: null };
         try {
-          const allClickables = Array.from(document.querySelectorAll('button, a[role="button"], a.uitk-button, [data-stid*="submit"]'));
-          
-          // Collect all button texts for debugging
-          for (const el of allClickables) {
-            const text = (el.textContent || '').trim();
-            if (text.length > 0 && text.length < 50) {
-              result.foundButtons.push(text.slice(0, 30));
-            }
-          }
-          
-          // Priority 1: "Begin booking" (exact or contains)
-          for (const el of allClickables) {
-            const text = (el.textContent || '').trim().toLowerCase();
+          const btns = Array.from(document.querySelectorAll('button, a[role="button"], a.uitk-button'));
+          for (const btn of btns) {
+            const text = (btn.textContent || '').trim().toLowerCase();
             if (text.includes('begin booking')) {
-              el.scrollIntoView({ behavior: 'instant', block: 'center' });
-              el.click();
-              result.clicked = true;
-              result.buttonText = text.slice(0, 50);
-              return JSON.stringify(result);
+              btn.scrollIntoView({ block: 'center' });
+              btn.click();
+              r.clicked = true;
+              r.buttonText = text.slice(0, 40);
+              return JSON.stringify(r);
             }
           }
-          
-          // Priority 2: "Reserve" button (common on VRBO)
-          for (const el of allClickables) {
-            const text = (el.textContent || '').trim().toLowerCase();
+          for (const btn of btns) {
+            const text = (btn.textContent || '').trim().toLowerCase();
             if (text === 'reserve' || text === 'reserve now') {
-              el.scrollIntoView({ behavior: 'instant', block: 'center' });
-              el.click();
-              result.clicked = true;
-              result.buttonText = text.slice(0, 50);
-              return JSON.stringify(result);
+              btn.scrollIntoView({ block: 'center' });
+              btn.click();
+              r.clicked = true;
+              r.buttonText = text.slice(0, 40);
+              return JSON.stringify(r);
             }
           }
-          
-          // Priority 3: Primary "Book" button in pricing card
-          const priceCard = document.querySelector('[data-stid="property-price-summary"], [data-stid="book-now-section"], [class*="BookingCard"], [class*="price-card"]');
-          if (priceCard) {
-            const btns = priceCard.querySelectorAll('button, a[role="button"]');
-            for (const btn of btns) {
-              const text = (btn.textContent || '').trim().toLowerCase();
-              if (text.includes('book') || text.includes('continue')) {
-                btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-                btn.click();
-                result.clicked = true;
-                result.buttonText = text.slice(0, 50);
-                return JSON.stringify(result);
-              }
+          for (const btn of btns) {
+            const text = (btn.textContent || '').trim().toLowerCase();
+            if (text.includes('book') && !text.includes('facebook')) {
+              btn.scrollIntoView({ block: 'center' });
+              btn.click();
+              r.clicked = true;
+              r.buttonText = text.slice(0, 40);
+              return JSON.stringify(r);
             }
           }
-          
-          // Priority 4: data-stid submit button
-          const submitBtn = document.querySelector('button[data-stid="submit-hotel-reserve"]');
-          if (submitBtn) {
-            submitBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
-            submitBtn.click();
-            result.clicked = true;
-            result.buttonText = 'submit-hotel-reserve';
-            return JSON.stringify(result);
-          }
-          
-          // Priority 5: Any primary button with booking text
-          for (const el of allClickables) {
-            const text = (el.textContent || '').trim().toLowerCase();
-            const isPrimary = el.classList.contains('uitk-button-primary') || el.classList.contains('primary');
-            if (isPrimary && (text.includes('book') || text.includes('continue') || text.includes('proceed'))) {
-              el.scrollIntoView({ behavior: 'instant', block: 'center' });
-              el.click();
-              result.clicked = true;
-              result.buttonText = text.slice(0, 50);
-              return JSON.stringify(result);
-            }
-          }
-          
-          result.error = 'No booking button found';
+          r.error = 'No booking button found';
         } catch (e) {
-          result.error = e.message || String(e);
+          r.error = e.message || String(e);
         }
-        return JSON.stringify(result);
+        return JSON.stringify(r);
       })();
     `;
 
-    // Single Zyte request with browser actions.
-    // Keep it minimal - just load page, wait for hydration, click, wait.
-    const requestBody = {
-      url: datedUrl,
-      browserHtml: true,
-      javascript: true,
-      actions: [
-        { action: 'waitForTimeout', timeout: 10 }, // Wait for page hydration (max 15)
-        { action: 'evaluate', source: clickBeginBookingJS }, // Click booking button
-        { action: 'waitForTimeout', timeout: 15 }, // Wait for checkout (max 15)
-      ],
-    };
+    // =========================================================================
+    // PHASE 1: Load property page with dates, click booking button
+    // =========================================================================
+    console.log(`[VRBO] PHASE 1: Loading ${datedUrl}`);
 
-    console.log(`[VRBO] Sending Zyte request with ${requestBody.actions.length} actions`);
+    const phase1Response = await zyteRequest(datedUrl, [
+      { action: 'waitForTimeout', timeout: 8 },
+      { action: 'evaluate', source: clickBookingJS },
+      { action: 'waitForTimeout', timeout: 10 },
+    ]);
 
-    // No artificial timeout - let Zyte complete naturally
-    // Edge function execution limits are the only constraint
-    const response = await fetch('https://api.zyte.com/v1/extract', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${zyteAuth}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    });
+    if (!phase1Response.ok) {
+      const errText = await phase1Response.text();
+      result.error = `Phase 1 HTTP ${phase1Response.status}: ${errText.slice(0, 200)}`;
+      result.httpStatus = phase1Response.status;
+      result.durationMs = Date.now() - start;
+      console.log(`[VRBO] PHASE 1 failed: ${result.error}`);
+      return result;
+    }
 
-    result.httpStatus = response.status;
+    const phase1Data = await phase1Response.json();
+    const phase1Html = phase1Data.browserHtml || '';
+    const phase1Url = phase1Data.url || datedUrl;
+    const phase1Actions = phase1Data.actions || [];
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.log(`[VRBO] Zyte HTTP error: ${response.status} - ${errText.slice(0, 200)}`);
-      result.error = `Zyte HTTP ${response.status}: ${errText.slice(0, 200)}`;
+    console.log(`[VRBO] PHASE 1 complete: ${phase1Html.length} bytes, url=${phase1Url}`);
+    console.log(`[VRBO] PHASE 1 actions: ${JSON.stringify(phase1Actions).slice(0, 300)}`);
+
+    result.propertyPageReached = phase1Html.length > 50000;
+    result.httpStatus = phase1Response.status;
+
+    // Check if we already reached checkout
+    const phase1Content = phase1Html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const alreadyAtCheckout = isCheckoutSessionUrl(phase1Url) || hasCheckoutSignals(phase1Content);
+
+    if (alreadyAtCheckout) {
+      console.log(`[VRBO] PHASE 1 already at checkout!`);
+      result.html = phase1Html;
+      result.content = phase1Content;
+      result.finalUrl = phase1Url;
+      result.checkoutSessionReached = true;
+      result.actionResults = phase1Actions;
+      result.success = true;
       result.durationMs = Date.now() - start;
       return result;
     }
 
-    const data = await response.json();
-    result.html = data.browserHtml || '';
-    result.content = result.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    result.finalUrl = data.url || datedUrl;
-    result.actionResults = data.actions || [];
+    // =========================================================================
+    // PHASE 2: Click again with longer wait for drawer/modal
+    // =========================================================================
+    console.log(`[VRBO] PHASE 2: Re-attempting click with longer wait`);
 
-    console.log(`[VRBO] Zyte response: ${result.html.length} bytes, finalUrl=${result.finalUrl}`);
-    console.log(`[VRBO] Action results: ${JSON.stringify(result.actionResults).slice(0, 500)}`);
+    const phase2Response = await zyteRequest(phase1Url, [
+      { action: 'waitForTimeout', timeout: 5 },
+      { action: 'evaluate', source: clickBookingJS },
+      { action: 'waitForTimeout', timeout: 15 },
+    ]);
 
-    // Check block signals
-    const blockSignal = detectBlockSignals(result.content);
-    if (blockSignal) {
-      console.log(`[VRBO] Block detected: ${blockSignal}`);
-      result.error = `Blocked: ${blockSignal}`;
+    if (!phase2Response.ok) {
+      console.log(`[VRBO] PHASE 2 failed, using PHASE 1 result`);
+      await phase2Response.text();
+      result.html = phase1Html;
+      result.content = phase1Content;
+      result.finalUrl = phase1Url;
+      result.actionResults = phase1Actions;
+      result.success = result.propertyPageReached;
       result.durationMs = Date.now() - start;
       return result;
     }
 
-    // Check if we reached property page (basic sanity check)
-    result.propertyPageReached = result.html.length > 50000;
+    const phase2Data = await phase2Response.json();
+    const phase2Html = phase2Data.browserHtml || '';
+    const phase2Url = phase2Data.url || phase1Url;
+    const phase2Actions = phase2Data.actions || [];
 
-    // Check if we reached checkout (URL or content signals)
-    result.checkoutSessionReached = isCheckoutSessionUrl(result.finalUrl || '') || hasCheckoutSignals(result.content);
+    console.log(`[VRBO] PHASE 2 complete: ${phase2Html.length} bytes, url=${phase2Url}`);
 
-    console.log(`[VRBO] property_reached=${result.propertyPageReached}, checkout_reached=${result.checkoutSessionReached}`);
+    const phase2Content = phase2Html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const phase2AtCheckout = isCheckoutSessionUrl(phase2Url) || hasCheckoutSignals(phase2Content);
 
+    result.html = phase2Html;
+    result.content = phase2Content;
+    result.finalUrl = phase2Url;
+    result.checkoutSessionReached = phase2AtCheckout;
+    result.actionResults = [...phase1Actions, ...phase2Actions];
     result.success = result.propertyPageReached;
     result.durationMs = Date.now() - start;
 
+    console.log(`[VRBO] checkout_reached=${result.checkoutSessionReached}`);
+
   } catch (e) {
     result.durationMs = Date.now() - start;
-    if (e instanceof Error && e.name === 'AbortError') {
-      result.error = 'Timeout after 120s';
-    } else {
-      result.error = e instanceof Error ? e.message : String(e);
-    }
+    result.error = e instanceof Error ? e.message : String(e);
     console.log(`[VRBO] Zyte error: ${result.error}`);
   }
 
