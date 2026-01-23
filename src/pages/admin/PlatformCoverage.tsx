@@ -1,4 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+  DragStartEvent,
+  DragOverlay,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import {
   CheckCircle2,
   XCircle,
@@ -18,6 +36,7 @@ import {
   History,
   Loader2,
   Info,
+  GripVertical,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -40,6 +59,8 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAdminAuth } from '@/hooks/useAdminAuth';
 import { HealthIndicator, SystemHealthBanner } from '@/components/admin/HealthIndicator';
 import { useSystemHealth } from '@/hooks/useSystemHealth';
+import { SortablePlatformRow } from '@/components/admin/SortablePlatformRow';
+import { toast } from '@/hooks/use-toast';
 
 interface PlatformAdapter {
   id: string;
@@ -361,7 +382,21 @@ export default function PlatformCoverage() {
   const [error, setError] = useState<string | null>(null);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [showDebug, setShowDebug] = useState(false);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [isSavingOrder, setIsSavingOrder] = useState(false);
   const { health: systemHealth, hasAlerts } = useSystemHealth();
+
+  // DnD sensors for pointer and keyboard
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   // GOLDEN PATH: Fetch via admin-dashboard edge function with service role
   // This bypasses RLS and uses the authoritative data source
@@ -557,6 +592,95 @@ export default function PlatformCoverage() {
     }
   };
 
+  // Handle drag start
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(event.active.id as string);
+  };
+
+  // Handle drag end - reorder within same tier only
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveId(null);
+    
+    if (!over || active.id === over.id) return;
+
+    const activePlatform = platforms.find(p => p.id === active.id);
+    const overPlatform = platforms.find(p => p.id === over.id);
+    
+    if (!activePlatform || !overPlatform) return;
+    
+    // Only allow reordering within the same tier
+    if (activePlatform.coverage_tier !== overPlatform.coverage_tier) {
+      toast({
+        title: "Cannot move between tiers",
+        description: "Platforms can only be reordered within the same tier.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Get platforms in the same tier
+    const tier = activePlatform.coverage_tier;
+    const tierPlatforms = platforms.filter(p => p.coverage_tier === tier);
+    const otherPlatforms = platforms.filter(p => p.coverage_tier !== tier);
+    
+    const oldIndex = tierPlatforms.findIndex(p => p.id === active.id);
+    const newIndex = tierPlatforms.findIndex(p => p.id === over.id);
+    
+    if (oldIndex === -1 || newIndex === -1) return;
+    
+    // Reorder within tier
+    const reorderedTier = arrayMove(tierPlatforms, oldIndex, newIndex);
+    
+    // Calculate new promotion_scores for this tier (higher score = higher in list)
+    const baseScore = tier === 'A' ? 1000 : tier === 'B' ? 500 : 100;
+    const updatedTier = reorderedTier.map((p, idx) => ({
+      ...p,
+      promotion_score: baseScore - idx,
+    }));
+    
+    // Update local state immediately for smooth UX
+    const newPlatforms = [...otherPlatforms, ...updatedTier];
+    setPlatforms(newPlatforms);
+    
+    // Persist to database
+    setIsSavingOrder(true);
+    try {
+      const token = getToken();
+      if (!token) throw new Error('Not authenticated');
+      
+      // Update each platform's promotion_score
+      const updates = updatedTier.map(p => ({
+        id: p.id,
+        promotion_score: p.promotion_score,
+      }));
+      
+      const { error: updateError } = await supabase.functions.invoke('admin-dashboard/reorder', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: { updates },
+      });
+      
+      if (updateError) throw updateError;
+      
+      toast({
+        title: "Order saved",
+        description: `${tier === 'A' ? 'Tier A' : tier === 'B' ? 'Tier B' : 'Tier C'} platform order updated.`,
+      });
+    } catch (err: any) {
+      console.error('Failed to save order:', err);
+      toast({
+        title: "Failed to save order",
+        description: err.message || "Please try again.",
+        variant: "destructive",
+      });
+      // Revert on error
+      fetchData();
+    } finally {
+      setIsSavingOrder(false);
+    }
+  };
+
   // Sort platforms: Tier A first, then Tier B, then Tier C (sorted by promotion_score descending)
   const sortedPlatforms = [...platforms].sort((a, b) => {
     // First sort by tier: A > B > C
@@ -566,12 +690,7 @@ export default function PlatformCoverage() {
     
     if (aTier !== bTier) return aTier - bTier;
     
-    // Within same tier, sort alphabetically for A and B
-    if (a.coverage_tier !== 'C') {
-      return (a.platform_name || '').localeCompare(b.platform_name || '');
-    }
-    
-    // For Tier C, sort by promotion_score descending (higher = more important)
+    // Within all tiers, sort by promotion_score descending (higher = more important)
     const aScore = a.promotion_score ?? 0;
     const bScore = b.promotion_score ?? 0;
     if (aScore !== bScore) return bScore - aScore;
@@ -579,6 +698,9 @@ export default function PlatformCoverage() {
     // Fallback to alphabetical
     return (a.platform_name || '').localeCompare(b.platform_name || '');
   });
+
+  // Get active platform for drag overlay
+  const activePlatform = activeId ? sortedPlatforms.find(p => p.id === activeId) : null;
 
   const tierACount = sortedPlatforms.filter(p => p.coverage_tier === 'A').length;
   const tierBCount = sortedPlatforms.filter(p => p.coverage_tier === 'B').length;
@@ -1159,63 +1281,98 @@ export default function PlatformCoverage() {
                 </div>
               )}
               
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Platform</TableHead>
-                    <TableHead>Domain</TableHead>
-                    <TableHead>Tier</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Attempts</TableHead>
-                    <TableHead>Successes</TableHead>
-                    <TableHead>Tier Reason</TableHead>
-                    <TableHead>Extractor</TableHead>
-                    <TableHead>Last Success</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {sortedPlatforms.map((platform) => (
-                    <TableRow key={platform.id}>
-                      <TableCell className="font-medium">{platform.platform_name}</TableCell>
-                      <TableCell className="text-muted-foreground text-sm">
-                        {platform.platform_domain}
-                      </TableCell>
-                      <TableCell>
-                        <TierBadge tier={platform.coverage_tier} />
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={platform.coverage_status} />
-                      </TableCell>
-                      <TableCell className="text-sm">
-                        {platform.total_attempts || 0}
-                      </TableCell>
-                      <TableCell className="text-sm">
-                        <span className="text-green-600">{platform.total_successes || 0}</span>
-                        {(platform.total_failures || 0) > 0 && (
-                          <span className="text-red-500 ml-1">/ {platform.total_failures}</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
-                        {platform.tier_reason || platform.coverage_reason || '-'}
-                      </TableCell>
-                      <TableCell>
-                        {platform.dedicated_extractor ? (
-                          <Badge variant="secondary" className="font-mono text-xs">
-                            {platform.dedicated_extractor}
-                          </Badge>
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {platform.last_success_at 
-                          ? new Date(platform.last_success_at).toLocaleDateString()
-                          : '-'}
-                      </TableCell>
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragStart={handleDragStart}
+                onDragEnd={handleDragEnd}
+                modifiers={[restrictToVerticalAxis]}
+              >
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10"></TableHead>
+                      <TableHead>Platform</TableHead>
+                      <TableHead>Domain</TableHead>
+                      <TableHead>Tier</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Attempts</TableHead>
+                      <TableHead>Successes</TableHead>
+                      <TableHead>Tier Reason</TableHead>
+                      <TableHead>Extractor</TableHead>
+                      <TableHead>Last Success</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    <SortableContext 
+                      items={sortedPlatforms.map(p => p.id)} 
+                      strategy={verticalListSortingStrategy}
+                    >
+                      {sortedPlatforms.map((platform) => (
+                        <SortablePlatformRow
+                          key={platform.id}
+                          platform={platform}
+                          TierBadge={TierBadge}
+                          StatusBadge={StatusBadge}
+                        />
+                      ))}
+                    </SortableContext>
+                  </TableBody>
+                </Table>
+                <DragOverlay>
+                  {activePlatform ? (
+                    <Table className="bg-background shadow-lg border rounded-md">
+                      <TableBody>
+                        <TableRow>
+                          <TableCell className="w-10">
+                            <GripVertical className="h-4 w-4 text-muted-foreground" />
+                          </TableCell>
+                          <TableCell className="font-medium">{activePlatform.platform_name}</TableCell>
+                          <TableCell className="text-muted-foreground text-sm">
+                            {activePlatform.platform_domain}
+                          </TableCell>
+                          <TableCell>
+                            <TierBadge tier={activePlatform.coverage_tier} />
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={activePlatform.coverage_status} />
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {activePlatform.total_attempts || 0}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            <span className="text-green-600">{activePlatform.total_successes || 0}</span>
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
+                            {activePlatform.tier_reason || activePlatform.coverage_reason || '-'}
+                          </TableCell>
+                          <TableCell>
+                            {activePlatform.dedicated_extractor ? (
+                              <Badge variant="secondary" className="font-mono text-xs">
+                                {activePlatform.dedicated_extractor}
+                              </Badge>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {activePlatform.last_success_at 
+                              ? new Date(activePlatform.last_success_at).toLocaleDateString()
+                              : '-'}
+                          </TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  ) : null}
+                </DragOverlay>
+              </DndContext>
+              
+              {isSavingOrder && (
+                <div className="flex items-center justify-center py-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Saving order...
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
