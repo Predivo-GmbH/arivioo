@@ -1066,18 +1066,34 @@ export default function SearchResults() {
                }
 
                // Add finalization activity logs
-               addActivityItem("Finalizing results", "Loading price extraction data...");
+               addActivityItem("Finalizing results", "Loading final snapshot...");
                
                try {
-                 const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:streamEnded');
+                 // CRITICAL: Use snapshot for deterministic results (preserves final_bucket)
+                 // fetchEnrichedResults() does NOT include final_bucket from snapshot
+                 const { data: snapshotData } = await supabase
+                   .from('searches')
+                   .select('finalised_at, final_results_snapshot')
+                   .eq('id', searchId)
+                   .single();
                  
-                 const verifiedCount = (enrichedResults as any[]).filter((r: any) => r.priceVerificationStatus === 'verified').length;
-                 const totalMatches = (enrichedResults as any[]).length;
-                 addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
+                 const snapshot = (snapshotData as any)?.final_results_snapshot;
                  
-                 setResults(enrichedResults as unknown as SearchResult[]);
+                 if (snapshot && snapshot.results) {
+                   console.log(`[StreamEndedTerminal] Using persisted snapshot with ${snapshot.results.length} results`);
+                   addActivityItem("Search complete", `Found ${snapshot.results.length} alternatives`);
+                   setResults(snapshot.results as unknown as SearchResult[]);
+                   setIsFinalized(true);
+                 } else {
+                   // Fallback: no snapshot, use enriched results (legacy)
+                   console.warn('[StreamEndedTerminal] No snapshot found, falling back to enriched results');
+                   const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:streamEnded');
+                   const totalMatches = (enrichedResults as any[]).length;
+                   addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives`);
+                   setResults(enrichedResults as unknown as SearchResult[]);
+                 }
                } catch (e) {
-                 console.error("Failed to fetch enriched results (stream ended):", e);
+                 console.error("Failed to fetch results (stream ended):", e);
                  toast({
                    title: "Showing partial results",
                    description: "We couldn't load all comparison details, but your search finished successfully.",
@@ -1331,19 +1347,34 @@ export default function SearchResults() {
           setIsTerminalFrozen(true);
           
           // Add finalization activity logs
-          addActivityItem("Finalizing results", "Loading price extraction data...");
+          addActivityItem("Finalizing results", "Loading final snapshot...");
           
           try {
-            // Fetch final results (bounded so UI never hangs on "Finalizing")
-            const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:heartbeat');
+            // CRITICAL: Use snapshot for deterministic results (preserves final_bucket)
+            // fetchEnrichedResults() does NOT include final_bucket from snapshot
+            const { data: snapshotData } = await supabase
+              .from('searches')
+              .select('finalised_at, final_results_snapshot')
+              .eq('id', searchId)
+              .single();
             
-            const verifiedCount = (enrichedResults as any[]).filter((r: any) => r.priceVerificationStatus === 'verified').length;
-            const totalMatches = (enrichedResults as any[]).length;
-            addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives (${verifiedCount} verified)`);
+            const snapshot = (snapshotData as any)?.final_results_snapshot;
             
-            setResults(enrichedResults as unknown as SearchResult[]);
+            if (snapshot && snapshot.results) {
+              console.log(`[HeartbeatTerminal] Using persisted snapshot with ${snapshot.results.length} results`);
+              addActivityItem("Search complete", `Found ${snapshot.results.length} alternatives`);
+              setResults(snapshot.results as unknown as SearchResult[]);
+              setIsFinalized(true);
+            } else {
+              // Fallback: no snapshot, use enriched results (legacy)
+              console.warn('[HeartbeatTerminal] No snapshot found, falling back to enriched results');
+              const enrichedResults = await withTimeout(fetchEnrichedResults(searchId), 12_000, 'fetchEnrichedResults:heartbeat');
+              const totalMatches = (enrichedResults as any[]).length;
+              addActivityItem("Computing savings", `Analyzing ${totalMatches} alternatives`);
+              setResults(enrichedResults as unknown as SearchResult[]);
+            }
           } catch (e) {
-            console.error("Failed to fetch enriched results (heartbeat):", e);
+            console.error("Failed to fetch results (heartbeat):", e);
             toast({
               title: "Showing partial results",
               description: "We couldn't load all comparison details, but your search finished successfully.",
