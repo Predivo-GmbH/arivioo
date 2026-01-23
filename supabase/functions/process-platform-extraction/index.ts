@@ -86,7 +86,7 @@ interface WorkerResult {
 // Per-phase timeout - increased to allow Firecrawl + Zyte fallback
 const PHASE_A_TIMEOUT = 60000;  // 60s for Phase A (Firecrawl ~25s + Zyte ~25s + buffer)
 const PHASE_B_TIMEOUT = 60000;  // 60s for Phase B
-const DEDICATED_EXTRACTOR_TIMEOUT = 90000; // 90s for dedicated extractors (they handle both phases)
+const DEDICATED_EXTRACTOR_TIMEOUT = 120000; // 120s for dedicated extractors (max reliability)
 
 // Golden path platforms with dedicated extractors
 const GOLDEN_PATH_PLATFORMS: Record<string, string> = {
@@ -727,7 +727,8 @@ Deno.serve(async (req) => {
     console.log(`[WORKER] Routing decision for ${platform}: tier=${tierInfo.tier}, dedicatedExtractor=${dedicatedExtractor}, willUseGoldenPath=${tierInfo.tier === 'A' && !!dedicatedExtractor}`);
     
     if (tierInfo.tier === 'A' && dedicatedExtractor) {
-      console.log(`[WORKER] *** USING GOLDEN PATH extractor: ${dedicatedExtractor} for ${platform} ***`);
+    console.log(`[PIPE_EXTRACT_START] search_id=${searchId} platform=${platform} extraction_id=${extractionId} extractor=${dedicatedExtractor}`);
+    console.log(`[WORKER] *** USING GOLDEN PATH extractor: ${dedicatedExtractor} for ${platform} ***`);
       
       result.phaseA.ran = true;
       result.phaseB.ran = true;
@@ -760,6 +761,16 @@ Deno.serve(async (req) => {
       
       // Parse dedicated extractor response
       const extractorResult = extractorResponse.result;
+
+      // Targeted return log (shape differs between Expedia and others)
+      try {
+        const rawStatus = extractorResult?.status || extractorResult?.finalStatus || 'unknown';
+        const rawPrice = extractorResult?.price ?? extractorResult?.extractedPrice ?? extractorResult?.extracted_price ?? extractorResult?.phaseB?.extractedPrice ?? null;
+        const rawCurrency = extractorResult?.currency ?? extractorResult?.phaseB?.currency ?? null;
+        console.log(`[PIPE_EXTRACT_RETURN] search_id=${searchId} platform=${platform} extraction_id=${extractionId} extractor=${dedicatedExtractor} status=${rawStatus} price=${rawPrice ?? 'null'} currency=${rawCurrency ?? 'null'}`);
+      } catch (_e) {
+        // no-op
+      }
       
       if (extractorResult) {
         // EXPEDIA-SPECIFIC: extract-expedia returns a flattened format
