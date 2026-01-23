@@ -557,13 +557,36 @@ export default function PlatformCoverage() {
     }
   };
 
-  const tierACount = platforms.filter(p => p.coverage_tier === 'A').length;
-  const tierBCount = platforms.filter(p => p.coverage_tier === 'B').length;
-  const tierCCount = platforms.filter(p => p.coverage_tier === 'C').length;
-  const tierBPlatforms = platforms.filter(p => p.coverage_tier === 'B');
-  const promotionCandidate = platforms.find(p => p.promotion_candidate === true && p.coverage_tier === 'B');
-  const promotionInProgress = platforms.find(p => p.promotion_in_progress === true);
-  const promotionHistory = platforms.filter(p => p.promotion_status === 'promoted' || p.promotion_status === 'rejected');
+  // Sort platforms: Tier A first, then Tier B, then Tier C (sorted by promotion_score descending)
+  const sortedPlatforms = [...platforms].sort((a, b) => {
+    // First sort by tier: A > B > C
+    const tierOrder = { 'A': 0, 'B': 1, 'C': 2 };
+    const aTier = tierOrder[a.coverage_tier as keyof typeof tierOrder] ?? 3;
+    const bTier = tierOrder[b.coverage_tier as keyof typeof tierOrder] ?? 3;
+    
+    if (aTier !== bTier) return aTier - bTier;
+    
+    // Within same tier, sort alphabetically for A and B
+    if (a.coverage_tier !== 'C') {
+      return (a.platform_name || '').localeCompare(b.platform_name || '');
+    }
+    
+    // For Tier C, sort by promotion_score descending (higher = more important)
+    const aScore = a.promotion_score ?? 0;
+    const bScore = b.promotion_score ?? 0;
+    if (aScore !== bScore) return bScore - aScore;
+    
+    // Fallback to alphabetical
+    return (a.platform_name || '').localeCompare(b.platform_name || '');
+  });
+
+  const tierACount = sortedPlatforms.filter(p => p.coverage_tier === 'A').length;
+  const tierBCount = sortedPlatforms.filter(p => p.coverage_tier === 'B').length;
+  const tierCCount = sortedPlatforms.filter(p => p.coverage_tier === 'C').length;
+  const tierBPlatforms = sortedPlatforms.filter(p => p.coverage_tier === 'B');
+  const promotionCandidate = sortedPlatforms.find(p => p.promotion_candidate === true && p.coverage_tier === 'B');
+  const promotionInProgress = sortedPlatforms.find(p => p.promotion_in_progress === true);
+  const promotionHistory = sortedPlatforms.filter(p => p.promotion_status === 'promoted' || p.promotion_status === 'rejected');
   
   // Detect empty tier states
   const noTierAWarning = platforms.length > 0 && tierACount === 0;
@@ -1151,7 +1174,7 @@ export default function PlatformCoverage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {platforms.map((platform) => (
+                  {sortedPlatforms.map((platform) => (
                     <TableRow key={platform.id}>
                       <TableCell className="font-medium">{platform.platform_name}</TableCell>
                       <TableCell className="text-muted-foreground text-sm">
