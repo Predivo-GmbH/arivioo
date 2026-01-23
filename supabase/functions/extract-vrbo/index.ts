@@ -814,16 +814,24 @@ Deno.serve(async (req) => {
         const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
         if (supabaseUrl && supabaseKey) {
           const supabase = createClient(supabaseUrl, supabaseKey);
+          // CRITICAL: Set all fields needed for finalization to correctly categorize as comparable
+          const datesValidatedInCheckout = result.success && result.structuralProof.dates_visible_on_page && result.structuralProof.checkout_session_reached;
           await supabase.from('price_extractions').update({
-            extraction_status: result.success ? 'completed' : 'failed',
+            extraction_status: result.success ? 'success_total_stay' : (result.status || 'failed'),
             extracted_price: result.extractedPrice,
             currency: result.currency,
-            includes_taxes_fees: result.includesTaxesFees,
+            includes_taxes_fees: result.includesTaxesFees === true,
+            dates_validated: datesValidatedInCheckout,
+            detected_checkin: checkIn,
+            detected_checkout: checkOut,
+            price_type: result.success ? 'TOTAL_STAY' : 'UNKNOWN',
+            confidence_score: result.success ? 90 : null,
             evidence_snippets: result.evidenceSnippet ? [result.evidenceSnippet] : null,
             extraction_metadata: {
               structuralProof: result.structuralProof,
               providerAttempts: result.providerAttempts,
               goldenPath: result.goldenPath,
+              verification: result.success ? 'VERIFIED' : null,
             },
             extraction_error: result.error,
             provider_used: 'zyte',
