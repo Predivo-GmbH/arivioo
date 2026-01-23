@@ -654,6 +654,8 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
 
             let roomsTextLen = 0;
             let checkoutTextLen = 0;
+            let chooseRoomClicked = false;
+            let chooseRoomInfo = null;
 
             const roomsOk = await safeGoto(roomsUrl, 60000);
             await sleep(1500);
@@ -662,6 +664,110 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
               roomsTextLen = w.textLen || 0;
               roomsTitle = await page.title();
               roomsHtml = truncateHtml(await safeContent());
+              
+              // ========== MULTI-ROOM DETECTION: "Choose room" button handling ==========
+              // Some Airbnb listings have multiple room options and show "Choose room" instead of "Reserve"
+              // We need to select the first (cheapest) room option to get to the checkout page
+              try {
+                const hasChooseRoom = await page.evaluate(() => {
+                  const bodyText = document.body?.innerText || '';
+                  // Look for "Choose room" or "Select room" button text
+                  const hasChooseBtn = /choose\s+room|select\s+room|choose\s+a\s+room/i.test(bodyText);
+                  // Also check for multiple room options section
+                  const hasRoomOptions = /room\s+\d+|option\s+\d+|bedroom\s+\d+/i.test(bodyText);
+                  return hasChooseBtn || (hasRoomOptions && !/reserve/i.test(bodyText.slice(0, 2000)));
+                });
+                
+                if (hasChooseRoom) {
+                  console.log('[MULTI-ROOM] Detected multi-room listing with "Choose room" button');
+                  
+                  // Try to click the first room option or "Choose room" button
+                  const clickResult = await page.evaluate(() => {
+                    // Strategy 1: Find explicit "Choose room" button and room option buttons
+                    const buttons = Array.from(document.querySelectorAll('button, a, [role="button"], [role="radio"], [data-testid]'));
+                    
+                    // Look for room selection options (often radio buttons or cards)
+                    for (const btn of buttons) {
+                      const text = (btn.textContent || '').toLowerCase();
+                      const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                      const testId = btn.getAttribute('data-testid') || '';
+                      
+                      // Skip if it's a general navigation or filter button
+                      if (/filter|search|close|back|share|save|translate/i.test(text)) continue;
+                      
+                      // Look for room option indicators
+                      if (
+                        /select\s*(this)?\s*room|choose\s*(this)?\s*room|book\s*(this)?\s*room/i.test(text) ||
+                        /room\s*option|bedroom\s*\d/i.test(ariaLabel) ||
+                        /room-option|listing-option/i.test(testId)
+                      ) {
+                        try {
+                          btn.scrollIntoView({ block: 'center' });
+                          btn.click();
+                          return { clicked: true, selector: 'room_option_button', text: text.slice(0, 50) };
+                        } catch (e) {}
+                      }
+                    }
+                    
+                    // Strategy 2: Find the first price card with a selectable action
+                    const priceCards = Array.from(document.querySelectorAll('[data-section-id*="BOOK"], [data-plugin-in-point-id*="BOOK"], section, article'));
+                    for (const card of priceCards) {
+                      const cardText = (card.textContent || '').toLowerCase();
+                      if (/per\s*night|\$\d+|€\d+|£\d+/i.test(cardText)) {
+                        const selectBtn = card.querySelector('button, [role="button"], input[type="radio"]');
+                        if (selectBtn && !/close|back|share/i.test(selectBtn.textContent || '')) {
+                          try {
+                            selectBtn.scrollIntoView({ block: 'center' });
+                            selectBtn.click();
+                            return { clicked: true, selector: 'price_card_button', text: (selectBtn.textContent || '').slice(0, 50) };
+                          } catch (e) {}
+                        }
+                      }
+                    }
+                    
+                    // Strategy 3: Click directly on "Choose room" or similar CTA button
+                    for (const btn of buttons) {
+                      const text = (btn.textContent || '').trim().toLowerCase();
+                      if (/^choose\s+room$|^select\s+room$|^choose$|^select$/i.test(text)) {
+                        try {
+                          btn.scrollIntoView({ block: 'center' });
+                          btn.click();
+                          return { clicked: true, selector: 'choose_room_cta', text: text.slice(0, 50) };
+                        } catch (e) {}
+                      }
+                    }
+                    
+                    return { clicked: false, selector: null, text: null };
+                  });
+                  
+                  if (clickResult && clickResult.clicked) {
+                    chooseRoomClicked = true;
+                    chooseRoomInfo = clickResult;
+                    console.log('[MULTI-ROOM] Clicked room option:', JSON.stringify(clickResult));
+                    
+                    // Wait for the page to update after room selection
+                    await sleep(2500);
+                    
+                    // After clicking, we may need to click "Reserve" or navigate to checkout
+                    // Check if we now have a Reserve button
+                    const hasReserveNow = await page.evaluate(() => {
+                      const bodyText = document.body?.innerText || '';
+                      return /reserve|book now|continue to book|request to book/i.test(bodyText);
+                    });
+                    
+                    if (hasReserveNow) {
+                      console.log('[MULTI-ROOM] Reserve button now visible after room selection');
+                    }
+                    
+                    // Re-capture rooms HTML after room selection (now shows selected room pricing)
+                    roomsHtml = truncateHtml(await safeContent());
+                  } else {
+                    console.log('[MULTI-ROOM] Could not find room option to click');
+                  }
+                }
+              } catch (e) {
+                console.log('[MULTI-ROOM] Error detecting/clicking room options:', e.message || e);
+              }
             }
 
             // ========== STEP 2: Navigate to book/stays for price ==========
@@ -866,6 +972,9 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
              breakdownScreenshot: breakdownOpened ? screenshot : null,
              // CRITICAL: Include direct text extraction for Pay Now total
              payNowExtraction: payNowExtraction || null,
+             // Multi-room detection info
+             chooseRoomClicked,
+             chooseRoomInfo,
            };
         }
       `,
@@ -916,6 +1025,8 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
       usedFallback: fnJson?.usedFallback,
       breakdownOpened: fnJson?.breakdownOpened,
       hasScreenshot: !!fnJson?.bookingCardScreenshot,
+      chooseRoomClicked: fnJson?.chooseRoomClicked || false,
+      chooseRoomInfo: fnJson?.chooseRoomInfo || null,
     });
     
     const html = (fnJson?.html || fnJson?.roomsHtml || "");

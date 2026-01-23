@@ -478,6 +478,9 @@ async function runBrowserlessBookStays(
           pageType = 'request_to_book';
         }
         
+        let chooseRoomClicked = false;
+        let chooseRoomInfo = null;
+        
         if (!bookStaysPathOk || isLoginRedirect || isConsentWall || (isErrorPage && !isUnavailable)) {
           console.log('book/stays blocked, trying rooms fallback...');
           usedFallback = true;
@@ -492,6 +495,59 @@ async function runBrowserlessBookStays(
           finalUrl = page.url();
           pageTitle = await page.title().catch(() => '');
           bodyTextSnippet = await page.evaluate(() => (document.body?.innerText || '').slice(0, 1000)).catch(() => '');
+          
+          // ========== MULTI-ROOM DETECTION: "Choose room" button handling ==========
+          // Some Airbnb listings have multiple room options and show "Choose room" instead of "Reserve"
+          try {
+            const hasChooseRoom = await page.evaluate(() => {
+              const bodyText = document.body?.innerText || '';
+              return /choose\\s+room|select\\s+room|choose\\s+a\\s+room/i.test(bodyText);
+            });
+            
+            if (hasChooseRoom) {
+              console.log('[MULTI-ROOM] Detected multi-room listing');
+              
+              const clickResult = await page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button, a, [role="button"], [role="radio"]'));
+                
+                for (const btn of buttons) {
+                  const text = (btn.textContent || '').toLowerCase();
+                  if (/filter|search|close|back|share|save|translate/i.test(text)) continue;
+                  
+                  if (/select\\s*(this)?\\s*room|choose\\s*(this)?\\s*room|book\\s*(this)?\\s*room/i.test(text)) {
+                    try {
+                      btn.scrollIntoView({ block: 'center' });
+                      btn.click();
+                      return { clicked: true, text: text.slice(0, 50) };
+                    } catch (e) {}
+                  }
+                }
+                
+                // Fallback: click "Choose room" button directly
+                for (const btn of buttons) {
+                  const text = (btn.textContent || '').trim().toLowerCase();
+                  if (/^choose\\s+room$|^select\\s+room$/i.test(text)) {
+                    try {
+                      btn.scrollIntoView({ block: 'center' });
+                      btn.click();
+                      return { clicked: true, text: text.slice(0, 50) };
+                    } catch (e) {}
+                  }
+                }
+                
+                return { clicked: false };
+              });
+              
+              if (clickResult && clickResult.clicked) {
+                chooseRoomClicked = true;
+                chooseRoomInfo = clickResult;
+                console.log('[MULTI-ROOM] Clicked room option');
+                await sleep(2500);
+              }
+            }
+          } catch (e) {
+            console.log('[MULTI-ROOM] Error:', e.message || e);
+          }
           
           // On rooms page, try to click "Price details" to reveal full breakdown
           try {
@@ -536,6 +592,8 @@ async function runBrowserlessBookStays(
           userCountry,
           guestCurrency,
           regionMismatch: proxyCountryUsed !== userCountry,
+          chooseRoomClicked,
+          chooseRoomInfo,
         };
       }`,
       context: {},
