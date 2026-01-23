@@ -19,6 +19,8 @@ interface PlatformAdapter {
   last_success_at: string | null;
   promotion_score: number | null;
   is_new?: boolean;
+  discovered_at?: string | null;
+  created_at?: string;
 }
 
 interface SortablePlatformRowProps {
@@ -118,6 +120,13 @@ export function SortablePlatformRow({ platform, TierBadge, StatusBadge, onClearN
         {platform.last_success_at 
           ? new Date(platform.last_success_at).toLocaleDateString()
           : '-'}
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        {platform.discovered_at 
+          ? new Date(platform.discovered_at).toLocaleDateString()
+          : platform.created_at
+            ? new Date(platform.created_at).toLocaleDateString()
+            : '-'}
       </TableCell>
     </TableRow>
   );

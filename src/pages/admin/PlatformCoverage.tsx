@@ -1341,6 +1341,7 @@ export default function PlatformCoverage() {
                       <TableHead>Tier Reason</TableHead>
                       <TableHead>Extractor</TableHead>
                       <TableHead>Last Success</TableHead>
+                      <TableHead>Added</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
