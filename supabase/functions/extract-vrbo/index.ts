@@ -517,30 +517,43 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     // NOTE: VRBO commonly requires opening the booking drawer, then clicking the
     // primary CTA (often labeled "Begin booking") to reach the checkout/session
     // where taxes/fees are shown.
-    // Simplified VRBO selectors - scroll first, then click booking CTA
+    // VRBO selectors - prioritized by reliability
+    // These are the buttons that lead to checkout/booking flow
     const bookingSelectors = [
       'button[data-stid="submit-hotel-reserve"]',
       'button[data-stid="open-booking-drawer"]',
       '[data-stid="sticky-booking-button"] button',
       'button.uitk-button-primary',
+      // Additional selectors based on VRBO page variants
+      '[data-stid="property-book-now"]',
+      'button[type="submit"][class*="primary"]',
     ];
+    
+    // Selector to wait for - indicates page has fully loaded its booking widget
+    const bookingWidgetSelector = '[data-stid="property-book"], [data-stid="property-price-summary"], .uitk-card-content-section';
 
-    const zyteExtract = async (url: string, actions: any[], timeoutMs: number) => {
+    const zyteExtract = async (url: string, actions: any[], timeoutMs: number, captureScreenshot: boolean = false) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       try {
+        const requestBody: Record<string, any> = {
+          url,
+          browserHtml: true,
+          javascript: true,
+          actions,
+        };
+        // Enable screenshot capture for debugging
+        if (captureScreenshot) {
+          requestBody.screenshot = true;
+          requestBody.screenshotOptions = { fullPage: false }; // viewport only to reduce size
+        }
         const response = await fetch('https://api.zyte.com/v1/extract', {
           method: 'POST',
           headers: {
             'Authorization': `Basic ${zyteAuth}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            url,
-            browserHtml: true,
-            javascript: true,
-            actions,
-          }),
+          body: JSON.stringify(requestBody),
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -551,43 +564,39 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
       }
     };
     
-    // VRBO extraction strategy: use scrollBottom action (Zyte's supported scroll), click CTA, wait for checkout
+    // VRBO extraction strategy:
+    // 1. Wait for booking widget to appear (indicates page is ready)
+    // 2. Click the booking CTA
+    // 3. Wait for checkout signals to appear
+    // CRITICAL: Zyte waitForTimeout max is 15 seconds! All timeouts must be <= 15.
+    // CRITICAL: Zyte waitForSelector max is 15 seconds!
     const attempts: Array<{ label: string; actions: any[]; expectedCheckout?: boolean }> = [
+      // First: just wait for page to load with booking widget visible
       {
-        label: 'baseline_wait',
-        actions: [{ action: 'waitForTimeout', timeout: 15 }],
-      },
-      // Direct click attempts with scrollBottom first
-      ...bookingSelectors.map((sel, idx) => ({
-        label: `scroll_click:${sel}`,
-        expectedCheckout: true,
+        label: 'wait_for_widget',
         actions: [
-          { action: 'waitForTimeout', timeout: 8 },
-          // Zyte's scrollBottom action scrolls to the bottom of the page
-          { action: 'scrollBottom' },
-          { action: 'waitForTimeout', timeout: 3 },
-          { action: 'click', selector: { type: 'css', value: sel } },
-          { action: 'waitForTimeout', timeout: 8 },
-          // Second click for "Begin booking" after drawer opens
-          { action: 'click', selector: { type: 'css', value: 'button.uitk-button-primary' } },
-          { action: 'waitForTimeout', timeout: idx === 0 ? 50 : 35 },
+          { action: 'waitForSelector', selector: { type: 'css', value: bookingWidgetSelector }, timeout: 15 },
         ],
-      })),
-      // Simple click-only attempts (no scroll)
-      ...bookingSelectors.map((sel, idx) => ({
-        label: `click_only:${sel}`,
+      },
+      // Then try clicking each booking selector after waiting for widget
+      ...bookingSelectors.map((sel) => ({
+        label: `click:${sel}`,
         expectedCheckout: true,
         actions: [
-          { action: 'waitForTimeout', timeout: 8 },
+          { action: 'waitForSelector', selector: { type: 'css', value: bookingWidgetSelector }, timeout: 15 },
           { action: 'click', selector: { type: 'css', value: sel } },
           { action: 'waitForTimeout', timeout: 5 },
+          // Second click for "Begin booking" or confirmation
           { action: 'click', selector: { type: 'css', value: 'button.uitk-button-primary' } },
-          { action: 'waitForTimeout', timeout: idx === 0 ? 50 : 35 },
+          { action: 'waitForTimeout', timeout: 10 },
         ],
       })),
     ];
 
     let lastErr: string | null = null;
+    // DEBUG: Capture screenshots for the first few attempts to understand page state
+    const screenshotDebugLog: Array<{ label: string; screenshotB64Preview: string; pageTitle: string; checkoutSignals: string[] }> = [];
+    
     for (const attempt of attempts) {
       const elapsed = Date.now() - start;
       // TIMEOUT FIX: Increased hard stop to 240s to allow full navigation
@@ -595,8 +604,10 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
 
       try {
         console.log(`[VRBO] zyte_attempt=${attempt.label} elapsed=${elapsed}ms`);
+        // Enable screenshot capture for first 3 attempts only (to limit cost/time)
+        const captureScreenshot = screenshotDebugLog.length < 3;
         // TIMEOUT FIX: Increased per-attempt timeout to 180s
-        const response = await zyteExtract(datedUrl, attempt.actions, 180000);
+        const response = await zyteExtract(datedUrl, attempt.actions, 180000, captureScreenshot);
         result.httpStatus = response.status;
 
         if (!response.ok) {
@@ -608,33 +619,69 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
 
         const data = await response.json();
         const html = data.browserHtml || '';
-         const finalUrl = data.url || datedUrl;
-         const propertyPageReached = html.length > 10000;
-         const normalizedContent = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-         const reachedCheckout = isCheckoutSessionUrl(finalUrl) || hasCheckoutSignals(normalizedContent);
+        const finalUrl = data.url || datedUrl;
+        const propertyPageReached = html.length > 10000;
+        const normalizedContent = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        const reachedCheckout = isCheckoutSessionUrl(finalUrl) || hasCheckoutSignals(normalizedContent);
+
+        // DEBUG: Log screenshot info if captured
+        if (data.screenshot) {
+          const screenshotB64 = data.screenshot as string;
+          // Extract page title for context
+          const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+          const pageTitle = titleMatch ? titleMatch[1].slice(0, 100) : 'No title';
+          // Check which checkout signals are present
+          const signalChecks = [
+            { name: 'Trip total', pattern: /\bTrip\s+total\b/i },
+            { name: 'Traveler info', pattern: /\bTraveler\s+information\b/i },
+            { name: 'Payment details', pattern: /\bPayment\s+(?:details|schedule)\b/i },
+            { name: 'Due now', pattern: /\bDue\s+now\b/i },
+            { name: 'Taxes', pattern: /\bTaxes\b/i },
+            { name: 'Service fee', pattern: /\bService\s+fee\b/i },
+            { name: 'Cleaning fee', pattern: /\bCleaning\s+fee\b/i },
+          ];
+          const foundSignals = signalChecks.filter(s => s.pattern.test(normalizedContent)).map(s => s.name);
+          
+          screenshotDebugLog.push({
+            label: attempt.label,
+            screenshotB64Preview: screenshotB64.slice(0, 100) + '...[truncated]',
+            pageTitle,
+            checkoutSignals: foundSignals,
+          });
+          
+          console.log(`[VRBO_DEBUG] attempt=${attempt.label} screenshot_size=${screenshotB64.length} title="${pageTitle}" signals=[${foundSignals.join(',')}]`);
+          // Log first 200 chars of visible text for debugging selectors
+          const visibleTextPreview = normalizedContent.slice(0, 500).replace(/\s+/g, ' ');
+          console.log(`[VRBO_DEBUG] visible_text_preview="${visibleTextPreview}"`);
+        }
 
         console.log(`[VRBO] final_url=${finalUrl}`);
         console.log(`[VRBO] reached_checkout_session=${reachedCheckout}`);
         console.log(`[VRBO] Zyte attempt complete (${attempt.label}): ${html.length} bytes, ${Date.now() - start}ms`);
 
         // Always keep the latest successful HTML payload.
-         if (propertyPageReached) {
+        if (propertyPageReached) {
           result.html = html;
-           result.content = normalizedContent;
+          result.content = normalizedContent;
           result.finalUrl = finalUrl;
           result.propertyPageReached = true;
           result.checkoutSessionReached = reachedCheckout;
         }
 
-         // If we reached checkout/session, stop immediately.
-         // This is the only place we should attempt to read a total-with-taxes.
-         if (reachedCheckout) break;
+        // If we reached checkout/session, stop immediately.
+        // This is the only place we should attempt to read a total-with-taxes.
+        if (reachedCheckout) break;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         lastErr = msg;
         console.log(`[VRBO] Zyte attempt exception (${attempt.label}): ${msg}`);
         continue;
       }
+    }
+    
+    // Log summary of screenshot debug attempts
+    if (screenshotDebugLog.length > 0) {
+      console.log(`[VRBO_DEBUG_SUMMARY] ${JSON.stringify(screenshotDebugLog)}`);
     }
 
     result.durationMs = Date.now() - start;
