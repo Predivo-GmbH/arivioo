@@ -4020,6 +4020,129 @@ export default function SearchResults() {
                             )}
                           </div>
                         )}
+
+                        {/* Category 5: Low Trust Score - Candidates that failed image verification */}
+                        {lowTrustScoreResults.length > 0 && (
+                          <div className="rounded-xl border border-muted-foreground/20 bg-muted/20 overflow-hidden">
+                            <button
+                              onClick={() => setShowLowTrustScore(!showLowTrustScore)}
+                              className="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/40 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                <Shield className="w-4 h-4 text-muted-foreground" />
+                                <span className="text-sm font-medium text-foreground">
+                                  {lowTrustScoreResults.length} candidate{lowTrustScoreResults.length !== 1 ? 's' : ''} below trust threshold
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-medium">
+                                  TESTING
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-muted-foreground">Trust score &lt; 75%</span>
+                                {showLowTrustScore ? (
+                                  <ChevronUp className="w-4 h-4 text-muted-foreground" />
+                                ) : (
+                                  <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                                )}
+                              </div>
+                            </button>
+
+                            {showLowTrustScore && (
+                              <div className="border-t border-muted-foreground/20">
+                                <div className="px-4 py-2 bg-muted/30 border-b border-muted-foreground/10">
+                                  <p className="text-xs text-muted-foreground italic">
+                                    These candidates were found via image search but failed visual verification.
+                                    They may be similar-looking properties, not the same listing.
+                                  </p>
+                                </div>
+                                <table className="w-full text-sm">
+                                  <tbody>
+                                    {lowTrustScoreResults.map((result) => {
+                                      const resultImages = toStringArray(result.images);
+                                      const isExpanded = expandedComparison === result.id;
+                                      const score = typeof result.confidence_score === 'number' ? Math.round(result.confidence_score) : null;
+
+                                      const getBadgeStyle = (s: number | null) => {
+                                        if (s === null) return 'bg-muted text-muted-foreground';
+                                        if (s >= 50) return 'bg-amber-500/10 text-amber-600';
+                                        if (s >= 25) return 'bg-orange-500/10 text-orange-600';
+                                        return 'bg-destructive/10 text-destructive';
+                                      };
+
+                                      return (
+                                        <React.Fragment key={result.id}>
+                                          <tr className="border-b border-border/50 hover:bg-muted/30 opacity-70">
+                                            <td className="py-4 px-4">
+                                              <div className="flex items-center gap-2 flex-wrap">
+                                                <span className="w-2 h-2 rounded-full bg-muted-foreground" />
+                                                <span className="font-medium text-foreground">{result.platform_name}</span>
+                                                <span
+                                                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${getBadgeStyle(score)}`}
+                                                  title={score === null ? 'Score not available for this candidate' : `${score}% confidence`}
+                                                >
+                                                  <Shield className="w-3 h-3" />
+                                                  {score === null ? 'N/A' : `${score}%`}
+                                                </span>
+                                              </div>
+                                            </td>
+                                            <td className="py-4 px-4 text-right text-muted-foreground">
+                                              <span
+                                                className="text-xs px-2 py-1 rounded bg-muted text-muted-foreground"
+                                                title="This candidate did not pass the 75% confidence threshold required for verification."
+                                              >
+                                                Below threshold
+                                              </span>
+                                            </td>
+                                            <td className="py-4 px-4 text-center">
+                                              <div className="flex flex-col gap-1.5 items-center">
+                                                <Button variant="outline" size="sm" asChild>
+                                                  <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+                                                    View <ExternalLink className="w-3 h-3 ml-1" />
+                                                  </a>
+                                                </Button>
+                                                <button
+                                                  onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                  className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                                                    isExpanded ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-primary'
+                                                  }`}
+                                                >
+                                                  <ArrowLeftRight className="w-3 h-3" />
+                                                  {isExpanded ? 'Hide' : 'Photos'}
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                          {isExpanded && (
+                                            <tr className="border-b border-border/50">
+                                              <td colSpan={3} className="p-4 bg-muted/30">
+                                                {resultImages.length > 0 || airbnbImages.length > 0 || result.source_airbnb_image ? (
+                                                  <ImageComparison
+                                                    airbnbImages={airbnbImages}
+                                                    alternativeImages={resultImages}
+                                                    airbnbTitle={search?.airbnb_title || 'Airbnb Listing'}
+                                                    alternativeTitle={result.listing_title || 'Alternative Listing'}
+                                                    platformName={result.platform_name}
+                                                    sourceAirbnbImage={result.source_airbnb_image}
+                                                  />
+                                                ) : (
+                                                  <div className="text-center py-6 text-muted-foreground">
+                                                    <Camera className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                    <p className="text-sm">No photos available for comparison</p>
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         
                       </div>
                     )}
