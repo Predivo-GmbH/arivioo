@@ -135,3 +135,6 @@ verify_jwt = false
 
 [functions.finalize-search-snapshot]
 verify_jwt = false
+
+[functions.vrbo-live-access-check]
+verify_jwt = false
