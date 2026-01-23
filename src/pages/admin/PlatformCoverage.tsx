@@ -100,6 +100,8 @@ interface PlatformAdapter {
   promotion_decision_by: string | null;
   proven_deterministic: boolean;
   is_active: boolean;
+  is_new: boolean;
+  discovered_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -681,7 +683,40 @@ export default function PlatformCoverage() {
     }
   };
 
-  // Sort platforms: Tier A first, then Tier B, then Tier C (sorted by promotion_score descending)
+  // Handle clearing the "new" flag from a platform
+  const handleClearNew = async (platformId: string) => {
+    try {
+      const token = getToken();
+      if (!token) throw new Error('Not authenticated');
+      
+      const { error: updateError } = await supabase.functions.invoke('admin-dashboard/clear-new', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: { platformId },
+      });
+      
+      if (updateError) throw updateError;
+      
+      // Update local state
+      setPlatforms(prev => prev.map(p => 
+        p.id === platformId ? { ...p, is_new: false } : p
+      ));
+      
+      toast({
+        title: "Label removed",
+        description: "Platform is no longer marked as new.",
+      });
+    } catch (err: any) {
+      console.error('Failed to clear new flag:', err);
+      toast({
+        title: "Failed to update",
+        description: err.message || "Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Sort platforms: Tier A first, then Tier B, then Tier C (sorted by promotion_score descending, new at end)
   const sortedPlatforms = [...platforms].sort((a, b) => {
     // First sort by tier: A > B > C
     const tierOrder = { 'A': 0, 'B': 1, 'C': 2 };
@@ -689,6 +724,11 @@ export default function PlatformCoverage() {
     const bTier = tierOrder[b.coverage_tier as keyof typeof tierOrder] ?? 3;
     
     if (aTier !== bTier) return aTier - bTier;
+    
+    // Within Tier C, put "new" platforms at the end
+    if (a.coverage_tier === 'C' && a.is_new !== b.is_new) {
+      return a.is_new ? 1 : -1;
+    }
     
     // Within all tiers, sort by promotion_score descending (higher = more important)
     const aScore = a.promotion_score ?? 0;
@@ -1314,6 +1354,7 @@ export default function PlatformCoverage() {
                           platform={platform}
                           TierBadge={TierBadge}
                           StatusBadge={StatusBadge}
+                          onClearNew={handleClearNew}
                         />
                       ))}
                     </SortableContext>

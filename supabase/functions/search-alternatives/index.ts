@@ -7400,12 +7400,69 @@ async function runSearchWithStreaming(
     .from("platform_adapters")
     .select("platform_domain, coverage_tier, coverage_status, coverage_reason") as { data: PlatformAdapterInfo[] | null };
   
+  const knownDomains = new Set<string>();
   const tierCDomains = new Set<string>();
   platformAdapters?.forEach((adapter: PlatformAdapterInfo) => {
+    knownDomains.add(adapter.platform_domain.toLowerCase());
     if (adapter.coverage_tier === 'C' || adapter.coverage_status === 'blocked') {
       tierCDomains.add(adapter.platform_domain.toLowerCase());
     }
   });
+
+  // Helper to extract domain from URL
+  const extractDomain = (url: string): string => {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.hostname.replace(/^www\./, '').toLowerCase();
+    } catch {
+      return '';
+    }
+  };
+
+  // Helper to format platform name from domain
+  const formatPlatformName = (domain: string): string => {
+    const name = domain.split('.')[0];
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  };
+
+  // Auto-register newly discovered platforms as Tier C with is_new=true
+  const discoveredPlatforms = new Set<string>();
+  for (const alt of prioritizedForPricing) {
+    const domain = extractDomain(alt.listing_url);
+    if (domain && !knownDomains.has(domain) && !discoveredPlatforms.has(domain)) {
+      discoveredPlatforms.add(domain);
+      const platformName = alt.platform_name || formatPlatformName(domain);
+      
+      console.log(`[AutoDiscovery] Registering new platform: ${platformName} (${domain})`);
+      
+      // Insert as Tier C with is_new flag and low promotion_score (end of list)
+      const { error: insertError } = await supabase
+        .from('platform_adapters')
+        .insert({
+          platform_name: platformName,
+          platform_domain: domain,
+          coverage_tier: 'C',
+          coverage_status: 'unsupported',
+          coverage_reason: 'Auto-discovered - pending review',
+          tier_reason: 'Auto-discovered from search results',
+          is_active: false,
+          is_new: true,
+          discovered_at: new Date().toISOString(),
+          promotion_score: -100, // Very low score = end of list
+          deep_link_template: `https://${domain}`,
+        })
+        .select()
+        .single();
+      
+      if (insertError) {
+        // Might already exist from concurrent request - that's ok
+        console.log(`[AutoDiscovery] Insert result for ${domain}:`, insertError?.code === '23505' ? 'already exists' : insertError);
+      } else {
+        // Add to known domains so we don't try to insert again
+        knownDomains.add(domain);
+      }
+    }
+  }
 
   // Helper to check if a URL belongs to a Tier C platform
   const isTierCPlatform = (url: string): { isTierC: boolean; reason?: string } => {

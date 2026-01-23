@@ -1,6 +1,6 @@
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical } from 'lucide-react';
+import { GripVertical, Sparkles } from 'lucide-react';
 import { TableRow, TableCell } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 
@@ -18,15 +18,17 @@ interface PlatformAdapter {
   dedicated_extractor: string | null;
   last_success_at: string | null;
   promotion_score: number | null;
+  is_new?: boolean;
 }
 
 interface SortablePlatformRowProps {
   platform: PlatformAdapter;
   TierBadge: React.ComponentType<{ tier: string }>;
   StatusBadge: React.ComponentType<{ status: string }>;
+  onClearNew?: (platformId: string) => void;
 }
 
-export function SortablePlatformRow({ platform, TierBadge, StatusBadge }: SortablePlatformRowProps) {
+export function SortablePlatformRow({ platform, TierBadge, StatusBadge, onClearNew }: SortablePlatformRowProps) {
   const {
     attributes,
     listeners,
@@ -63,7 +65,25 @@ export function SortablePlatformRow({ platform, TierBadge, StatusBadge }: Sortab
           <GripVertical className="h-4 w-4 text-muted-foreground" />
         </button>
       </TableCell>
-      <TableCell className="font-medium">{platform.platform_name}</TableCell>
+      <TableCell className="font-medium">
+        <div className="flex items-center gap-2">
+          {platform.platform_name}
+          {platform.is_new && (
+            <Badge 
+              variant="default" 
+              className="bg-emerald-500 hover:bg-emerald-600 text-white cursor-pointer text-xs gap-1"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClearNew?.(platform.id);
+              }}
+              title="Click to dismiss"
+            >
+              <Sparkles className="h-3 w-3" />
+              New
+            </Badge>
+          )}
+        </div>
+      </TableCell>
       <TableCell className="text-muted-foreground text-sm">
         {platform.platform_domain}
       </TableCell>
