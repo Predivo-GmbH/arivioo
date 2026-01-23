@@ -205,8 +205,8 @@ function mapConfidence(score: number | null, hasStructuralVerification: boolean 
 function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boolean {
   if (!metadata) return false;
   
-  // EXPEDIA-SPECIFIC: Check for verification: "VERIFIED" (case insensitive)
-  // This is the primary signal from extract-expedia golden path
+  // Check for verification: "VERIFIED" (case insensitive) - used by both Expedia and VRBO
+  // This is the primary signal from golden path extractors
   const verification = metadata.verification || metadata.structuralProof?.verification || '';
   if (typeof verification === 'string' && verification.toUpperCase() === 'VERIFIED') {
     return true;
@@ -219,8 +219,18 @@ function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boole
     metadata.extracted_from_breakdown_total === true;
   if (topLevel) return true;
   
-  // Check nested structuralProof object (Expedia golden path uses this)
+  // Check nested structuralProof object (Expedia and VRBO golden paths use this)
   const structuralProof = metadata.structuralProof || metadata.structural_proof || {};
+  
+  // VRBO-SPECIFIC: VRBO uses checkout_session_reached + total_label_found as proof
+  // When VRBO reaches checkout and finds a total label, that's verified
+  const vrboProof = 
+    structuralProof.checkout_session_reached === true &&
+    structuralProof.total_label_found === true &&
+    structuralProof.dates_visible_on_page === true;
+  if (vrboProof) return true;
+  
+  // Expedia nested proof pattern
   const nestedProof = 
     structuralProof.breakdown_found === true &&
     (structuralProof.total_label_found === true || structuralProof.hasTotalWithTaxes === true) &&
@@ -235,7 +245,7 @@ function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boole
     offersPage.datesRenderedCorrectly === true;
   if (offersProof) return true;
   
-  // EXPEDIA-SPECIFIC: Check semantic pass as additional verification
+  // Check semantic pass as additional verification
   // If semantic: "pass" and extraction was successful, trust it
   const semantic = metadata.semantic || '';
   if (typeof semantic === 'string' && semantic.toLowerCase() === 'pass') {
@@ -347,9 +357,11 @@ function determinePriceType(input: ExtractionInput): PriceType {
   // Check if taxes/fees are included with successful extraction
   // This indicates a total was found, though we can't prove it structurally
   if (input.includes_taxes_fees === true && input.dates_validated === true) {
-    const successStatuses = ['success', 'price_extracted', 'completed'];
+    // VRBO uses 'success_total_stay' as its golden path success status
+    const successStatuses = ['success', 'price_extracted', 'completed', 'success_total_stay'];
     if (input.extraction_status && successStatuses.includes(input.extraction_status)) {
-      return 'total_derived';
+      // If we have structural verification, it's proven; otherwise derived
+      return hasVerifiedStructuralProof(input.extraction_metadata || null) ? 'total_proven' : 'total_derived';
     }
   }
   
@@ -420,11 +432,16 @@ function extractStructuralProof(metadata: Record<string, any> | null): Structura
   const proof = metadata.structuralProof || metadata.structural_proof || {};
   const offersPage = metadata.offersPage || {};
   
+  // VRBO uses checkout_session_reached as proof of reaching the breakdown
+  // Also uses dates_visible_on_page for date matching
+  const vrboCheckoutReached = proof.checkout_session_reached === true;
+  const vrboDatesVisible = proof.dates_visible_on_page === true;
+  
   return {
-    breakdown_found: metadata.breakdown_found ?? proof.breakdown_found ?? offersPage.hasOfferCards ?? null,
+    breakdown_found: metadata.breakdown_found ?? proof.breakdown_found ?? offersPage.hasOfferCards ?? vrboCheckoutReached ?? null,
     total_label_found: metadata.total_label_found ?? proof.total_label_found ?? offersPage.hasTotalWithTaxes ?? null,
-    rendered_dates_match: metadata.rendered_dates_match ?? proof.rendered_dates_match ?? metadata.dates_matched ?? null,
-    extracted_from_breakdown_total: metadata.extracted_from_breakdown_total ?? proof.extracted_from_breakdown_total ?? null,
+    rendered_dates_match: metadata.rendered_dates_match ?? proof.rendered_dates_match ?? metadata.dates_matched ?? vrboDatesVisible ?? null,
+    extracted_from_breakdown_total: metadata.extracted_from_breakdown_total ?? proof.extracted_from_breakdown_total ?? vrboCheckoutReached ?? null,
     breakdown_selector_used: metadata.breakdown_selector_used ?? proof.breakdown_selector_used ?? null,
     total_value_raw: metadata.total_value_raw ?? proof.total_value_raw ?? null,
     date_value_raw: metadata.date_value_raw ?? proof.date_value_raw ?? null,
