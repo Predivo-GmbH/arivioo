@@ -234,9 +234,10 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
   // VRBO uses various layouts - check multiple patterns
   // =========================================================================
   
-  // VRBO-specific patterns for Total
+  // VRBO-specific patterns for EXPLICIT Total only
+  // REMOVED: "for X nights" pattern - this is subtotal, NOT total
   const totalPatterns = [
-    // Standard patterns
+    // Standard explicit "Total" patterns only
     /\bTotal[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
     /\bTotal\s+\$?([\d,]+(?:\.\d{2})?)/gi,
     /\$\s*([\d,]+(?:\.\d{2})?)\s*Total\b/gi,
@@ -244,10 +245,6 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     /\bTrip\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
     // "Total price" pattern
     /\bTotal\s+price[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
-    // Price followed by total indicator
-    /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:total|for\s+\d+\s+nights?)/gi,
-    // VRBO "X nights" total pattern (e.g., "$2,167 for 5 nights")
-    /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+\d+\s+nights?/gi,
     // Total with currency after
     /Total[:\s]*([\d,]+(?:\.\d{2})?)\s*USD/gi,
   ];
@@ -431,10 +428,11 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
 
     const zyteAuth = btoa(apiKey + ':');
 
+    // Prioritize submit-hotel-reserve first - this is the most reliable checkout selector
     const clickSelectors: string[] = [
-      // Keep the historical selector that previously worked in some flows
+      // PRIORITY 1: The checkout submit button (most reliable, needs longer wait)
       'button[data-stid="submit-hotel-reserve"]',
-      // VRBO booking drawer / reserve buttons (common variants)
+      // PRIORITY 2: Booking drawer / reserve buttons
       'button[data-stid="open-booking-drawer"]',
       'button[data-testid="book-button"]',
       'button[data-wdio="book-button"]',
@@ -476,20 +474,23 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     // Zyte navigation strategy (historical working route):
     // attempt multiple click selectors to reach checkout/session, without inventing URLs.
 
+    // TIMEOUT FIX: Increased wait times to ensure checkout page loads fully
+    // The submit-hotel-reserve selector can take 100-120s to reach checkout
     const attempts: Array<{ label: string; actions: any[] }> = [
       {
         label: 'baseline_wait',
         actions: [
-          { action: 'waitForTimeout', timeout: 10 },
+          { action: 'waitForTimeout', timeout: 15 },
         ],
       },
-      ...clickSelectors.map((selector) => ({
+      ...clickSelectors.map((selector, idx) => ({
         label: `click:${selector}`,
         actions: [
-          { action: 'waitForTimeout', timeout: 8 },
-          { action: 'click', selector: { type: 'css', value: selector } },
           { action: 'waitForTimeout', timeout: 10 },
-          { action: 'waitForTimeout', timeout: 6 },
+          { action: 'click', selector: { type: 'css', value: selector } },
+          // Extended wait for checkout page to fully load
+          { action: 'waitForTimeout', timeout: idx === 0 ? 45 : 20 }, // Longer for submit-hotel-reserve
+          { action: 'waitForTimeout', timeout: idx === 0 ? 30 : 10 },
         ],
       })),
     ];
@@ -497,11 +498,13 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     let lastErr: string | null = null;
     for (const attempt of attempts) {
       const elapsed = Date.now() - start;
-      if (elapsed > 115000) break; // hard stop before outer timeout handling
+      // TIMEOUT FIX: Increased hard stop to 240s to allow full navigation
+      if (elapsed > 240000) break;
 
       try {
-        console.log(`[VRBO] zyte_attempt=${attempt.label}`);
-        const response = await zyteExtract(datedUrl, attempt.actions, 60000);
+        console.log(`[VRBO] zyte_attempt=${attempt.label} elapsed=${elapsed}ms`);
+        // TIMEOUT FIX: Increased per-attempt timeout to 180s
+        const response = await zyteExtract(datedUrl, attempt.actions, 180000);
         result.httpStatus = response.status;
 
         if (!response.ok) {
@@ -554,7 +557,7 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
   } catch (e) {
     result.durationMs = Date.now() - start;
     if (e instanceof Error && e.name === 'AbortError') {
-      result.error = 'Timeout after 120s';
+      result.error = 'Timeout after 240s';
     } else {
       result.error = e instanceof Error ? e.message : String(e);
     }
@@ -710,8 +713,21 @@ Deno.serve(async (req) => {
           taxes: priceResult.taxesAmount,
         };
 
-        if (priceResult.totalFound && priceResult.totalPrice && priceResult.directlyComparable) {
-          // SUCCESS - Total price found from "Total" label
+        // STRICT RULE: Only accept Total if checkout session was reached
+        // This prevents property-page subtotals from being accepted as totals
+        if (!zyteResult.checkoutSessionReached) {
+          // Could not reach checkout page - NEVER accept any price
+          result.success = false;
+          result.status = 'checkout_not_reached';
+          result.failureCategory = 'checkout_not_reached';
+          result.directlyComparable = false;
+          result.error = `Checkout/session page not reached. Final URL: ${zyteResult.finalUrl}. Labels found: ${priceResult.labelsFound.join(', ') || 'none'}`;
+          result.structuralProof.extraction_method = 'zyte_nav_no_checkout';
+
+          console.log(`[VRBO] FAILURE: Checkout not reached. Labels found: ${priceResult.labelsFound.join(', ')}`);
+
+        } else if (priceResult.totalFound && priceResult.totalPrice && priceResult.directlyComparable) {
+          // SUCCESS - Total price found from explicit "Total" label ON CHECKOUT PAGE
           result.success = true;
           result.status = 'success_total_stay';
           result.failureCategory = 'success';
@@ -724,32 +740,21 @@ Deno.serve(async (req) => {
           result.directlyComparable = true;
           result.evidenceSnippet = priceResult.totalEvidence;
           result.structuralProof.directly_comparable = true;
-          result.structuralProof.extraction_method = 'zyte_nav_total_label';
+          result.structuralProof.extraction_method = 'zyte_nav_checkout_total_label';
           result.goldenPath = true;
 
-          console.log(`[VRBO] SUCCESS: Total=$${priceResult.totalPrice} currency=${priceResult.currency} directly_comparable=true`);
-
-        } else if (!zyteResult.checkoutSessionReached) {
-          // Could not reach checkout page
-          result.success = false;
-          result.status = 'checkout_not_reached';
-          result.failureCategory = 'checkout_not_reached';
-          result.directlyComparable = false;
-          result.error = `Checkout/session page not reached. Final URL: ${zyteResult.finalUrl}. Labels found: ${priceResult.labelsFound.join(', ') || 'none'}`;
-          result.structuralProof.extraction_method = 'zyte_nav_no_checkout';
-
-          console.log(`[VRBO] FAILURE: Checkout not reached. Labels found: ${priceResult.labelsFound.join(', ')}`);
+          console.log(`[VRBO] SUCCESS: Total=$${priceResult.totalPrice} currency=${priceResult.currency} directly_comparable=true checkout_verified=true`);
 
         } else {
-          // At checkout but no "Total" label found
+          // At checkout but no explicit "Total" label found
           result.success = false;
           result.status = 'total_price_not_found';
           result.failureCategory = 'no_total_label';
           result.directlyComparable = false;
-          result.error = `"Total" label not found on checkout page. Found instead: ${priceResult.labelsFound.join(', ') || 'none'}. Competing amounts: nightly=${priceResult.nightlyRate}, subtotal=${priceResult.subtotal}, due_now=${priceResult.dueNow}`;
-          result.structuralProof.extraction_method = 'zyte_nav_no_total_label';
+          result.error = `Explicit "Total" label not found on checkout page. Found instead: ${priceResult.labelsFound.join(', ') || 'none'}. Competing amounts: nightly=${priceResult.nightlyRate}, subtotal=${priceResult.subtotal}, due_now=${priceResult.dueNow}`;
+          result.structuralProof.extraction_method = 'zyte_nav_checkout_no_total_label';
 
-          console.log(`[VRBO] FAILURE: No "Total" label. Competing: nightly=${priceResult.nightlyRate}, subtotal=${priceResult.subtotal}, due_now=${priceResult.dueNow}, deposit=${priceResult.deposit}`);
+          console.log(`[VRBO] FAILURE: No explicit "Total" label on checkout. Competing: nightly=${priceResult.nightlyRate}, subtotal=${priceResult.subtotal}, due_now=${priceResult.dueNow}, deposit=${priceResult.deposit}`);
         }
       }
     } else {
