@@ -2032,6 +2032,29 @@ Deno.serve(async (req) => {
     if (action === 'platform-coverage' && req.method === 'GET') {
       console.log('[Admin Dashboard] Platform Coverage: Fetching platform adapters via service role');
       
+      // First, fetch blocked platforms to exclude them
+      const { data: blockedPlatforms, error: blockedError } = await supabase
+        .from('blocked_platforms')
+        .select('domain');
+      
+      if (blockedError) {
+        console.warn('[Admin Dashboard] Platform Coverage: Could not fetch blocked platforms', blockedError);
+      }
+      
+      // Normalize blocked domains for comparison
+      const blockedDomains = new Set(
+        (blockedPlatforms || []).map(bp => {
+          // Normalize: remove protocol, www, trailing slash
+          return bp.domain
+            .replace(/^https?:\/\//, '')
+            .replace(/^www\./, '')
+            .replace(/\/$/, '')
+            .toLowerCase();
+        })
+      );
+      
+      console.log('[Admin Dashboard] Platform Coverage: Blocked domains to exclude:', blockedDomains.size);
+      
       // Fetch all platform adapters using service role (bypasses RLS)
       const { data: adaptersData, error: adaptersError, count } = await supabase
         .from('platform_adapters')
@@ -2052,13 +2075,39 @@ Deno.serve(async (req) => {
         );
       }
       
-      // Count tiers for verification
-      const tierA = adaptersData?.filter(p => p.coverage_tier === 'A').length || 0;
-      const tierB = adaptersData?.filter(p => p.coverage_tier === 'B').length || 0;
-      const tierC = adaptersData?.filter(p => p.coverage_tier === 'C').length || 0;
+      // Filter out blocked platforms
+      const filteredAdapters = (adaptersData || []).filter(adapter => {
+        const normalizedDomain = adapter.platform_domain
+          ?.replace(/^https?:\/\//, '')
+          .replace(/^www\./, '')
+          .replace(/\/$/, '')
+          .toLowerCase() || '';
+        const normalizedName = adapter.platform_name?.toLowerCase() || '';
+        
+        // Check if domain or name matches any blocked entry
+        const isBlocked = blockedDomains.has(normalizedDomain) || 
+          blockedDomains.has(normalizedName) ||
+          [...blockedDomains].some(blocked => 
+            blocked.includes(normalizedDomain) || 
+            normalizedDomain.includes(blocked) ||
+            blocked.includes(normalizedName)
+          );
+        
+        if (isBlocked) {
+          console.log('[Admin Dashboard] Platform Coverage: Excluding blocked platform:', adapter.platform_name);
+        }
+        
+        return !isBlocked;
+      });
+      
+      // Count tiers for verification (from filtered list)
+      const tierA = filteredAdapters.filter(p => p.coverage_tier === 'A').length || 0;
+      const tierB = filteredAdapters.filter(p => p.coverage_tier === 'B').length || 0;
+      const tierC = filteredAdapters.filter(p => p.coverage_tier === 'C').length || 0;
       
       console.log('[Admin Dashboard] Platform Coverage: Retrieved', {
-        total: adaptersData?.length || 0,
+        total: filteredAdapters.length,
+        excluded: (adaptersData?.length || 0) - filteredAdapters.length,
         tierA,
         tierB,
         tierC,
@@ -2121,13 +2170,14 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({
           success: true,
-          platforms: adaptersData || [],
+          platforms: filteredAdapters,
           pipelineRuns,
           meta: {
             source: 'admin-dashboard/platform-coverage',
             supabaseProjectRef: Deno.env.get('SUPABASE_URL')?.match(/https:\/\/([^.]+)\./)?.[1] || 'unknown',
             queryMethod: 'service_role',
-            totalCount: count,
+            totalCount: filteredAdapters.length,
+            excludedCount: (adaptersData?.length || 0) - filteredAdapters.length,
             tierCounts: { A: tierA, B: tierB, C: tierC },
             fetchedAt: new Date().toISOString(),
           },
