@@ -29,7 +29,7 @@ const corsHeaders = {
 // CONFIGURATION - Toggle for live access check mode
 // ============================================================================
 
-const VRBO_LIVE_ACCESS_CHECK_MODE = true; // Set to true to enable diagnostic mode
+const VRBO_LIVE_ACCESS_CHECK_MODE = false; // Set to true to enable diagnostic mode
 
 // Fixed test case
 const TEST_URL = 'https://www.vrbo.com/9836046ha';

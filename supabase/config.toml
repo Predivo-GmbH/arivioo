@@ -138,3 +138,6 @@ verify_jwt = false
 
 [functions.vrbo-live-access-check]
 verify_jwt = false
+
+[functions.extract-vrbo]
+verify_jwt = false
