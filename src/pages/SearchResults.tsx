@@ -1845,12 +1845,19 @@ export default function SearchResults() {
   // ============================================================================
   const categorizedResults = finalCandidates.map((r) => {
     // CHECK IF WE HAVE A FROZEN BUCKET FROM THE SNAPSHOT
-    // If final_bucket exists, use it directly (immutable on refresh)
-    const frozenBucket = (r as any).final_bucket as string | undefined;
+    // Snapshot field naming can vary across versions:
+    // - final_bucket / final_bucket_label (new)
+    // - result_bucket / result_bucket_label (older)
+    // Always prefer these over client-side recomputation.
+    const frozenBucket = ((r as any).final_bucket ?? (r as any).result_bucket) as string | undefined;
     
     if (frozenBucket) {
       // Use the frozen bucket from snapshot - no re-computation
-      const bucketLabel = (r as any).final_bucket_label || BUCKET_DISPLAY[frozenBucket as ResultBucket]?.label || 'Unknown';
+      const bucketLabel =
+        (r as any).final_bucket_label ||
+        (r as any).result_bucket_label ||
+        BUCKET_DISPLAY[frozenBucket as ResultBucket]?.label ||
+        'Unknown';
       const bucketDisplay = BUCKET_DISPLAY[frozenBucket as ResultBucket];
       
       // Build a minimal categorization object from frozen data
@@ -1862,8 +1869,10 @@ export default function SearchResults() {
         comparison_result: null,
         savings_amount: r.savings_amount || null,
         savings_percentage: r.savings_percentage || null,
+        // Note: snapshot buckets 'cheaper'/'more_expensive' imply a comparable total.
         is_verified: frozenBucket === 'cheaper' || frozenBucket === 'more_expensive',
-        verification_label: frozenBucket === 'cheaper' || frozenBucket === 'more_expensive' ? 'Verified' : 'Not Available',
+        verification_label:
+          frozenBucket === 'cheaper' || frozenBucket === 'more_expensive' ? 'Verified' : 'Not Available',
         has_low_confidence: false,
         non_comparable_reasons: [],
         non_comparable_user_message: null,
