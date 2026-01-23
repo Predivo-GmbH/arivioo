@@ -292,16 +292,32 @@ function categorizeResultForSnapshot(
     return 'blocked';
   }
   
-  // 5. No price - check if it's an unmapped error
+  // 5. No price - categorize based on extraction status
   if (!result.price || result.price <= 0) {
     const pendingStatuses = ['pending', 'running', 'in_progress'];
     const successStatuses = ['success', 'price_extracted', 'completed', 'success_total_stay'];
+    // Known "price not found" statuses - extraction reached platform but couldn't get price
+    const priceNotFoundStatuses = [
+      'checkout_not_reached',
+      'total_price_not_found',
+      'nightly_only_rejected',
+      'price_not_found',
+      'price_not_found_after_dates_applied',
+      'no_price_found',
+    ];
     
-    if (extractionStatus && !pendingStatuses.includes(extractionStatus) && !successStatuses.includes(extractionStatus)) {
-      // Unknown terminal status - additional_issues
-      return 'additional_issues';
+    // If it's a known "price not found" variant, categorize as such
+    if (priceNotFoundStatuses.includes(extractionStatus)) {
+      return 'price_not_found';
     }
-    return 'price_not_found';
+    
+    // If it's pending or success (but no price), treat as price_not_found
+    if (!extractionStatus || pendingStatuses.includes(extractionStatus) || successStatuses.includes(extractionStatus)) {
+      return 'price_not_found';
+    }
+    
+    // Unknown terminal status - additional_issues
+    return 'additional_issues';
   }
   
   // 6. Has price - check comparability
