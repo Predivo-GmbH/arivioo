@@ -233,18 +233,32 @@ export function categorizeResult(
     return createResult('sold_out', input, null);
   }
   
-  // No price at all - but distinguish from unmapped errors
+  // No price at all - categorize based on extraction status
   if (!input.price || input.price <= 0) {
-    // Check if we have an extraction_status that wasn't mapped above
-    const successStatuses = ['pending', 'running', 'success', 'price_extracted', 'success_total_stay', 'completed'];
-    const unmappedStatus = input.extraction_status && 
-      !successStatuses.includes(input.extraction_status.toLowerCase());
+    const normalizedStatus = input.extraction_status?.toLowerCase() || '';
     
-    if (unmappedStatus) {
-      // Unknown terminal status - use additional_issues bucket
-      return createResult('additional_issues', input, null);
+    // Known "price not found" statuses - extraction reached platform but couldn't get price
+    const priceNotFoundStatuses = [
+      'checkout_not_reached',
+      'total_price_not_found',
+      'nightly_only_rejected',
+      'price_not_found',
+      'price_not_found_after_dates_applied',
+      'no_price_found',
+    ];
+    
+    if (priceNotFoundStatuses.includes(normalizedStatus)) {
+      return createResult('price_not_found', input, null);
     }
-    return createResult('price_not_found', input, null);
+    
+    // Success/pending with no price = price not found
+    const knownStatuses = ['pending', 'running', 'success', 'price_extracted', 'success_total_stay', 'completed', ...priceNotFoundStatuses];
+    if (!normalizedStatus || knownStatuses.includes(normalizedStatus)) {
+      return createResult('price_not_found', input, null);
+    }
+    
+    // Unknown terminal status - use additional_issues bucket
+    return createResult('additional_issues', input, null);
   }
   
   // Has price - now check if it's comparable
