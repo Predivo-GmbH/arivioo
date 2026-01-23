@@ -2235,6 +2235,48 @@ Deno.serve(async (req) => {
       );
     }
 
+    // CLEAR NEW FLAG - Remove the "new" label from a platform
+    if (action === 'clear-new' && req.method === 'POST') {
+      console.log('[Admin Dashboard] Clear New: Processing request');
+      
+      const body = await req.json();
+      const { platformId } = body;
+      
+      if (!platformId) {
+        return new Response(
+          JSON.stringify({ error: 'Missing platformId' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      const { error: updateError } = await supabase
+        .from('platform_adapters')
+        .update({ is_new: false })
+        .eq('id', platformId);
+      
+      if (updateError) {
+        console.error('[Admin Dashboard] Clear New: Failed to update', updateError);
+        return new Response(
+          JSON.stringify({ error: 'Failed to clear new flag' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      // Log the action
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin?.id || null,
+        admin_email: authResult.admin?.email || 'unknown',
+        action: 'clear_new_flag',
+        resource_type: 'platform_adapters',
+        resource_id: platformId,
+      });
+      
+      return new Response(
+        JSON.stringify({ success: true }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     // BASELINE INFO - Get current active baseline
     if (action === 'baseline' && req.method === 'GET') {
       const { data: baseline, error: baselineError } = await supabase

@@ -972,6 +972,7 @@ export type Database = {
           date_validation_required: boolean | null
           dedicated_extractor: string | null
           deep_link_template: string
+          discovered_at: string | null
           extraction_schema_overrides: Json | null
           gate_1_passed: boolean | null
           gate_2_passed: boolean | null
@@ -979,6 +980,7 @@ export type Database = {
           id: string
           is_active: boolean
           is_ai_generated: boolean
+          is_new: boolean | null
           last_attempt_at: string | null
           last_failure_at: string | null
           last_outcome_type: string | null
@@ -1028,6 +1030,7 @@ export type Database = {
           date_validation_required?: boolean | null
           dedicated_extractor?: string | null
           deep_link_template: string
+          discovered_at?: string | null
           extraction_schema_overrides?: Json | null
           gate_1_passed?: boolean | null
           gate_2_passed?: boolean | null
@@ -1035,6 +1038,7 @@ export type Database = {
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          is_new?: boolean | null
           last_attempt_at?: string | null
           last_failure_at?: string | null
           last_outcome_type?: string | null
@@ -1084,6 +1088,7 @@ export type Database = {
           date_validation_required?: boolean | null
           dedicated_extractor?: string | null
           deep_link_template?: string
+          discovered_at?: string | null
           extraction_schema_overrides?: Json | null
           gate_1_passed?: boolean | null
           gate_2_passed?: boolean | null
@@ -1091,6 +1096,7 @@ export type Database = {
           id?: string
           is_active?: boolean
           is_ai_generated?: boolean
+          is_new?: boolean | null
           last_attempt_at?: string | null
           last_failure_at?: string | null
           last_outcome_type?: string | null
