@@ -100,8 +100,10 @@ interface SearchResult {
   price_type?: PriceType;
   price_type_label?: string;
   is_total_price?: boolean;
-  // Result categorization bucket
+  // Result categorization bucket (from snapshot)
   result_bucket?: ResultBucket | null;
+  final_bucket?: ResultBucket | null;  // New snapshot field name
+  final_bucket_label?: string | null;
   categorization?: CategorizedResult | null;
   // TWO-PASS IMAGE VERIFICATION: Authority status
   // is_authoritative = true means PASS 2 >= 90% (high trust, "Verified")
@@ -1850,6 +1852,9 @@ export default function SearchResults() {
     // - result_bucket / result_bucket_label (older)
     // Always prefer these over client-side recomputation.
     const frozenBucket = ((r as any).final_bucket ?? (r as any).result_bucket) as string | undefined;
+    
+    // DEBUG: Log frozen bucket detection
+    console.log(`[Categorization] ${r.platform_name}: frozenBucket=${frozenBucket}, final_bucket=${(r as any).final_bucket}, result_bucket=${(r as any).result_bucket}`);
     
     if (frozenBucket) {
       // Use the frozen bucket from snapshot - no re-computation
