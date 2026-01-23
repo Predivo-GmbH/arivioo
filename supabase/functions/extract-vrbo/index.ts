@@ -517,23 +517,13 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     // NOTE: VRBO commonly requires opening the booking drawer, then clicking the
     // primary CTA (often labeled "Begin booking") to reach the checkout/session
     // where taxes/fees are shown.
-    const selectors = {
-      openBookingDrawer: [
-        'button[data-stid="open-booking-drawer"]',
-        '[data-stid="sticky-booking-button"] button',
-        'button[data-testid="book-button"]',
-        'button[data-wdio="book-button"]',
-      ],
-      beginBookingOrReserve: [
-        // Most reliable known selector (also used by Expedia/UITK patterns)
-        'button[data-stid="submit-hotel-reserve"]',
-        // Fallbacks (class-based/semantic)
-        'button.uitk-button-primary',
-        'button[type="submit"]',
-        // Text-based selectors are not supported by Zyte actions, so we rely on
-        // stable attributes + primary button fallbacks.
-      ],
-    };
+    // Simplified VRBO selectors - scroll first, then click booking CTA
+    const bookingSelectors = [
+      'button[data-stid="submit-hotel-reserve"]',
+      'button[data-stid="open-booking-drawer"]',
+      '[data-stid="sticky-booking-button"] button',
+      'button.uitk-button-primary',
+    ];
 
     const zyteExtract = async (url: string, actions: any[], timeoutMs: number) => {
       const controller = new AbortController();
@@ -561,56 +551,25 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
       }
     };
     
-    // =========================================================================
-    // STEP 1: Load property page with dates and click through to checkout
-    // =========================================================================
-    
-    // Zyte navigation strategy (historical working route):
-    // attempt multiple click selectors to reach checkout/session, without inventing URLs.
-
-    // TIMEOUT FIX: Increased wait times to ensure checkout page loads fully.
-    // The checkout CTA (submit-hotel-reserve / "Begin booking") can take 60-120s.
-    //
-    // IMPORTANT: We explicitly try a two-step flow:
-    //   1) open booking drawer
-    //   2) click primary CTA to reach checkout/session
+    // VRBO extraction strategy: scroll to booking widget, click CTA, wait for checkout
     const attempts: Array<{ label: string; actions: any[]; expectedCheckout?: boolean }> = [
       {
         label: 'baseline_wait',
         actions: [{ action: 'waitForTimeout', timeout: 15 }],
       },
-
-      // Two-step: open drawer -> click primary CTA (most closely matches "Begin booking")
-      ...selectors.openBookingDrawer.flatMap((openSel, openIdx) =>
-        selectors.beginBookingOrReserve.map((ctaSel, ctaIdx) => ({
-          label: `drawer_then_cta:${openSel}>>${ctaSel}`,
-          expectedCheckout: true,
-          actions: [
-            { action: 'waitForTimeout', timeout: 10 },
-            // Open booking drawer
-            { action: 'waitForSelector', selector: { type: 'css', value: openSel }, timeout: 20 },
-            { action: 'click', selector: { type: 'css', value: openSel } },
-            { action: 'waitForTimeout', timeout: 6 + Math.min(openIdx, 2) },
-            // Click primary CTA (often "Begin booking")
-            { action: 'waitForSelector', selector: { type: 'css', value: ctaSel }, timeout: 20 },
-            { action: 'click', selector: { type: 'css', value: ctaSel } },
-            // Longer waits after CTA to allow navigation/render of checkout breakdown
-            { action: 'waitForTimeout', timeout: ctaIdx === 0 ? 55 : 35 },
-            { action: 'waitForTimeout', timeout: ctaIdx === 0 ? 35 : 15 },
-          ],
-        }))
-      ),
-
-      // Direct CTA clicks (some pages render the CTA without needing drawer)
-      ...selectors.beginBookingOrReserve.map((ctaSel, idx) => ({
-        label: `cta_only:${ctaSel}`,
+      // Scroll + click attempts for each selector
+      ...bookingSelectors.map((sel, idx) => ({
+        label: `scroll_click:${sel}`,
         expectedCheckout: true,
         actions: [
           { action: 'waitForTimeout', timeout: 10 },
-          { action: 'waitForSelector', selector: { type: 'css', value: ctaSel }, timeout: 20 },
-          { action: 'click', selector: { type: 'css', value: ctaSel } },
-          { action: 'waitForTimeout', timeout: idx === 0 ? 55 : 30 },
-          { action: 'waitForTimeout', timeout: idx === 0 ? 35 : 15 },
+          { action: 'scroll', direction: 'down', pixels: 400 },
+          { action: 'waitForTimeout', timeout: 3 },
+          { action: 'click', selector: { type: 'css', value: sel } },
+          { action: 'waitForTimeout', timeout: 10 },
+          // Second click for "Begin booking" after drawer opens
+          { action: 'click', selector: { type: 'css', value: 'button.uitk-button-primary' } },
+          { action: 'waitForTimeout', timeout: idx === 0 ? 60 : 45 },
         ],
       })),
     ];
