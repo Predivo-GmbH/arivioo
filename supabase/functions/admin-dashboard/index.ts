@@ -2523,7 +2523,7 @@ Deno.serve(async (req) => {
       console.log('[Admin Dashboard] Running extraction test');
       const startTime = Date.now();
       
-      let body: { airbnb_url: string; expedia_url?: string | null; skip_discovery?: boolean; expedia_only?: boolean };
+      let body: { airbnb_url: string; expedia_url?: string | null; agoda_url?: string | null; skip_discovery?: boolean; expedia_only?: boolean; agoda_only?: boolean };
       try {
         body = await req.json();
       } catch {
@@ -2533,7 +2533,7 @@ Deno.serve(async (req) => {
         );
       }
 
-      const { airbnb_url, expedia_url, skip_discovery = true, expedia_only = false } = body;
+      const { airbnb_url, expedia_url, agoda_url, skip_discovery = true, expedia_only = false, agoda_only = false } = body;
 
       if (!airbnb_url) {
         return new Response(
@@ -2578,6 +2578,7 @@ Deno.serve(async (req) => {
         currency,
         skip_discovery,
         expedia_only,
+        agoda_only,
       };
 
       // Build derived_request with parsed values
@@ -2635,6 +2636,7 @@ Deno.serve(async (req) => {
       const results: {
         airbnb?: any;
         expedia?: any;
+        agoda?: any;
         request_dates?: { check_in: string; check_out: string; adults: number };
       } = {
         request_dates: { check_in, check_out, adults },
@@ -2643,9 +2645,9 @@ Deno.serve(async (req) => {
       let overallStatus = 'success';
       let errorMessage: string | null = null;
 
-      // Run Airbnb baseline extraction (skip if expedia_only mode)
+      // Run Airbnb baseline extraction (skip if expedia_only or agoda_only mode)
       // NOTE: airbnb-baseline-test validates admin session, so pass the admin token from request
-      if (!expedia_only) {
+      if (!expedia_only && !agoda_only) {
         try {
           console.log('[Extraction Test] Running Airbnb baseline extraction');
           const airbnbResponse = await fetch(`${supabaseUrl}/functions/v1/airbnb-baseline-test`, {
@@ -2702,7 +2704,7 @@ Deno.serve(async (req) => {
           overallStatus = 'partial';
         }
       } else {
-        console.log('[Extraction Test] Skipping Airbnb extraction (expedia_only mode)');
+        console.log('[Extraction Test] Skipping Airbnb extraction (expedia_only or agoda_only mode)');
       }
 
       // Run Expedia extraction if URL provided
@@ -2760,6 +2762,64 @@ Deno.serve(async (req) => {
             platform: 'expedia',
             status: 'error',
             error: err.message || 'Expedia extraction failed',
+          };
+          overallStatus = overallStatus === 'partial' ? 'failed' : 'partial';
+        }
+      }
+
+      // Run Agoda extraction if URL provided
+      if (agoda_url) {
+        try {
+          console.log('[Extraction Test] Running Agoda extraction');
+          console.log(`[Extraction Test] Agoda URL: ${agoda_url}`);
+          console.log(`[Extraction Test] Agoda dates: checkIn=${check_in}, checkOut=${check_out}, adults=${adults}`);
+          
+          const agodaResponse = await fetch(`${supabaseUrl}/functions/v1/extract-agoda`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${supabaseServiceKey}`,
+            },
+            body: JSON.stringify({
+              url: agoda_url,
+              checkIn: check_in,
+              checkOut: check_out,
+              adults: adults,
+            }),
+          });
+
+          const agodaData = await agodaResponse.json();
+          console.log('[Extraction Test] Agoda response:', JSON.stringify(agodaData, null, 2).slice(0, 2000));
+          
+          results.agoda = {
+            platform: 'agoda',
+            status: agodaData.success ? 'success' : 'failed',
+            terminal_status: agodaData.status,
+            extracted_price: agodaData.price,
+            currency: agodaData.currency || 'USD',
+            includes_taxes_fees: agodaData.includesTaxesFees,
+            provider_used: agodaData.providerUsed,
+            evidence_snippets: agodaData.evidenceSnippets || [],
+            verification_status: agodaData.success ? 'verified' : 'unverified',
+            checkout_url_discovered: agodaData.checkoutUrlDiscovered || null,
+            discovery_method: agodaData.discoveryMethod || null,
+            provider_attempt_trace: agodaData.providerAttemptTrace || [],
+            duration_ms: agodaData.durationMs,
+            error: agodaData.error,
+            // Debug fields
+            html_length: agodaData.htmlLength,
+            extraction_method: agodaData.extractionMethod,
+          };
+
+          if (!agodaData.success) {
+            overallStatus = overallStatus === 'partial' ? 'failed' : 'partial';
+          }
+        } catch (err: any) {
+          console.error('[Extraction Test] Agoda extraction failed:', err);
+          results.agoda = {
+            platform: 'agoda',
+            status: 'error',
+            error: err.message || 'Agoda extraction failed',
           };
           overallStatus = overallStatus === 'partial' ? 'failed' : 'partial';
         }
