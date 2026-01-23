@@ -141,3 +141,6 @@ verify_jwt = false
 
 [functions.extract-vrbo]
 verify_jwt = false
+
+[functions.extract-airpaz]
+verify_jwt = false

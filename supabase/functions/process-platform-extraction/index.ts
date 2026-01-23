@@ -96,6 +96,7 @@ const GOLDEN_PATH_PLATFORMS: Record<string, string> = {
   'expedia': 'extract-expedia',
   'agoda.com': 'extract-agoda',
   'vrbo.com': 'extract-vrbo',
+  'airpaz.com': 'extract-airpaz',
 };
 
 // Check if platform has a dedicated golden path extractor
@@ -108,6 +109,9 @@ function getDedicatedExtractor(platformName: string): string | null {
   
   // VRBO catch-all - any vrbo domain uses dedicated extractor
   if (platformLower.includes('vrbo')) return 'extract-vrbo';
+  
+  // Airpaz catch-all - uses dedicated extractor
+  if (platformLower.includes('airpaz')) return 'extract-airpaz';
 
   for (const [domain, extractor] of Object.entries(GOLDEN_PATH_PLATFORMS)) {
     if (platformLower.includes(domain) || platformLower === domain.split('.')[0]) {
