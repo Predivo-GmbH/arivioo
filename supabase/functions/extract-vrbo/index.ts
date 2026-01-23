@@ -430,124 +430,123 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     console.log(`[VRBO] dated_property_url=${datedUrl}`);
 
     const zyteAuth = btoa(apiKey + ':');
+
+    const clickSelectors: string[] = [
+      // Keep the historical selector that previously worked in some flows
+      'button[data-stid="submit-hotel-reserve"]',
+      // VRBO booking drawer / reserve buttons (common variants)
+      'button[data-stid="open-booking-drawer"]',
+      'button[data-testid="book-button"]',
+      'button[data-wdio="book-button"]',
+      '[data-stid="sticky-booking-button"] button',
+      'button.uitk-button-primary',
+      'button[type="submit"]',
+    ];
+
+    const zyteExtract = async (url: string, actions: any[], timeoutMs: number) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch('https://api.zyte.com/v1/extract', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Basic ${zyteAuth}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            url,
+            browserHtml: true,
+            javascript: true,
+            actions,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        return response;
+      } catch (e) {
+        clearTimeout(timeoutId);
+        throw e;
+      }
+    };
     
     // =========================================================================
     // STEP 1: Load property page with dates and click through to checkout
     // =========================================================================
     
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2min timeout
+    // Zyte navigation strategy (historical working route):
+    // attempt multiple click selectors to reach checkout/session, without inventing URLs.
 
-    // Zyte browser actions to:
-    // 1. Navigate to dated property page
-    // 2. Wait for content to load
-    // 3. Click the primary booking CTA (Reserve/Book/Continue)
-    // 4. Wait for navigation to checkout
-    // 5. Extract final page content
-    
-    // Try primary approach: Load page with JavaScript, then extract content
-    // Note: VRBO shows Total in the booking panel on the property page when dates are applied
-    const response = await fetch('https://api.zyte.com/v1/extract', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${zyteAuth}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url: datedUrl,
-        browserHtml: true,
-        javascript: true,
+    const attempts: Array<{ label: string; actions: any[] }> = [
+      {
+        label: 'baseline_wait',
         actions: [
-          // Wait for page to fully load with JavaScript
-          { action: 'waitForTimeout', timeout: 15 },
+          { action: 'waitForTimeout', timeout: 10 },
         ],
-      }),
-      signal: controller.signal,
-    });
+      },
+      ...clickSelectors.map((selector) => ({
+        label: `click:${selector}`,
+        actions: [
+          { action: 'waitForTimeout', timeout: 8 },
+          { action: 'click', selector: { type: 'css', value: selector } },
+          { action: 'waitForTimeout', timeout: 10 },
+          { action: 'waitForTimeout', timeout: 6 },
+        ],
+      })),
+    ];
 
-    clearTimeout(timeoutId);
+    let lastErr: string | null = null;
+    for (const attempt of attempts) {
+      const elapsed = Date.now() - start;
+      if (elapsed > 115000) break; // hard stop before outer timeout handling
 
-    result.httpStatus = response.status;
-    result.durationMs = Date.now() - start;
+      try {
+        console.log(`[VRBO] zyte_attempt=${attempt.label}`);
+        const response = await zyteExtract(datedUrl, attempt.actions, 60000);
+        result.httpStatus = response.status;
 
-    if (!response.ok) {
-      const errText = await response.text();
-      result.error = `HTTP ${response.status}: ${errText.slice(0, 200)}`;
-      console.log(`[VRBO] Zyte navigation failed: ${result.error}`);
-      return result;
+        if (!response.ok) {
+          const errText = await response.text();
+          lastErr = `HTTP ${response.status}: ${errText.slice(0, 200)}`;
+          console.log(`[VRBO] Zyte attempt failed (${attempt.label}): ${lastErr}`);
+          continue;
+        }
+
+        const data = await response.json();
+        const html = data.browserHtml || '';
+        const finalUrl = data.url || datedUrl;
+        const propertyPageReached = html.length > 10000;
+        const reachedCheckout = isCheckoutSessionUrl(finalUrl);
+
+        console.log(`[VRBO] final_url=${finalUrl}`);
+        console.log(`[VRBO] reached_checkout_session=${reachedCheckout}`);
+        console.log(`[VRBO] Zyte attempt complete (${attempt.label}): ${html.length} bytes, ${Date.now() - start}ms`);
+
+        // Always keep the latest successful HTML payload.
+        if (propertyPageReached) {
+          result.html = html;
+          result.content = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+          result.finalUrl = finalUrl;
+          result.propertyPageReached = true;
+          result.checkoutSessionReached = reachedCheckout;
+        }
+
+        // If we reached checkout/session, stop immediately.
+        if (reachedCheckout) {
+          break;
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        lastErr = msg;
+        console.log(`[VRBO] Zyte attempt exception (${attempt.label}): ${msg}`);
+        continue;
+      }
     }
 
-    const data = await response.json();
-    result.html = data.browserHtml || '';
-    result.content = result.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    result.finalUrl = data.url || datedUrl;
-    result.propertyPageReached = result.html.length > 10000;
-    result.checkoutSessionReached = isCheckoutSessionUrl(result.finalUrl || '');
-
-    console.log(`[VRBO] final_url=${result.finalUrl}`);
-    console.log(`[VRBO] reached_checkout_session=${result.checkoutSessionReached}`);
-    console.log(`[VRBO] Zyte navigation complete: ${result.html.length} bytes, ${result.durationMs}ms`);
-
-    // =========================================================================
-    // STEP 2: If not at checkout, try a second navigation attempt
-    // =========================================================================
-    
-    if (!result.checkoutSessionReached && result.propertyPageReached) {
-      console.log('[VRBO] Not at checkout, attempting second navigation...');
-      
-      // Look for checkout/booking links in the current content
-      const checkoutLinkMatch = result.html.match(/href=["']([^"']*(?:checkout|book|reserve|session)[^"']*)["']/i);
-      
-      if (checkoutLinkMatch) {
-        let checkoutUrl = checkoutLinkMatch[1];
-        if (checkoutUrl.startsWith('/')) {
-          checkoutUrl = 'https://www.vrbo.com' + checkoutUrl;
-        }
-        
-        console.log(`[VRBO] Found checkout link, navigating to: ${checkoutUrl.slice(0, 100)}...`);
-        
-        const controller2 = new AbortController();
-        const timeoutId2 = setTimeout(() => controller2.abort(), 60000);
-        
-        try {
-          const response2 = await fetch('https://api.zyte.com/v1/extract', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Basic ${zyteAuth}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              url: checkoutUrl,
-              browserHtml: true,
-              javascript: true,
-              actions: [
-                { action: 'waitForTimeout', timeout: 8 },
-              ],
-            }),
-            signal: controller2.signal,
-          });
-          
-          clearTimeout(timeoutId2);
-          
-          if (response2.ok) {
-            const data2 = await response2.json();
-            const html2 = data2.browserHtml || '';
-            const url2 = data2.url || checkoutUrl;
-            
-            if (html2.length > result.html.length / 2) {
-              result.html = html2;
-              result.content = html2.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-              result.finalUrl = url2;
-              result.checkoutSessionReached = isCheckoutSessionUrl(url2 || '');
-              result.durationMs = Date.now() - start;
-              
-              console.log(`[VRBO] Second navigation: final_url=${url2}, reached_checkout=${result.checkoutSessionReached}`);
-            }
-          }
-        } catch (e) {
-          console.log(`[VRBO] Second navigation failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
+    result.durationMs = Date.now() - start;
+    if (!result.propertyPageReached) {
+      result.error = lastErr || 'No property page content returned';
+      console.log(`[VRBO] Zyte navigation failed: ${result.error}`);
+      return result;
     }
 
     result.success = result.propertyPageReached;
@@ -815,6 +814,18 @@ Deno.serve(async (req) => {
         const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
         const supabase = createClient(supabaseUrl, supabaseKey);
 
+        // Resolve search/platform for targeted logs
+        const { data: ctx } = await supabase
+          .from('price_extractions')
+          .select('search_id, platform_name')
+          .eq('id', extractionId)
+          .maybeSingle();
+
+        const ctxSearchId = (ctx as any)?.search_id || 'unknown';
+        const ctxPlatform = (ctx as any)?.platform_name || 'unknown';
+
+        console.log(`[VRBO_PIPE] search_id=${ctxSearchId} platform=${ctxPlatform} extraction_id=${extractionId} return status=${result.status} total=${result.extractedPrice ?? 'null'} currency=${result.currency ?? 'null'} directly_comparable=${result.directlyComparable}`);
+
         // Map success_total_stay to canonical 'success' status for classification
         const canonicalStatus = result.status === 'success_total_stay' ? 'success' : result.status;
         
@@ -842,7 +853,7 @@ Deno.serve(async (req) => {
           })
           .eq('id', extractionId);
 
-        console.log(`[VRBO] Updated extraction ${extractionId}`);
+        console.log(`[VRBO_PIPE] search_id=${ctxSearchId} platform=${ctxPlatform} extraction_id=${extractionId} persisted status=${canonicalStatus} price_type=${result.directlyComparable ? 'TOTAL_STAY' : 'UNKNOWN'} extracted_price=${result.extractedPrice ?? 'null'}`);
       } catch (dbError) {
         console.error(`[VRBO] Database update failed:`, dbError);
       }

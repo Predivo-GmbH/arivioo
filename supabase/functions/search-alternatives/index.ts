@@ -7904,6 +7904,30 @@ async function runSearchWithStreaming(
         // Reject all other combinations
         return false;
       }).length;
+
+      // Targeted per-platform debug (especially VRBO)
+      const perPlatform = pricedExtractions.map((ext: any) => ({
+        id: ext.id,
+        status: (ext.extraction_status || '').toLowerCase(),
+        price_type: (ext.price_type || '').toUpperCase(),
+        price: ext.extracted_price,
+      }));
+      const vrboCandidates = await supabase
+        .from('price_extractions')
+        .select('id, platform_name, extracted_price, extraction_status, price_type')
+        .eq('search_id', searchId)
+        .ilike('platform_name', '%vrbo%');
+      const vrboRows = (vrboCandidates.data || []) as any[];
+      const vrboTotalStay = vrboRows.filter((r) => {
+        const st = (r.extraction_status || '').toLowerCase();
+        const pt = (r.price_type || '').toUpperCase();
+        const p = r.extracted_price;
+        if (!p || p <= 0) return false;
+        if (st === 'success_total_stay') return true;
+        if (st === 'success' && pt === 'TOTAL_STAY') return true;
+        return false;
+      }).length;
+      console.log(`[FINALIZE_PRICE_COUNT] search_id=${searchId} totalStay=${dbPriceCount} vrbo_totalStay=${vrboTotalStay} priced_rows=${perPlatform.length}`);
     }
     
     // Debug log: compare in-memory vs DB counts for validation
