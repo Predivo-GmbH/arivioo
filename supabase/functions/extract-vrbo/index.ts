@@ -2,21 +2,19 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 /**
  * ============================================================================
- * VRBO ZYTE-FIRST GOLDEN PATH EXTRACTOR v1.0
+ * VRBO ZYTE-FIRST GOLDEN PATH EXTRACTOR v2.0
  * ============================================================================
  * 
- * GOLDEN PATH: Zyte-first extraction for VRBO
- * 
- * Based on VRBO_LIVE_ACCESS_CHECK diagnostic results:
- * - Zyte: accessible, booking DOM = true (1.5MB content)
- * - Browserless: blocked by captcha
- * - Firecrawl: failed due to quota/credits
+ * GOLDEN PATH: Navigate from property page → checkout/session → extract Total
  * 
  * FLOW:
- * 1. Build VRBO URL with date/occupancy params
- * 2. Fetch via Zyte (primary) - NO Browserless fallback (captcha blocked)
- * 3. Extract TOTAL stay price from booking DOM
- * 4. Currency detection and USD conversion
+ * 1. Start from property URL (e.g., https://www.vrbo.com/9836046ha)
+ * 2. Apply dates via URL params
+ * 3. Use Zyte browser actions to click Reserve/Book CTA
+ * 4. Follow navigation to checkout/session page
+ * 5. Extract "Total" amount (not nightly, not subtotal, not deposit)
+ * 
+ * Based on VRBO_LIVE_ACCESS_CHECK: Zyte is the only viable provider.
  */
 
 const corsHeaders = {
@@ -33,6 +31,7 @@ type TerminalStatus =
   | 'blocked_rate_limit'
   | 'quota_error'
   | 'page_not_reached'
+  | 'checkout_not_reached'
   | 'total_price_not_found'
   | 'nightly_only_rejected'
   | 'render_failed'
@@ -45,7 +44,8 @@ type FailureCategory =
   | 'quota_error'
   | 'params_missing'
   | 'selector_not_found'
-  | 'no_price'
+  | 'checkout_not_reached'
+  | 'no_total_label'
   | 'nightly_only'
   | 'unavailable'
   | 'render_error'
@@ -65,14 +65,19 @@ interface ProviderAttemptTrace {
   contentLength: number | null;
   errorMessage: string | null;
   urlUsed: string | null;
+  finalUrl: string | null;
 }
 
 interface StructuralProof {
-  page_reached: boolean;
+  property_page_reached: boolean;
+  checkout_session_reached: boolean;
   dates_injected: boolean;
   dates_visible_on_page: boolean;
-  total_price_label_found: boolean;
-  nightly_rate_only: boolean;
+  total_label_found: boolean;
+  nightly_rate_found: boolean;
+  subtotal_found: boolean;
+  due_now_found: boolean;
+  deposit_found: boolean;
   cleaning_fee_found: boolean;
   service_fee_found: boolean;
   taxes_visible: boolean;
@@ -81,9 +86,12 @@ interface StructuralProof {
   currency_detected: string | null;
   nights_detected: number | null;
   entry_url_used: string | null;
+  dated_property_url: string | null;
+  final_url: string | null;
   content_hash: string | null;
   failure_category: FailureCategory;
   extraction_method: string | null;
+  competing_amounts: Record<string, number | null>;
 }
 
 interface ExtractionRequest {
@@ -116,56 +124,6 @@ interface ExtractionResult {
 }
 
 // ============================================================================
-// CURRENCY HANDLING
-// ============================================================================
-
-interface CurrencyInfo {
-  code: string;
-  symbol: string;
-  rate_to_usd: number;
-}
-
-const FX_RATES: Record<string, CurrencyInfo> = {
-  'USD': { code: 'USD', symbol: '$', rate_to_usd: 1.0 },
-  'EUR': { code: 'EUR', symbol: '€', rate_to_usd: 1.08 },
-  'GBP': { code: 'GBP', symbol: '£', rate_to_usd: 1.27 },
-  'JPY': { code: 'JPY', symbol: '¥', rate_to_usd: 0.0067 },
-  'CAD': { code: 'CAD', symbol: 'CA$', rate_to_usd: 0.74 },
-  'AUD': { code: 'AUD', symbol: 'A$', rate_to_usd: 0.66 },
-  'MXN': { code: 'MXN', symbol: 'MX$', rate_to_usd: 0.059 },
-};
-
-function detectCurrency(priceText: string): { code: string; amount: number } | null {
-  const patterns: Array<{ pattern: RegExp; code: string }> = [
-    { pattern: /USD\s*\$?([\d,]+(?:\.\d{2})?)/i, code: 'USD' },
-    { pattern: /\$?([\d,]+(?:\.\d{2})?)\s*USD/i, code: 'USD' },
-    { pattern: /€\s*([\d,]+(?:\.\d{2})?)/i, code: 'EUR' },
-    { pattern: /£\s*([\d,]+(?:\.\d{2})?)/i, code: 'GBP' },
-    { pattern: /CA\$\s*([\d,]+(?:\.\d{2})?)/i, code: 'CAD' },
-    { pattern: /A\$\s*([\d,]+(?:\.\d{2})?)/i, code: 'AUD' },
-    { pattern: /MX\$\s*([\d,]+(?:\.\d{2})?)/i, code: 'MXN' },
-    { pattern: /\$\s*([\d,]+(?:\.\d{2})?)/i, code: 'USD' }, // Default $ to USD
-  ];
-
-  for (const { pattern, code } of patterns) {
-    const match = priceText.match(pattern);
-    if (match && match[1]) {
-      const amount = parseFloat(match[1].replace(/,/g, ''));
-      if (!isNaN(amount) && amount > 0) {
-        return { code, amount };
-      }
-    }
-  }
-  return null;
-}
-
-function convertToUsd(amount: number, currencyCode: string): number | null {
-  const info = FX_RATES[currencyCode];
-  if (!info) return null;
-  return Math.round(amount * info.rate_to_usd * 100) / 100;
-}
-
-// ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
 
@@ -189,172 +147,191 @@ function calculateNights(checkIn: string, checkOut: string): number {
 function buildVrboUrl(baseUrl: string, checkIn: string, checkOut: string, adults: number = 2, children: number = 0): string {
   try {
     const url = new URL(baseUrl);
-    
-    // VRBO uses different date param formats
-    // Format: arrival/departure or startDate/endDate
+    // VRBO uses startDate/endDate and arrival/departure
     url.searchParams.set('startDate', checkIn);
     url.searchParams.set('endDate', checkOut);
-    url.searchParams.set('arrival', checkIn);
-    url.searchParams.set('departure', checkOut);
     url.searchParams.set('adults', String(adults));
     if (children > 0) {
       url.searchParams.set('children', String(children));
     }
-    
     return url.toString();
   } catch (e) {
-    // If URL parsing fails, append params manually
     const separator = baseUrl.includes('?') ? '&' : '?';
     return `${baseUrl}${separator}startDate=${checkIn}&endDate=${checkOut}&adults=${adults}`;
   }
 }
 
 function detectBlockSignals(content: string): string | null {
-  const lowerContent = content.toLowerCase();
-  
   if (/captcha|recaptcha|hcaptcha/i.test(content)) return 'captcha';
   if (/verify you are human|verify you're human/i.test(content)) return 'human_verification';
   if (/checking your browser/i.test(content)) return 'browser_check';
-  if (/just a moment/i.test(content)) return 'cloudflare_wait';
-  if (/access denied|access to this page has been denied/i.test(content)) return 'access_denied';
-  if (/unusual traffic/i.test(content)) return 'unusual_traffic';
-  if (/too many requests/i.test(content)) return 'too_many_requests';
-  
+  if (/access denied/i.test(content)) return 'access_denied';
   return null;
 }
 
+function isCheckoutSessionUrl(url: string): boolean {
+  if (!url) return false;
+  const lowerUrl = url.toLowerCase();
+  return lowerUrl.includes('/checkout') || 
+         lowerUrl.includes('/book/') ||
+         lowerUrl.includes('/session/') ||
+         lowerUrl.includes('tripid=') ||
+         lowerUrl.includes('checkouttoken=') ||
+         lowerUrl.includes('/reserve/');
+}
+
 // ============================================================================
-// VRBO PRICE EXTRACTION
+// VRBO PRICE EXTRACTION - STRICT TOTAL ONLY
 // ============================================================================
 
 interface VrboPriceResult {
-  found: boolean;
+  totalFound: boolean;
   totalPrice: number | null;
-  nightlyPrice: number | null;
   currency: string | null;
-  includesTaxes: boolean;
-  isNightlyOnly: boolean;
-  evidenceSnippet: string | null;
-  cleaningFeeFound: boolean;
-  serviceFeeFound: boolean;
-  taxesFound: boolean;
+  totalEvidence: string | null;
+  directlyComparable: boolean;
+  // Competing amounts (for logging what was found instead)
+  nightlyRate: number | null;
+  subtotal: number | null;
+  dueNow: number | null;
+  deposit: number | null;
+  cleaningFee: number | null;
+  serviceFee: number | null;
+  taxesAmount: number | null;
+  // What labels were found
+  labelsFound: string[];
 }
 
-function extractVrboPrice(content: string, nights: number): VrboPriceResult {
+function extractVrboTotal(content: string, nights: number): VrboPriceResult {
   const result: VrboPriceResult = {
-    found: false,
+    totalFound: false,
     totalPrice: null,
-    nightlyPrice: null,
     currency: null,
-    includesTaxes: false,
-    isNightlyOnly: false,
-    evidenceSnippet: null,
-    cleaningFeeFound: false,
-    serviceFeeFound: false,
-    taxesFound: false,
+    totalEvidence: null,
+    directlyComparable: false,
+    nightlyRate: null,
+    subtotal: null,
+    dueNow: null,
+    deposit: null,
+    cleaningFee: null,
+    serviceFee: null,
+    taxesAmount: null,
+    labelsFound: [],
   };
 
-  // Detect fee components
-  result.cleaningFeeFound = /cleaning\s*fee/i.test(content);
-  result.serviceFeeFound = /service\s*fee/i.test(content);
-  result.taxesFound = /taxes?|tax\s*&\s*fees?/i.test(content);
+  // Helper to parse price
+  const parsePrice = (text: string): number | null => {
+    const match = text.match(/\$?\s*([\d,]+(?:\.\d{2})?)/);
+    if (match) {
+      const val = parseFloat(match[1].replace(/,/g, ''));
+      return isNaN(val) ? null : val;
+    }
+    return null;
+  };
 
-  // PRIORITY 1: Look for explicit total patterns
+  // =========================================================================
+  // PRIORITY 1: Find explicit "Total" label with price
+  // This is the ONLY directly comparable price
+  // =========================================================================
+  
+  // Look for patterns like "Total $2,167.40" or "Total: $2,167.40"
   const totalPatterns = [
-    // VRBO total patterns
-    /total[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    /total\s*price[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    /\$?([\d,]+(?:\.\d{2})?)\s*total/i,
-    /grand\s*total[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    /your\s*total[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    /trip\s*total[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    // Amount due patterns
-    /amount\s*due[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    /you\s*pay[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    // With taxes patterns
-    /\$?([\d,]+(?:\.\d{2})?)\s*(?:includes?\s*)?(?:taxes?|fees?)/i,
+    /\bTotal[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    /\bTotal\s+\$?([\d,]+(?:\.\d{2})?)/gi,
+    /\$\s*([\d,]+(?:\.\d{2})?)\s*Total\b/gi,
   ];
 
   for (const pattern of totalPatterns) {
-    const match = content.match(pattern);
-    if (match && match[1]) {
-      const amount = parseFloat(match[1].replace(/,/g, ''));
-      // Total should be reasonably high (at least $50 for any stay)
-      if (!isNaN(amount) && amount > 50) {
-        result.found = true;
-        result.totalPrice = amount;
-        result.currency = 'USD'; // VRBO is US-focused
-        result.includesTaxes = /taxes?|fees?/i.test(match[0]);
-        result.evidenceSnippet = match[0].slice(0, 150);
-        result.isNightlyOnly = false;
-        
-        console.log(`[VRBO] Found total price: $${amount} from pattern: ${pattern}`);
-        return result;
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      // Exclude "Subtotal", "Due now total", etc.
+      const context = content.slice(Math.max(0, match.index! - 30), match.index! + match[0].length + 10);
+      if (/subtotal|due\s*now|deposit|pay\s*now|per\s*night|nightly/i.test(context)) {
+        continue;
       }
-    }
-  }
-
-  // PRIORITY 2: Look for "X nights" total patterns
-  const nightsPatterns = [
-    new RegExp(`\\$([\\\d,]+(?:\\.\\d{2})?)\\s*(?:for\\s*)?${nights}\\s*nights?`, 'i'),
-    new RegExp(`${nights}\\s*nights?[:\\s]+\\$([\\\d,]+(?:\\.\\d{2})?)`, 'i'),
-    /\$?([\d,]+(?:\.\d{2})?)\s*for\s*\d+\s*nights?/i,
-  ];
-
-  for (const pattern of nightsPatterns) {
-    const match = content.match(pattern);
-    if (match && match[1]) {
-      const amount = parseFloat(match[1].replace(/,/g, ''));
-      if (!isNaN(amount) && amount > 50) {
-        result.found = true;
-        result.totalPrice = amount;
+      
+      const price = parseFloat(match[1].replace(/,/g, ''));
+      if (!isNaN(price) && price > 100) { // Total should be substantial
+        result.totalFound = true;
+        result.totalPrice = price;
         result.currency = 'USD';
-        result.includesTaxes = result.taxesFound;
-        result.evidenceSnippet = match[0].slice(0, 150);
-        result.isNightlyOnly = false;
+        result.totalEvidence = context.trim().slice(0, 150);
+        result.directlyComparable = true;
+        result.labelsFound.push('Total');
         
-        console.log(`[VRBO] Found nights-based total: $${amount}`);
+        console.log(`[VRBO] total_label_found=true extracted_total=${price} currency=USD evidence="${result.totalEvidence}"`);
         return result;
       }
     }
   }
 
-  // PRIORITY 3: Look for nightly rate (NOT directly comparable)
-  const nightlyPatterns = [
-    /\$?([\d,]+(?:\.\d{2})?)\s*\/?\s*(?:per\s*)?night/i,
-    /nightly\s*rate[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    /avg\.?\s*\/?\s*night[:\s]+\$?([\d,]+(?:\.\d{2})?)/i,
-    /\$?([\d,]+(?:\.\d{2})?)\s*avg\.?\s*\/?\s*night/i,
-  ];
+  // =========================================================================
+  // FALLBACK: Detect competing amounts (for error logging)
+  // These are NOT directly comparable
+  // =========================================================================
 
-  for (const pattern of nightlyPatterns) {
-    const match = content.match(pattern);
-    if (match && match[1]) {
-      const amount = parseFloat(match[1].replace(/,/g, ''));
-      if (!isNaN(amount) && amount > 10 && amount < 10000) {
-        result.found = true;
-        result.nightlyPrice = amount;
-        result.currency = 'USD';
-        result.isNightlyOnly = true;
-        result.includesTaxes = false;
-        result.evidenceSnippet = match[0].slice(0, 150);
-        
-        console.log(`[VRBO] Found nightly rate only: $${amount}/night (NOT directly comparable)`);
-        return result;
-      }
-    }
+  // Nightly rate
+  const nightlyMatch = content.match(/\$\s*([\d,]+(?:\.\d{2})?)\s*(?:\/?\s*)?(?:per\s*)?night/i);
+  if (nightlyMatch) {
+    result.nightlyRate = parsePrice(nightlyMatch[0]);
+    result.labelsFound.push('nightly');
   }
 
-  console.log('[VRBO] No price found in content');
+  // Subtotal
+  const subtotalMatch = content.match(/subtotal[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (subtotalMatch) {
+    result.subtotal = parsePrice(subtotalMatch[0]);
+    result.labelsFound.push('subtotal');
+  }
+
+  // Due now / Pay now
+  const dueNowMatch = content.match(/(?:due\s*now|pay\s*now)[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (dueNowMatch) {
+    result.dueNow = parsePrice(dueNowMatch[0]);
+    result.labelsFound.push('due_now');
+  }
+
+  // Deposit
+  const depositMatch = content.match(/deposit[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (depositMatch) {
+    result.deposit = parsePrice(depositMatch[0]);
+    result.labelsFound.push('deposit');
+  }
+
+  // Cleaning fee
+  const cleaningMatch = content.match(/cleaning\s*fee[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (cleaningMatch) {
+    result.cleaningFee = parsePrice(cleaningMatch[0]);
+    result.labelsFound.push('cleaning_fee');
+  }
+
+  // Service fee
+  const serviceMatch = content.match(/service\s*fee[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (serviceMatch) {
+    result.serviceFee = parsePrice(serviceMatch[0]);
+    result.labelsFound.push('service_fee');
+  }
+
+  // Taxes
+  const taxesMatch = content.match(/taxes?(?:\s*&\s*fees?)?[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (taxesMatch) {
+    result.taxesAmount = parsePrice(taxesMatch[0]);
+    result.labelsFound.push('taxes');
+  }
+
+  console.log(`[VRBO] total_label_found=false competing_amounts: nightly=${result.nightlyRate}, subtotal=${result.subtotal}, due_now=${result.dueNow}, deposit=${result.deposit}`);
+  
   return result;
 }
 
 // ============================================================================
-// ZYTE EXTRACTION (PRIMARY)
+// ZYTE EXTRACTION WITH NAVIGATION
 // ============================================================================
 
-async function extractWithZyte(url: string, nights: number): Promise<{
+async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, nights: number): Promise<{
   success: boolean;
+  propertyPageReached: boolean;
+  checkoutSessionReached: boolean;
   content: string;
   html: string;
   httpStatus: number | null;
@@ -365,6 +342,8 @@ async function extractWithZyte(url: string, nights: number): Promise<{
   const start = Date.now();
   const result = {
     success: false,
+    propertyPageReached: false,
+    checkoutSessionReached: false,
     content: '',
     html: '',
     httpStatus: null as number | null,
@@ -381,13 +360,25 @@ async function extractWithZyte(url: string, nights: number): Promise<{
       return result;
     }
 
-    console.log(`[VRBO] Zyte extraction starting: ${url}`);
+    console.log(`[VRBO] url_in=${propertyUrl}`);
+    console.log(`[VRBO] dated_property_url=${datedUrl}`);
 
     const zyteAuth = btoa(apiKey + ':');
     
+    // =========================================================================
+    // STEP 1: Load property page with dates and click through to checkout
+    // =========================================================================
+    
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2min timeout
 
+    // Zyte browser actions to:
+    // 1. Navigate to dated property page
+    // 2. Wait for content to load
+    // 3. Click the primary booking CTA (Reserve/Book/Continue)
+    // 4. Wait for navigation to checkout
+    // 5. Extract final page content
+    
     const response = await fetch('https://api.zyte.com/v1/extract', {
       method: 'POST',
       headers: {
@@ -395,11 +386,28 @@ async function extractWithZyte(url: string, nights: number): Promise<{
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        url,
+        url: datedUrl,
         browserHtml: true,
         javascript: true,
         actions: [
-          { action: 'waitForTimeout', timeout: 8 }, // Wait for JS to render
+          // Wait for page to fully load
+          { action: 'waitForTimeout', timeout: 8 },
+          
+          // Click primary booking button - use simple CSS selector
+          // VRBO uses data-stid attributes for booking buttons
+          {
+            action: 'click',
+            selector: {
+              type: 'css',
+              value: 'button[data-stid="submit-hotel-reserve"]'
+            }
+          },
+          
+          // Wait for navigation/loading
+          { action: 'waitForTimeout', timeout: 5 },
+          
+          // Wait for page content to stabilize
+          { action: 'waitForTimeout', timeout: 5 },
         ],
       }),
       signal: controller.signal,
@@ -413,22 +421,89 @@ async function extractWithZyte(url: string, nights: number): Promise<{
     if (!response.ok) {
       const errText = await response.text();
       result.error = `HTTP ${response.status}: ${errText.slice(0, 200)}`;
-      console.log(`[VRBO] Zyte failed: ${result.error}`);
+      console.log(`[VRBO] Zyte navigation failed: ${result.error}`);
       return result;
     }
 
     const data = await response.json();
     result.html = data.browserHtml || '';
     result.content = result.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    result.finalUrl = data.url || url;
-    result.success = true;
+    result.finalUrl = data.url || datedUrl;
+    result.propertyPageReached = result.html.length > 10000;
+    result.checkoutSessionReached = isCheckoutSessionUrl(result.finalUrl || '');
 
-    console.log(`[VRBO] Zyte success: ${result.html.length} bytes, ${result.durationMs}ms`);
+    console.log(`[VRBO] final_url=${result.finalUrl}`);
+    console.log(`[VRBO] reached_checkout_session=${result.checkoutSessionReached}`);
+    console.log(`[VRBO] Zyte navigation complete: ${result.html.length} bytes, ${result.durationMs}ms`);
+
+    // =========================================================================
+    // STEP 2: If not at checkout, try a second navigation attempt
+    // =========================================================================
+    
+    if (!result.checkoutSessionReached && result.propertyPageReached) {
+      console.log('[VRBO] Not at checkout, attempting second navigation...');
+      
+      // Look for checkout/booking links in the current content
+      const checkoutLinkMatch = result.html.match(/href=["']([^"']*(?:checkout|book|reserve|session)[^"']*)["']/i);
+      
+      if (checkoutLinkMatch) {
+        let checkoutUrl = checkoutLinkMatch[1];
+        if (checkoutUrl.startsWith('/')) {
+          checkoutUrl = 'https://www.vrbo.com' + checkoutUrl;
+        }
+        
+        console.log(`[VRBO] Found checkout link, navigating to: ${checkoutUrl.slice(0, 100)}...`);
+        
+        const controller2 = new AbortController();
+        const timeoutId2 = setTimeout(() => controller2.abort(), 60000);
+        
+        try {
+          const response2 = await fetch('https://api.zyte.com/v1/extract', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Basic ${zyteAuth}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              url: checkoutUrl,
+              browserHtml: true,
+              javascript: true,
+              actions: [
+                { action: 'waitForTimeout', timeout: 8 },
+              ],
+            }),
+            signal: controller2.signal,
+          });
+          
+          clearTimeout(timeoutId2);
+          
+          if (response2.ok) {
+            const data2 = await response2.json();
+            const html2 = data2.browserHtml || '';
+            const url2 = data2.url || checkoutUrl;
+            
+            if (html2.length > result.html.length / 2) {
+              result.html = html2;
+              result.content = html2.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+              result.finalUrl = url2;
+              result.checkoutSessionReached = isCheckoutSessionUrl(url2 || '');
+              result.durationMs = Date.now() - start;
+              
+              console.log(`[VRBO] Second navigation: final_url=${url2}, reached_checkout=${result.checkoutSessionReached}`);
+            }
+          }
+        } catch (e) {
+          console.log(`[VRBO] Second navigation failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+
+    result.success = result.propertyPageReached;
 
   } catch (e) {
     result.durationMs = Date.now() - start;
     if (e instanceof Error && e.name === 'AbortError') {
-      result.error = 'Timeout after 90s';
+      result.error = 'Timeout after 120s';
     } else {
       result.error = e instanceof Error ? e.message : String(e);
     }
@@ -464,22 +539,29 @@ Deno.serve(async (req) => {
     directlyComparable: false,
     evidenceSnippet: null,
     structuralProof: {
-      page_reached: false,
+      property_page_reached: false,
+      checkout_session_reached: false,
       dates_injected: false,
       dates_visible_on_page: false,
-      total_price_label_found: false,
-      nightly_rate_only: false,
+      total_label_found: false,
+      nightly_rate_found: false,
+      subtotal_found: false,
+      due_now_found: false,
+      deposit_found: false,
       cleaning_fee_found: false,
       service_fee_found: false,
       taxes_visible: false,
       directly_comparable: false,
-      proof_version: 'vrbo-zyte-v1.0',
+      proof_version: 'vrbo-zyte-nav-v2.0',
       currency_detected: null,
       nights_detected: null,
       entry_url_used: null,
+      dated_property_url: null,
+      final_url: null,
       content_hash: null,
       failure_category: 'params_missing',
       extraction_method: null,
+      competing_amounts: {},
     },
     durationMs: 0,
     error: null,
@@ -491,7 +573,7 @@ Deno.serve(async (req) => {
     const body: ExtractionRequest = await req.json();
     const { extractionId, url, checkIn, checkOut, adults = 2, children = 0 } = body;
 
-    console.log(`[VRBO] Extraction request: ${url}`);
+    console.log(`[VRBO] Extraction request: url_in=${url}`);
     console.log(`[VRBO] Dates: ${checkIn} to ${checkOut}, adults: ${adults}`);
 
     // Validate inputs
@@ -506,16 +588,15 @@ Deno.serve(async (req) => {
 
     const nights = calculateNights(checkIn, checkOut);
     result.structuralProof.nights_detected = nights;
+    result.structuralProof.entry_url_used = url;
 
     // Build URL with dates
-    const vrboUrl = buildVrboUrl(url, checkIn, checkOut, adults, children);
-    result.structuralProof.entry_url_used = vrboUrl;
+    const datedUrl = buildVrboUrl(url, checkIn, checkOut, adults, children);
+    result.structuralProof.dated_property_url = datedUrl;
     result.structuralProof.dates_injected = true;
 
-    console.log(`[VRBO] URL with dates: ${vrboUrl}`);
-
     // ========================================================================
-    // ZYTE-FIRST GOLDEN PATH
+    // ZYTE-FIRST GOLDEN PATH WITH NAVIGATION
     // ========================================================================
     
     const zyteAttempt: ProviderAttemptTrace = {
@@ -528,18 +609,23 @@ Deno.serve(async (req) => {
       httpStatus: null,
       contentLength: null,
       errorMessage: null,
-      urlUsed: vrboUrl,
+      urlUsed: datedUrl,
+      finalUrl: null,
     };
 
-    const zyteResult = await extractWithZyte(vrboUrl, nights);
+    const zyteResult = await extractWithZyteNavigation(url, datedUrl, nights);
     
     zyteAttempt.endedAt = new Date().toISOString();
     zyteAttempt.httpStatus = zyteResult.httpStatus;
     zyteAttempt.contentLength = zyteResult.html.length;
+    zyteAttempt.finalUrl = zyteResult.finalUrl;
+
+    result.structuralProof.property_page_reached = zyteResult.propertyPageReached;
+    result.structuralProof.checkout_session_reached = zyteResult.checkoutSessionReached;
+    result.structuralProof.final_url = zyteResult.finalUrl;
 
     if (zyteResult.success) {
       zyteAttempt.outcome = 'success';
-      result.structuralProof.page_reached = true;
       result.structuralProof.content_hash = simpleHash(zyteResult.html);
 
       // Check for block signals
@@ -551,17 +637,30 @@ Deno.serve(async (req) => {
         result.failureCategory = blockSignal === 'captcha' ? 'captcha' : 'blocked';
         result.error = `Blocked: ${blockSignal}`;
       } else {
-        // Extract price
-        const priceResult = extractVrboPrice(zyteResult.content, nights);
+        // Extract TOTAL price only
+        const priceResult = extractVrboTotal(zyteResult.content, nights);
         
-        result.structuralProof.total_price_label_found = priceResult.found && !priceResult.isNightlyOnly;
-        result.structuralProof.nightly_rate_only = priceResult.isNightlyOnly;
-        result.structuralProof.cleaning_fee_found = priceResult.cleaningFeeFound;
-        result.structuralProof.service_fee_found = priceResult.serviceFeeFound;
-        result.structuralProof.taxes_visible = priceResult.taxesFound;
+        result.structuralProof.total_label_found = priceResult.totalFound;
+        result.structuralProof.nightly_rate_found = priceResult.nightlyRate !== null;
+        result.structuralProof.subtotal_found = priceResult.subtotal !== null;
+        result.structuralProof.due_now_found = priceResult.dueNow !== null;
+        result.structuralProof.deposit_found = priceResult.deposit !== null;
+        result.structuralProof.cleaning_fee_found = priceResult.cleaningFee !== null;
+        result.structuralProof.service_fee_found = priceResult.serviceFee !== null;
+        result.structuralProof.taxes_visible = priceResult.taxesAmount !== null;
+        
+        result.structuralProof.competing_amounts = {
+          nightly: priceResult.nightlyRate,
+          subtotal: priceResult.subtotal,
+          due_now: priceResult.dueNow,
+          deposit: priceResult.deposit,
+          cleaning_fee: priceResult.cleaningFee,
+          service_fee: priceResult.serviceFee,
+          taxes: priceResult.taxesAmount,
+        };
 
-        if (priceResult.found && priceResult.totalPrice && !priceResult.isNightlyOnly) {
-          // SUCCESS - Total price found
+        if (priceResult.totalFound && priceResult.totalPrice && priceResult.directlyComparable) {
+          // SUCCESS - Total price found from "Total" label
           result.success = true;
           result.status = 'success_total_stay';
           result.failureCategory = 'success';
@@ -570,35 +669,36 @@ Deno.serve(async (req) => {
           result.originalAmount = priceResult.totalPrice;
           result.originalCurrency = priceResult.currency;
           result.conversionRate = 1.0;
-          result.includesTaxesFees = priceResult.includesTaxes;
+          result.includesTaxesFees = true;
           result.directlyComparable = true;
-          result.evidenceSnippet = priceResult.evidenceSnippet;
+          result.evidenceSnippet = priceResult.totalEvidence;
           result.structuralProof.directly_comparable = true;
-          result.structuralProof.extraction_method = 'zyte_total_pattern';
+          result.structuralProof.extraction_method = 'zyte_nav_total_label';
           result.goldenPath = true;
 
-          console.log(`[VRBO] SUCCESS: $${priceResult.totalPrice} (total stay)`);
+          console.log(`[VRBO] SUCCESS: Total=$${priceResult.totalPrice} currency=${priceResult.currency} directly_comparable=true`);
 
-        } else if (priceResult.found && priceResult.isNightlyOnly) {
-          // Nightly rate only - NOT directly comparable
+        } else if (!zyteResult.checkoutSessionReached) {
+          // Could not reach checkout page
           result.success = false;
-          result.status = 'nightly_only_rejected';
-          result.failureCategory = 'nightly_only';
-          result.error = 'Only nightly rate found, not directly comparable';
-          result.evidenceSnippet = priceResult.evidenceSnippet;
-          result.structuralProof.extraction_method = 'zyte_nightly_only';
+          result.status = 'checkout_not_reached';
+          result.failureCategory = 'checkout_not_reached';
+          result.directlyComparable = false;
+          result.error = `Checkout/session page not reached. Final URL: ${zyteResult.finalUrl}. Labels found: ${priceResult.labelsFound.join(', ') || 'none'}`;
+          result.structuralProof.extraction_method = 'zyte_nav_no_checkout';
 
-          console.log(`[VRBO] Nightly rate only: $${priceResult.nightlyPrice}/night - REJECTED`);
+          console.log(`[VRBO] FAILURE: Checkout not reached. Labels found: ${priceResult.labelsFound.join(', ')}`);
 
         } else {
-          // No price found
+          // At checkout but no "Total" label found
           result.success = false;
           result.status = 'total_price_not_found';
-          result.failureCategory = 'no_price';
-          result.error = 'Total price not found in booking DOM';
-          result.structuralProof.extraction_method = 'zyte_no_match';
+          result.failureCategory = 'no_total_label';
+          result.directlyComparable = false;
+          result.error = `"Total" label not found on checkout page. Found instead: ${priceResult.labelsFound.join(', ') || 'none'}. Competing amounts: nightly=${priceResult.nightlyRate}, subtotal=${priceResult.subtotal}, due_now=${priceResult.dueNow}`;
+          result.structuralProof.extraction_method = 'zyte_nav_no_total_label';
 
-          console.log('[VRBO] No total price found');
+          console.log(`[VRBO] FAILURE: No "Total" label. Competing: nightly=${priceResult.nightlyRate}, subtotal=${priceResult.subtotal}, due_now=${priceResult.dueNow}, deposit=${priceResult.deposit}`);
         }
       }
     } else {
@@ -617,13 +717,8 @@ Deno.serve(async (req) => {
 
     providerAttempts.push(zyteAttempt);
 
-    // ========================================================================
-    // BROWSERLESS FALLBACK - DISABLED (captcha blocked)
-    // ========================================================================
-    
-    // NOTE: Browserless is NOT attempted for VRBO per VRBO_LIVE_ACCESS_CHECK results
-    // Browserless returns captcha wall (116KB content, bookingDom=false)
-    const browserlessAttempt: ProviderAttemptTrace = {
+    // Browserless and Firecrawl skipped (captcha/quota per live check)
+    providerAttempts.push({
       provider: 'browserless',
       attempted: false,
       attemptIndex: 1,
@@ -632,18 +727,12 @@ Deno.serve(async (req) => {
       outcome: 'skipped',
       httpStatus: null,
       contentLength: null,
-      errorMessage: 'Skipped: VRBO_LIVE_ACCESS_CHECK shows Browserless is captcha-blocked',
+      errorMessage: 'Skipped: Browserless captcha-blocked per VRBO_LIVE_ACCESS_CHECK',
       urlUsed: null,
-    };
-    providerAttempts.push(browserlessAttempt);
+      finalUrl: null,
+    });
 
-    // ========================================================================
-    // FIRECRAWL FALLBACK - DISABLED (quota error)
-    // ========================================================================
-    
-    // NOTE: Firecrawl is NOT attempted for VRBO per VRBO_LIVE_ACCESS_CHECK results
-    // Firecrawl returns 402 quota error (not a technical block)
-    const firecrawlAttempt: ProviderAttemptTrace = {
+    providerAttempts.push({
       provider: 'firecrawl',
       attempted: false,
       attemptIndex: 2,
@@ -652,16 +741,17 @@ Deno.serve(async (req) => {
       outcome: 'skipped',
       httpStatus: null,
       contentLength: null,
-      errorMessage: 'Skipped: VRBO_LIVE_ACCESS_CHECK shows Firecrawl quota error (402)',
+      errorMessage: 'Skipped: Firecrawl quota error per VRBO_LIVE_ACCESS_CHECK',
       urlUsed: null,
-    };
-    providerAttempts.push(firecrawlAttempt);
+      finalUrl: null,
+    });
 
     result.providerAttempts = providerAttempts;
     result.structuralProof.failure_category = result.failureCategory;
+    result.structuralProof.currency_detected = result.currency;
     result.durationMs = Date.now() - startTime;
 
-    console.log(`[VRBO] Extraction complete: ${result.status}, ${result.durationMs}ms`);
+    console.log(`[VRBO] Extraction complete: status=${result.status}, directly_comparable=${result.directlyComparable}, ${result.durationMs}ms`);
 
     // ========================================================================
     // DATABASE UPDATE (if extractionId provided)
