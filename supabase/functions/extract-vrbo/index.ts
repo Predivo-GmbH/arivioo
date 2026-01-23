@@ -180,6 +180,23 @@ function isCheckoutSessionUrl(url: string): boolean {
          lowerUrl.includes('/reserve/');
 }
 
+function hasCheckoutSignals(content: string): boolean {
+  // VRBO sometimes keeps the same URL but swaps to a booking/checkout view.
+  // We treat these as strong checkout signals that appear on the "Begin booking" flow.
+  const signals = [
+    /\bTrip\s+total\b/i,
+    /\bTraveler\s+information\b/i,
+    /\bPayment\s+(?:details|schedule)\b/i,
+    /\bDue\s+now\b/i,
+    /\bTaxes\b/i,
+    /\bService\s+fee\b/i,
+    /\bCleaning\s+fee\b/i,
+  ];
+  const hits = signals.reduce((acc, r) => acc + (r.test(content) ? 1 : 0), 0);
+  // Require multiple signals to avoid falsely treating marketing/footer text as checkout.
+  return hits >= 2;
+}
+
 // ============================================================================
 // VRBO PRICE EXTRACTION - STRICT TOTAL ONLY
 // ============================================================================
@@ -497,18 +514,26 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
 
     const zyteAuth = btoa(apiKey + ':');
 
-    // Prioritize submit-hotel-reserve first - this is the most reliable checkout selector
-    const clickSelectors: string[] = [
-      // PRIORITY 1: The checkout submit button (most reliable, needs longer wait)
-      'button[data-stid="submit-hotel-reserve"]',
-      // PRIORITY 2: Booking drawer / reserve buttons
-      'button[data-stid="open-booking-drawer"]',
-      'button[data-testid="book-button"]',
-      'button[data-wdio="book-button"]',
-      '[data-stid="sticky-booking-button"] button',
-      'button.uitk-button-primary',
-      'button[type="submit"]',
-    ];
+    // NOTE: VRBO commonly requires opening the booking drawer, then clicking the
+    // primary CTA (often labeled "Begin booking") to reach the checkout/session
+    // where taxes/fees are shown.
+    const selectors = {
+      openBookingDrawer: [
+        'button[data-stid="open-booking-drawer"]',
+        '[data-stid="sticky-booking-button"] button',
+        'button[data-testid="book-button"]',
+        'button[data-wdio="book-button"]',
+      ],
+      beginBookingOrReserve: [
+        // Most reliable known selector (also used by Expedia/UITK patterns)
+        'button[data-stid="submit-hotel-reserve"]',
+        // Fallbacks (class-based/semantic)
+        'button.uitk-button-primary',
+        'button[type="submit"]',
+        // Text-based selectors are not supported by Zyte actions, so we rely on
+        // stable attributes + primary button fallbacks.
+      ],
+    };
 
     const zyteExtract = async (url: string, actions: any[], timeoutMs: number) => {
       const controller = new AbortController();
@@ -543,23 +568,49 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     // Zyte navigation strategy (historical working route):
     // attempt multiple click selectors to reach checkout/session, without inventing URLs.
 
-    // TIMEOUT FIX: Increased wait times to ensure checkout page loads fully
-    // The submit-hotel-reserve selector can take 100-120s to reach checkout
-    const attempts: Array<{ label: string; actions: any[] }> = [
+    // TIMEOUT FIX: Increased wait times to ensure checkout page loads fully.
+    // The checkout CTA (submit-hotel-reserve / "Begin booking") can take 60-120s.
+    //
+    // IMPORTANT: We explicitly try a two-step flow:
+    //   1) open booking drawer
+    //   2) click primary CTA to reach checkout/session
+    const attempts: Array<{ label: string; actions: any[]; expectedCheckout?: boolean }> = [
       {
         label: 'baseline_wait',
-        actions: [
-          { action: 'waitForTimeout', timeout: 15 },
-        ],
+        actions: [{ action: 'waitForTimeout', timeout: 15 }],
       },
-      ...clickSelectors.map((selector, idx) => ({
-        label: `click:${selector}`,
+
+      // Two-step: open drawer -> click primary CTA (most closely matches "Begin booking")
+      ...selectors.openBookingDrawer.flatMap((openSel, openIdx) =>
+        selectors.beginBookingOrReserve.map((ctaSel, ctaIdx) => ({
+          label: `drawer_then_cta:${openSel}>>${ctaSel}`,
+          expectedCheckout: true,
+          actions: [
+            { action: 'waitForTimeout', timeout: 10 },
+            // Open booking drawer
+            { action: 'waitForSelector', selector: { type: 'css', value: openSel }, timeout: 20 },
+            { action: 'click', selector: { type: 'css', value: openSel } },
+            { action: 'waitForTimeout', timeout: 6 + Math.min(openIdx, 2) },
+            // Click primary CTA (often "Begin booking")
+            { action: 'waitForSelector', selector: { type: 'css', value: ctaSel }, timeout: 20 },
+            { action: 'click', selector: { type: 'css', value: ctaSel } },
+            // Longer waits after CTA to allow navigation/render of checkout breakdown
+            { action: 'waitForTimeout', timeout: ctaIdx === 0 ? 55 : 35 },
+            { action: 'waitForTimeout', timeout: ctaIdx === 0 ? 35 : 15 },
+          ],
+        }))
+      ),
+
+      // Direct CTA clicks (some pages render the CTA without needing drawer)
+      ...selectors.beginBookingOrReserve.map((ctaSel, idx) => ({
+        label: `cta_only:${ctaSel}`,
+        expectedCheckout: true,
         actions: [
           { action: 'waitForTimeout', timeout: 10 },
-          { action: 'click', selector: { type: 'css', value: selector } },
-          // Extended wait for checkout page to fully load
-          { action: 'waitForTimeout', timeout: idx === 0 ? 45 : 20 }, // Longer for submit-hotel-reserve
-          { action: 'waitForTimeout', timeout: idx === 0 ? 30 : 10 },
+          { action: 'waitForSelector', selector: { type: 'css', value: ctaSel }, timeout: 20 },
+          { action: 'click', selector: { type: 'css', value: ctaSel } },
+          { action: 'waitForTimeout', timeout: idx === 0 ? 55 : 30 },
+          { action: 'waitForTimeout', timeout: idx === 0 ? 35 : 15 },
         ],
       })),
     ];
@@ -585,27 +636,27 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
 
         const data = await response.json();
         const html = data.browserHtml || '';
-        const finalUrl = data.url || datedUrl;
-        const propertyPageReached = html.length > 10000;
-        const reachedCheckout = isCheckoutSessionUrl(finalUrl);
+         const finalUrl = data.url || datedUrl;
+         const propertyPageReached = html.length > 10000;
+         const normalizedContent = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+         const reachedCheckout = isCheckoutSessionUrl(finalUrl) || hasCheckoutSignals(normalizedContent);
 
         console.log(`[VRBO] final_url=${finalUrl}`);
         console.log(`[VRBO] reached_checkout_session=${reachedCheckout}`);
         console.log(`[VRBO] Zyte attempt complete (${attempt.label}): ${html.length} bytes, ${Date.now() - start}ms`);
 
         // Always keep the latest successful HTML payload.
-        if (propertyPageReached) {
+         if (propertyPageReached) {
           result.html = html;
-          result.content = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+           result.content = normalizedContent;
           result.finalUrl = finalUrl;
           result.propertyPageReached = true;
           result.checkoutSessionReached = reachedCheckout;
         }
 
-        // If we reached checkout/session, stop immediately.
-        if (reachedCheckout) {
-          break;
-        }
+         // If we reached checkout/session, stop immediately.
+         // This is the only place we should attempt to read a total-with-taxes.
+         if (reachedCheckout) break;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         lastErr = msg;
