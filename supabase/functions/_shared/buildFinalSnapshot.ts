@@ -712,6 +712,21 @@ export async function finalizeAndCompleteSearch(
           airbnbPrice
         );
 
+        // SAFEGUARD ASSERTION: success_total_stay MUST be classified correctly
+        // This prevents silent drops of successful VRBO/Agoda extractions
+        const extractionStatus = extraction?.extraction_status || platform.extraction_status_terminal || '';
+        if (extractionStatus === 'success_total_stay') {
+          const validBuckets = ['cheaper', 'more_expensive', 'not_comparable'];
+          if (!validBuckets.includes(finalBucket)) {
+            console.error(
+              `[CRITICAL] success_total_stay extraction incorrectly bucketed as "${finalBucket}" ` +
+              `for platform="${platform.platform_name}". ` +
+              `This violates baseline invariant vrbo-price-extraction-golden-path-v1. ` +
+              `Price=${effectivePrice}, Airbnb=${airbnbPrice}, CanonicalPrice=${JSON.stringify(canonicalPrice)}`
+            );
+          }
+        }
+
         // Determine image verification authority status from two-pass outcome
         // 'authoritative' = PASS 2 >= 90% (high trust)
         // 'needs_review' = PASS 1 passed (75%+) but PASS 2 < 90%

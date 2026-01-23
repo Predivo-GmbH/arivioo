@@ -30,9 +30,14 @@ export const AGODA_EXTRACTION_BASELINE_NAME = 'agoda-price-extraction-golden-pat
 export const AGODA_EXTRACTION_BASELINE_VERSION = '1.0.0';
 export const AGODA_EXTRACTION_BASELINE_DATE = '2026-01-23';
 
+// VRBO Price Extraction Working Baseline
+export const VRBO_EXTRACTION_BASELINE_NAME = 'vrbo-price-extraction-golden-path-v1';
+export const VRBO_EXTRACTION_BASELINE_VERSION = '1.0.0';
+export const VRBO_EXTRACTION_BASELINE_DATE = '2026-01-23';
+
 export interface BaselineExpectation {
   id: string;
-  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization' | 'image_verification' | 'agoda_extraction';
+  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization' | 'image_verification' | 'agoda_extraction' | 'vrbo_extraction';
   description: string;
   observable: string;
   critical: boolean;
@@ -331,6 +336,57 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     observable: 'evidenceSnippet contains "Total Price" text',
     critical: true,
   },
+
+  // VRBO Extraction Contract (Working Baseline v1.0.0 - 2026-01-23)
+  {
+    id: 'vrbo_zyte_primary',
+    category: 'vrbo_extraction',
+    description: 'Zyte is primary provider for VRBO',
+    observable: 'providerUsed=zyte in extraction metadata',
+    critical: true,
+  },
+  {
+    id: 'vrbo_checkout_session_reached',
+    category: 'vrbo_extraction',
+    description: 'Checkout session reached via button click',
+    observable: 'structuralProof.checkout_session_reached=true',
+    critical: true,
+  },
+  {
+    id: 'vrbo_total_price_extracted',
+    category: 'vrbo_extraction',
+    description: 'Total price including taxes extracted',
+    observable: 'status=success_total_stay with includesTaxesFees=true',
+    critical: true,
+  },
+  {
+    id: 'vrbo_dates_validated',
+    category: 'vrbo_extraction',
+    description: 'Dates visible on checkout page',
+    observable: 'structuralProof.dates_visible_on_page=true AND dates_validated=true',
+    critical: true,
+  },
+  {
+    id: 'vrbo_directly_comparable',
+    category: 'vrbo_extraction',
+    description: 'Price marked as directly comparable',
+    observable: 'directlyComparable=true in extraction result',
+    critical: true,
+  },
+  {
+    id: 'vrbo_snapshot_inclusion',
+    category: 'vrbo_extraction',
+    description: 'Successful extraction included in snapshot',
+    observable: 'success_total_stay VRBO appears in final_results_snapshot',
+    critical: true,
+  },
+  {
+    id: 'vrbo_correct_bucket_classification',
+    category: 'vrbo_extraction',
+    description: 'VRBO classified in cheaper or more_expensive bucket',
+    observable: 'final_bucket is "cheaper" or "more_expensive", never "additional_issues"',
+    critical: true,
+  },
 ];
 
 /**
@@ -363,4 +419,5 @@ export const CATEGORY_LABELS: Record<string, string> = {
   finalization: 'Finalization Contract',
   image_verification: 'Image Verification (Working Baseline v1.0.0)',
   agoda_extraction: 'Agoda Extraction (Working Baseline v1.0.0)',
+  vrbo_extraction: 'VRBO Extraction (Working Baseline v1.0.0)',
 };
