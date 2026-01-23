@@ -236,8 +236,9 @@ export function categorizeResult(
   // No price at all - but distinguish from unmapped errors
   if (!input.price || input.price <= 0) {
     // Check if we have an extraction_status that wasn't mapped above
+    const successStatuses = ['pending', 'running', 'success', 'price_extracted', 'success_total_stay', 'completed'];
     const unmappedStatus = input.extraction_status && 
-      !['pending', 'running', 'success', 'price_extracted'].includes(input.extraction_status.toLowerCase());
+      !successStatuses.includes(input.extraction_status.toLowerCase());
     
     if (unmappedStatus) {
       // Unknown terminal status - use additional_issues bucket
