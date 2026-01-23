@@ -2186,6 +2186,55 @@ Deno.serve(async (req) => {
       );
     }
 
+    // ADAPTERS REORDER - Update platform order within a tier
+    if (action === 'reorder' && req.method === 'POST') {
+      console.log('[Admin Dashboard] Adapters Reorder: Processing request');
+      
+      const body = await req.json();
+      const { updates } = body;
+      
+      if (!updates || !Array.isArray(updates)) {
+        return new Response(
+          JSON.stringify({ error: 'Missing updates array' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      console.log('[Admin Dashboard] Adapters Reorder: Updating', updates.length, 'platforms');
+      
+      // Update each platform's promotion_score
+      for (const update of updates) {
+        if (!update.id || typeof update.promotion_score !== 'number') {
+          console.warn('[Admin Dashboard] Adapters Reorder: Skipping invalid update:', update);
+          continue;
+        }
+        
+        const { error: updateError } = await supabase
+          .from('platform_adapters')
+          .update({ promotion_score: update.promotion_score })
+          .eq('id', update.id);
+        
+        if (updateError) {
+          console.error('[Admin Dashboard] Adapters Reorder: Failed to update platform', update.id, updateError);
+        }
+      }
+      
+      // Log the reorder action
+      await supabase.from('admin_audit_logs').insert({
+        admin_user_id: authResult.admin?.id || null,
+        admin_email: authResult.admin?.email || 'unknown',
+        action: 'reorder_platforms',
+        resource_type: 'platform_adapters',
+        resource_id: null,
+        new_values: { updates_count: updates.length },
+      });
+      
+      return new Response(
+        JSON.stringify({ success: true, updated: updates.length }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     // BASELINE INFO - Get current active baseline
     if (action === 'baseline' && req.method === 'GET') {
       const { data: baseline, error: baselineError } = await supabase
