@@ -7737,9 +7737,9 @@ async function runSearchWithStreaming(
   sendProgress(controller, "Finalizing results", "Waiting for all platforms to finish pricing");
   sendStatusUpdate(controller, "finalizing");
 
-  const FINALIZE_MAX_WAIT_MS = 60_000;
+  const FINALIZE_MAX_WAIT_MS = 180_000; // 3 minutes max wait for finalization (accommodates VRBO 2-phase extraction)
   const FINALIZE_POLL_MS = 2_000;
-  const EXTRACTION_TIMEOUT_MS = 45_000; // Per-platform extraction timeout guard
+  const EXTRACTION_TIMEOUT_MS = 150_000; // 2.5 minute timeout guard for dedicated extractors (VRBO needs ~120s)
   const finalizeStart = Date.now();
 
   // ============================================================================
