@@ -628,126 +628,10 @@ function extractPrice(content: string, expectedNights: number): PriceExtractionR
   }
   
   // ==========================================================================
-  // PATTERN 2: Room price (X nights) - fallback, NOT directly comparable
-  // ==========================================================================
-  
-  const roomPricePatterns: Array<{ pattern: RegExp; name: string }> = [
-    { pattern: /room\s*price\s*\((\d+)\s*nights?\)[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'room_price_nights_currency' },
-    { pattern: /room\s*price\s*\((\d+)\s*nights?\)[^$]*?\$\s*([\d,\.]+)/i, name: 'room_price_nights_dollar' },
-    { pattern: /(\d+)\s*nights?[^$€£¥]*?([A-Z]{3})\s*([\d,\.]+)/i, name: 'nights_currency_amount' },
-  ];
-  
-  for (const { pattern, name } of roomPricePatterns) {
-    const match = normalized.match(pattern);
-    if (match) {
-      const nightsFound = parseInt(match[1], 10);
-      let currency: string;
-      let amountStr: string;
-      
-      if (match[3]) {
-        currency = match[2].toUpperCase();
-        amountStr = match[3];
-      } else {
-        currency = 'USD';
-        amountStr = match[2];
-      }
-      
-      const amount = parseCurrencyAmount(amountStr);
-      
-      if (amount && amount >= 50 && amount <= 100000) {
-        result.extracted = true;
-        result.roomPriceNights = amount;
-        result.totalPrice = amount;
-        result.nightsDetected = nightsFound;
-        result.currency = currency;
-        result.directlyComparable = false; // Missing taxes!
-        result.includesTaxesFees = false;
-        result.extractionMethod = 'room_price_nights';
-        result.selectorMatched = name;
-        
-        const matchIndex = normalized.indexOf(match[0]);
-        const start = Math.max(0, matchIndex - 10);
-        const end = Math.min(normalized.length, matchIndex + match[0].length + 30);
-        result.evidenceSnippet = normalized.slice(start, end).trim();
-        
-        console.log(`[AGODA] selector_matched: ${name}`);
-        console.log(`[AGODA] Room price found: ${currency} ${amount} for ${nightsFound} nights (NOT directly comparable)`);
-        return result;
-      }
-    }
-  }
-  
-  // ==========================================================================
-  // PATTERN 3: Nightly rate extraction (search page display format)
-  // Format: "USD 798 Per night before taxes" from search page
-  // We compute: nightlyRate × expectedNights as subtotal (NOT directly comparable)
-  // ==========================================================================
-  
-  const nightlyRatePatterns: Array<{ pattern: RegExp; name: string }> = [
-    // "USD 798 Per night" - Agoda search page format
-    { pattern: /([A-Z]{3})\s*([\d,\.]+)\s*(?:per|\/)\s*night/i, name: 'currency_amount_per_night' },
-    // "$798 per night"
-    { pattern: /\$\s*([\d,\.]+)\s*(?:per|\/)\s*night/i, name: 'dollar_per_night' },
-    // "€798 /night"
-    { pattern: /€\s*([\d,\.]+)\s*(?:per|\/)\s*night/i, name: 'euro_per_night' },
-    // "798 USD per night"
-    { pattern: /([\d,\.]+)\s*([A-Z]{3})\s*(?:per|\/)\s*night/i, name: 'amount_currency_per_night' },
-    // "from USD 798" (indicates nightly or starting price)
-    { pattern: /from\s+([A-Z]{3})\s*([\d,\.]+)/i, name: 'from_currency_amount' },
-    // Price with "before taxes" (indicates it's pre-tax nightly)
-    { pattern: /([A-Z]{3})\s*([\d,\.]+)[^.]*?before\s*taxes/i, name: 'currency_before_taxes' },
-  ];
-  
-  for (const { pattern, name } of nightlyRatePatterns) {
-    const match = normalized.match(pattern);
-    if (match) {
-      let currency: string;
-      let amountStr: string;
-      
-      if (name === 'dollar_per_night') {
-        currency = 'USD';
-        amountStr = match[1];
-      } else if (name === 'euro_per_night') {
-        currency = 'EUR';
-        amountStr = match[1];
-      } else if (name === 'amount_currency_per_night') {
-        amountStr = match[1];
-        currency = match[2].toUpperCase();
-      } else {
-        currency = match[1].toUpperCase();
-        amountStr = match[2];
-      }
-      
-      const nightlyRate = parseCurrencyAmount(amountStr);
-      
-      // Validate: reasonable nightly rate ($20 to $5000 per night)
-      if (nightlyRate && nightlyRate >= 20 && nightlyRate <= 5000) {
-        // Compute total as nightly × expectedNights
-        const computedTotal = nightlyRate * expectedNights;
-        
-        result.extracted = true;
-        result.roomPriceNights = computedTotal;
-        result.totalPrice = computedTotal;
-        result.nightsDetected = expectedNights;
-        result.currency = currency;
-        result.directlyComparable = false; // Computed from nightly, missing taxes!
-        result.includesTaxesFees = false;
-        result.extractionMethod = 'nightly_rate_computed';
-        result.selectorMatched = name;
-        
-        const matchIndex = normalized.indexOf(match[0]);
-        const start = Math.max(0, matchIndex - 10);
-        const end = Math.min(normalized.length, matchIndex + match[0].length + 50);
-        result.evidenceSnippet = `${normalized.slice(start, end).trim()} (${nightlyRate} × ${expectedNights} nights = ${computedTotal})`;
-        
-        console.log(`[AGODA] selector_matched: ${name}`);
-        console.log(`[AGODA] Nightly rate found: ${currency} ${nightlyRate}/night × ${expectedNights} nights = ${computedTotal} (NOT directly comparable - no taxes)`);
-        return result;
-      }
-    }
-  }
-  
-  console.log('[AGODA] No price pattern matched');
+  // TOTAL-ONLY POLICY: do not accept room subtotals or per-night displays.
+  // If we cannot find a checkout "Total Price" (incl. taxes/fees) we treat it as no-price.
+
+  console.log('[AGODA] No TOTAL price pattern matched');
   return result;
 }
 
@@ -844,15 +728,30 @@ export default async ({ page }) => {
   let debugInfo = { selectorsChecked: [], elementsFound: {}, timing: {} };
   
   try {
-    // Set viewport and user agent to appear more like real browser
-    await page.setViewport({ width: 1920, height: 1080 });
+    // Make the session look like a normal desktop browser, and keep it fast.
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+
+    // Speed: block heavy assets.
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const rt = req.resourceType();
+      if (rt === 'image' || rt === 'media' || rt === 'font') return req.abort();
+      return req.continue();
+    });
+
+    // Light stealth (not full stealth plugin, but helps)
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
     
     debugInfo.timing.navigationStart = Date.now();
     
-    // Navigate to search page
+    // Navigate (avoid networkidle0; Agoda can keep long-polling open)
     await page.goto('${searchUrl.replace(/'/g, "\\'")}', {
-      waitUntil: 'networkidle0',
-      timeout: 55000,
+      waitUntil: 'domcontentloaded',
+      timeout: 25000,
     });
     
     debugInfo.timing.navigationEnd = Date.now();
@@ -879,41 +778,43 @@ export default async ({ page }) => {
       } catch (e) {}
     }
     
-    // Wait for loading spinner to disappear
+    // Small settle time for hydration
+    await new Promise(r => setTimeout(r, 2500));
+    
+    // Wait for at least one anchor/button to exist (page hydrated)
     try {
-      await page.waitForSelector('#ModalLoadingSpinner', { hidden: true, timeout: 20000 });
-      console.log('Loading spinner hidden');
-    } catch (e) {
-      console.log('Loading spinner timeout or not found');
+      await page.waitForSelector('a, button', { timeout: 12000 });
+    } catch (e) {}
+
+    // FAST PATH: If a real checkout URL is already present in the live DOM, use it.
+    const directCheckout = await page.evaluate(() => {
+      const anchors = Array.from(document.querySelectorAll('a'));
+      const candidates = anchors
+        .map((a) => (a instanceof HTMLAnchorElement ? a.href : ''))
+        .filter(Boolean)
+        .filter((h) => h.includes('/book/') && (h.includes('secdat=') || h.includes('r0=') || h.includes('sarg=')));
+      return candidates[0] || null;
+    });
+
+    if (directCheckout) {
+      checkoutUrl = directCheckout;
+      console.log('Found checkout URL directly in DOM:', checkoutUrl.substring(0, 120));
+      await page.goto(checkoutUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      await new Promise(r => setTimeout(r, 2500));
+      pageContent = await page.evaluate(() => document.body.innerText);
+      pageHtml = await page.evaluate(() => document.body.innerHTML);
+
+      return {
+        data: {
+          checkoutUrl,
+          pageContent: pageContent.substring(0, 350000),
+          pageHtml: pageHtml.substring(0, 350000),
+          error,
+          finalUrl: page.url(),
+          debugInfo,
+        },
+      };
     }
-    
-    // Wait for Agoda-specific property list container
-    const propertyListSelectors = [
-      'ol.hotel-list-container li',
-      'li.PropertyCardItem',
-      '[data-element-name="property-card"]',
-      '.PropertyCard',
-      '[data-hotelid]',
-    ];
-    
-    let foundPropertyList = false;
-    for (const sel of propertyListSelectors) {
-      try {
-        await page.waitForSelector(sel, { timeout: 12000 });
-        foundPropertyList = true;
-        debugInfo.elementsFound.propertyList = sel;
-        console.log('Found property list with:', sel);
-        break;
-      } catch (e) {}
-    }
-    
-    if (!foundPropertyList) {
-      // Wait longer and check for loading spinner to disappear
-      await new Promise(r => setTimeout(r, 5000));
-    }
-    
-    // Additional wait for all JS hydration to complete
-    await new Promise(r => setTimeout(r, 4000));
     
     // STRATEGY 1: Find and click the first property card (whole card is clickable)
     // Agoda property cards navigate to /book/ when clicked
@@ -2002,48 +1903,6 @@ async function extractFromAgoda(
             }
           } else {
             console.log('[AGODA] No static checkout link found on search page');
-            
-            // ======================================================================
-            // PHASE 2B-3.5: Try to extract nightly rate from search page content
-            // ======================================================================
-            // The search page shows nightly rates even without checkout links
-            // Format: "USD 798 Per night before taxes"
-            // We can compute: nightlyRate × nights (NOT directly comparable - missing taxes)
-            
-            console.log('[AGODA] Phase 2B-3.5: Attempting nightly rate extraction from search page');
-            
-            const searchContent = searchPageHtml || searchPageContent;
-            if (searchContent && searchContent.length >= MIN_CONTENT_LENGTH) {
-              const searchPriceResult = extractPrice(searchContent, nights);
-              
-              if (searchPriceResult.extracted && searchPriceResult.totalPrice) {
-                result.success = true;
-                result.status = searchPriceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
-                result.failureCategory = 'success';
-                result.extractedPrice = searchPriceResult.totalPrice;
-                result.currency = searchPriceResult.currency;
-                result.includesTaxesFees = searchPriceResult.includesTaxesFees;
-                result.directlyComparable = searchPriceResult.directlyComparable;
-                result.evidenceSnippet = searchPriceResult.evidenceSnippet;
-                
-                result.structuralProof.total_price_label_found = searchPriceResult.totalLabelFound;
-                result.structuralProof.room_price_nights_found = searchPriceResult.roomPriceNights !== null;
-                result.structuralProof.directly_comparable = searchPriceResult.directlyComparable;
-                result.structuralProof.currency_detected = searchPriceResult.currency;
-                result.structuralProof.failure_category = 'success';
-                result.structuralProof.extraction_method = `search_page_${searchPriceResult.extractionMethod}`;
-                result.structuralProof.selector_matched = searchPriceResult.selectorMatched;
-                result.structuralProof.final_url_fetched = searchUrlData.searchUrl;
-                
-                result.durationMs = Date.now() - startTime;
-                result.providerAttempts = providerAttempts;
-                
-                console.log(`[AGODA] SUCCESS from search page nightly rate: ${result.currency} ${result.extractedPrice} (directlyComparable: ${result.directlyComparable})`);
-                return result;
-              } else {
-                console.log('[AGODA] No price pattern matched in search page content');
-              }
-            }
           }
         }
         
@@ -2082,9 +1941,9 @@ async function extractFromAgoda(
           if (clickResult.content && clickResult.content.length >= MIN_CONTENT_LENGTH) {
             const priceResult = extractPrice(clickResult.content, nights);
             
-            if (priceResult.extracted && priceResult.totalPrice) {
+              if (priceResult.extracted && priceResult.totalPrice) {
               result.success = true;
-              result.status = priceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+                result.status = 'success_total_stay';
               result.failureCategory = 'success';
               result.extractedPrice = priceResult.totalPrice;
               result.currency = priceResult.currency;
