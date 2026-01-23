@@ -517,25 +517,142 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     // NOTE: VRBO commonly requires opening the booking drawer, then clicking the
     // primary CTA (often labeled "Begin booking") to reach the checkout/session
     // where taxes/fees are shown.
-    // XPath selectors targeting visible button text - more reliable than data-stid attributes
-    // These target the actual visible text users see on the buttons
-    const xpathBookingSelectors = [
-      '//button[contains(text(), "Reserve")]',
-      '//button[contains(text(), "Book")]',
-      '//button[contains(text(), "Begin booking")]',
-      '//button[contains(text(), "Check availability")]',
-      '//a[contains(text(), "Reserve")]',
-      '//a[contains(text(), "Book")]',
-      // Fallback: buttons with primary styling
-      '//button[contains(@class, "primary")]',
-    ];
     
-    // CSS selectors as fallback
-    const cssBookingSelectors = [
-      'button[data-stid="submit-hotel-reserve"]',
-      'button[data-stid="open-booking-drawer"]',
-      'button.uitk-button-primary',
-    ];
+    // ===========================================================================
+    // STRATEGY: Use Zyte `evaluate` action to run JavaScript that clicks buttons
+    // This is more reliable than XPath/CSS selectors because:
+    // 1. We can find buttons by visible text content (not exact match)
+    // 2. We can scroll to make buttons visible before clicking
+    // 3. We can handle dynamically rendered React/JS content
+    // ===========================================================================
+    
+    // JavaScript code to find and click the booking button
+    // CRITICAL: Must find button INSIDE the pricing card, not header/footer links
+    const findAndClickBookingButtonJS = `
+      (function() {
+        const result = { clicked: false, buttonText: '', selector: '', error: null, debug: {} };
+        try {
+          // STRATEGY 1: Find button inside pricing/booking card sections
+          // VRBO uses data-stid attributes for pricing components
+          const priceCardSelectors = [
+            '[data-stid="property-price-summary"]',
+            '[data-stid="book-cta"]',
+            '[data-stid="property-book"]',
+            '.uitk-card-content-section',
+            '[data-stid="open-booking-drawer"]',
+            '[class*="BookingCard"]',
+            '[class*="PropertyBook"]',
+            '[class*="price-summary"]',
+          ];
+          
+          for (const cardSel of priceCardSelectors) {
+            const card = document.querySelector(cardSel);
+            if (card) {
+              result.debug.foundCard = cardSel;
+              // Find a button or link inside this card
+              const btns = card.querySelectorAll('button, a[role="button"], a.uitk-button');
+              for (const btn of btns) {
+                const text = (btn.textContent || '').trim();
+                // Must be a booking-related button
+                if (/book|reserve|check availability/i.test(text)) {
+                  btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                  btn.click();
+                  result.clicked = true;
+                  result.buttonText = text.slice(0, 50);
+                  result.selector = cardSel + ' > button';
+                  return JSON.stringify(result);
+                }
+              }
+              // If no text match, click the first primary button in card
+              const primaryBtn = card.querySelector('button.uitk-button-primary, button[type="submit"]');
+              if (primaryBtn) {
+                primaryBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                primaryBtn.click();
+                result.clicked = true;
+                result.buttonText = (primaryBtn.textContent || 'card-primary').trim().slice(0, 50);
+                result.selector = cardSel + ' button.primary';
+                return JSON.stringify(result);
+              }
+            }
+          }
+          
+          // STRATEGY 2: Find data-stid buttons directly (VRBO specific)
+          const stidBtns = document.querySelectorAll('[data-stid="submit-hotel-reserve"], [data-stid="open-booking-drawer"]');
+          if (stidBtns.length > 0) {
+            const btn = stidBtns[0];
+            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            btn.click();
+            result.clicked = true;
+            result.buttonText = (btn.textContent || 'stid-btn').trim().slice(0, 50);
+            result.selector = 'data-stid';
+            return JSON.stringify(result);
+          }
+          
+          // STRATEGY 3: Look for buttons with "$" price nearby (indicates booking section)
+          const allButtons = Array.from(document.querySelectorAll('button.uitk-button-primary'));
+          for (const btn of allButtons) {
+            // Check if parent/grandparent contains price info
+            const parent = btn.closest('[class*="card"], [class*="summary"], section');
+            if (parent) {
+              const parentText = parent.textContent || '';
+              if (/\\$\\d+/.test(parentText) && /night|total|book|reserve/i.test(parentText)) {
+                btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                btn.click();
+                result.clicked = true;
+                result.buttonText = (btn.textContent || 'price-section-btn').trim().slice(0, 50);
+                result.selector = 'price-section';
+                return JSON.stringify(result);
+              }
+            }
+          }
+          
+          result.debug.buttonsFound = document.querySelectorAll('button').length;
+          result.debug.primaryButtons = document.querySelectorAll('button.uitk-button-primary').length;
+          result.error = 'No booking button found in pricing card';
+        } catch (e) {
+          result.error = e.message || String(e);
+        }
+        return JSON.stringify(result);
+      })();
+    `;
+    
+    // JavaScript to click "Begin booking" drawer button
+    const clickBeginBookingJS = `
+      (function() {
+        const result = { clicked: false, buttonText: '', error: null };
+        try {
+          const clickables = Array.from(document.querySelectorAll('button, a[role="button"]'));
+          
+          for (const el of clickables) {
+            const text = (el.textContent || '').trim().toLowerCase();
+            if (text.includes('begin booking') || text.includes('continue') || text === 'book') {
+              el.scrollIntoView({ behavior: 'instant', block: 'center' });
+              el.click();
+              result.clicked = true;
+              result.buttonText = text.slice(0, 50);
+              return JSON.stringify(result);
+            }
+          }
+          
+          // Fallback: any primary button in a drawer/modal
+          const modal = document.querySelector('[role="dialog"], .uitk-sheet, .uitk-modal');
+          if (modal) {
+            const primaryBtn = modal.querySelector('button.uitk-button-primary');
+            if (primaryBtn) {
+              primaryBtn.click();
+              result.clicked = true;
+              result.buttonText = (primaryBtn.textContent || 'modal-btn').trim().slice(0, 50);
+              return JSON.stringify(result);
+            }
+          }
+          
+          result.error = 'No begin booking button found';
+        } catch (e) {
+          result.error = e.message || String(e);
+        }
+        return JSON.stringify(result);
+      })();
+    `;
 
     const zyteExtract = async (url: string, actions: any[], timeoutMs: number, captureScreenshot: boolean = false) => {
       const controller = new AbortController();
@@ -569,49 +686,55 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
       }
     };
     
-    // VRBO extraction strategy:
-    // 1. Use waitForSelector to wait for booking widget to appear (indicates JS hydrated)
-    // 2. Click the booking CTA using XPath selectors targeting visible text
-    // 3. Wait for checkout signals to appear using waitForSelector
-    // CRITICAL: Zyte waitForTimeout max is 15 seconds! waitForSelector max is also 15s.
-    // NOTE: Zyte does NOT support waitForNetworkIdle - must use waitForSelector instead
+    // VRBO extraction strategy using JavaScript evaluate:
+    // 1. Wait for page to hydrate
+    // 2. Use evaluate to find and click booking CTA via JavaScript
+    // 3. Wait for drawer to open
+    // 4. Use evaluate to click "Begin booking" button
+    // 5. Wait for checkout signals
     
     // Selector to wait for that indicates page is ready (booking widget loaded)
     const pageReadySelector = 'button.uitk-button-primary, [data-stid="property-price-summary"], .uitk-card-content-section';
     
     const attempts: Array<{ label: string; actions: any[]; expectedCheckout?: boolean }> = [
-      // First: wait for booking widget to appear (indicates page is ready)
+      // STRATEGY 1: JavaScript-based click (most reliable)
       {
-        label: 'wait_for_widget',
+        label: 'js_evaluate_click',
+        expectedCheckout: true,
         actions: [
           { action: 'waitForSelector', selector: { type: 'css', value: pageReadySelector }, timeout: 15 },
+          { action: 'evaluate', source: findAndClickBookingButtonJS },
+          { action: 'waitForTimeout', timeout: 8 },
+          { action: 'evaluate', source: clickBeginBookingJS },
+          { action: 'waitForTimeout', timeout: 12 },
         ],
       },
-      // XPath selectors targeting visible button text - most reliable
-      ...xpathBookingSelectors.map((xpath) => ({
-        label: `xpath:${xpath.slice(0, 40)}`,
+      // STRATEGY 2: First wait longer for full hydration, then JS click
+      {
+        label: 'js_evaluate_delayed',
+        expectedCheckout: true,
+        actions: [
+          { action: 'waitForTimeout', timeout: 10 },
+          { action: 'evaluate', source: findAndClickBookingButtonJS },
+          { action: 'waitForTimeout', timeout: 8 },
+          { action: 'evaluate', source: clickBeginBookingJS },
+          { action: 'waitForTimeout', timeout: 12 },
+        ],
+      },
+      // STRATEGY 3: Scroll down first (booking widget might be below fold)
+      {
+        label: 'scroll_then_js_click',
         expectedCheckout: true,
         actions: [
           { action: 'waitForSelector', selector: { type: 'css', value: pageReadySelector }, timeout: 15 },
-          { action: 'click', selector: { type: 'xpath', value: xpath } },
-          { action: 'waitForTimeout', timeout: 5 },
-          // Second click for "Begin booking" confirmation button
-          { action: 'click', selector: { type: 'xpath', value: '//button[contains(text(), "Begin booking")]' } },
-          { action: 'waitForTimeout', timeout: 10 },
+          { action: 'scrollBottom' },
+          { action: 'waitForTimeout', timeout: 3 },
+          { action: 'evaluate', source: findAndClickBookingButtonJS },
+          { action: 'waitForTimeout', timeout: 8 },
+          { action: 'evaluate', source: clickBeginBookingJS },
+          { action: 'waitForTimeout', timeout: 12 },
         ],
-      })),
-      // CSS selectors as fallback
-      ...cssBookingSelectors.map((sel) => ({
-        label: `css:${sel}`,
-        expectedCheckout: true,
-        actions: [
-          { action: 'waitForSelector', selector: { type: 'css', value: pageReadySelector }, timeout: 15 },
-          { action: 'click', selector: { type: 'css', value: sel } },
-          { action: 'waitForTimeout', timeout: 5 },
-          { action: 'click', selector: { type: 'css', value: 'button.uitk-button-primary' } },
-          { action: 'waitForTimeout', timeout: 10 },
-        ],
-      })),
+      },
     ];
 
     let lastErr: string | null = null;
