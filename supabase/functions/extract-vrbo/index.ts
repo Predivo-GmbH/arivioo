@@ -551,25 +551,38 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
       }
     };
     
-    // VRBO extraction strategy: scroll to booking widget, click CTA, wait for checkout
+    // VRBO extraction strategy: use scrollBottom action (Zyte's supported scroll), click CTA, wait for checkout
     const attempts: Array<{ label: string; actions: any[]; expectedCheckout?: boolean }> = [
       {
         label: 'baseline_wait',
         actions: [{ action: 'waitForTimeout', timeout: 15 }],
       },
-      // Scroll + click attempts for each selector
+      // Direct click attempts with scrollBottom first
       ...bookingSelectors.map((sel, idx) => ({
         label: `scroll_click:${sel}`,
         expectedCheckout: true,
         actions: [
-          { action: 'waitForTimeout', timeout: 10 },
-          { action: 'scroll', direction: 'down', pixels: 400 },
+          { action: 'waitForTimeout', timeout: 8 },
+          // Zyte's scrollBottom action scrolls to the bottom of the page
+          { action: 'scrollBottom' },
           { action: 'waitForTimeout', timeout: 3 },
           { action: 'click', selector: { type: 'css', value: sel } },
-          { action: 'waitForTimeout', timeout: 10 },
+          { action: 'waitForTimeout', timeout: 8 },
           // Second click for "Begin booking" after drawer opens
           { action: 'click', selector: { type: 'css', value: 'button.uitk-button-primary' } },
-          { action: 'waitForTimeout', timeout: idx === 0 ? 60 : 45 },
+          { action: 'waitForTimeout', timeout: idx === 0 ? 50 : 35 },
+        ],
+      })),
+      // Simple click-only attempts (no scroll)
+      ...bookingSelectors.map((sel, idx) => ({
+        label: `click_only:${sel}`,
+        expectedCheckout: true,
+        actions: [
+          { action: 'waitForTimeout', timeout: 8 },
+          { action: 'click', selector: { type: 'css', value: sel } },
+          { action: 'waitForTimeout', timeout: 5 },
+          { action: 'click', selector: { type: 'css', value: 'button.uitk-button-primary' } },
+          { action: 'waitForTimeout', timeout: idx === 0 ? 50 : 35 },
         ],
       })),
     ];
