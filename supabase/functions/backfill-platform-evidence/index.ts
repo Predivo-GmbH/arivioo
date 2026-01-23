@@ -35,8 +35,12 @@ function normalizeOutcome(status: string, extractionError: string | null): Norma
   const statusLower = status.toLowerCase();
   const errorLower = (extractionError || '').toLowerCase();
   
-  // Success case
-  if (statusLower === 'success') {
+  // Success cases - include all success variants (success, success_total_stay, completed, etc.)
+  if (
+    statusLower === 'success' ||
+    statusLower.startsWith('success_') ||
+    statusLower === 'completed'
+  ) {
     return 'success';
   }
   
@@ -349,6 +353,25 @@ Deno.serve(async (req) => {
         }
       }
       
+      // Compute coverage_status based on evidence
+      // - 'supported': Has at least 1 success and no blocking failures
+      // - 'blocked': Dominant failure is blocking (bot detection, login required, etc.)
+      // - 'unsupported': Has blocking failures that prevent extraction
+      // - 'unknown': No attempts or no clear signal
+      let coverageStatus = 'unknown';
+      if (stats.totalSuccesses > 0) {
+        // Has successful extractions - mark as supported
+        coverageStatus = 'supported';
+      } else if (stats.totalAttempts > 0) {
+        // Has attempts but no successes - check why
+        if (BLOCKING_FAILURE_REASONS.includes(dominantFailure)) {
+          coverageStatus = dominantFailure === 'blocked' ? 'blocked' : 'unsupported';
+        } else if (stats.totalAttempts >= 3) {
+          // Multiple attempts, no success, but not blocked - might be an extraction issue
+          coverageStatus = 'unknown';
+        }
+      }
+      
       updates.push({
         adapterId: adapter.id,
         platformName: adapter.platform_name,
@@ -363,6 +386,7 @@ Deno.serve(async (req) => {
           gate_1_passed: gate1Passed,
           gate_2_passed: gate2Passed,
           gate_3_passed: gate3Passed,
+          coverage_status: coverageStatus,
           promotion_score: promotionScore,
           last_scored_at: new Date().toISOString(),
           promotion_candidate: false, // Will be set by nomination logic
