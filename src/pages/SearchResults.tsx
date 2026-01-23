@@ -16,6 +16,8 @@ import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
 import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
 import { ResultBucketSection } from "@/components/search/ResultBucketSection";
 import { ResultRow, type ResultRowResult, type RowVariant } from "@/components/search/ResultRow";
+import { VerifiedMatchesLoading } from "@/components/search/VerifiedMatchesLoading";
+import { SearchPhaseBanner, type SearchPhaseType } from "@/components/search/SearchPhaseBanner";
 import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
 import {
   normalizeExtraction,
@@ -53,12 +55,38 @@ import {
   ChevronUp,
   Ban,
   AlertTriangle,
-  HelpCircle
+  HelpCircle,
+  Loader2
 } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import type { Json } from "@/integrations/supabase/types";
 import type { OutcomeCategory } from "@/lib/extractionOutcomeTaxonomy";
 import type { PriceType, CanonicalPrice as CanonicalPriceType } from "@/lib/canonicalPrice";
+
+// ============================================================================
+// TWO-PHASE UX: Search Result Phases
+// ============================================================================
+// Phase 1 (DISCOVERY_PRICING): Image verification complete, prices loading
+// Phase 2 (COMPLETE): Finalization complete, final_bucket is authoritative
+// ============================================================================
+
+// PRICE_DEPENDENT buckets - only show in Phase 2 (after finalization)
+const PRICE_DEPENDENT_BUCKETS: Set<ResultBucket> = new Set([
+  'cheaper',
+  'more_expensive', 
+  'not_comparable',
+]);
+
+// MATCH_ONLY buckets - can show in Phase 1 (before finalization)
+const MATCH_ONLY_BUCKETS: Set<ResultBucket> = new Set([
+  'sold_out',
+  'price_not_found',
+  'blocked',
+  'requires_action',
+  'service_error',
+  'platform_blocked',
+  'additional_issues',
+]);
 
 // SearchResult can come from raw DB or enriched - make enrichment fields optional
 interface SearchResult {
@@ -345,6 +373,20 @@ export default function SearchResults() {
   
   // Track if search is finalized (finalised_at is set in DB)
   const [isFinalized, setIsFinalized] = useState(false);
+  
+  // TWO-PHASE UX: Track verified matches found during discovery (before pricing)
+  const [verifiedMatchesPending, setVerifiedMatchesPending] = useState<Array<{
+    id: string;
+    platform_name: string;
+    listing_url: string;
+    listing_title: string | null;
+    confidence_score: number | null;
+    images: Json;
+    match_type?: string;
+    source_airbnb_image?: string | null;
+  }>>([]);
+  // Track whether we're in Phase 1 (discovery complete, pricing running) or Phase 2 (complete)
+  const [resultsPhase, setResultsPhase] = useState<SearchPhaseType>("discovery_pricing");
   
   const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
     let timeoutId: number | null = null;
@@ -824,7 +866,7 @@ export default function SearchResults() {
                         }
                       }
                     } else if (eventType === "price_extraction_start") {
-                      // Starting price extraction phase
+                      // Starting price extraction phase - this is Phase 1 of two-phase UX
                       setCurrentStep(3); // "Collecting Prices" step
                       setExtractingPrices(true);
                       setPriceExtractionTotal(data.totalPlatforms || 0);
@@ -836,6 +878,34 @@ export default function SearchResults() {
                           price: null,
                         }))
                       );
+                      
+                      // TWO-PHASE UX: Fetch verified matches to show in Phase 1 UI
+                      // These are candidates that passed image verification
+                      try {
+                        const { data: platformsData } = await supabase
+                          .from('search_platforms')
+                          .select('id, platform_name, listing_url, listing_title, confidence_score, images, match_type, source_airbnb_image')
+                          .eq('search_id', searchId)
+                          .gte('confidence_score', 75);
+                        
+                        if (platformsData && platformsData.length > 0) {
+                          setVerifiedMatchesPending(platformsData);
+                          // Also set results for Phase 1 display
+                          setResults(platformsData.map(p => ({
+                            ...p,
+                            price: null,
+                            original_price: null,
+                            savings_amount: null,
+                            savings_percentage: null,
+                            image_url: null,
+                            price_check_in: null,
+                            price_check_out: null,
+                            dates_differ: false,
+                          })) as unknown as SearchResult[]);
+                        }
+                      } catch (e) {
+                        console.error('[Phase1] Failed to fetch verified matches:', e);
+                      }
                     } else if (eventType === "price_extraction_progress") {
                       // Update individual platform status
                       setPriceExtractionPlatforms((prev) => {
@@ -1873,8 +1943,28 @@ export default function SearchResults() {
   })();
 
   // ============================================================================
+  // TWO-PHASE UX: Determine if we're in Phase 1 (pricing running) or Phase 2 (complete)
+  // ============================================================================
+  // Phase 1: Matches found, prices still loading (show VerifiedMatchesLoading)
+  // Phase 2: Finalization complete, show bucketed results with final_bucket
+  // ============================================================================
+  
+  // Compute the actual phase based on finalization state
+  const computedResultsPhase: SearchPhaseType = isFinalized ? "complete" : "discovery_pricing";
+  
+  // Results that are still awaiting prices (Phase 1 display)
+  // These are results without a frozen bucket that would be price-dependent
+  const pendingPriceResults = finalCandidates.filter((r) => {
+    const frozenBucket = ((r as any).final_bucket ?? (r as any).result_bucket) as string | undefined;
+    // No frozen bucket = still pending
+    if (!frozenBucket) return true;
+    return false;
+  });
+
+  // ============================================================================
   // CATEGORIZATION: Use frozen snapshot bucket if available, else compute
   // CRITICAL: For refresh determinism, snapshot-based buckets are authoritative
+  // PHASE 1 GUARD: In Phase 1, prevent price-dependent bucket assignment
   // ============================================================================
   const categorizedResults = finalCandidates.map((r) => {
     // CHECK IF WE HAVE A FROZEN BUCKET FROM THE SNAPSHOT
@@ -1885,7 +1975,7 @@ export default function SearchResults() {
     const frozenBucket = ((r as any).final_bucket ?? (r as any).result_bucket) as string | undefined;
     
     // DEBUG: Log frozen bucket detection
-    console.log(`[Categorization] ${r.platform_name}: frozenBucket=${frozenBucket}, final_bucket=${(r as any).final_bucket}, result_bucket=${(r as any).result_bucket}`);
+    console.log(`[Categorization] ${r.platform_name}: frozenBucket=${frozenBucket}, final_bucket=${(r as any).final_bucket}, result_bucket=${(r as any).result_bucket}, phase=${computedResultsPhase}`);
     
     if (frozenBucket) {
       // Use the frozen bucket from snapshot - no re-computation
@@ -2026,9 +2116,16 @@ export default function SearchResults() {
     | 'no_platforms_found'
     | 'cheaper_found'
     | 'no_cheaper_found'
-    | 'prices_unavailable';
+    | 'prices_unavailable'
+    | 'pricing_in_progress';  // NEW: Phase 1 state
 
   const computeResultState = (): ResultState => {
+    // TWO-PHASE UX: If not finalized, we're in Phase 1 (pricing in progress)
+    // Only show this state if we have matches but finalization not complete
+    if (!isFinalized && finalCandidates.length > 0) {
+      return 'pricing_in_progress';
+    }
+    
     // Canonical: if backend proceeded with N candidates, we must not claim
     // "No Alternative Listings Found" just because some candidates lack photos
     // or complete extraction metadata.
@@ -2050,6 +2147,10 @@ export default function SearchResults() {
   const comparedPlatformsCount = verifiedResults.length;
   const platformsWithoutPricesCount = unverifiedResults.length;
   const notComparableCount = notComparableResults.length;
+  
+  // Phase 1 specific: Count matches awaiting prices (those without frozen bucket)
+  const pendingPriceCount = pendingPriceResults.length;
+  const matchOnlyResultsCount = soldOutResults.length + blockedResults.length + failedResults.length;
 
   // Helper to generate key differences based on platform
   const getKeyDifferences = (result: SearchResult): string[] => {
@@ -2546,10 +2647,94 @@ export default function SearchResults() {
                   </>
                 )}
 
-                {/* Alternatives exist but none are cheaper than Airbnb */}
-                {(search?.status === "completed" && displayResults.length === 0 && (resultState === 'no_cheaper_found' || resultState === 'prices_unavailable') && (search?.airbnb_price || confirmedTotal)) && (
+                {/* ================================================================
+                    PHASE 1 UI: Pricing In Progress
+                    Shows verified matches with "Fetching price…" placeholders
+                    Only renders when search has matches but finalization not complete
+                ================================================================ */}
+                {(resultState === 'pricing_in_progress' && finalCandidates.length > 0) && (
+                  <>
+                    {/* Phase 1 Banner */}
+                    <SearchPhaseBanner 
+                      phase="discovery_pricing" 
+                      matchCount={finalCandidates.length}
+                    />
+
+                    {/* Verified Matches Loading Section */}
+                    <div className="space-y-6">
+                      {/* Main matches awaiting prices */}
+                      <VerifiedMatchesLoading
+                        results={finalCandidates.map(r => ({
+                          id: r.id,
+                          platform_name: r.platform_name,
+                          listing_url: r.listing_url,
+                          listing_title: r.listing_title,
+                          confidence_score: r.confidence_score,
+                          images: r.images,
+                          match_type: r.match_type,
+                          source_airbnb_image: r.source_airbnb_image,
+                          extraction_status: r.extraction_status,
+                          outcome_category: r.outcome_category,
+                        }))}
+                        pricingProgress={{
+                          completed: priceExtractionCompleted,
+                          total: priceExtractionTotal || finalCandidates.length,
+                        }}
+                      />
+
+                      {/* MATCH_ONLY sections can still show in Phase 1 */}
+                      {/* Blocked platforms */}
+                      {blockedResults.length > 0 && (
+                        <div className="rounded-xl border border-red-500/20 bg-red-500/5 overflow-hidden">
+                          <div className="px-4 py-3 flex items-center gap-2">
+                            <Ban className="w-4 h-4 text-red-500" />
+                            <span className="text-sm font-medium text-foreground">
+                              {blockedResults.length} platform{blockedResults.length !== 1 ? 's' : ''} blocked access
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Sold out platforms */}
+                      {soldOutResults.length > 0 && (
+                        <div className="rounded-xl border border-orange-500/20 bg-orange-500/5 overflow-hidden">
+                          <div className="px-4 py-3 flex items-center gap-2">
+                            <Calendar className="w-4 h-4 text-orange-500" />
+                            <span className="text-sm font-medium text-foreground">
+                              {soldOutResults.length} platform{soldOutResults.length !== 1 ? 's' : ''} unavailable for these dates
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Low trust score section (unchanged - always available) */}
+                      {lowTrustScoreResults.length > 0 && (
+                        <div className="rounded-xl border border-muted-foreground/20 bg-muted/20 overflow-hidden">
+                          <div className="px-4 py-3 flex items-center gap-2">
+                            <Shield className="w-4 h-4 text-muted-foreground" />
+                            <span className="text-sm font-medium text-foreground">
+                              {lowTrustScoreResults.length} candidate{lowTrustScoreResults.length !== 1 ? 's' : ''} below trust threshold
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-medium">
+                              TESTING
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+                {/* PHASE 2 ONLY: Show when finalized and no cheaper alternatives found */}
+                {(search?.status === "completed" && isFinalized && displayResults.length === 0 && (resultState === 'no_cheaper_found' || resultState === 'prices_unavailable') && (search?.airbnb_price || confirmedTotal)) && (
                   /* Alternatives exist but none are cheaper than Airbnb - use same table layout */
                   <>
+                    {/* Phase 2 Banner: Final results ready */}
+                    <SearchPhaseBanner 
+                      phase="complete" 
+                      matchCount={finalCandidates.length}
+                      cheaperCount={0}
+                    />
+                    
                     {/* Success/Info banner - varies by result state */}
                     <div className={`mb-6 p-4 rounded-xl flex items-center gap-3 ${
                       resultState === 'no_cheaper_found' 
@@ -3313,9 +3498,16 @@ export default function SearchResults() {
                 )}
 
                 {/* Main results with cheaper alternatives */}
-                {(search?.status === "completed" && displayResults.length > 0 && (search?.airbnb_price || confirmedTotal)) && (
+                {/* PHASE 2 ONLY: Only show price-dependent results after finalization */}
+                {(search?.status === "completed" && isFinalized && displayResults.length > 0 && (search?.airbnb_price || confirmedTotal)) && (
                   <>
-                    {/* Comparison Table - Matching ExampleResult layout */}
+                    {/* Phase 2 Banner: Final results ready */}
+                    <SearchPhaseBanner 
+                      phase="complete" 
+                      matchCount={finalCandidates.length}
+                      cheaperCount={cheaperResults.length}
+                    />
+
                     {/* Comparison Table - Matching ExampleResult layout */}
                     <div className="overflow-x-auto mb-8">
                       <table className="w-full text-sm">
