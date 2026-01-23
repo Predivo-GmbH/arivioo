@@ -230,85 +230,15 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
   };
 
   // =========================================================================
-  // PRIORITY 1: Find explicit "Total" label with price
-  // VRBO uses various layouts - check multiple patterns
+  // STEP 1: Extract all fee components first
+  // This helps us identify the price breakdown structure
   // =========================================================================
   
-  // VRBO-specific patterns for EXPLICIT Total only
-  // REMOVED: "for X nights" pattern - this is subtotal, NOT total
-  const totalPatterns = [
-    // Standard explicit "Total" patterns only
-    /\bTotal[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
-    /\bTotal\s+\$?([\d,]+(?:\.\d{2})?)/gi,
-    /\$\s*([\d,]+(?:\.\d{2})?)\s*Total\b/gi,
-    // "Trip total" used by VRBO
-    /\bTrip\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
-    // "Total price" pattern
-    /\bTotal\s+price[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
-    // Total with currency after
-    /Total[:\s]*([\d,]+(?:\.\d{2})?)\s*USD/gi,
-  ];
-
-  for (const pattern of totalPatterns) {
-    const matches = [...content.matchAll(pattern)];
-    for (const match of matches) {
-      // Get surrounding context
-      const startIdx = Math.max(0, match.index! - 50);
-      const endIdx = Math.min(content.length, match.index! + match[0].length + 30);
-      const context = content.slice(startIdx, endIdx);
-      
-      // Exclude subtotal, due now, deposit, per night, nightly - but NOT "Trip total"
-      if (/subtotal|due\s*now|deposit|pay\s*now|per\s*night(?!s)|nightly|avg/i.test(context)) {
-        // Exception: "Trip total" should NOT be excluded even if near "per night"
-        if (!/trip\s+total/i.test(context)) {
-          continue;
-        }
-      }
-      
-      const price = parseFloat(match[1].replace(/,/g, ''));
-      // Total should be substantial (at least nightly * nights / 2 roughly)
-      if (!isNaN(price) && price > 100) { 
-        result.totalFound = true;
-        result.totalPrice = price;
-        result.currency = 'USD';
-        result.totalEvidence = context.trim().slice(0, 150);
-        result.directlyComparable = true;
-        result.labelsFound.push('Total');
-        
-        console.log(`[VRBO] total_label_found=true extracted_total=${price} currency=USD evidence="${result.totalEvidence}"`);
-        return result;
-      }
-    }
-  }
-
-  // =========================================================================
-  // PRIORITY 2: Look for the price breakdown section and find the total there
-  // VRBO often has a breakdown with fees + taxes ending in a total
-  // =========================================================================
-  
-  // Find largest price that could be a total (substantially more than nightly)
-  const allPrices: Array<{value: number, context: string}> = [];
-  const pricePattern = /\$\s*([\d,]+(?:\.\d{2})?)/g;
-  let priceMatch;
-  while ((priceMatch = pricePattern.exec(content)) !== null) {
-    const value = parseFloat(priceMatch[1].replace(/,/g, ''));
-    if (!isNaN(value) && value > 0) {
-      const ctx = content.slice(Math.max(0, priceMatch.index - 30), priceMatch.index + priceMatch[0].length + 30);
-      allPrices.push({ value, context: ctx });
-    }
-  }
-
-  // =========================================================================
-  // FALLBACK: Detect competing amounts (for error logging)
-  // These are NOT directly comparable
-  // =========================================================================
-
   // Nightly rate - look for various patterns
   const nightlyPatterns = [
     /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:\/?\s*)?(?:per\s*)?night\b/i,
     /\$\s*([\d,]+(?:\.\d{2})?)\s*avg(?:\/|\s*per)?\s*night/i,
     /avg\.\s*\$\s*([\d,]+(?:\.\d{2})?)\s*\/?\s*night/i,
-    /\$\s*([\d,]+)\s*x\s*\d+\s*nights?/i,
   ];
   for (const np of nightlyPatterns) {
     const nightlyMatch = content.match(np);
@@ -319,27 +249,6 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
         break;
       }
     }
-  }
-
-  // Subtotal
-  const subtotalMatch = content.match(/subtotal[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
-  if (subtotalMatch) {
-    result.subtotal = parsePrice(subtotalMatch[0]);
-    result.labelsFound.push('subtotal');
-  }
-
-  // Due now / Pay now
-  const dueNowMatch = content.match(/(?:due\s*now|pay\s*now)[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
-  if (dueNowMatch) {
-    result.dueNow = parsePrice(dueNowMatch[0]);
-    result.labelsFound.push('due_now');
-  }
-
-  // Deposit
-  const depositMatch = content.match(/deposit[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
-  if (depositMatch) {
-    result.deposit = parsePrice(depositMatch[0]);
-    result.labelsFound.push('deposit');
   }
 
   // Cleaning fee
@@ -356,32 +265,192 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     result.labelsFound.push('service_fee');
   }
 
-  // Taxes
-  const taxesMatch = content.match(/taxes?(?:\s*&\s*fees?)?[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
-  if (taxesMatch) {
-    result.taxesAmount = parsePrice(taxesMatch[0]);
-    result.labelsFound.push('taxes');
-  }
-
-  // =========================================================================
-  // PRIORITY 3: Calculate total from components if we have nightly + fees
-  // Only if we found nightly rate and this is a property page with date-specific pricing
-  // =========================================================================
-  if (result.nightlyRate && nights > 0) {
-    // Check if there's a clear "X nights" indicator with a subtotal/total nearby
-    const nightsSubtotalMatch = content.match(/\$\s*([\d,]+(?:\.\d{2})?)\s*x?\s*\d+\s*nights?[^$]*\$\s*([\d,]+(?:\.\d{2})?)/i);
-    if (nightsSubtotalMatch) {
-      const possibleTotal = parseFloat(nightsSubtotalMatch[2].replace(/,/g, ''));
-      const nightlyCalculated = result.nightlyRate * nights;
-      // If the second number is close to or larger than calculated nightly total, it might be the real total
-      if (!isNaN(possibleTotal) && possibleTotal >= nightlyCalculated * 0.9) {
-        result.subtotal = possibleTotal;
-        result.labelsFound.push('calculated_subtotal');
+  // Taxes - CRITICAL: This indicates we have the full breakdown
+  const taxesPatterns = [
+    /taxes?\s*(?:&\s*fees?)?[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i,
+    /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:in\s+)?taxes?/i,
+  ];
+  for (const tp of taxesPatterns) {
+    const taxesMatch = content.match(tp);
+    if (taxesMatch) {
+      result.taxesAmount = parsePrice(taxesMatch[0]);
+      if (result.taxesAmount && result.taxesAmount > 10) { // Sanity check
+        result.labelsFound.push('taxes');
+        break;
       }
     }
   }
 
-  console.log(`[VRBO] total_label_found=false competing_amounts: nightly=${result.nightlyRate}, subtotal=${result.subtotal}, due_now=${result.dueNow}, deposit=${result.deposit}, cleaning=${result.cleaningFee}, service=${result.serviceFee}, taxes=${result.taxesAmount}`);
+  // Subtotal / nights cost (without fees/taxes)
+  const subtotalPatterns = [
+    /subtotal[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i,
+    /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+\d+\s+nights?/i, // This is SUBTOTAL not total
+  ];
+  for (const sp of subtotalPatterns) {
+    const subtotalMatch = content.match(sp);
+    if (subtotalMatch) {
+      result.subtotal = parsePrice(subtotalMatch[0]);
+      if (result.subtotal) {
+        result.labelsFound.push('subtotal');
+        break;
+      }
+    }
+  }
+
+  // Due now / Pay now
+  const dueNowMatch = content.match(/(?:due\s*now|pay\s*now)[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (dueNowMatch) {
+    result.dueNow = parsePrice(dueNowMatch[0]);
+    result.labelsFound.push('due_now');
+  }
+
+  // Deposit
+  const depositMatch = content.match(/deposit[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  if (depositMatch) {
+    result.deposit = parsePrice(depositMatch[0]);
+    result.labelsFound.push('deposit');
+  }
+
+  console.log(`[VRBO] Fee components: nightly=${result.nightlyRate}, subtotal=${result.subtotal}, cleaning=${result.cleaningFee}, service=${result.serviceFee}, taxes=${result.taxesAmount}`);
+
+  // =========================================================================
+  // STEP 2: Look for EXPLICIT "Total" that is GREATER than subtotal
+  // The real total MUST include taxes, so it should be > subtotal
+  // =========================================================================
+  
+  // Calculate expected subtotal for sanity check
+  const expectedSubtotal = result.nightlyRate ? result.nightlyRate * nights : (result.subtotal || 0);
+  const minValidTotal = expectedSubtotal > 0 ? expectedSubtotal * 1.05 : 100; // Total must be at least 5% more than subtotal
+  
+  // VRBO-specific patterns for EXPLICIT Total only
+  const totalPatterns = [
+    // "Trip total" is the most reliable - VRBO's final total
+    /\bTrip\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    // Standard explicit "Total" with $ and amount
+    /\bTotal[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    // "Total price" pattern
+    /\bTotal\s+price[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    // Total at end of breakdown (amount followed by Total label)
+    /\$\s*([\d,]+(?:\.\d{2})?)\s+Total\b/gi,
+    // Total with currency after
+    /\bTotal[:\s]*([\d,]+(?:\.\d{2})?)\s*USD/gi,
+  ];
+
+  const foundTotals: Array<{price: number, context: string, pattern: string}> = [];
+
+  for (const pattern of totalPatterns) {
+    const matches = [...content.matchAll(pattern)];
+    for (const match of matches) {
+      // Get surrounding context
+      const startIdx = Math.max(0, match.index! - 60);
+      const endIdx = Math.min(content.length, match.index! + match[0].length + 40);
+      const context = content.slice(startIdx, endIdx);
+      
+      // STRICT EXCLUSIONS: Skip if context indicates this is NOT the final total
+      const exclusionPatterns = [
+        /subtotal/i,
+        /due\s*now/i,
+        /pay\s*now/i,
+        /deposit/i,
+        /per\s*night/i,
+        /nightly/i,
+        /avg\.?\s*\$/i,
+        /for\s+\d+\s+nights?/i, // This is subtotal, not total with taxes
+      ];
+      
+      let isExcluded = false;
+      for (const exclusion of exclusionPatterns) {
+        if (exclusion.test(context)) {
+          // Exception: "Trip total" is NEVER excluded
+          if (!/trip\s+total/i.test(match[0])) {
+            isExcluded = true;
+            console.log(`[VRBO] Excluding match due to pattern: ${exclusion.source}, context: "${context.slice(0, 80)}"`);
+            break;
+          }
+        }
+      }
+      
+      if (isExcluded) continue;
+      
+      const price = parseFloat(match[1].replace(/,/g, ''));
+      if (!isNaN(price) && price > 100) {
+        foundTotals.push({ price, context: context.trim(), pattern: pattern.source });
+      }
+    }
+  }
+
+  console.log(`[VRBO] Found ${foundTotals.length} potential totals: ${foundTotals.map(t => `$${t.price}`).join(', ')}`);
+
+  // =========================================================================
+  // STEP 3: Select the CORRECT total
+  // Priority: 
+  //   1. Total that is greater than subtotal (includes taxes)
+  //   2. If taxes found separately, total should be >= subtotal + taxes
+  //   3. Prefer "Trip total" pattern
+  // =========================================================================
+
+  if (foundTotals.length > 0) {
+    // Sort by price descending - the true total should be the highest
+    foundTotals.sort((a, b) => b.price - a.price);
+    
+    for (const candidate of foundTotals) {
+      // Validate: Total must be greater than subtotal if we know the subtotal
+      if (result.subtotal && candidate.price <= result.subtotal) {
+        console.log(`[VRBO] Rejecting total $${candidate.price} - not greater than subtotal $${result.subtotal}`);
+        continue;
+      }
+      
+      // Validate: If we have taxes, total should be approximately subtotal + taxes
+      if (result.subtotal && result.taxesAmount) {
+        const expectedTotal = result.subtotal + result.taxesAmount;
+        const tolerance = expectedTotal * 0.15; // 15% tolerance for rounding/fees
+        if (Math.abs(candidate.price - expectedTotal) > tolerance && candidate.price < expectedTotal) {
+          console.log(`[VRBO] Rejecting total $${candidate.price} - doesn't match expected $${expectedTotal} (subtotal + taxes)`);
+          continue;
+        }
+      }
+      
+      // Validate: Total must be substantial compared to expected subtotal
+      if (minValidTotal > 0 && candidate.price < minValidTotal) {
+        console.log(`[VRBO] Rejecting total $${candidate.price} - below minimum valid total $${minValidTotal}`);
+        continue;
+      }
+      
+      // This candidate passes validation
+      result.totalFound = true;
+      result.totalPrice = candidate.price;
+      result.currency = 'USD';
+      result.totalEvidence = candidate.context.slice(0, 150);
+      result.directlyComparable = true;
+      result.labelsFound.push('Total');
+      
+      console.log(`[VRBO] ACCEPTED total_label_found=true extracted_total=${candidate.price} currency=USD evidence="${result.totalEvidence}"`);
+      return result;
+    }
+    
+    console.log(`[VRBO] All ${foundTotals.length} total candidates were rejected`);
+  }
+
+  // =========================================================================
+  // STEP 4: If we have subtotal + taxes but no explicit total, calculate it
+  // This is a derived total, still directly comparable
+  // =========================================================================
+  if (result.subtotal && result.taxesAmount && !result.totalFound) {
+    const calculatedTotal = result.subtotal + result.taxesAmount + (result.cleaningFee || 0) + (result.serviceFee || 0);
+    if (calculatedTotal > result.subtotal * 1.05) { // Sanity check
+      result.totalFound = true;
+      result.totalPrice = calculatedTotal;
+      result.currency = 'USD';
+      result.totalEvidence = `Calculated: subtotal $${result.subtotal} + taxes $${result.taxesAmount} + fees`;
+      result.directlyComparable = true;
+      result.labelsFound.push('calculated_total');
+      
+      console.log(`[VRBO] CALCULATED total=${calculatedTotal} from subtotal=${result.subtotal} + taxes=${result.taxesAmount} + fees`);
+      return result;
+    }
+  }
+
+  console.log(`[VRBO] total_label_found=false - no valid total found`);
   console.log(`[VRBO] Labels found: ${result.labelsFound.join(', ')}`);
   
   return result;
