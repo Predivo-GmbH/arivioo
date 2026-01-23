@@ -25,9 +25,14 @@ export const IMAGE_VERIFICATION_BASELINE_NAME = 'image-verification-two-pass-v1'
 export const IMAGE_VERIFICATION_BASELINE_VERSION = '1.0.0';
 export const IMAGE_VERIFICATION_BASELINE_DATE = '2026-01-19';
 
+// Agoda Price Extraction Working Baseline
+export const AGODA_EXTRACTION_BASELINE_NAME = 'agoda-price-extraction-golden-path-v1';
+export const AGODA_EXTRACTION_BASELINE_VERSION = '1.0.0';
+export const AGODA_EXTRACTION_BASELINE_DATE = '2026-01-23';
+
 export interface BaselineExpectation {
   id: string;
-  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization' | 'image_verification';
+  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization' | 'image_verification' | 'agoda_extraction';
   description: string;
   observable: string;
   critical: boolean;
@@ -282,6 +287,50 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     observable: 'Collapsible section displays <75% candidates with actual scores',
     critical: false,
   },
+
+  // Agoda Extraction Contract (Working Baseline v1.0.0 - 2026-01-23)
+  {
+    id: 'agoda_phase_2c_primary',
+    category: 'agoda_extraction',
+    description: 'Phase 2C hotel-page click is primary discovery method',
+    observable: 'Browserless /function API called on hotel page URL',
+    critical: true,
+  },
+  {
+    id: 'agoda_phase_2b5_skipped',
+    category: 'agoda_extraction',
+    description: 'Phase 2B-5 search-page click is skipped',
+    observable: 'No Browserless click attempt on search page URL',
+    critical: true,
+  },
+  {
+    id: 'agoda_checkout_url_discovered',
+    category: 'agoda_extraction',
+    description: 'Encrypted checkout URL discovered via hotel click',
+    observable: 'checkout_url_found contains /book/ with secdat param',
+    critical: true,
+  },
+  {
+    id: 'agoda_total_price_extracted',
+    category: 'agoda_extraction',
+    description: 'Total price including taxes extracted',
+    observable: 'status=success_total_stay with includesTaxesFees=true',
+    critical: true,
+  },
+  {
+    id: 'agoda_completes_under_30s',
+    category: 'agoda_extraction',
+    description: 'Extraction completes within timeout',
+    observable: 'durationMs < 30000 without timeout status',
+    critical: true,
+  },
+  {
+    id: 'agoda_evidence_pattern',
+    category: 'agoda_extraction',
+    description: 'Evidence contains Total Price label',
+    observable: 'evidenceSnippet contains "Total Price" text',
+    critical: true,
+  },
 ];
 
 /**
@@ -313,4 +362,5 @@ export const CATEGORY_LABELS: Record<string, string> = {
   admin: 'Admin Dashboard',
   finalization: 'Finalization Contract',
   image_verification: 'Image Verification (Working Baseline v1.0.0)',
+  agoda_extraction: 'Agoda Extraction (Working Baseline v1.0.0)',
 };
