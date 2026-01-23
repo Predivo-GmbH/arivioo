@@ -231,27 +231,46 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
 
   // =========================================================================
   // PRIORITY 1: Find explicit "Total" label with price
-  // This is the ONLY directly comparable price
+  // VRBO uses various layouts - check multiple patterns
   // =========================================================================
   
-  // Look for patterns like "Total $2,167.40" or "Total: $2,167.40"
+  // VRBO-specific patterns for Total
   const totalPatterns = [
+    // Standard patterns
     /\bTotal[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
     /\bTotal\s+\$?([\d,]+(?:\.\d{2})?)/gi,
     /\$\s*([\d,]+(?:\.\d{2})?)\s*Total\b/gi,
+    // "Trip total" used by VRBO
+    /\bTrip\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    // "Total price" pattern
+    /\bTotal\s+price[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    // Price followed by total indicator
+    /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:total|for\s+\d+\s+nights?)/gi,
+    // VRBO "X nights" total pattern (e.g., "$2,167 for 5 nights")
+    /\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+\d+\s+nights?/gi,
+    // Total with currency after
+    /Total[:\s]*([\d,]+(?:\.\d{2})?)\s*USD/gi,
   ];
 
   for (const pattern of totalPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
-      // Exclude "Subtotal", "Due now total", etc.
-      const context = content.slice(Math.max(0, match.index! - 30), match.index! + match[0].length + 10);
-      if (/subtotal|due\s*now|deposit|pay\s*now|per\s*night|nightly/i.test(context)) {
-        continue;
+      // Get surrounding context
+      const startIdx = Math.max(0, match.index! - 50);
+      const endIdx = Math.min(content.length, match.index! + match[0].length + 30);
+      const context = content.slice(startIdx, endIdx);
+      
+      // Exclude subtotal, due now, deposit, per night, nightly - but NOT "Trip total"
+      if (/subtotal|due\s*now|deposit|pay\s*now|per\s*night(?!s)|nightly|avg/i.test(context)) {
+        // Exception: "Trip total" should NOT be excluded even if near "per night"
+        if (!/trip\s+total/i.test(context)) {
+          continue;
+        }
       }
       
       const price = parseFloat(match[1].replace(/,/g, ''));
-      if (!isNaN(price) && price > 100) { // Total should be substantial
+      // Total should be substantial (at least nightly * nights / 2 roughly)
+      if (!isNaN(price) && price > 100) { 
         result.totalFound = true;
         result.totalPrice = price;
         result.currency = 'USD';
@@ -266,15 +285,43 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
   }
 
   // =========================================================================
+  // PRIORITY 2: Look for the price breakdown section and find the total there
+  // VRBO often has a breakdown with fees + taxes ending in a total
+  // =========================================================================
+  
+  // Find largest price that could be a total (substantially more than nightly)
+  const allPrices: Array<{value: number, context: string}> = [];
+  const pricePattern = /\$\s*([\d,]+(?:\.\d{2})?)/g;
+  let priceMatch;
+  while ((priceMatch = pricePattern.exec(content)) !== null) {
+    const value = parseFloat(priceMatch[1].replace(/,/g, ''));
+    if (!isNaN(value) && value > 0) {
+      const ctx = content.slice(Math.max(0, priceMatch.index - 30), priceMatch.index + priceMatch[0].length + 30);
+      allPrices.push({ value, context: ctx });
+    }
+  }
+
+  // =========================================================================
   // FALLBACK: Detect competing amounts (for error logging)
   // These are NOT directly comparable
   // =========================================================================
 
-  // Nightly rate
-  const nightlyMatch = content.match(/\$\s*([\d,]+(?:\.\d{2})?)\s*(?:\/?\s*)?(?:per\s*)?night/i);
-  if (nightlyMatch) {
-    result.nightlyRate = parsePrice(nightlyMatch[0]);
-    result.labelsFound.push('nightly');
+  // Nightly rate - look for various patterns
+  const nightlyPatterns = [
+    /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:\/?\s*)?(?:per\s*)?night\b/i,
+    /\$\s*([\d,]+(?:\.\d{2})?)\s*avg(?:\/|\s*per)?\s*night/i,
+    /avg\.\s*\$\s*([\d,]+(?:\.\d{2})?)\s*\/?\s*night/i,
+    /\$\s*([\d,]+)\s*x\s*\d+\s*nights?/i,
+  ];
+  for (const np of nightlyPatterns) {
+    const nightlyMatch = content.match(np);
+    if (nightlyMatch) {
+      result.nightlyRate = parsePrice(nightlyMatch[0]);
+      if (result.nightlyRate) {
+        result.labelsFound.push('nightly');
+        break;
+      }
+    }
   }
 
   // Subtotal
@@ -319,7 +366,26 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     result.labelsFound.push('taxes');
   }
 
-  console.log(`[VRBO] total_label_found=false competing_amounts: nightly=${result.nightlyRate}, subtotal=${result.subtotal}, due_now=${result.dueNow}, deposit=${result.deposit}`);
+  // =========================================================================
+  // PRIORITY 3: Calculate total from components if we have nightly + fees
+  // Only if we found nightly rate and this is a property page with date-specific pricing
+  // =========================================================================
+  if (result.nightlyRate && nights > 0) {
+    // Check if there's a clear "X nights" indicator with a subtotal/total nearby
+    const nightsSubtotalMatch = content.match(/\$\s*([\d,]+(?:\.\d{2})?)\s*x?\s*\d+\s*nights?[^$]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+    if (nightsSubtotalMatch) {
+      const possibleTotal = parseFloat(nightsSubtotalMatch[2].replace(/,/g, ''));
+      const nightlyCalculated = result.nightlyRate * nights;
+      // If the second number is close to or larger than calculated nightly total, it might be the real total
+      if (!isNaN(possibleTotal) && possibleTotal >= nightlyCalculated * 0.9) {
+        result.subtotal = possibleTotal;
+        result.labelsFound.push('calculated_subtotal');
+      }
+    }
+  }
+
+  console.log(`[VRBO] total_label_found=false competing_amounts: nightly=${result.nightlyRate}, subtotal=${result.subtotal}, due_now=${result.dueNow}, deposit=${result.deposit}, cleaning=${result.cleaningFee}, service=${result.serviceFee}, taxes=${result.taxesAmount}`);
+  console.log(`[VRBO] Labels found: ${result.labelsFound.join(', ')}`);
   
   return result;
 }
@@ -379,6 +445,8 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     // 4. Wait for navigation to checkout
     // 5. Extract final page content
     
+    // Try primary approach: Load page with JavaScript, then extract content
+    // Note: VRBO shows Total in the booking panel on the property page when dates are applied
     const response = await fetch('https://api.zyte.com/v1/extract', {
       method: 'POST',
       headers: {
@@ -390,24 +458,8 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
         browserHtml: true,
         javascript: true,
         actions: [
-          // Wait for page to fully load
-          { action: 'waitForTimeout', timeout: 8 },
-          
-          // Click primary booking button - use simple CSS selector
-          // VRBO uses data-stid attributes for booking buttons
-          {
-            action: 'click',
-            selector: {
-              type: 'css',
-              value: 'button[data-stid="submit-hotel-reserve"]'
-            }
-          },
-          
-          // Wait for navigation/loading
-          { action: 'waitForTimeout', timeout: 5 },
-          
-          // Wait for page content to stabilize
-          { action: 'waitForTimeout', timeout: 5 },
+          // Wait for page to fully load with JavaScript
+          { action: 'waitForTimeout', timeout: 15 },
         ],
       }),
       signal: controller.signal,
