@@ -1523,9 +1523,136 @@ async function extractFromAgoda(
     }
     
     if (!hotelPageContent) {
-      // All providers failed for hotel page
+      // All providers failed for hotel page - try SEARCH PAGE FALLBACK directly
+      // The search page often works when hotel page is blocked
+      console.log('[AGODA] Phase 1B: Hotel page failed - trying search page fallback');
+      
+      // Try to extract property ID from URL itself (some URLs have it)
+      const propertyIdFromUrl = extractPropertyIdFromUrl(originalUrl);
+      
+      // If we can't get property ID from URL, we need to try with a generated search URL
+      // Use the hotel slug to build a search query
+      const urlSlugMatch = originalUrl.match(/\/([^\/]+)\/hotel\/([^\/]+)\.html/);
+      const hotelSlug = urlSlugMatch ? urlSlugMatch[1] : null;
+      
+      console.log(`[AGODA] PropertyId from URL: ${propertyIdFromUrl}, Hotel slug: ${hotelSlug}`);
+      
+      // Build a fallback search URL using the hotel page URL with search path
+      // Example: /search?q=sapphire-elegance&checkIn=...
+      const fallbackSearchUrl = new URL('https://www.agoda.com/en-sg/search');
+      fallbackSearchUrl.searchParams.set('checkIn', checkIn);
+      fallbackSearchUrl.searchParams.set('checkOut', checkOut);
+      fallbackSearchUrl.searchParams.set('los', String(nights));
+      fallbackSearchUrl.searchParams.set('rooms', String(rooms));
+      fallbackSearchUrl.searchParams.set('adults', String(adults));
+      fallbackSearchUrl.searchParams.set('children', String(children));
+      fallbackSearchUrl.searchParams.set('currency', 'USD');
+      if (hotelSlug) {
+        fallbackSearchUrl.searchParams.set('textToSearch', hotelSlug.replace(/-/g, ' '));
+      }
+      if (propertyIdFromUrl) {
+        fallbackSearchUrl.searchParams.set('selectedproperty', propertyIdFromUrl);
+      }
+      
+      console.log(`[AGODA] Fallback search URL: ${fallbackSearchUrl.toString()}`);
+      
+      // Try to fetch search page
+      for (const provider of PROVIDER_ORDER) {
+        const attemptTrace: ProviderAttemptTrace = {
+          provider,
+          attempted: true,
+          attemptIndex: providerAttempts.length,
+          startedAt: new Date().toISOString(),
+          endedAt: null,
+          outcome: 'navigation_failed',
+          httpStatus: null,
+          contentLength: null,
+          errorMessage: null,
+          urlUsed: fallbackSearchUrl.toString(),
+        };
+        
+        let fetchResult: FetchResult;
+        
+        switch (provider) {
+          case 'browserless':
+            fetchResult = await fetchWithBrowserless(fallbackSearchUrl.toString(), 8000);
+            break;
+          case 'zyte':
+            fetchResult = await fetchWithZyte(fallbackSearchUrl.toString());
+            break;
+          case 'firecrawl':
+            fetchResult = await fetchWithFirecrawl(fallbackSearchUrl.toString(), 7000);
+            break;
+        }
+        
+        attemptTrace.endedAt = new Date().toISOString();
+        attemptTrace.httpStatus = fetchResult.httpStatus || null;
+        attemptTrace.contentLength = fetchResult.content.length;
+        
+        if (fetchResult.error) {
+          attemptTrace.errorMessage = fetchResult.error;
+          attemptTrace.outcome = 'navigation_failed';
+          providerAttempts.push(attemptTrace);
+          console.log(`[AGODA] ${provider} failed for fallback search: ${fetchResult.error}`);
+          continue;
+        }
+        
+        if (fetchResult.content.length < MIN_CONTENT_LENGTH) {
+          attemptTrace.outcome = 'insufficient_content';
+          attemptTrace.errorMessage = `Content too short: ${fetchResult.content.length}`;
+          providerAttempts.push(attemptTrace);
+          continue;
+        }
+        
+        const pageState = analyzePageState(fetchResult.content, fallbackSearchUrl.toString());
+        
+        if (pageState.botBlocked) {
+          attemptTrace.outcome = 'bot_blocked';
+          attemptTrace.errorMessage = 'Bot detection triggered';
+          providerAttempts.push(attemptTrace);
+          continue;
+        }
+        
+        attemptTrace.outcome = 'success';
+        providerAttempts.push(attemptTrace);
+        
+        console.log(`[AGODA] ${provider} succeeded for fallback search: ${fetchResult.content.length} chars`);
+        
+        // Try to extract nightly rate from search page
+        const fallbackSearchContent = fetchResult.html || fetchResult.content;
+        const fallbackPriceResult = extractPrice(fallbackSearchContent, nights);
+        
+        if (fallbackPriceResult.extracted && fallbackPriceResult.totalPrice) {
+          result.success = true;
+          result.status = fallbackPriceResult.directlyComparable ? 'success_total_stay' : 'success_partial';
+          result.failureCategory = 'success';
+          result.extractedPrice = fallbackPriceResult.totalPrice;
+          result.currency = fallbackPriceResult.currency;
+          result.includesTaxesFees = fallbackPriceResult.includesTaxesFees;
+          result.directlyComparable = fallbackPriceResult.directlyComparable;
+          result.evidenceSnippet = fallbackPriceResult.evidenceSnippet;
+          
+          result.structuralProof.total_price_label_found = fallbackPriceResult.totalLabelFound;
+          result.structuralProof.directly_comparable = fallbackPriceResult.directlyComparable;
+          result.structuralProof.currency_detected = fallbackPriceResult.currency;
+          result.structuralProof.failure_category = 'success';
+          result.structuralProof.extraction_method = `fallback_search_${fallbackPriceResult.extractionMethod}`;
+          result.structuralProof.selector_matched = fallbackPriceResult.selectorMatched;
+          result.structuralProof.final_url_fetched = fallbackSearchUrl.toString();
+          
+          result.durationMs = Date.now() - startTime;
+          result.providerAttempts = providerAttempts;
+          
+          console.log(`[AGODA] SUCCESS via fallback search: ${result.currency} ${result.extractedPrice}`);
+          return result;
+        }
+        
+        break;
+      }
+      
+      // All fallbacks failed
       result.status = 'hotel_page_not_reached';
-      result.error = 'Could not reach hotel page';
+      result.error = 'Could not reach hotel page or search fallback';
       result.failureCategory = providerAttempts.every(a => a.outcome === 'bot_blocked') ? 'blocked' : 'render_error';
       result.structuralProof.failure_category = result.failureCategory;
       result.durationMs = Date.now() - startTime;
