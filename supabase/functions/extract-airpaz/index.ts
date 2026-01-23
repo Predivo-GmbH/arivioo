@@ -579,6 +579,40 @@ async function runExtraction(
     console.log(`[AIRPAZ] Warning: dates not visible on page`);
   }
 
+  // CRITICAL: Check for sold out / unavailable BEFORE price extraction
+  // Airpaz shows these messages when rooms are fully booked
+  const soldOutPatterns = [
+    /rooms?\s*fully\s*booked/i,
+    /fully\s*booked/i,
+    /sold\s*out/i,
+    /no\s*rooms?\s*available/i,
+    /not\s*available\s*for\s*(?:these|selected)\s*dates/i,
+    /no\s*availability/i,
+    /unavailable\s*for\s*(?:these|selected|your)\s*dates/i,
+    /all\s*rooms?\s*(?:are\s*)?(?:sold\s*out|booked|unavailable)/i,
+    /property\s*(?:is\s*)?(?:fully\s*booked|not\s*available)/i,
+  ];
+
+  const lowerContent = zyteResult.content.toLowerCase();
+  for (const pattern of soldOutPatterns) {
+    if (pattern.test(zyteResult.content)) {
+      // Extract the matched text for evidence
+      const match = zyteResult.content.match(pattern);
+      const evidenceText = match ? match[0] : 'sold out indicator found';
+      
+      result.status = 'dates_unavailable';
+      result.failureCategory = 'unavailable';
+      proof.failure_category = 'unavailable';
+      result.error = `Property sold out for these dates: "${evidenceText}"`;
+      result.evidenceSnippet = evidenceText;
+      result.durationMs = Date.now() - startTime;
+      result.structuralProof = proof;
+      
+      console.log(`[AIRPAZ] failure_reason=sold_out evidence="${evidenceText}"`);
+      return result;
+    }
+  }
+
   // Extract price
   const priceResult = extractAirpazPrice(zyteResult.content, nights);
 
