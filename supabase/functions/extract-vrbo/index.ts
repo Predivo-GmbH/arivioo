@@ -517,20 +517,25 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     // NOTE: VRBO commonly requires opening the booking drawer, then clicking the
     // primary CTA (often labeled "Begin booking") to reach the checkout/session
     // where taxes/fees are shown.
-    // VRBO selectors - prioritized by reliability
-    // These are the buttons that lead to checkout/booking flow
-    const bookingSelectors = [
-      'button[data-stid="submit-hotel-reserve"]',
-      'button[data-stid="open-booking-drawer"]',
-      '[data-stid="sticky-booking-button"] button',
-      'button.uitk-button-primary',
-      // Additional selectors based on VRBO page variants
-      '[data-stid="property-book-now"]',
-      'button[type="submit"][class*="primary"]',
+    // XPath selectors targeting visible button text - more reliable than data-stid attributes
+    // These target the actual visible text users see on the buttons
+    const xpathBookingSelectors = [
+      '//button[contains(text(), "Reserve")]',
+      '//button[contains(text(), "Book")]',
+      '//button[contains(text(), "Begin booking")]',
+      '//button[contains(text(), "Check availability")]',
+      '//a[contains(text(), "Reserve")]',
+      '//a[contains(text(), "Book")]',
+      // Fallback: buttons with primary styling
+      '//button[contains(@class, "primary")]',
     ];
     
-    // Selector to wait for - indicates page has fully loaded its booking widget
-    const bookingWidgetSelector = '[data-stid="property-book"], [data-stid="property-price-summary"], .uitk-card-content-section';
+    // CSS selectors as fallback
+    const cssBookingSelectors = [
+      'button[data-stid="submit-hotel-reserve"]',
+      'button[data-stid="open-booking-drawer"]',
+      'button.uitk-button-primary',
+    ];
 
     const zyteExtract = async (url: string, actions: any[], timeoutMs: number, captureScreenshot: boolean = false) => {
       const controller = new AbortController();
@@ -565,28 +570,44 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
     };
     
     // VRBO extraction strategy:
-    // 1. Wait for booking widget to appear (indicates page is ready)
-    // 2. Click the booking CTA
-    // 3. Wait for checkout signals to appear
-    // CRITICAL: Zyte waitForTimeout max is 15 seconds! All timeouts must be <= 15.
-    // CRITICAL: Zyte waitForSelector max is 15 seconds!
+    // 1. Use waitForSelector to wait for booking widget to appear (indicates JS hydrated)
+    // 2. Click the booking CTA using XPath selectors targeting visible text
+    // 3. Wait for checkout signals to appear using waitForSelector
+    // CRITICAL: Zyte waitForTimeout max is 15 seconds! waitForSelector max is also 15s.
+    // NOTE: Zyte does NOT support waitForNetworkIdle - must use waitForSelector instead
+    
+    // Selector to wait for that indicates page is ready (booking widget loaded)
+    const pageReadySelector = 'button.uitk-button-primary, [data-stid="property-price-summary"], .uitk-card-content-section';
+    
     const attempts: Array<{ label: string; actions: any[]; expectedCheckout?: boolean }> = [
-      // First: just wait for page to load with booking widget visible
+      // First: wait for booking widget to appear (indicates page is ready)
       {
         label: 'wait_for_widget',
         actions: [
-          { action: 'waitForSelector', selector: { type: 'css', value: bookingWidgetSelector }, timeout: 15 },
+          { action: 'waitForSelector', selector: { type: 'css', value: pageReadySelector }, timeout: 15 },
         ],
       },
-      // Then try clicking each booking selector after waiting for widget
-      ...bookingSelectors.map((sel) => ({
-        label: `click:${sel}`,
+      // XPath selectors targeting visible button text - most reliable
+      ...xpathBookingSelectors.map((xpath) => ({
+        label: `xpath:${xpath.slice(0, 40)}`,
         expectedCheckout: true,
         actions: [
-          { action: 'waitForSelector', selector: { type: 'css', value: bookingWidgetSelector }, timeout: 15 },
+          { action: 'waitForSelector', selector: { type: 'css', value: pageReadySelector }, timeout: 15 },
+          { action: 'click', selector: { type: 'xpath', value: xpath } },
+          { action: 'waitForTimeout', timeout: 5 },
+          // Second click for "Begin booking" confirmation button
+          { action: 'click', selector: { type: 'xpath', value: '//button[contains(text(), "Begin booking")]' } },
+          { action: 'waitForTimeout', timeout: 10 },
+        ],
+      })),
+      // CSS selectors as fallback
+      ...cssBookingSelectors.map((sel) => ({
+        label: `css:${sel}`,
+        expectedCheckout: true,
+        actions: [
+          { action: 'waitForSelector', selector: { type: 'css', value: pageReadySelector }, timeout: 15 },
           { action: 'click', selector: { type: 'css', value: sel } },
           { action: 'waitForTimeout', timeout: 5 },
-          // Second click for "Begin booking" or confirmation
           { action: 'click', selector: { type: 'css', value: 'button.uitk-button-primary' } },
           { action: 'waitForTimeout', timeout: 10 },
         ],
@@ -650,9 +671,23 @@ async function extractWithZyteNavigation(propertyUrl: string, datedUrl: string, 
           });
           
           console.log(`[VRBO_DEBUG] attempt=${attempt.label} screenshot_size=${screenshotB64.length} title="${pageTitle}" signals=[${foundSignals.join(',')}]`);
-          // Log first 200 chars of visible text for debugging selectors
-          const visibleTextPreview = normalizedContent.slice(0, 500).replace(/\s+/g, ' ');
-          console.log(`[VRBO_DEBUG] visible_text_preview="${visibleTextPreview}"`);
+          
+          // Log price-related content, not just first 500 chars
+          // Search for price indicators in the content
+          const priceMatch = normalizedContent.match(/\$\s*[\d,]+(?:\.\d{2})?[^$]{0,100}/g);
+          if (priceMatch && priceMatch.length > 0) {
+            console.log(`[VRBO_DEBUG] price_snippets="${priceMatch.slice(0, 5).join(' | ')}"`);
+          } else {
+            console.log(`[VRBO_DEBUG] price_snippets=NONE_FOUND`);
+          }
+          
+          // Check for button text to verify page rendered
+          const buttonMatch = normalizedContent.match(/(Reserve|Book|Check availability)[^a-z]{0,50}/gi);
+          if (buttonMatch && buttonMatch.length > 0) {
+            console.log(`[VRBO_DEBUG] button_text="${buttonMatch.slice(0, 3).join(' | ')}"`);
+          } else {
+            console.log(`[VRBO_DEBUG] button_text=NONE_FOUND`);
+          }
         }
 
         console.log(`[VRBO] final_url=${finalUrl}`);
