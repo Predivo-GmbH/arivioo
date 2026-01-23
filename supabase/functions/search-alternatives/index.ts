@@ -2376,10 +2376,25 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
         continue;
       }
 
-      // Fee/deposit lines are NEVER trip totals (even if the word "total" appears nearby in the UI)
+      // Fee/deposit/line-item labels are NEVER trip totals (even if the word "total" appears nearby in the UI)
+      // CRITICAL: "Taxes and fees" as a LABEL means it's a line item, not the total
       const feeTerms = ['pet', 'pets', 'deposit', 'damage', 'security'];
+      const lineItemTerms = [
+        'price-item-taxes_and_fees',  // testid for taxes line item
+        'price-item-cleaning',
+        'price-item-service',
+        'price-item-',  // any line item testid
+        'title-taxes_and_fees',  // title for taxes label
+        '>taxes and fees</div>',  // label for taxes line item
+        '>cleaning fee</div>',
+        '>service fee</div>',
+        '>airbnb service fee</div>',
+      ];
+      
       const feeHit = feeTerms.find((t) => ctxLower.includes(t));
-      if (feeHit) {
+      const lineItemHit = lineItemTerms.find((t) => ctxLower.includes(t.toLowerCase()));
+      
+      if (feeHit || lineItemHit) {
         candidates.push({
           rawMatch,
           amountRaw,
@@ -2391,14 +2406,17 @@ function extractAirbnbPriceCandidates(content: string, nights: number): PriceCan
           kind: 'price_not_available_in_content',
           includesTaxesFees: false,
           score: -10,
-          rejectedReason: `fee_context:${feeHit}`,
+          rejectedReason: lineItemHit ? `line_item_context:${lineItemHit}` : `fee_context:${feeHit}`,
         });
         continue;
       }
 
       // Classify using label context (must be *explicit* total labels; plain "total" is too error-prone).
       const hasTotalLabel = /\b(trip total|grand total|total before taxes|total\s*USD|you pay|you will pay)\b/i.test(context);
-      const hasTaxesFeesLabel = /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(context);
+      // CRITICAL: "Taxes and fees" as a standalone label is a LINE ITEM, not a total!
+      // Only match "includes taxes" or "incl. taxes" or "including taxes" - these indicate a TOTAL that includes taxes
+      // DO NOT match "taxes and fees" by itself - that's often just a label for the taxes line item
+      const hasTaxesFeesLabel = /\b(includes\s+taxes|incl\.?\s+taxes|including\s+taxes|includes\s+fees|incl\.?\s+fees|total\s+incl|total\s+including)\b/i.test(context);
       const hasBeforeTaxesLabel = /\btotal\s+before\s+taxes\b/i.test(context);
       const hasForNights = new RegExp(`\\bfor\\s+${nights}\\s+nights?\\b`, 'i').test(context) || /\bfor\s+\d+\s+nights?\b/i.test(context);
       const hasNightOnly = /\bper\s+night\b|\/night|\bnightly\b/i.test(context);
@@ -2532,10 +2550,28 @@ function validatePriceExtraction(
 
   // Accept prices with explicit total labels, taxes/fees labels, OR checkout patterns
   // CRITICAL: "$X for N nights" is a SUBTOTAL, NOT a total - it must NOT pass validation as a total
+  // CRITICAL: "Taxes and fees" as a standalone label is a LINE ITEM, not a total!
   const hasExplicitTotalLabel =
     /\b(trip total|grand total|total before taxes|total\s*USD|you pay|you will pay)\b/i.test(snippet);
+  // Only match "includes taxes" or "incl. taxes" patterns - NOT "taxes and fees" standalone
   const hasTaxesFeesLabel =
-    /\b(includes\s+taxes|incl\.?\s+taxes|taxes\s+and\s+fees|including\s+taxes|includes\s+fees|incl\.?\s+fees)\b/i.test(snippet);
+    /\b(includes\s+taxes|incl\.?\s+taxes|including\s+taxes|includes\s+fees|incl\.?\s+fees|total\s+incl|total\s+including)\b/i.test(snippet);
+  
+  // Reject line item contexts even if other patterns match
+  const snippetLower = snippet.toLowerCase();
+  const isLineItem = [
+    'price-item-taxes_and_fees',
+    'price-item-cleaning',
+    'price-item-service',
+    'title-taxes_and_fees',
+    '>taxes and fees</div>',
+    '>cleaning fee</div>',
+    '>service fee</div>',
+  ].some(term => snippetLower.includes(term.toLowerCase()));
+  
+  if (isLineItem) {
+    return { ok: false, reason: 'line_item_not_total', evidence: snippet };
+  }
   
   // Book/stays checkout page patterns - these are the ONLY all-in totals we accept
   const hasCheckoutPayNow = /\bpay\s*\$[\d,]+(?:\.\d{2})?\s*now\b/i.test(snippet);
