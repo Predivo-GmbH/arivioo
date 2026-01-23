@@ -263,11 +263,12 @@ export function classifyOutcome(
   }
 
   // 2. Success states - check verification status
-  if (status === 'success' || status === 'price_extracted') {
-    if (metadata.priceStatus === 'verified') {
+  // success_total_stay is the VRBO golden path success status - treat as verified
+  if (status === 'success' || status === 'price_extracted' || status === 'success_total_stay') {
+    if (metadata.priceStatus === 'verified' || status === 'success_total_stay') {
       return {
         category: 'price_verified',
-        reasonCode: 'success_verified',
+        reasonCode: status === 'success_total_stay' ? 'vrbo_total_verified' : 'success_verified',
         isTerminal: true,
       };
     }

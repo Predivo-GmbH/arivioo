@@ -763,20 +763,28 @@ Deno.serve(async (req) => {
         const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
         const supabase = createClient(supabaseUrl, supabaseKey);
 
+        // Map success_total_stay to canonical 'success' status for classification
+        const canonicalStatus = result.status === 'success_total_stay' ? 'success' : result.status;
+        
         await supabase
           .from('price_extractions')
           .update({
-            extraction_status: result.status,
+            extraction_status: canonicalStatus,
             extracted_price: result.extractedPrice,
             currency: result.currency,
             includes_taxes_fees: result.includesTaxesFees,
+            dates_validated: result.directlyComparable && result.success, // Set dates_validated for proper classification
             evidence_snippets: result.evidenceSnippet ? [result.evidenceSnippet] : null,
             extraction_metadata: {
               structuralProof: result.structuralProof,
               providerAttempts: result.providerAttempts,
               goldenPath: result.goldenPath,
               durationMs: result.durationMs,
+              originalStatus: result.status, // Preserve original for debugging
+              price_type: result.directlyComparable ? 'TOTAL_STAY' : 'UNKNOWN',
+              verification: result.directlyComparable ? 'VERIFIED' : 'UNVERIFIED',
             },
+            price_type: result.directlyComparable ? 'TOTAL_STAY' : 'UNKNOWN',
             provider_used: 'zyte',
             updated_at: new Date().toISOString(),
           })

@@ -130,10 +130,16 @@ function determinePriceTypeFromExtraction(extraction: any): string {
   const metadata = extraction.extraction_metadata || {};
   const platformName = (extraction.platform_name || '').toLowerCase();
   const isExpedia = platformName.includes('expedia');
+  const isVrbo = platformName.includes('vrbo');
   
   // 1. Check explicit price_type from extractor first
   const rawPriceType = extraction.price_type || metadata?.price_type || '';
   const normalizedRawType = String(rawPriceType).toLowerCase();
+  
+  // VRBO/Expedia golden path: TOTAL_STAY = total_proven
+  if (normalizedRawType === 'total_stay' || normalizedRawType === 'total-stay') {
+    return 'total_proven';
+  }
   
   if (normalizedRawType.includes('total') && (normalizedRawType.includes('proven') || normalizedRawType.includes('verified'))) {
     return 'total_proven';
@@ -148,7 +154,22 @@ function determinePriceTypeFromExtraction(extraction: any): string {
     return 'nightly_only';
   }
   
-  // 2. EXPEDIA-SPECIFIC: Check for verification: "VERIFIED" signal from golden path
+  // 2. VRBO-SPECIFIC: Check for verification signal from golden path
+  if (isVrbo) {
+    const verification = metadata.verification || '';
+    const structuralProof = metadata.structuralProof || {};
+    
+    if (
+      (typeof verification === 'string' && verification.toUpperCase() === 'VERIFIED') ||
+      (structuralProof.directly_comparable === true && structuralProof.total_label_found === true)
+    ) {
+      if (extraction.includes_taxes_fees === true || extraction.dates_validated === true) {
+        return 'total_proven';
+      }
+    }
+  }
+  
+  // 3. EXPEDIA-SPECIFIC: Check for verification: "VERIFIED" signal from golden path
   if (isExpedia) {
     const verification = metadata.verification || metadata.structuralProof?.verification || '';
     const semantic = metadata.semantic || '';
@@ -174,7 +195,7 @@ function determinePriceTypeFromExtraction(extraction: any): string {
     }
   }
   
-  // 3. Check structural proof from metadata
+  // 4. Check structural proof from metadata
   const structuralProof = metadata.structuralProof || metadata.structural_proof || {};
   const offersPage = metadata.offersPage || {};
   
@@ -183,21 +204,23 @@ function determinePriceTypeFromExtraction(extraction: any): string {
     (structuralProof.breakdown_found === true && 
      (structuralProof.total_label_found === true || structuralProof.hasTotalWithTaxes === true) &&
      (structuralProof.extracted_from_breakdown_total === true || structuralProof.extracted_from_target_card === true)) ||
-    (offersPage.hasOfferCards === true && offersPage.hasTotalWithTaxes === true && offersPage.datesRenderedCorrectly === true);
+    (offersPage.hasOfferCards === true && offersPage.hasTotalWithTaxes === true && offersPage.datesRenderedCorrectly === true) ||
+    // VRBO structural proof
+    (structuralProof.total_label_found === true && structuralProof.directly_comparable === true);
   
   if (hasStructuralProof && extraction.includes_taxes_fees === true && extraction.dates_validated === true) {
     return 'total_proven';
   }
   
-  // 4. Check if taxes/fees are included with successful extraction → total_derived
+  // 5. Check if taxes/fees are included with successful extraction → total_derived
   if (extraction.includes_taxes_fees === true && extraction.dates_validated === true) {
-    const successStatuses = ['success', 'price_extracted', 'completed'];
+    const successStatuses = ['success', 'price_extracted', 'completed', 'success_total_stay'];
     if (extraction.extraction_status && successStatuses.includes(extraction.extraction_status)) {
       return 'total_derived';
     }
   }
   
-  // 5. If taxes/fees explicitly not included
+  // 6. If taxes/fees explicitly not included
   if (extraction.includes_taxes_fees === false) {
     return 'subtotal_nights_only';
   }
@@ -259,6 +282,10 @@ function categorizeResultForSnapshot(
     return 'sold_out';
   }
   
+  // 3b. Check for success states (including VRBO's success_total_stay)
+  const successStatuses = ['success', 'price_extracted', 'completed', 'success_total_stay'];
+  const isSuccessStatus = successStatuses.includes(extractionStatus);
+  
   // 4. Check extraction status for blocked
   const blockedStatuses = ['blocked', 'blocked_captcha_or_bot', 'access_denied', 'bot_detected'];
   if (blockedStatuses.includes(extractionStatus)) {
@@ -268,7 +295,7 @@ function categorizeResultForSnapshot(
   // 5. No price - check if it's an unmapped error
   if (!result.price || result.price <= 0) {
     const pendingStatuses = ['pending', 'running', 'in_progress'];
-    const successStatuses = ['success', 'price_extracted', 'completed'];
+    const successStatuses = ['success', 'price_extracted', 'completed', 'success_total_stay'];
     
     if (extractionStatus && !pendingStatuses.includes(extractionStatus) && !successStatuses.includes(extractionStatus)) {
       // Unknown terminal status - additional_issues
