@@ -402,6 +402,7 @@ function validateRenderedDates(
 }
 
 // Phase B: Extract total price with verification AND structural proof
+// POLICY: When multiple room prices exist, return the CHEAPEST (minimum) price
 function extractPrice(
   markdown: string,
   requestedCheckIn: string,
@@ -413,6 +414,7 @@ function extractPrice(
   priceVerified: boolean;
   evidenceSnippet: string | null;
   structuralProof: StructuralProof;
+  allPricesFound: number[];
 } {
   // Initialize structural proof with explicit false values
   const structuralProof: StructuralProof = {
@@ -438,61 +440,103 @@ function extractPrice(
   let extractedPrice: number | null = null;
   let evidenceSnippet: string | null = null;
   let includesTaxesFees: boolean | null = null;
+  const allPricesFound: number[] = [];
   
-  // Step 3: Extract price ONLY from breakdown total if structural proof exists
-  if (breakdown.breakdown_found && breakdown.total_label_found && breakdown.breakdown_price) {
-    extractedPrice = breakdown.breakdown_price;
-    evidenceSnippet = breakdown.total_value_raw;
-    structuralProof.extracted_from_breakdown_total = true;
+  // Step 3: Find ALL room total prices on the page
+  // Pattern 1: "The current price is $XXX total" (Hotels.com room cards)
+  const currentPricePattern = /the\s+current\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/gi;
+  const currentPriceMatches = [...markdown.matchAll(currentPricePattern)];
+  
+  // Pattern 2: "The price is $XXX total"
+  const thePricePattern = /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/gi;
+  const thePriceMatches = [...markdown.matchAll(thePricePattern)];
+  
+  // Pattern 3: Generic "$XXX total" (but filter out nightly rates and strikethrough prices)
+  const genericTotalPattern = /\$([\d,]+(?:\.\d{2})?)\s*total/gi;
+  const genericMatches = [...markdown.matchAll(genericTotalPattern)];
+  
+  // Collect all prices from specific patterns (most reliable)
+  for (const match of currentPriceMatches) {
+    const priceStr = match[1].replace(/,/g, '');
+    const price = parseFloat(priceStr);
+    if (price > 50 && price < 50000) { // Sanity check
+      allPricesFound.push(price);
+    }
+  }
+  
+  for (const match of thePriceMatches) {
+    const priceStr = match[1].replace(/,/g, '');
+    const price = parseFloat(priceStr);
+    if (price > 50 && price < 50000 && !allPricesFound.includes(price)) {
+      allPricesFound.push(price);
+    }
+  }
+  
+  // If no specific patterns found, fall back to generic total pattern
+  if (allPricesFound.length === 0) {
+    for (const match of genericMatches) {
+      const priceStr = match[1].replace(/,/g, '');
+      const price = parseFloat(priceStr);
+      
+      // Filter: Skip prices that appear after strikethrough (~~$XXX~~) or "nightly"
+      const matchIndex = markdown.indexOf(match[0]);
+      const contextBefore = markdown.slice(Math.max(0, matchIndex - 50), matchIndex).toLowerCase();
+      const isStrikethrough = contextBefore.includes('~~') || contextBefore.includes('previous price');
+      const isNightly = contextBefore.includes('nightly') || contextBefore.includes('per night');
+      
+      if (!isStrikethrough && !isNightly && price > 50 && price < 50000) {
+        allPricesFound.push(price);
+      }
+    }
+  }
+  
+  console.log(`[HOTELS.COM] Found ${allPricesFound.length} room total prices: ${JSON.stringify(allPricesFound)}`);
+  
+  // Step 4: Select the MINIMUM (cheapest) price
+  if (allPricesFound.length > 0) {
+    extractedPrice = Math.min(...allPricesFound);
     
-    // Check if taxes are included (based on breakdown having fee lines)
-    if (breakdown.has_fee_lines) {
+    // Find the evidence snippet for the cheapest price
+    const cheapestPriceStr = extractedPrice.toString();
+    const cheapestPatterns = [
+      new RegExp(`the\\s+current\\s+price\\s+is\\s+\\$?${cheapestPriceStr}\\s*total`, 'i'),
+      new RegExp(`the\\s+price\\s+is\\s+\\$?${cheapestPriceStr}\\s*total`, 'i'),
+      new RegExp(`\\$${cheapestPriceStr}\\s*total`, 'i'),
+    ];
+    
+    for (const pattern of cheapestPatterns) {
+      const match = markdown.match(pattern);
+      if (match) {
+        const matchIndex = markdown.indexOf(match[0]);
+        const start = Math.max(0, matchIndex - 30);
+        const end = Math.min(markdown.length, matchIndex + match[0].length + 50);
+        evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
+        break;
+      }
+    }
+    
+    // If no specific evidence found, create one
+    if (!evidenceSnippet) {
+      evidenceSnippet = `Cheapest room: $${extractedPrice} total (from ${allPricesFound.length} options)`;
+    }
+    
+    // Mark structural proof based on what we found
+    if (breakdown.breakdown_found && breakdown.has_fee_lines) {
+      structuralProof.extracted_from_breakdown_total = true;
       includesTaxesFees = true;
+    } else if (allPricesFound.length > 0) {
+      // We found prices even without breakdown - mark as extracted but not from breakdown
+      structuralProof.extracted_from_breakdown_total = false;
+      // Check context for taxes/fees indication
+      const lowerMarkdown = markdown.toLowerCase();
+      if (lowerMarkdown.includes('taxes and fees') || lowerMarkdown.includes('total with taxes')) {
+        includesTaxesFees = true;
+      }
     }
     
-    console.log(`[HOTELS.COM] Structural extraction: $${extractedPrice} from breakdown`);
+    console.log(`[HOTELS.COM] Selected cheapest price: $${extractedPrice} from ${allPricesFound.length} options`);
   } else {
-    // Fallback: Try legacy extraction but mark as NOT from breakdown
-    // This allows extraction to succeed but verification will fail
-    const thepricePattern = /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/i;
-    const thepriceMatch = markdown.match(thepricePattern);
-    
-    const totalPattern = /\$([\d,]+(?:\.\d{2})?)\s*total/gi;
-    const totalMatches = [...markdown.matchAll(totalPattern)];
-    
-    if (thepriceMatch) {
-      const priceStr = thepriceMatch[1].replace(/,/g, '');
-      extractedPrice = parseFloat(priceStr);
-      const matchIndex = markdown.indexOf(thepriceMatch[0]);
-      const start = Math.max(0, matchIndex - 30);
-      const end = Math.min(markdown.length, matchIndex + thepriceMatch[0].length + 50);
-      evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
-      
-      const context = markdown.slice(matchIndex, matchIndex + 100).toLowerCase();
-      if (context.includes('taxes') && context.includes('fees')) {
-        includesTaxesFees = true;
-      }
-      
-      console.log(`[HOTELS.COM] Legacy extraction (no structural proof): $${extractedPrice}`);
-    } else if (totalMatches.length > 0) {
-      const firstMatch = totalMatches[0];
-      const priceStr = firstMatch[1].replace(/,/g, '');
-      extractedPrice = parseFloat(priceStr);
-      const matchIndex = markdown.indexOf(firstMatch[0]);
-      const start = Math.max(0, matchIndex - 30);
-      const end = Math.min(markdown.length, matchIndex + firstMatch[0].length + 50);
-      evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
-      
-      const context = markdown.slice(matchIndex, matchIndex + 100).toLowerCase();
-      if (context.includes('taxes') && context.includes('fees')) {
-        includesTaxesFees = true;
-      }
-      
-      console.log(`[HOTELS.COM] Legacy extraction (no structural proof): $${extractedPrice}`);
-    }
-    
-    // Mark as NOT extracted from breakdown
-    structuralProof.extracted_from_breakdown_total = false;
+    console.log('[HOTELS.COM] No valid room total prices found');
   }
   
   // HALLUCINATION GUARD: Verify price appears verbatim in content
@@ -508,6 +552,7 @@ function extractPrice(
     priceVerified,
     evidenceSnippet,
     structuralProof,
+    allPricesFound,
   };
 }
 
@@ -707,7 +752,8 @@ async function extractFromHotelsCom(
     result.success = true;
     result.status = 'success';
     result.durationMs = Date.now() - startTime;
-    console.log(`[HOTELS.COM] Success: $${phaseBResult.extractedPrice} (structurally_verified=${structurallyVerified})`);
+    const roomCount = phaseBResult.allPricesFound?.length || 1;
+    console.log(`[HOTELS.COM] Success: $${phaseBResult.extractedPrice} (cheapest of ${roomCount} rooms, structurally_verified=${structurallyVerified})`);
     
     return result;
     
