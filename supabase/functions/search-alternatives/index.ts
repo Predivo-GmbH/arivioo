@@ -7239,12 +7239,22 @@ async function runSearchWithStreaming(
             // PARALLEL PIPELINE OPTIMIZATION: Trigger price extraction IMMEDIATELY
             // Don't wait for all images - start extraction as soon as platform is VERIFIED
             // ============================================================================
-            if (newConfidence >= 75) { // Above IMAGE_VERIFICATION_THRESHOLD
+            // TESTING BYPASS: Hotels.com gets extraction regardless of confidence score
+            const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
+            const normalizedPlatform = platformName.toLowerCase().replace(/[^a-z]/g, '');
+            const isHotelsComBypass = HOTELS_COM_GLOBAL_BYPASS_ENABLED && 
+              (normalizedPlatform === 'hotelscom' || normalizedPlatform === 'hotels');
+            
+            if (newConfidence >= 75 || isHotelsComBypass) { // Above IMAGE_VERIFICATION_THRESHOLD or Hotels.com bypass
+              if (isHotelsComBypass && newConfidence < 75) {
+                console.log(`[TESTING_BYPASS] Hotels.com extraction triggered despite low confidence (${newConfidence}%)`);
+              }
               const extractionPromise = triggerImmediatePriceExtraction(newMatch);
               extractionPromises.push(extractionPromise);
               sendProgress(controller, `Starting price extraction for ${platformName}`, "Running in parallel with continued discovery", {
                 platform: platformName,
                 parallelExtraction: true,
+                bypassActive: isHotelsComBypass && newConfidence < 75,
               });
             }
           }
