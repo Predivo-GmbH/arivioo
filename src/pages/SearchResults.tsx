@@ -325,6 +325,105 @@ function AriviooLogo() {
   );
 }
 
+function TestingPublicSearchResultsView({
+  searchId,
+  search,
+  results,
+  loading,
+  onBack,
+}: {
+  searchId: string | undefined;
+  search: SearchData | null;
+  results: SearchResult[];
+  loading: boolean;
+  onBack: () => void;
+}) {
+  return (
+    <div className="min-h-screen bg-background text-foreground">
+      <header className="border-b border-border bg-card">
+        <div className="mx-auto max-w-5xl px-6 py-6">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h1 className="text-xl font-semibold">Search results (testing view)</h1>
+              <p className="mt-1 text-sm text-muted-foreground break-all">Search ID: {searchId}</p>
+            </div>
+            <Button variant="secondary" onClick={onBack}>Back</Button>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-5xl px-6 py-8">
+        {loading ? (
+          <div className="rounded-xl border border-border bg-card p-6">
+            <p className="text-sm text-muted-foreground">Loading snapshot…</p>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <section className="rounded-xl border border-border bg-card p-6">
+              <h2 className="text-base font-medium">Airbnb</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {search?.airbnb_title || "(title unavailable)"}
+              </p>
+              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="rounded-lg border border-border bg-background p-3">
+                  <div className="text-xs text-muted-foreground">Status</div>
+                  <div className="mt-1 text-sm font-medium">{search?.status || "unknown"}</div>
+                </div>
+                <div className="rounded-lg border border-border bg-background p-3">
+                  <div className="text-xs text-muted-foreground">Total</div>
+                  <div className="mt-1 text-sm font-medium">
+                    {search?.airbnb_price != null
+                      ? formatPrice(search.airbnb_price, search?.airbnb_currency || "USD")
+                      : "—"}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-border bg-background p-3">
+                  <div className="text-xs text-muted-foreground">Results in snapshot</div>
+                  <div className="mt-1 text-sm font-medium">{results.length}</div>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-border bg-card">
+              <div className="border-b border-border px-6 py-4">
+                <h2 className="text-base font-medium">Platforms</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="text-left text-xs text-muted-foreground">
+                    <tr className="border-b border-border">
+                      <th className="px-6 py-3 font-medium">Platform</th>
+                      <th className="px-6 py-3 font-medium">Bucket</th>
+                      <th className="px-6 py-3 font-medium">Price</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm">
+                    {results.map((r) => (
+                      <tr key={r.id} className="border-b border-border/50 last:border-0">
+                        <td className="px-6 py-4">{r.platform_name}</td>
+                        <td className="px-6 py-4 text-muted-foreground">
+                          {(r as any).final_bucket_label || (r as any).final_bucket || "—"}
+                        </td>
+                        <td className="px-6 py-4">
+                          {(r as any).extracted_price != null
+                            ? formatPrice((r as any).extracted_price, (r as any).currency || search?.airbnb_currency || "USD")
+                            : r.price != null
+                              ? formatPrice(r.price, (r as any).currency || search?.airbnb_currency || "USD")
+                              : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
 export default function SearchResults() {
   const { searchId } = useParams();
   const navigate = useNavigate();
@@ -509,6 +608,14 @@ export default function SearchResults() {
     });
   };
   useEffect(() => {
+    // TESTING-ONLY: In the preview public screenshot mode, we intentionally ignore
+    // any existing (often anonymous) auth session because it will not own the
+    // target search and will cause RLS fetches to fail/redirect.
+    if (isTestingPublicView) {
+      setUser(null);
+      return;
+    }
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
       if (!session?.user && !isTestingPublicView) navigate("/auth");
@@ -525,8 +632,7 @@ export default function SearchResults() {
   // TESTING-ONLY: Fetch snapshot via restricted backend function (no auth needed).
   useEffect(() => {
     if (!isTestingPublicView || !searchId) return;
-    // If a real user session exists, normal flow will handle everything.
-    if (user) return;
+    // In testing public view, always prefer the backend snapshot fetch.
 
     let cancelled = false;
     const run = async () => {
@@ -570,6 +676,8 @@ export default function SearchResults() {
 
   // Fetch search data and trigger search
   useEffect(() => {
+    // TESTING-ONLY: Never run the authenticated pipeline flow in the preview public view.
+    if (isTestingPublicView) return;
     if (!searchId || !user) return;
     if (searchTriggeredRef.current) return;
 
@@ -2075,6 +2183,18 @@ export default function SearchResults() {
   const handleTotalCleared = () => {
     setConfirmedTotal(null);
   };
+
+  if (isTestingPublicView) {
+    return (
+      <TestingPublicSearchResultsView
+        searchId={searchId}
+        search={search}
+        results={results}
+        loading={loading}
+        onBack={() => navigate("/")}
+      />
+    );
+  }
 
   if (!user) return null;
   const airbnbImages = toStringArray(search?.airbnb_images);
