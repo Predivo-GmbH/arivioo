@@ -367,10 +367,10 @@ async function extractWithFirecrawl(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     
-    let scrapeResponse: Response;
+      let scrapeResponse: Response;
     try {
       // Firecrawl scrape with optional actions and JSON extraction
-      const requestBody: any = {
+        const requestBody: any = {
         url,
         formats: ['markdown', 'extract'],
         extract: {
@@ -380,6 +380,12 @@ async function extractWithFirecrawl(
         onlyMainContent: true,
         waitFor: actions.length > 0 ? 5000 : 3000,
       };
+
+        // Booking.com: bias scraping toward US locale (matches our known successful canary run)
+        // Firecrawl supports a `location` hint.
+        if (platformName.toLowerCase().includes('booking')) {
+          requestBody.location = { country: 'US', languages: ['en-US', 'en'] };
+        }
       
       // Add actions if we have them
       if (actions.length > 0) {

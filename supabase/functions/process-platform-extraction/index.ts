@@ -266,20 +266,32 @@ async function runDedicatedExtractor(
     
     console.log(`[WORKER] Calling dedicated extractor: ${extractorName}`);
     
+    // Some dedicated extractors have slightly different request shapes.
+    // Keep this logic here (instead of inside extractors) so the worker owns orchestration.
+    const payload: Record<string, any> = extractorName === 'extract-booking'
+      ? {
+          extractionId,
+          url: deepLink,
+          checkIn: requestedCheckIn,
+          checkOut: requestedCheckOut,
+          adults,
+        }
+      : {
+          extractionId,
+          url: deepLink,
+          checkIn: requestedCheckIn,
+          checkOut: requestedCheckOut,
+          adults,
+          requireValidation: true,
+        };
+
     const response = await fetch(`${supabaseUrl}/functions/v1/${extractorName}`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${supabaseKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        extractionId,
-        url: deepLink,
-        checkIn: requestedCheckIn,
-        checkOut: requestedCheckOut,
-        adults,
-        requireValidation: true,
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     
@@ -299,6 +311,11 @@ async function runDedicatedExtractor(
     }
     return { success: false, result: null, error: errorMsg };
   }
+}
+
+function isBookingPlatform(platformName: string): boolean {
+  const p = (platformName || '').toLowerCase();
+  return p.includes('booking');
 }
 
 // Call validate-dates with timeout
@@ -1121,9 +1138,54 @@ Deno.serve(async (req) => {
       result.phaseB.includesTaxesFees = updatedExtraction.includes_taxes_fees;
       result.phaseB.status = updatedExtraction.extraction_status;
       result.phaseB.evidence = updatedExtraction.extraction_error;
+
+      // ============= BOOKING.COM: TRY HARDER FALLBACK =============
+      // If the generic path gets blocked, immediately escalate to the dedicated Booking extractor
+      // (Zyte → Browserless) to maximize our chances of a pre-checkout total.
+      if (
+        isBookingPlatform(platform) &&
+        (updatedExtraction.extraction_status === 'blocked_captcha_or_bot' ||
+          updatedExtraction.extraction_status === 'render_failed' ||
+          updatedExtraction.extraction_status === 'blocked_rate_limit')
+      ) {
+        console.log(`[WORKER] Booking.com blocked on generic path (${updatedExtraction.extraction_status}) - escalating to extract-booking`);
+
+        const bookingFallback = await runDedicatedExtractor(
+          supabaseUrl,
+          supabaseKey,
+          'extract-booking',
+          extractionId,
+          deepLink,
+          requestedCheckIn,
+          requestedCheckOut,
+          extraction.assumed_adults || 2
+        );
+
+        if (!bookingFallback.timedOut) {
+          const { data: afterFallback } = await supabaseClient
+            .from('price_extractions')
+            .select('*')
+            .eq('id', extractionId)
+            .single();
+
+          if (afterFallback) {
+            result.phaseB.extractedPrice = afterFallback.extracted_price;
+            result.phaseB.currency = afterFallback.currency;
+            result.phaseB.includesTaxesFees = afterFallback.includes_taxes_fees;
+            result.phaseB.status = afterFallback.extraction_status;
+            result.phaseB.evidence = afterFallback.extraction_error;
+          } else {
+            console.log('[WORKER] Booking fallback ran but could not re-fetch extraction row');
+          }
+        } else {
+          console.log('[WORKER] Booking fallback timed out - keeping generic result');
+        }
+      }
       
-      // Map to terminal status
-      const isSuccess = updatedExtraction.extraction_status === 'success' && updatedExtraction.extracted_price;
+      // Map to terminal status (use the latest phaseB fields, which may have been updated by fallback)
+      const currentPhaseBStatus = (result.phaseB.status || 'failed_unknown') as string;
+      const currentPrice = result.phaseB.extractedPrice;
+      const isSuccess = currentPhaseBStatus === 'success' && !!currentPrice;
       
       if (isSuccess) {
         result.finalStatus = 'success';
@@ -1138,10 +1200,10 @@ Deno.serve(async (req) => {
           'pending': 'extraction_error', // Should not happen, but safety
         };
         
-        result.finalStatus = statusMap[updatedExtraction.extraction_status] || 'extraction_error';
+        result.finalStatus = statusMap[currentPhaseBStatus] || 'extraction_error';
         
         // Ensure DB has terminal status if still pending
-        if (updatedExtraction.extraction_status === 'pending') {
+        if (currentPhaseBStatus === 'pending') {
           await ensureTerminalStatus(supabaseClient, extractionId, 'extraction_error', 'Phase B completed without updating status');
         }
       }
