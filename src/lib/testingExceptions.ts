@@ -10,50 +10,39 @@
 // ============================================================================
 
 /**
- * Exception: Hotels.com Photo Comparison Bypass
+ * Exception: Hotels.com Global Photo Comparison Bypass
  * 
- * For this specific Airbnb URL, treat Hotels.com results as valid even if
- * photo comparison failed. This allows testing the Hotels.com price extraction
- * without the image verification gate blocking it.
+ * Treat ALL Hotels.com results as valid even if photo comparison failed.
+ * This allows testing the Hotels.com price extraction without the image
+ * verification gate blocking it.
  * 
  * Added: 2026-01-24
- * Reason: Testing Hotels.com price extraction fix
+ * Updated: 2026-01-24 - Changed from single-URL to global bypass
+ * Reason: Testing Hotels.com price extraction across all searches
  * Remove when: User requests removal
  */
-export const HOTELS_COM_BYPASS_AIRBNB_URL = 'https://www.airbnb.com/rooms/1411591824436140561';
+export const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
 
 /**
- * Check if a given Airbnb URL matches the Hotels.com bypass exception
+ * Check if Hotels.com bypass is active (always true when global bypass enabled)
  */
 export function isHotelsComBypassUrl(airbnbUrl: string | null | undefined): boolean {
-  if (!airbnbUrl) return false;
-  
-  try {
-    const url = new URL(airbnbUrl);
-    // Extract the room ID path to match regardless of query params
-    const roomIdMatch = url.pathname.match(/\/rooms\/(\d+)/);
-    if (!roomIdMatch) return false;
-    
-    const targetUrl = new URL(HOTELS_COM_BYPASS_AIRBNB_URL);
-    const targetRoomIdMatch = targetUrl.pathname.match(/\/rooms\/(\d+)/);
-    if (!targetRoomIdMatch) return false;
-    
-    return roomIdMatch[1] === targetRoomIdMatch[1];
-  } catch {
-    return false;
-  }
+  // Global bypass - applies to ALL Airbnb URLs
+  return HOTELS_COM_GLOBAL_BYPASS_ENABLED;
 }
 
 /**
- * Check if a platform should bypass photo comparison rejection for a given Airbnb URL
+ * Check if a platform should bypass photo comparison rejection
+ * When HOTELS_COM_GLOBAL_BYPASS_ENABLED is true, Hotels.com results
+ * are treated as valid regardless of confidence score
  */
 export function shouldBypassPhotoRejection(
   airbnbUrl: string | null | undefined,
   platformName: string
 ): boolean {
-  if (!isHotelsComBypassUrl(airbnbUrl)) return false;
+  if (!HOTELS_COM_GLOBAL_BYPASS_ENABLED) return false;
   
-  // Only Hotels.com is bypassed for this exception
+  // Only Hotels.com is bypassed
   const normalizedPlatform = platformName.toLowerCase().replace(/[^a-z]/g, '');
   return normalizedPlatform === 'hotelscom' || normalizedPlatform === 'hotels';
 }
