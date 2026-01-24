@@ -883,6 +883,21 @@ export async function finalizeAndCompleteSearch(
     const IMAGE_VERIFICATION_THRESHOLD = 75;
     const preFilterCount = finalResults.length;
     
+    // ============================================================================
+    // TESTING EXCEPTION: Hotels.com Global Bypass
+    // When enabled, Hotels.com results are included in the snapshot even if they
+    // fail the image verification gate. This allows testing Hotels.com extraction.
+    // Added: 2026-01-24
+    // Remove when: Testing complete
+    // ============================================================================
+    const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
+    
+    const shouldBypassImageGate = (platformName: string): boolean => {
+      if (!HOTELS_COM_GLOBAL_BYPASS_ENABLED) return false;
+      const normalized = platformName.toLowerCase().replace(/[^a-z]/g, '');
+      return normalized === 'hotelscom' || normalized === 'hotels';
+    };
+    
     /**
      * Helper to check if a value is a non-empty string URL
      */
@@ -919,6 +934,12 @@ export async function finalizeAndCompleteSearch(
     
     finalResults = finalResults.filter((result) => {
       const platformName = result.platform_name || 'Unknown';
+      
+      // TESTING BYPASS: Allow Hotels.com through regardless of image verification
+      if (shouldBypassImageGate(platformName)) {
+        console.log(`[ImageEvidenceGate] BYPASS ACTIVE: Hotels.com included despite low confidence - confidence=${result.confidence_score}`);
+        return true;
+      }
       
       // GATE 1: Only 'visual' match types are valid for display
       if (result.match_type !== 'visual') {
