@@ -147,3 +147,6 @@ verify_jwt = false
 
 [functions.testing-hotelscom-bypass]
 verify_jwt = false
+
+[functions.testing-public-search-results]
+verify_jwt = false

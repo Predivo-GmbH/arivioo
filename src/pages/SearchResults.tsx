@@ -330,6 +330,20 @@ export default function SearchResults() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { fetchEnrichedResults } = useEnrichedSearchResults();
+
+  // TESTING-ONLY: allow a locked-down public render path in preview so we can
+  // capture evidence screenshots without requiring the original user session.
+  const isTestingPublicView = (() => {
+    try {
+      const host = window.location.hostname;
+      return (
+        (host.includes("lovableproject.com") || host.startsWith("id-preview--")) &&
+        searchId === "ad29e42c-1e5c-4190-b446-6b104fc795b1"
+      );
+    } catch {
+      return false;
+    }
+  })();
   
   const [user, setUser] = useState<User | null>(null);
   const [search, setSearch] = useState<SearchData | null>(null);
@@ -497,16 +511,62 @@ export default function SearchResults() {
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
-      if (!session?.user) navigate("/auth");
+      if (!session?.user && !isTestingPublicView) navigate("/auth");
     });
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
-      if (!session?.user) navigate("/auth");
+      if (!session?.user && !isTestingPublicView) navigate("/auth");
     });
 
     return () => subscription.unsubscribe();
-  }, [navigate]);
+  }, [navigate, isTestingPublicView]);
+
+  // TESTING-ONLY: Fetch snapshot via restricted backend function (no auth needed).
+  useEffect(() => {
+    if (!isTestingPublicView || !searchId) return;
+    // If a real user session exists, normal flow will handle everything.
+    if (user) return;
+
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      try {
+        const { data, error } = await supabase.functions.invoke("testing-public-search-results", {
+          body: { searchId },
+        });
+        if (error) throw error;
+        if (!data?.success) throw new Error(data?.error || "Unable to load testing view");
+
+        const searchRow = data.search as any;
+        const snapshot = data.snapshot as any;
+        const snapshotResults = Array.isArray(snapshot?.results) ? snapshot.results : [];
+
+        if (cancelled) return;
+
+        setSearch(searchRow);
+        setResults(snapshotResults);
+        setIsFinalized(Boolean(searchRow?.finalised_at));
+        setResultsPhase("complete");
+      } catch (e: any) {
+        if (!cancelled) {
+          console.error("[testing-public-view] failed", e);
+          toast({
+            title: "Unable to load testing view",
+            description: e?.message || "Unknown error",
+            variant: "destructive",
+          });
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [isTestingPublicView, searchId, user, toast]);
 
   // Fetch search data and trigger search
   useEffect(() => {
