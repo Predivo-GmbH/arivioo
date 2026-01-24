@@ -19,6 +19,7 @@ import { ResultRow, type ResultRowResult, type RowVariant } from "@/components/s
 import { VerifiedMatchesLoading } from "@/components/search/VerifiedMatchesLoading";
 import { SearchPhaseBanner, type SearchPhaseType } from "@/components/search/SearchPhaseBanner";
 import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
+import { shouldBypassPhotoRejection } from "@/lib/testingExceptions";
 import {
   normalizeExtraction,
   type CanonicalPrice,
@@ -364,6 +365,17 @@ export default function SearchResults() {
     images: Json;
     source_airbnb_image: string | null;
     confidence_score: number | null;
+  }>>([]);
+  // TESTING: Bypassed results that failed photo comparison but are allowed via testing exception
+  const [bypassedResults, setBypassedResults] = useState<Array<{
+    id: string;
+    platform_name: string;
+    listing_url: string;
+    listing_title: string | null;
+    images: Json;
+    source_airbnb_image: string | null;
+    confidence_score: number | null;
+    bypassed_reason: string;
   }>>([]);
   const [streamDisconnected, setStreamDisconnected] = useState(false);
   const [extractingPrices, setExtractingPrices] = useState(false);
@@ -1831,6 +1843,7 @@ export default function SearchResults() {
   }, [search, confirmedTotal, showConfirmationModal, subtotalInfo]);
 
   // Fetch rejected platforms (low trust score) for testing display
+  // Also check for testing exceptions that bypass photo comparison rejection
   useEffect(() => {
     if (!searchId || !isTerminalFrozen) return;
 
@@ -1848,12 +1861,35 @@ export default function SearchResults() {
       }
 
       if (data) {
-        setLowTrustScoreResults(data);
+        // Check for testing exceptions - bypass photo comparison for specific URLs
+        const airbnbUrl = search?.airbnb_url;
+        const bypassed: typeof bypassedResults = [];
+        const remaining: typeof data = [];
+
+        for (const result of data) {
+          if (shouldBypassPhotoRejection(airbnbUrl, result.platform_name)) {
+            console.log(`[TestingException] Bypassing photo rejection for ${result.platform_name} on URL: ${airbnbUrl}`);
+            bypassed.push({
+              ...result,
+              bypassed_reason: 'Testing exception: Hotels.com photo comparison bypass'
+            });
+          } else {
+            remaining.push(result);
+          }
+        }
+
+        setLowTrustScoreResults(remaining);
+        setBypassedResults(bypassed);
+
+        // If we have bypassed results, add them to verified matches for price extraction
+        if (bypassed.length > 0) {
+          console.log(`[TestingException] ${bypassed.length} result(s) bypassed and promoted to valid matches`);
+        }
       }
     };
 
     fetchRejectedPlatforms();
-  }, [searchId, isTerminalFrozen]);
+  }, [searchId, isTerminalFrozen, search?.airbnb_url]);
 
   // Handle confirmation callbacks
   const handleTotalConfirmed = (amount: number, currency: string) => {
@@ -2707,6 +2743,93 @@ export default function SearchResults() {
                         </div>
                       )}
 
+                      {/* TESTING: Bypassed results - photo comparison bypassed via testing exception */}
+                      {bypassedResults.length > 0 && (
+                        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
+                          <div className="px-4 py-3 flex items-center gap-2">
+                            <AlertTriangle className="w-4 h-4 text-amber-500" />
+                            <span className="text-sm font-medium text-foreground">
+                              {bypassedResults.length} result{bypassedResults.length !== 1 ? 's' : ''} with photo verification bypassed
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 text-[10px] font-medium">
+                              TESTING EXCEPTION
+                            </span>
+                          </div>
+                          <div className="border-t border-amber-500/20 p-4">
+                            <table className="w-full text-sm">
+                              <tbody>
+                                {bypassedResults.map((result) => {
+                                  const resultImages = toStringArray(result.images);
+                                  const isExpanded = expandedComparison === result.id;
+                                  return (
+                                    <React.Fragment key={result.id}>
+                                      <tr className="border-b border-border/50 last:border-0">
+                                        <td className="py-3 pr-3">
+                                          <div className="font-medium text-foreground">{result.platform_name}</div>
+                                          <div className="text-xs text-muted-foreground truncate max-w-[200px]">
+                                            {result.listing_title || 'Listing'}
+                                          </div>
+                                          <div className="text-xs text-amber-600 mt-1">
+                                            {result.bypassed_reason}
+                                          </div>
+                                        </td>
+                                        <td className="py-3 px-3 text-center">
+                                          <span className="text-xs text-muted-foreground">
+                                            Score: {result.confidence_score != null ? `${Math.round(result.confidence_score)}%` : 'N/A'}
+                                          </span>
+                                        </td>
+                                        <td className="py-3 px-3">
+                                          <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-600 text-xs font-medium">
+                                            Bypassed
+                                          </span>
+                                        </td>
+                                        <td className="py-3 pl-3 text-right">
+                                          <div className="flex items-center justify-end gap-2">
+                                            <a 
+                                              href={result.listing_url} 
+                                              target="_blank" 
+                                              rel="noopener noreferrer"
+                                              className="text-xs text-primary hover:underline"
+                                            >
+                                              View
+                                            </a>
+                                            {(result.source_airbnb_image || airbnbImages[0]) && resultImages.length > 0 && (
+                                              <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
+                                                className="text-xs h-7 px-2"
+                                              >
+                                                <Camera className="w-3 h-3 mr-1" />
+                                                {isExpanded ? 'Hide' : 'Photos'}
+                                              </Button>
+                                            )}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                      {isExpanded && (result.source_airbnb_image || airbnbImages[0]) && resultImages.length > 0 && (
+                                        <tr>
+                                          <td colSpan={4} className="py-4 bg-muted/30">
+                                            <ImageComparison
+                                              airbnbImages={result.source_airbnb_image ? [result.source_airbnb_image] : airbnbImages}
+                                              alternativeImages={resultImages}
+                                              airbnbTitle={search?.airbnb_title || 'Airbnb Listing'}
+                                              alternativeTitle={result.listing_title || 'Alternative Listing'}
+                                              platformName={result.platform_name}
+                                              sourceAirbnbImage={result.source_airbnb_image}
+                                            />
+                                          </td>
+                                        </tr>
+                                      )}
+                                    </React.Fragment>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Low trust score section (unchanged - always available) */}
                       {lowTrustScoreResults.length > 0 && (
                         <div className="rounded-xl border border-muted-foreground/20 bg-muted/20 overflow-hidden">
@@ -3351,6 +3474,42 @@ export default function SearchResults() {
                                 </table>
                               </div>
                             )}
+                          </div>
+                        )}
+
+                        {/* TESTING: Bypassed results - photo comparison bypassed via testing exception */}
+                        {bypassedResults.length > 0 && (
+                          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
+                            <div className="px-4 py-3 flex items-center gap-2">
+                              <AlertTriangle className="w-4 h-4 text-amber-500" />
+                              <span className="text-sm font-medium text-foreground">
+                                {bypassedResults.length} result{bypassedResults.length !== 1 ? 's' : ''} with photo verification bypassed
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 text-[10px] font-medium">
+                                TESTING EXCEPTION
+                              </span>
+                            </div>
+                            <div className="border-t border-amber-500/20 p-4">
+                              <p className="text-xs text-amber-600 mb-3">
+                                These results failed photo comparison but are shown due to an active testing exception.
+                              </p>
+                              {bypassedResults.map((result) => (
+                                <div key={result.id} className="flex items-center justify-between py-2 border-b border-amber-500/10 last:border-0">
+                                  <div>
+                                    <span className="font-medium text-foreground">{result.platform_name}</span>
+                                    <span className="text-xs text-muted-foreground ml-2">Score: {result.confidence_score != null ? `${Math.round(result.confidence_score)}%` : 'N/A'}</span>
+                                  </div>
+                                  <a 
+                                    href={result.listing_url} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer"
+                                    className="text-xs text-primary hover:underline"
+                                  >
+                                    View Listing
+                                  </a>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         )}
                         
@@ -4210,6 +4369,42 @@ export default function SearchResults() {
                                 </table>
                               </div>
                             )}
+                          </div>
+                        )}
+
+                        {/* TESTING: Bypassed results - photo comparison bypassed via testing exception */}
+                        {bypassedResults.length > 0 && (
+                          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
+                            <div className="px-4 py-3 flex items-center gap-2">
+                              <AlertTriangle className="w-4 h-4 text-amber-500" />
+                              <span className="text-sm font-medium text-foreground">
+                                {bypassedResults.length} result{bypassedResults.length !== 1 ? 's' : ''} with photo verification bypassed
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 text-[10px] font-medium">
+                                TESTING EXCEPTION
+                              </span>
+                            </div>
+                            <div className="border-t border-amber-500/20 p-4">
+                              <p className="text-xs text-amber-600 mb-3">
+                                These results failed photo comparison but are shown due to an active testing exception.
+                              </p>
+                              {bypassedResults.map((result) => (
+                                <div key={result.id} className="flex items-center justify-between py-2 border-b border-amber-500/10 last:border-0">
+                                  <div>
+                                    <span className="font-medium text-foreground">{result.platform_name}</span>
+                                    <span className="text-xs text-muted-foreground ml-2">Score: {result.confidence_score != null ? `${Math.round(result.confidence_score)}%` : 'N/A'}</span>
+                                  </div>
+                                  <a 
+                                    href={result.listing_url} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer"
+                                    className="text-xs text-primary hover:underline"
+                                  >
+                                    View Listing
+                                  </a>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         )}
 
