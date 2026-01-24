@@ -403,7 +403,153 @@ function validateRenderedDates(
 
 // Phase B: Extract total price with verification AND structural proof
 // POLICY: When multiple room prices exist, return the CHEAPEST (minimum) price
-// IMPORTANT: Only extract prices for THIS hotel, not from "Similar Hotels" section
+// CRITICAL: Only extract prices for THIS hotel, not from "Similar Hotels" section
+
+/**
+ * ROBUST SECTION ISOLATION - v2
+ * 
+ * Hotels.com pages embed "Similar hotels" inline with NO clear text marker.
+ * The evidence shows: "$177 total [Holiday" - meaning other hotel names appear
+ * in brackets/links immediately AFTER their prices.
+ * 
+ * Strategy: 
+ * 1. First, try text boundary detection (for pages that have markers)
+ * 2. Then, for each price found, check if it belongs to ANOTHER hotel by looking 
+ *    for hotel brand names in the 100-200 chars after the price match
+ * 
+ * Known "other hotel" brand patterns that appear after prices:
+ * - "[Holiday Inn", "[Marriott", "[Hilton", etc.
+ */
+
+const OTHER_HOTEL_BRANDS = [
+  // Major chains
+  'holiday inn', 'marriott', 'hilton', 'hyatt', 'sheraton', 'westin',
+  'crowne plaza', 'intercontinental', 'radisson', 'ibis', 'novotel',
+  'mercure', 'best western', 'doubletree', 'hampton inn', 'courtyard',
+  'fairfield', 'residence inn', 'springhill', 'comfort inn', 'la quinta',
+  'embassy suites', 'four seasons', 'ritz-carlton', 'st. regis', 'w hotel',
+  // India-specific
+  'taj', 'oberoi', 'itc', 'lemon tree', 'zuri', 'leela', 'trident',
+  'fortune', 'sarovar', 'fern', 'orange tree',
+  // Budget chains
+  'oyo', 'treebo', 'fabhotel', 'ginger', 'red fox',
+];
+
+function isolateMainHotelContent(markdown: string): { 
+  isolatedContent: string; 
+  truncatedAt: string | null;
+  originalLength: number;
+  isolatedLength: number;
+} {
+  const originalLength = markdown.length;
+  let isolatedContent = markdown;
+  let truncatedAt: string | null = null;
+  
+  // Section boundary markers (case-insensitive search)
+  const sectionBoundaries = [
+    'compare to similar hotels',
+    'similar hotels nearby',
+    'similar hotels',
+    'compare hotels',
+    'other hotels nearby',
+    'nearby hotels',
+    'hotels nearby',
+    'other properties',
+    'you might also like',
+    'guests also viewed',
+    'recommended for you',
+    'more options',
+    'about the area',
+    'explore the area',
+    'what\'s nearby',
+    'getting around',
+    'reviews from guests',
+    'frequently asked questions',
+  ];
+  
+  const lowerMarkdown = markdown.toLowerCase();
+  
+  // Find the EARLIEST boundary marker (after 20% of content)
+  let earliestCutoff = markdown.length;
+  const minCutoff = Math.floor(markdown.length * 0.2);
+  
+  for (const boundary of sectionBoundaries) {
+    const idx = lowerMarkdown.indexOf(boundary);
+    if (idx !== -1 && idx < earliestCutoff && idx >= minCutoff) {
+      earliestCutoff = idx;
+      truncatedAt = boundary;
+    }
+  }
+  
+  if (earliestCutoff < markdown.length) {
+    isolatedContent = markdown.slice(0, earliestCutoff);
+    console.log(`[HOTELS.COM] Isolated content at "${truncatedAt}" - ${isolatedContent.length}/${originalLength} chars`);
+  } else {
+    console.log(`[HOTELS.COM] No section boundary found - using full content (${originalLength} chars)`);
+  }
+  
+  return {
+    isolatedContent,
+    truncatedAt,
+    originalLength,
+    isolatedLength: isolatedContent.length,
+  };
+}
+
+/**
+ * Check if a price match belongs to ANOTHER hotel (not the main hotel)
+ * 
+ * Hotels.com embeds comparison hotels inline. Their prices appear with hotel names
+ * in brackets immediately after, e.g.: "$177 total [Holiday Inn Express..."
+ * 
+ * Detection strategies:
+ * 1. Known brand names in context after price
+ * 2. Markdown link pattern: "[HotelName" appearing within 100 chars after price
+ *    (indicating a comparison card, not a room type of the main hotel)
+ * 
+ * Returns true if this price should be EXCLUDED.
+ */
+function isOtherHotelPrice(markdown: string, matchIndex: number, matchLength: number): boolean {
+  // Look at 150 chars AFTER the price match
+  const contextStart = matchIndex + matchLength;
+  const contextEnd = Math.min(markdown.length, contextStart + 150);
+  const contextAfter = markdown.slice(contextStart, contextEnd);
+  const contextAfterLower = contextAfter.toLowerCase();
+  
+  // Strategy 1: Check for known hotel brands
+  for (const brand of OTHER_HOTEL_BRANDS) {
+    const brandIdx = contextAfterLower.indexOf(brand);
+    if (brandIdx !== -1 && brandIdx < 100) {
+      console.log(`[HOTELS.COM] Excluding price at ${matchIndex} - known brand "${brand}"`);
+      return true;
+    }
+  }
+  
+  // Strategy 2: Detect markdown link pattern to another hotel
+  // Pattern: "[SomeName" where SomeName starts with capital and is NOT a room type
+  // Room types: Deluxe, Suite, Apartment, Studio, Standard, Superior, etc.
+  const linkPattern = /\[([A-Z][a-zA-Z\s]+)/;
+  const linkMatch = contextAfter.match(linkPattern);
+  if (linkMatch) {
+    const linkedName = linkMatch[1].toLowerCase().trim();
+    
+    // Room type keywords that are part of THIS hotel
+    const roomTypeKeywords = ['deluxe', 'suite', 'apartment', 'studio', 'bedroom', 
+      'standard', 'superior', 'executive', 'premium', 'classic', 'library', 'waverly'];
+    
+    // If the linked name starts with a room type keyword, it's a room of THIS hotel
+    const isRoomType = roomTypeKeywords.some(rt => linkedName.startsWith(rt));
+    
+    if (!isRoomType && linkMatch.index !== undefined && linkMatch.index < 80) {
+      // This looks like a link to ANOTHER hotel
+      console.log(`[HOTELS.COM] Excluding price at ${matchIndex} - link to "[${linkMatch[1].slice(0, 20)}..."`);
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 function extractPrice(
   markdown: string,
   requestedCheckIn: string,
@@ -416,6 +562,7 @@ function extractPrice(
   evidenceSnippet: string | null;
   structuralProof: StructuralProof;
   allPricesFound: number[];
+  sectionIsolation: { truncatedAt: string | null; originalLength: number; isolatedLength: number };
 } {
   // Initialize structural proof with explicit false values
   const structuralProof: StructuralProof = {
@@ -423,18 +570,22 @@ function extractPrice(
     total_label_found: false,
     rendered_dates_match: false,
     extracted_from_breakdown_total: false,
-    proof_version: '1.0',
+    proof_version: '1.1', // Bumped for section isolation
   };
   
-  // Step 1: Detect breakdown structure
-  const breakdown = detectBreakdownStructure(markdown);
+  // STEP 0: ISOLATE MAIN HOTEL CONTENT (before any price detection)
+  const isolation = isolateMainHotelContent(markdown);
+  const safeMarkdown = isolation.isolatedContent;
+  
+  // Step 1: Detect breakdown structure (on isolated content)
+  const breakdown = detectBreakdownStructure(safeMarkdown);
   structuralProof.breakdown_found = breakdown.breakdown_found;
   structuralProof.total_label_found = breakdown.total_label_found;
   structuralProof.breakdown_selector_used = breakdown.breakdown_selector_used || undefined;
   structuralProof.total_value_raw = breakdown.total_value_raw || undefined;
   
   // Step 2: Validate rendered dates match request
-  const dateValidation = validateRenderedDates(markdown, requestedCheckIn, requestedCheckOut);
+  const dateValidation = validateRenderedDates(safeMarkdown, requestedCheckIn, requestedCheckOut);
   structuralProof.rendered_dates_match = dateValidation.rendered_dates_match;
   structuralProof.date_value_raw = dateValidation.date_value_raw || undefined;
   
@@ -443,52 +594,19 @@ function extractPrice(
   let includesTaxesFees: boolean | null = null;
   const allPricesFound: number[] = [];
   
-  // CRITICAL: Only extract prices for THIS hotel
-  // Hotels.com embeds "Compare hotels" and "Similar hotels" sections with OTHER hotel prices
-  // 
-  // The evidence shows: "$177 total ... [Holiday" - the other hotel name appears AFTER the price
-  // So we need to check context AFTER each price match for other hotel brands
+  // Step 3: Find room total prices with brand filtering
+  // Note: We use safeMarkdown for isolation, but check brands against FULL markdown
+  // because the brand name might appear just after the truncation point
   
-  const lowerMarkdown = markdown.toLowerCase();
-  
-  // Hotel brand names that indicate a DIFFERENT hotel (not The Waverly)
-  const otherHotelBrands = ['holiday inn', 'marriott', 'hilton', 'hyatt', 'ibis', 'novotel', 
-    'radisson', 'zuri', 'lemon tree', 'taj', 'oberoi', 'itc', 'sheraton', 'westin', 
-    'crowne plaza', 'best western', 'doubletree', 'hampton', 'courtyard', 'express',
-    'fairfield', 'residence inn', 'springhill', 'comfort inn', 'la quinta'];
-  
-  // Helper: Check if a price match is for another hotel (check context after the match)
-  function isOtherHotelPrice(matchIndex: number, matchLength: number): boolean {
-    // Check 200 chars after the match for other hotel names
-    const contextAfter = lowerMarkdown.slice(matchIndex + matchLength, matchIndex + matchLength + 200);
-    
-    // Also check for just "holiday" since it might appear as "[Holiday"
-    const allBrands = [...otherHotelBrands, 'holiday'];
-    
-    for (const brand of allBrands) {
-      if (contextAfter.includes(brand)) {
-        // Make sure this isn't just navigation or unrelated text
-        // If the brand appears before any next price indicator, it's likely that hotel's price
-        const brandIdx = contextAfter.indexOf(brand);
-        const nextPriceIdx = contextAfter.search(/\$\d/);
-        if (nextPriceIdx === -1 || brandIdx < nextPriceIdx) {
-          console.log(`[HOTELS.COM] Filtering price at ${matchIndex} - belongs to "${brand}" (context: "${contextAfter.slice(0, 50)}...")`);
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-  
-  // Step 3: Find room total prices for THIS hotel only
   // Pattern 1: "The current price is $XXX total" (Hotels.com room cards - MOST RELIABLE)
   const currentPricePattern = /the\s+current\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/gi;
   let match;
-  while ((match = currentPricePattern.exec(markdown)) !== null) {
+  while ((match = currentPricePattern.exec(safeMarkdown)) !== null) {
     const priceStr = match[1].replace(/,/g, '');
     const price = parseFloat(priceStr);
     if (price > 50 && price < 50000) {
-      if (!isOtherHotelPrice(match.index, match[0].length)) {
+      // Check if this price belongs to another hotel
+      if (!isOtherHotelPrice(markdown, match.index, match[0].length)) {
         allPricesFound.push(price);
       }
     }
@@ -496,38 +614,40 @@ function extractPrice(
   
   // Pattern 2: "The price is $XXX total" 
   const thePricePattern = /the\s+price\s+is\s+\$?([\d,]+(?:\.\d{2})?)\s*total/gi;
-  while ((match = thePricePattern.exec(markdown)) !== null) {
+  while ((match = thePricePattern.exec(safeMarkdown)) !== null) {
     const priceStr = match[1].replace(/,/g, '');
     const price = parseFloat(priceStr);
     if (price > 50 && price < 50000 && !allPricesFound.includes(price)) {
-      if (!isOtherHotelPrice(match.index, match[0].length)) {
+      // Check if this price belongs to another hotel
+      if (!isOtherHotelPrice(markdown, match.index, match[0].length)) {
         allPricesFound.push(price);
       }
     }
   }
   
-  // If no specific patterns, fallback to generic but with same filter
+  // If no specific patterns, fallback to generic "$XXX total"
   if (allPricesFound.length === 0) {
     const genericTotalPattern = /\$([\d,]+(?:\.\d{2})?)\s*total/gi;
-    while ((match = genericTotalPattern.exec(markdown)) !== null) {
+    while ((match = genericTotalPattern.exec(safeMarkdown)) !== null) {
       const priceStr = match[1].replace(/,/g, '');
       const price = parseFloat(priceStr);
       
       // Filter: Skip strikethrough and nightly prices
       const matchIndex = match.index;
-      const contextBefore = markdown.slice(Math.max(0, matchIndex - 50), matchIndex).toLowerCase();
+      const contextBefore = safeMarkdown.slice(Math.max(0, matchIndex - 50), matchIndex).toLowerCase();
       const isStrikethrough = contextBefore.includes('~~') || contextBefore.includes('previous price');
       const isNightly = contextBefore.includes('nightly') || contextBefore.includes('per night');
       
       if (!isStrikethrough && !isNightly && price > 50 && price < 50000) {
-        if (!isOtherHotelPrice(match.index, match[0].length)) {
+        // Check if this price belongs to another hotel
+        if (!isOtherHotelPrice(markdown, match.index, match[0].length)) {
           allPricesFound.push(price);
         }
       }
     }
   }
   
-  console.log(`[HOTELS.COM] Found ${allPricesFound.length} room total prices: ${JSON.stringify(allPricesFound)}`);
+  console.log(`[HOTELS.COM] Found ${allPricesFound.length} room total prices in isolated content: ${JSON.stringify(allPricesFound)}`);
   
   // Step 4: Select the MINIMUM (cheapest) price
   if (allPricesFound.length > 0) {
@@ -542,12 +662,12 @@ function extractPrice(
     ];
     
     for (const pattern of cheapestPatterns) {
-      const match = markdown.match(pattern);
+      const match = safeMarkdown.match(pattern);
       if (match) {
-        const matchIndex = markdown.indexOf(match[0]);
+        const matchIndex = safeMarkdown.indexOf(match[0]);
         const start = Math.max(0, matchIndex - 30);
-        const end = Math.min(markdown.length, matchIndex + match[0].length + 50);
-        evidenceSnippet = markdown.slice(start, end).replace(/\s+/g, ' ').trim();
+        const end = Math.min(safeMarkdown.length, matchIndex + match[0].length + 50);
+        evidenceSnippet = safeMarkdown.slice(start, end).replace(/\s+/g, ' ').trim();
         break;
       }
     }
@@ -565,15 +685,15 @@ function extractPrice(
       // We found prices even without breakdown - mark as extracted but not from breakdown
       structuralProof.extracted_from_breakdown_total = false;
       // Check context for taxes/fees indication
-      const lowerMarkdown = markdown.toLowerCase();
-      if (lowerMarkdown.includes('taxes and fees') || lowerMarkdown.includes('total with taxes')) {
+      const lowerSafeMarkdown = safeMarkdown.toLowerCase();
+      if (lowerSafeMarkdown.includes('taxes and fees') || lowerSafeMarkdown.includes('total with taxes')) {
         includesTaxesFees = true;
       }
     }
     
     console.log(`[HOTELS.COM] Selected cheapest price: $${extractedPrice} from ${allPricesFound.length} options`);
   } else {
-    console.log('[HOTELS.COM] No valid room total prices found');
+    console.log('[HOTELS.COM] No valid room total prices found in isolated content');
   }
   
   // HALLUCINATION GUARD: Verify price appears verbatim in content
@@ -590,6 +710,11 @@ function extractPrice(
     evidenceSnippet,
     structuralProof,
     allPricesFound,
+    sectionIsolation: {
+      truncatedAt: isolation.truncatedAt,
+      originalLength: isolation.originalLength,
+      isolatedLength: isolation.isolatedLength,
+    },
   };
 }
 
@@ -761,6 +886,7 @@ async function extractFromHotelsCom(
     
     // Pass dates for structural validation
     const phaseBResult = extractPrice(markdown, checkIn, checkOut);
+    console.log(`[HOTELS.COM] Section isolation: truncated at "${phaseBResult.sectionIsolation.truncatedAt}", ${phaseBResult.sectionIsolation.isolatedLength}/${phaseBResult.sectionIsolation.originalLength} chars`);
     result.phaseB.extractedPrice = phaseBResult.extractedPrice;
     result.phaseB.currency = phaseBResult.currency;
     result.phaseB.includesTaxesFees = phaseBResult.includesTaxesFees;
