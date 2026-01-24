@@ -99,6 +99,69 @@ const GOLDEN_PATH_PLATFORMS: Record<string, string> = {
   'airpaz.com': 'extract-airpaz',
 };
 
+// ============= CRITICAL: Apply date params to deep link =============
+// Some callers (search-alternatives) store raw listing_url without dates.
+// This function ensures dates are ALWAYS applied before extraction.
+function applyDatesToDeepLink(url: string, platform: string, checkIn: string, checkOut: string, adults: number): string {
+  try {
+    const urlObj = new URL(url);
+    const lowerPlatform = platform.toLowerCase();
+    
+    // Check if dates are already applied (avoid double-adding)
+    const hasCheckIn = urlObj.searchParams.has('checkin') || 
+                       urlObj.searchParams.has('chkin') || 
+                       urlObj.searchParams.has('checkIn') ||
+                       urlObj.searchParams.has('startDate') ||
+                       urlObj.searchParams.has('arrival');
+    
+    if (hasCheckIn) {
+      console.log(`[WORKER] Deep link already has date params, skipping: ${url.slice(0, 100)}`);
+      return url; // Already has dates
+    }
+    
+    console.log(`[WORKER] Applying dates to deep link for ${platform}: ${checkIn} to ${checkOut}`);
+    
+    if (lowerPlatform.includes('vrbo')) {
+      urlObj.searchParams.set('arrival', checkIn);
+      urlObj.searchParams.set('departure', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    } else if (lowerPlatform.includes('expedia')) {
+      urlObj.searchParams.set('chkin', checkIn);
+      urlObj.searchParams.set('chkout', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    } else if (lowerPlatform.includes('agoda')) {
+      urlObj.searchParams.set('checkIn', checkIn);
+      urlObj.searchParams.set('checkOut', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    } else if (lowerPlatform.includes('booking')) {
+      urlObj.searchParams.set('checkin', checkIn);
+      urlObj.searchParams.set('checkout', checkOut);
+      urlObj.searchParams.set('group_adults', adults.toString());
+      urlObj.searchParams.set('no_rooms', '1');
+    } else if (lowerPlatform.includes('hotels')) {
+      urlObj.searchParams.set('chkin', checkIn);
+      urlObj.searchParams.set('chkout', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    } else if (lowerPlatform.includes('airpaz')) {
+      urlObj.searchParams.set('checkIn', checkIn);
+      urlObj.searchParams.set('checkOut', checkOut);
+    } else if (lowerPlatform.includes('houfy')) {
+      urlObj.searchParams.set('check_in', checkIn);
+      urlObj.searchParams.set('check_out', checkOut);
+    } else {
+      // Generic fallback
+      urlObj.searchParams.set('checkin', checkIn);
+      urlObj.searchParams.set('checkout', checkOut);
+      urlObj.searchParams.set('adults', adults.toString());
+    }
+    
+    return urlObj.toString();
+  } catch (err) {
+    console.error(`[WORKER] Error applying dates to deep link:`, err);
+    return url;
+  }
+}
+
 // Check if platform has a dedicated golden path extractor
 function getDedicatedExtractor(platformName: string): string | null {
   const platformLower = (platformName || '').toLowerCase();
@@ -674,9 +737,24 @@ Deno.serve(async (req) => {
     }
     
     const platform = extraction.platform_name;
-    const deepLink = extraction.deep_link;
+    const rawDeepLink = extraction.deep_link;
     const searchId = extraction.search_id;
     const searchResultId = extraction.search_result_id;
+    const adults = extraction.assumed_adults || 2;
+    
+    // ============= CRITICAL FIX: Apply dates to deep link =============
+    // Some callers (search-alternatives) store raw listing_url without dates.
+    // Ensure dates are ALWAYS applied before extraction.
+    const deepLink = applyDatesToDeepLink(rawDeepLink, platform, requestedCheckIn, requestedCheckOut, adults);
+    
+    // Update DB with proper deep link if it changed
+    if (deepLink !== rawDeepLink) {
+      console.log(`[WORKER] Updated deep_link with date params for ${platform}`);
+      await supabaseClient
+        .from('price_extractions')
+        .update({ deep_link: deepLink })
+        .eq('id', extractionId);
+    }
     
     // ============= COVERAGE TIER ENFORCEMENT =============
     // Lookup platform's coverage tier from platform_adapters
