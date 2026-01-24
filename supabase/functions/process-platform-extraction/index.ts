@@ -131,28 +131,49 @@ async function getPlatformTier(
     
     console.log(`[WORKER] getPlatformTier: Looking up tier for platform="${platformName}" (lower="${platformLower}")`);
     
-    // Query platform_adapters for coverage_tier
-    const { data: adapters, error: queryError } = await supabaseClient
+    // ----- STEP 1: Try EXACT match first (case-insensitive) -----
+    // This avoids "Hotels.com" picking up "Ecohotels" due to ilike substring matching.
+    const { data: exactAdapters, error: exactErr } = await supabaseClient
       .from('platform_adapters')
       .select('coverage_tier, tier_reason, dedicated_extractor, platform_domain, platform_name')
-      .or(`platform_name.ilike.%${platformLower}%,platform_domain.ilike.%${platformLower}%`)
+      .ilike('platform_name', platformLower)
       .limit(1);
     
-    if (queryError) {
-      console.error(`[WORKER] getPlatformTier query error: ${JSON.stringify(queryError)}`);
-      return { tier: 'B', reason: `Query error: ${queryError.message}`, dedicatedExtractor: null };
+    if (exactErr) {
+      console.error(`[WORKER] getPlatformTier exact query error: ${JSON.stringify(exactErr)}`);
     }
     
-    console.log(`[WORKER] getPlatformTier: Query returned ${adapters?.length || 0} adapters: ${JSON.stringify(adapters)}`);
-    
-    if (adapters && adapters.length > 0) {
-      const adapter = adapters[0];
+    if (exactAdapters && exactAdapters.length > 0) {
+      const adapter = exactAdapters[0];
       const result = {
         tier: (adapter.coverage_tier || 'B') as CoverageTier,
         reason: adapter.tier_reason,
         dedicatedExtractor: adapter.dedicated_extractor,
       };
-      console.log(`[WORKER] getPlatformTier: Resolved tier=${result.tier}, dedicatedExtractor=${result.dedicatedExtractor}`);
+      console.log(`[WORKER] getPlatformTier: EXACT match found - tier=${result.tier}, dedicatedExtractor=${result.dedicatedExtractor}`);
+      return result;
+    }
+    
+    // ----- STEP 2: Fallback to domain-based lookup -----
+    // E.g. if platform_name doesn't match, check if platform_domain contains the value.
+    const { data: domainAdapters, error: domainErr } = await supabaseClient
+      .from('platform_adapters')
+      .select('coverage_tier, tier_reason, dedicated_extractor, platform_domain, platform_name')
+      .ilike('platform_domain', `%${platformLower}%`)
+      .limit(1);
+    
+    if (domainErr) {
+      console.error(`[WORKER] getPlatformTier domain query error: ${JSON.stringify(domainErr)}`);
+    }
+    
+    if (domainAdapters && domainAdapters.length > 0) {
+      const adapter = domainAdapters[0];
+      const result = {
+        tier: (adapter.coverage_tier || 'B') as CoverageTier,
+        reason: adapter.tier_reason,
+        dedicatedExtractor: adapter.dedicated_extractor,
+      };
+      console.log(`[WORKER] getPlatformTier: DOMAIN match found - tier=${result.tier}, dedicatedExtractor=${result.dedicatedExtractor}`);
       return result;
     }
     
