@@ -303,7 +303,8 @@ async function extractWithZyte(url: string, nights: number): Promise<{
             {
               action: 'click',
               selector: { type: 'css', value: '#onetrust-accept-btn-handler, [data-testid="accept-btn"], button[id*="accept"]' },
-              onError: 'ignore'
+               // Zyte expects onError to be a supported enum (e.g. "continue").
+               onError: 'continue'
             }
           ]
         },
