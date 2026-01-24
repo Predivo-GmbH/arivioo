@@ -144,3 +144,6 @@ verify_jwt = false
 
 [functions.extract-airpaz]
 verify_jwt = false
+
+[functions.testing-hotelscom-bypass]
+verify_jwt = false

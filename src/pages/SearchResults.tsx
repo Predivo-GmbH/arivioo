@@ -19,7 +19,7 @@ import { ResultRow, type ResultRowResult, type RowVariant } from "@/components/s
 import { VerifiedMatchesLoading } from "@/components/search/VerifiedMatchesLoading";
 import { SearchPhaseBanner, type SearchPhaseType } from "@/components/search/SearchPhaseBanner";
 import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
-import { shouldBypassPhotoRejection } from "@/lib/testingExceptions";
+import { isHotelsComBypassUrl, shouldBypassPhotoRejection } from "@/lib/testingExceptions";
 import {
   normalizeExtraction,
   type CanonicalPrice,
@@ -377,6 +377,18 @@ export default function SearchResults() {
     confidence_score: number | null;
     bypassed_reason: string;
   }>>([]);
+
+  // TESTING: Hotels.com bypass extraction status (only for the specific Airbnb URL exception)
+  const [hotelsComBypassExtraction, setHotelsComBypassExtraction] = useState<{
+    status: 'idle' | 'triggering' | 'running' | 'done' | 'error';
+    extractionId?: string;
+    extractedPrice?: number | null;
+    currency?: string | null;
+    extractionStatus?: string | null;
+    error?: string;
+  }>({ status: 'idle' });
+
+  const hotelsComBypassTriggeredRef = useRef(false);
   const [streamDisconnected, setStreamDisconnected] = useState(false);
   const [extractingPrices, setExtractingPrices] = useState(false);
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
@@ -1890,6 +1902,103 @@ export default function SearchResults() {
 
     fetchRejectedPlatforms();
   }, [searchId, isTerminalFrozen, search?.airbnb_url]);
+
+  // TESTING: For the Hotels.com bypass case, trigger a backend extraction so we can validate the extractor.
+  useEffect(() => {
+    if (!searchId || !isTerminalFrozen) return;
+    if (!search?.airbnb_url) return;
+    if (!isHotelsComBypassUrl(search.airbnb_url)) return;
+
+    const hasHotelsComBypass = bypassedResults.some((r) => {
+      const n = r.platform_name.toLowerCase().replace(/[^a-z]/g, '');
+      return n === 'hotelscom' || n === 'hotels';
+    });
+
+    if (!hasHotelsComBypass) return;
+    if (hotelsComBypassTriggeredRef.current) return;
+
+    hotelsComBypassTriggeredRef.current = true;
+    setHotelsComBypassExtraction({ status: 'triggering' });
+
+    let cancelled = false;
+    let pollId: number | null = null;
+
+    const trigger = async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke('testing-hotelscom-bypass', {
+          body: { searchId },
+        });
+
+        if (cancelled) return;
+
+        if (error || !data?.success) {
+          setHotelsComBypassExtraction({
+            status: 'error',
+            error: error?.message || data?.error || 'Failed to trigger Hotels.com extraction',
+          });
+          return;
+        }
+
+        const extractionId = data.extractionId as string | undefined;
+        setHotelsComBypassExtraction({ status: 'running', extractionId });
+
+        // Poll until we see a terminal extraction for Hotels.com
+        const startedAt = Date.now();
+        pollId = window.setInterval(async () => {
+          if (cancelled) return;
+          if (Date.now() - startedAt > 120000) {
+            window.clearInterval(pollId!);
+            pollId = null;
+            setHotelsComBypassExtraction((prev) => ({
+              ...prev,
+              status: 'error',
+              error: 'Timed out waiting for Hotels.com extraction',
+            }));
+            return;
+          }
+
+          const { data: rows } = await supabase
+            .from('price_extractions')
+            .select('id, extraction_status, extracted_price, currency, extraction_error')
+            .eq('search_id', searchId)
+            .eq('platform_name', 'Hotels.com')
+            .order('created_at', { ascending: false })
+            .limit(1);
+
+          const row = rows?.[0];
+          if (!row) return;
+
+          const status = row.extraction_status;
+          const isRunning = status === 'pending' || status === 'running';
+          if (!isRunning) {
+            window.clearInterval(pollId!);
+            pollId = null;
+            setHotelsComBypassExtraction({
+              status: 'done',
+              extractionId: row.id,
+              extractedPrice: row.extracted_price,
+              currency: row.currency,
+              extractionStatus: status,
+              error: row.extraction_error || undefined,
+            });
+          }
+        }, 4000);
+      } catch (e) {
+        if (cancelled) return;
+        setHotelsComBypassExtraction({
+          status: 'error',
+          error: e instanceof Error ? e.message : 'Unknown error',
+        });
+      }
+    };
+
+    trigger();
+
+    return () => {
+      cancelled = true;
+      if (pollId) window.clearInterval(pollId);
+    };
+  }, [searchId, isTerminalFrozen, search?.airbnb_url, bypassedResults]);
 
   // Handle confirmation callbacks
   const handleTotalConfirmed = (amount: number, currency: string) => {
