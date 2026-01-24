@@ -3785,46 +3785,69 @@ function generatePricedDeepLink(
 }
 
 // Expanded platform list for better coverage - including international variants
+// Uses domain extraction to avoid false positives (e.g., "easyhotel.com" matching "hotel.")
 function getPlatformName(url: string): string {
-  const lowercaseUrl = url.toLowerCase();
-  if (lowercaseUrl.includes("vrbo.com")) return "Vrbo";
-  if (lowercaseUrl.includes("booking.com")) return "Booking.com";
-  if (lowercaseUrl.includes("expedia.")) return "Expedia";
-  if (lowercaseUrl.includes("hotels.com")) return "Hotels.com";
-  if (lowercaseUrl.includes("tripadvisor.")) return "TripAdvisor";
-  if (lowercaseUrl.includes("homeaway.")) return "HomeAway";
-  if (lowercaseUrl.includes("vacasa.com")) return "Vacasa";
-  if (lowercaseUrl.includes("agoda.")) return "Agoda";
-  if (lowercaseUrl.includes("hometogo.")) return "HomeToGo";
-  if (lowercaseUrl.includes("holidu.")) return "Holidu";
-  if (lowercaseUrl.includes("holidaycheck.")) return "HolidayCheck";
-  if (lowercaseUrl.includes("hrs.")) return "HRS";
-  if (lowercaseUrl.includes("hostelworld.")) return "Hostelworld";
-  if (lowercaseUrl.includes("rentbyowner.")) return "Rentbyowner";
-  if (lowercaseUrl.includes("interhome.")) return "Interhome";
-  if (lowercaseUrl.includes("flipkey.")) return "FlipKey";
-  if (lowercaseUrl.includes("atraveo.")) return "Atraveo";
-  if (lowercaseUrl.includes("fewo-direkt.")) return "FeWo-direkt";
-  if (lowercaseUrl.includes("traum-ferienwohnungen.")) return "Traum-Ferienwohnungen";
-  if (lowercaseUrl.includes("casamundo.")) return "Casamundo";
-  if (lowercaseUrl.includes("kayak.")) return "Kayak";
-  if (lowercaseUrl.includes("trivago.")) return "Trivago";
-  if (lowercaseUrl.includes("trip.com")) return "Trip.com";
-  if (lowercaseUrl.includes("makemytrip.")) return "MakeMyTrip";
-  if (lowercaseUrl.includes("hostel.com")) return "Hostel.com";
-  if (lowercaseUrl.includes("priceline.")) return "Priceline";
-  if (lowercaseUrl.includes("travelocity.")) return "Travelocity";
-  if (lowercaseUrl.includes("orbitz.")) return "Orbitz";
-  if (lowercaseUrl.includes("hotwire.")) return "Hotwire";
-  if (lowercaseUrl.includes("cheaptickets.")) return "CheapTickets";
-  if (lowercaseUrl.includes("hotelstonight.")) return "Hotels Tonight";
-  if (lowercaseUrl.includes("getaroom.")) return "GetARoom";
-  if (lowercaseUrl.includes("hotel.")) return "Hotel.com";
-  
   try {
-    const domain = new URL(url).hostname.replace("www.", "");
-    const name = domain.split(".")[0];
-    return name.charAt(0).toUpperCase() + name.slice(1);
+    const hostname = new URL(url).hostname.toLowerCase().replace("www.", "");
+    
+    // Extract the main domain (e.g., "hotels.com" from "www.hotels.com")
+    // For subdomains like "uk.hotels.com", we want "hotels.com"
+    const parts = hostname.split(".");
+    const tld = parts[parts.length - 1];
+    const baseDomain = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+    const fullDomain = `${baseDomain}.${tld}`;
+    
+    // Exact domain matches for major platforms (prevents false positives)
+    const exactDomainMap: Record<string, string> = {
+      "vrbo.com": "Vrbo",
+      "booking.com": "Booking.com",
+      "hotels.com": "Hotels.com",
+      "vacasa.com": "Vacasa",
+      "trip.com": "Trip.com",
+      "hostel.com": "Hostel.com",
+      "hotel.com": "Hotel.com",
+    };
+    
+    if (exactDomainMap[fullDomain]) {
+      return exactDomainMap[fullDomain];
+    }
+    
+    // Prefix-based matches for platforms with multiple TLDs (e.g., expedia.com, expedia.co.uk)
+    const prefixMap: Record<string, string> = {
+      "expedia": "Expedia",
+      "tripadvisor": "TripAdvisor",
+      "homeaway": "HomeAway",
+      "agoda": "Agoda",
+      "hometogo": "HomeToGo",
+      "holidu": "Holidu",
+      "holidaycheck": "HolidayCheck",
+      "hrs": "HRS",
+      "hostelworld": "Hostelworld",
+      "rentbyowner": "Rentbyowner",
+      "interhome": "Interhome",
+      "flipkey": "FlipKey",
+      "atraveo": "Atraveo",
+      "fewo-direkt": "FeWo-direkt",
+      "traum-ferienwohnungen": "Traum-Ferienwohnungen",
+      "casamundo": "Casamundo",
+      "kayak": "Kayak",
+      "trivago": "Trivago",
+      "makemytrip": "MakeMyTrip",
+      "priceline": "Priceline",
+      "travelocity": "Travelocity",
+      "orbitz": "Orbitz",
+      "hotwire": "Hotwire",
+      "cheaptickets": "CheapTickets",
+      "hotelstonight": "Hotels Tonight",
+      "getaroom": "GetARoom",
+    };
+    
+    if (prefixMap[baseDomain]) {
+      return prefixMap[baseDomain];
+    }
+    
+    // Fallback: capitalize the base domain
+    return baseDomain.charAt(0).toUpperCase() + baseDomain.slice(1);
   } catch {
     return "Other Platform";
   }
