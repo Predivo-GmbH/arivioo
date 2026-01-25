@@ -129,6 +129,8 @@ export interface FinalResultRow {
   // Foreign currency fallback: Show non-USD price when extraction found foreign currency
   original_currency?: string | null;
   original_amount?: number | null;
+  // Deep link with dates applied (for booking URLs) - populated from price_extractions
+  deep_link?: string | null;
 }
 
 export interface FinalSnapshot {
@@ -863,6 +865,8 @@ export async function finalizeAndCompleteSearch(
           // Foreign currency fallback display
           original_currency: originalCurrency as string | null,
           original_amount: originalAmount as number | null,
+          // Deep link with dates applied (from price_extractions)
+          deep_link: extraction?.deep_link || null,
         };
       });
       
@@ -983,6 +987,8 @@ export async function finalizeAndCompleteSearch(
           // Foreign currency fallback display
           original_currency: originalCurrency as string | null,
           original_amount: originalAmount as number | null,
+          // Deep link with dates applied (from price_extractions)
+          deep_link: extraction?.deep_link || null,
         };
       });
       
