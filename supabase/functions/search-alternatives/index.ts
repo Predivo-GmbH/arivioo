@@ -7239,22 +7239,27 @@ async function runSearchWithStreaming(
             // PARALLEL PIPELINE OPTIMIZATION: Trigger price extraction IMMEDIATELY
             // Don't wait for all images - start extraction as soon as platform is VERIFIED
             // ============================================================================
-            // TESTING BYPASS: Hotels.com gets extraction regardless of confidence score
+            // TESTING BYPASS: Hotels.com and Booking.com get extraction regardless of confidence
             const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
+            const BOOKING_COM_GLOBAL_BYPASS_ENABLED = true;
             const normalizedPlatform = platformName.toLowerCase().replace(/[^a-z]/g, '');
             const isHotelsComBypass = HOTELS_COM_GLOBAL_BYPASS_ENABLED && 
               (normalizedPlatform === 'hotelscom' || normalizedPlatform === 'hotels');
+            const isBookingComBypass = BOOKING_COM_GLOBAL_BYPASS_ENABLED && 
+              (normalizedPlatform === 'bookingcom' || normalizedPlatform === 'booking');
+            const isPlatformBypass = isHotelsComBypass || isBookingComBypass;
             
-            if (newConfidence >= 75 || isHotelsComBypass) { // Above IMAGE_VERIFICATION_THRESHOLD or Hotels.com bypass
-              if (isHotelsComBypass && newConfidence < 75) {
-                console.log(`[TESTING_BYPASS] Hotels.com extraction triggered despite low confidence (${newConfidence}%)`);
+            if (newConfidence >= 75 || isPlatformBypass) { // Above IMAGE_VERIFICATION_THRESHOLD or bypass
+              if (isPlatformBypass && newConfidence < 75) {
+                const bypassedPlatform = isHotelsComBypass ? 'Hotels.com' : 'Booking.com';
+                console.log(`[TESTING_BYPASS] ${bypassedPlatform} extraction triggered despite low confidence (${newConfidence}%)`);
               }
               const extractionPromise = triggerImmediatePriceExtraction(newMatch);
               extractionPromises.push(extractionPromise);
               sendProgress(controller, `Starting price extraction for ${platformName}`, "Running in parallel with continued discovery", {
                 platform: platformName,
                 parallelExtraction: true,
-                bypassActive: isHotelsComBypass && newConfidence < 75,
+                bypassActive: isPlatformBypass && newConfidence < 75,
               });
             }
           }
