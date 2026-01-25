@@ -61,6 +61,7 @@ import { HealthIndicator, SystemHealthBanner } from '@/components/admin/HealthIn
 import { useSystemHealth } from '@/hooks/useSystemHealth';
 import { SortablePlatformRow } from '@/components/admin/SortablePlatformRow';
 import { toast } from '@/hooks/use-toast';
+import { getPlatformDisplayName } from '@/lib/platformNames';
 
 interface PlatformAdapter {
   id: string;
@@ -104,6 +105,24 @@ interface PlatformAdapter {
   discovered_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface CoverageVariant {
+  id: string;
+  parent_platform_domain: string;
+  coverage_variant_key: string;
+  detected_country: string | null;
+  detected_locale: string | null;
+  detected_tld: string | null;
+  variant_status: string;
+  variant_reason: string | null;
+  inherited_tier: string | null;
+  total_attempts: number;
+  structural_failures: number;
+  transient_failures: number;
+  first_detected_at: string;
+  last_seen_at: string;
+  sample_urls: string[] | null;
 }
 
 // Compute promotion readiness for Tier B platforms
@@ -330,7 +349,7 @@ function PipelineRunCard({ run }: { run: PipelineRun }) {
               <TableBody>
                 {run.platforms.map((p, idx) => (
                   <TableRow key={idx}>
-                    <TableCell className="font-medium">{p.platform_name}</TableCell>
+                    <TableCell className="font-medium">{getPlatformDisplayName(p.platform_name)}</TableCell>
                     <TableCell>
                       <Badge 
                         variant={p.status === 'success' ? 'default' : 'outline'}
@@ -378,6 +397,7 @@ interface DebugInfo {
 export default function PlatformCoverage() {
   const { getToken } = useAdminAuth();
   const [platforms, setPlatforms] = useState<PlatformAdapter[]>([]);
+  const [variants, setVariants] = useState<CoverageVariant[]>([]);
   const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isStartingPromotion, setIsStartingPromotion] = useState(false);
@@ -467,6 +487,20 @@ export default function PlatformCoverage() {
       // Success - set platforms and debug info
       setPlatforms(data.platforms || []);
       setPipelineRuns(data.pipelineRuns || []);
+      
+      // Also fetch variants
+      try {
+        const variantsResp = await supabase.functions.invoke('admin-dashboard/coverage-variants', {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (variantsResp.data?.variants) {
+          setVariants(variantsResp.data.variants);
+        }
+      } catch (variantErr) {
+        console.warn('[PlatformCoverage] Failed to fetch variants:', variantErr);
+      }
+      
       setDebugInfo({
         source: data.meta?.source || 'admin-dashboard/platform-coverage',
         supabaseProjectRef: data.meta?.supabaseProjectRef || 'unknown',
@@ -500,7 +534,7 @@ export default function PlatformCoverage() {
   // Start Promotion Work - mark platform as in_progress
   // Uses the admin-dashboard edge function to ensure proper authorization and audit logging
   const startPromotionWork = async (platform: PlatformAdapter) => {
-    if (!window.confirm(`Start promotion work for ${platform.platform_name}?\n\nThis will lock scoring for this platform and begin the promotion workflow.`)) {
+    if (!window.confirm(`Start promotion work for ${getPlatformDisplayName(platform.platform_domain)}?\n\nThis will lock scoring for this platform and begin the promotion workflow.`)) {
       return;
     }
     
@@ -1016,7 +1050,7 @@ export default function PlatformCoverage() {
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="flex items-center gap-3 mb-2">
-                      <span className="text-xl font-bold">{promotionInProgress.platform_name}</span>
+                      <span className="text-xl font-bold">{getPlatformDisplayName(promotionInProgress.platform_domain)}</span>
                       <Badge className="bg-blue-500 text-white">In Progress</Badge>
                       <Badge variant="outline">Locked Score: {((promotionInProgress.promotion_source_score || 0) * 100).toFixed(0)}%</Badge>
                     </div>
@@ -1100,7 +1134,7 @@ export default function PlatformCoverage() {
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="flex items-center gap-3 mb-2">
-                      <span className="text-xl font-bold">{promotionCandidate.platform_name}</span>
+                      <span className="text-xl font-bold">{getPlatformDisplayName(promotionCandidate.platform_domain)}</span>
                       <Badge className="bg-green-500 text-white">Score: {((promotionCandidate.promotion_score || 0) * 100).toFixed(0)}%</Badge>
                     </div>
                     <p className="text-sm text-muted-foreground mb-3">
@@ -1193,7 +1227,7 @@ export default function PlatformCoverage() {
                   <TableBody>
                     {promotionHistory.map((platform) => (
                       <TableRow key={platform.id}>
-                        <TableCell className="font-medium">{platform.platform_name}</TableCell>
+                        <TableCell className="font-medium">{getPlatformDisplayName(platform.platform_domain)}</TableCell>
                         <TableCell>
                           <Badge 
                             className={platform.promotion_status === 'promoted' ? 'bg-green-500' : 'bg-red-500'}
@@ -1245,7 +1279,7 @@ export default function PlatformCoverage() {
                         <Card key={platform.id} className={`border ${platform.promotion_candidate ? 'border-green-300 bg-green-50/50' : allGatesPassed ? 'border-blue-200' : ''}`}>
                           <CardContent className="pt-4 pb-3">
                             <div className="flex items-center justify-between mb-2">
-                              <span className="font-medium text-sm">{platform.platform_name}</span>
+                              <span className="font-medium text-sm">{getPlatformDisplayName(platform.platform_domain)}</span>
                               {platform.promotion_candidate ? (
                                 <Badge className="bg-green-500 text-white text-xs gap-1">
                                   <TrendingUp className="h-3 w-3" /> Candidate
@@ -1349,15 +1383,21 @@ export default function PlatformCoverage() {
                       items={sortedPlatforms.map(p => p.id)} 
                       strategy={verticalListSortingStrategy}
                     >
-                      {sortedPlatforms.map((platform) => (
-                        <SortablePlatformRow
-                          key={platform.id}
-                          platform={platform}
-                          TierBadge={TierBadge}
-                          StatusBadge={StatusBadge}
-                          onClearNew={handleClearNew}
-                        />
-                      ))}
+                      {sortedPlatforms.map((platform) => {
+                        const platformVariants = variants.filter(
+                          v => v.parent_platform_domain === platform.platform_domain
+                        );
+                        return (
+                          <SortablePlatformRow
+                            key={platform.id}
+                            platform={platform}
+                            variants={platformVariants}
+                            TierBadge={TierBadge}
+                            StatusBadge={StatusBadge}
+                            onClearNew={handleClearNew}
+                          />
+                        );
+                      })}
                     </SortableContext>
                   </TableBody>
                 </Table>
@@ -1369,7 +1409,7 @@ export default function PlatformCoverage() {
                           <TableCell className="w-10">
                             <GripVertical className="h-4 w-4 text-muted-foreground" />
                           </TableCell>
-                          <TableCell className="font-medium">{activePlatform.platform_name}</TableCell>
+                          <TableCell className="font-medium">{getPlatformDisplayName(activePlatform.platform_domain)}</TableCell>
                           <TableCell className="text-muted-foreground text-sm">
                             {activePlatform.platform_domain}
                           </TableCell>
