@@ -224,12 +224,12 @@ interface PipelineRun {
 }
 
 const STATUS_CONFIG: Record<string, { icon: any; color: string; label: string }> = {
-  supported: { icon: CheckCircle2, color: 'text-green-500', label: 'Supported' },
-  unsupported: { icon: XCircle, color: 'text-red-500', label: 'Unsupported' },
+  supported: { icon: CheckCircle2, color: 'text-green-500', label: 'Working' },
+  unsupported: { icon: XCircle, color: 'text-red-500', label: 'Failing' },
   inquiry_based: { icon: HelpCircle, color: 'text-yellow-500', label: 'Inquiry Based' },
   reserve_required: { icon: Clock, color: 'text-orange-500', label: 'Reserve Required' },
   blocked: { icon: Ban, color: 'text-red-600', label: 'Blocked' },
-  unknown: { icon: AlertTriangle, color: 'text-muted-foreground', label: 'Unknown' },
+  unknown: { icon: AlertTriangle, color: 'text-muted-foreground', label: 'Not Tested' },
 };
 
 function StatusBadge({ status }: { status: string }) {
