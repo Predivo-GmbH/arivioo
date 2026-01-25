@@ -145,12 +145,26 @@ function calculateNights(checkIn: string, checkOut: string): number {
 }
 
 /**
+ * Normalize VRBO URL to use US locale for consistent USD pricing.
+ * International domains (en-ca, en-gb, etc.) show local currency which
+ * cannot be compared to the USD Airbnb baseline.
+ */
+function normalizeVrboUrlToUS(url: string): string {
+  // Replace international locale paths with en-us
+  // Examples: /en-ca/, /en-gb/, /en-au/, /de-de/, /fr-fr/
+  return url.replace(/\/(?:en-(?:ca|gb|au|nz|ie)|de-de|fr-fr|es-es|it-it|nl-nl|pt-pt)\//i, '/');
+}
+
+/**
  * Build VRBO URL with dates in the format that works for direct property access
- * Based on user-verified Step 6 URL format
+ * Based on user-verified Step 6 URL format.
+ * CRITICAL: Forces USD currency to ensure comparability with Airbnb baseline.
  */
 function buildVrboUrlWithDates(baseUrl: string, checkIn: string, checkOut: string, adults: number = 2): string {
   try {
-    const url = new URL(baseUrl);
+    // First normalize to US locale for USD pricing
+    const normalizedBase = normalizeVrboUrlToUS(baseUrl);
+    const url = new URL(normalizedBase);
     
     // Clear any existing date params first
     url.searchParams.delete('chkin');
@@ -170,11 +184,15 @@ function buildVrboUrlWithDates(baseUrl: string, checkIn: string, checkOut: strin
     url.searchParams.set('adults', String(adults));
     url.searchParams.set('x_pwa', '1'); // Request PWA/modern version
     
+    // Force USD currency to ensure comparability with Airbnb baseline
+    url.searchParams.set('currency', 'USD');
+    
     return url.toString();
   } catch (e) {
-    // Fallback if URL parsing fails
-    const separator = baseUrl.includes('?') ? '&' : '?';
-    return `${baseUrl}${separator}chkin=${checkIn}&chkout=${checkOut}&d1=${checkIn}&d2=${checkOut}&startDate=${checkIn}&endDate=${checkOut}&adults=${adults}&x_pwa=1`;
+    // Fallback if URL parsing fails - still try to normalize
+    const normalizedBase = normalizeVrboUrlToUS(baseUrl);
+    const separator = normalizedBase.includes('?') ? '&' : '?';
+    return `${normalizedBase}${separator}chkin=${checkIn}&chkout=${checkOut}&d1=${checkIn}&d2=${checkOut}&startDate=${checkIn}&endDate=${checkOut}&adults=${adults}&x_pwa=1&currency=USD`;
   }
 }
 
@@ -251,27 +269,19 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     labelsFound: [],
   };
 
-  // Multi-currency price parser: $, CA$, €, £, R (ZAR)
+  // USD-only price parser - we force USD currency in URL params
   const parsePrice = (text: string): number | null => {
-    // Match various currency formats
-    const match = text.match(/(?:CA?\$|ZAR|R|€|£|USD|EUR|GBP)?\s*([\d,\s]+(?:[.,]\d{2})?)/i);
+    const match = text.match(/\$?\s*([\d,]+(?:\.\d{2})?)/);
     if (match) {
-      // Handle European format (1.234,56) vs US format (1,234.56)
-      let numStr = match[1].replace(/\s/g, '');
-      // If comma is after period, it's European format
-      if (/\.\d{3},\d{2}$/.test(numStr)) {
-        numStr = numStr.replace(/\./g, '').replace(',', '.');
-      } else {
-        numStr = numStr.replace(/,/g, '');
-      }
+      const numStr = match[1].replace(/,/g, '');
       const val = parseFloat(numStr);
       return isNaN(val) ? null : val;
     }
     return null;
   };
 
-  // Currency regex that matches multiple formats
-  const currencyRx = '(?:CA?\\$|R|ZAR|€|£|USD|EUR|GBP)?\\s*';
+  // USD currency pattern
+  const currencyRx = '\\$?\\s*';
 
   // Extract fee components for context - support multi-currency
   const nightlyPatterns = [
