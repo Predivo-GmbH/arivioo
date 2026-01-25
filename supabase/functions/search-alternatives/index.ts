@@ -6623,8 +6623,8 @@ async function runSearchWithStreaming(
   // - Time budget low → continue with fast path (fewer candidates per image)
   // ============================================================================
   const MAX_TIME = 120000; // 2 minutes total
-  const MAX_AI = 50; // Global AI verification budget (increased for two-pass)
-  const MAX_CANDIDATES_PER_IMAGE = 40; // Max reverse search results to process per image
+  const MAX_AI = 65; // Global AI verification budget (increased for better discovery)
+  const MAX_CANDIDATES_PER_IMAGE = 50; // Max reverse search results to process per image (increased)
   const TIME_DEGRADED_THRESHOLD = 100000; // After 100s, enter time-degraded mode (was 90s)
   const VERIFIED_PLATFORM_THRESHOLD = 75; // Skip re-verification if platform already has >= this confidence
   
@@ -9030,8 +9030,8 @@ serve(async (req) => {
     // CRITICAL: Track time and AI comparison budget to avoid timeout
     const searchStartTime = Date.now();
     const MAX_SEARCH_TIME_MS = 120000; // 2 minute limit for visual search phase (better coverage)
-    const MAX_AI_COMPARISONS = 45; // More AI comparisons to capture more platforms
-    const TARGET_VISUAL_MATCHES = 12; // Target more matches before stopping
+    const MAX_AI_COMPARISONS = 60; // Increased AI comparisons for better platform discovery
+    const TARGET_VISUAL_MATCHES = 15; // Target more matches before stopping (increased)
     let aiComparisonCount = 0;
 
     const isTimeBudgetExceeded = () => {
