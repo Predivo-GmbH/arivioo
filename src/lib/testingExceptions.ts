@@ -24,6 +24,19 @@
 export const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
 
 /**
+ * Exception: Booking.com Global Photo Comparison Bypass
+ * 
+ * Treat ALL Booking.com results as valid even if photo comparison failed.
+ * This allows testing the Booking.com price extraction without the image
+ * verification gate blocking it.
+ * 
+ * Added: 2026-01-25
+ * Reason: Testing Booking.com price extraction across all searches
+ * Remove when: User requests removal
+ */
+export const BOOKING_COM_GLOBAL_BYPASS_ENABLED = true;
+
+/**
  * Check if Hotels.com bypass is active (always true when global bypass enabled)
  */
 export function isHotelsComBypassUrl(airbnbUrl: string | null | undefined): boolean {
@@ -32,17 +45,36 @@ export function isHotelsComBypassUrl(airbnbUrl: string | null | undefined): bool
 }
 
 /**
+ * Check if Booking.com bypass is active (always true when global bypass enabled)
+ */
+export function isBookingComBypassUrl(airbnbUrl: string | null | undefined): boolean {
+  // Global bypass - applies to ALL Airbnb URLs
+  return BOOKING_COM_GLOBAL_BYPASS_ENABLED;
+}
+
+/**
  * Check if a platform should bypass photo comparison rejection
- * When HOTELS_COM_GLOBAL_BYPASS_ENABLED is true, Hotels.com results
- * are treated as valid regardless of confidence score
+ * When bypass is enabled, results are treated as valid regardless of confidence score
  */
 export function shouldBypassPhotoRejection(
   airbnbUrl: string | null | undefined,
   platformName: string
 ): boolean {
-  if (!HOTELS_COM_GLOBAL_BYPASS_ENABLED) return false;
-  
-  // Only Hotels.com is bypassed
   const normalizedPlatform = platformName.toLowerCase().replace(/[^a-z]/g, '');
-  return normalizedPlatform === 'hotelscom' || normalizedPlatform === 'hotels';
+  
+  // Hotels.com bypass
+  if (HOTELS_COM_GLOBAL_BYPASS_ENABLED) {
+    if (normalizedPlatform === 'hotelscom' || normalizedPlatform === 'hotels') {
+      return true;
+    }
+  }
+  
+  // Booking.com bypass
+  if (BOOKING_COM_GLOBAL_BYPASS_ENABLED) {
+    if (normalizedPlatform === 'bookingcom' || normalizedPlatform === 'booking') {
+      return true;
+    }
+  }
+  
+  return false;
 }

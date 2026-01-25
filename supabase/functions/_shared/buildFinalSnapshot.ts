@@ -610,6 +610,10 @@ export async function finalizeAndCompleteSearch(
     const extractionByPlatform = new Map<string, any>();
     const extractionByUrl = new Map<string, any>();
     const terminalPlatforms = new Set<string>();
+    
+    // TESTING BYPASS CONSTANTS (used in terminal platform checks)
+    const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
+    const BOOKING_COM_GLOBAL_BYPASS_ENABLED = true;
 
     extractionsData?.forEach((e: any) => {
       const platformKey = typeof e.platform_name === 'string' ? e.platform_name.toLowerCase() : '';
@@ -629,22 +633,27 @@ export async function finalizeAndCompleteSearch(
     
     // WORKING BASELINE: Add platforms with terminal outcome_category to terminalPlatforms
     // These are rejected/low_confidence candidates that don't need extractions
-    // EXCEPTION: Hotels.com with bypass MUST wait for extraction before being terminal
+    // EXCEPTION: Bypassed platforms (Hotels.com, Booking.com) MUST wait for extraction before being terminal
     authoritativePlatforms.forEach((p: any) => {
       const platformKey = typeof p.platform_name === 'string' ? p.platform_name.toLowerCase() : '';
       if (!platformKey) return;
       
-      // Hotels.com bypass check: if bypass is active, Hotels.com needs extraction
+      // Check if platform has active bypass
+      const normalizedKey = platformKey.replace(/[^a-z]/g, '');
       const isHotelsComBypassed = HOTELS_COM_GLOBAL_BYPASS_ENABLED && 
-        (platformKey === 'hotels.com' || platformKey === 'hotelscom' || platformKey === 'hotels');
+        (normalizedKey === 'hotelscom' || normalizedKey === 'hotels');
+      const isBookingComBypassed = BOOKING_COM_GLOBAL_BYPASS_ENABLED && 
+        (normalizedKey === 'bookingcom' || normalizedKey === 'booking');
+      const isPlatformBypassed = isHotelsComBypassed || isBookingComBypassed;
       
-      if (isHotelsComBypassed) {
-        // Hotels.com with bypass: only terminal if extraction exists and is terminal
+      if (isPlatformBypassed) {
+        // Bypassed platforms: only terminal if extraction exists and is terminal
         const hasTerminalExtraction = terminalPlatforms.has(platformKey);
+        const platformLabel = isHotelsComBypassed ? 'Hotels.com' : 'Booking.com';
         if (hasTerminalExtraction) {
-          console.log(`[finalizeAndComplete] Hotels.com bypass: extraction terminal, ready`);
+          console.log(`[finalizeAndComplete] ${platformLabel} bypass: extraction terminal, ready`);
         } else {
-          console.log(`[finalizeAndComplete] Hotels.com bypass: waiting for extraction...`);
+          console.log(`[finalizeAndComplete] ${platformLabel} bypass: waiting for extraction...`);
         }
         // Don't add to terminal here - it's already handled by extraction lookup above
         return;
@@ -995,18 +1004,28 @@ export async function finalizeAndCompleteSearch(
     const preFilterCount = finalResults.length;
     
     // ============================================================================
-    // TESTING EXCEPTION: Hotels.com Global Bypass
-    // When enabled, Hotels.com results are included in the snapshot even if they
-    // fail the image verification gate. This allows testing Hotels.com extraction.
-    // Added: 2026-01-24
+    // TESTING EXCEPTION: Global Bypass for Hotels.com and Booking.com
+    // When enabled, these platforms are included in the snapshot even if they
+    // fail the image verification gate. This allows testing extraction.
+    // Added: 2026-01-24 (Hotels.com), 2026-01-25 (Booking.com)
     // Remove when: Testing complete
+    // Constants defined at top of function: HOTELS_COM_GLOBAL_BYPASS_ENABLED, BOOKING_COM_GLOBAL_BYPASS_ENABLED
     // ============================================================================
-    const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
     
     const shouldBypassImageGate = (platformName: string): boolean => {
-      if (!HOTELS_COM_GLOBAL_BYPASS_ENABLED) return false;
       const normalized = platformName.toLowerCase().replace(/[^a-z]/g, '');
-      return normalized === 'hotelscom' || normalized === 'hotels';
+      
+      // Hotels.com bypass
+      if (HOTELS_COM_GLOBAL_BYPASS_ENABLED) {
+        if (normalized === 'hotelscom' || normalized === 'hotels') return true;
+      }
+      
+      // Booking.com bypass
+      if (BOOKING_COM_GLOBAL_BYPASS_ENABLED) {
+        if (normalized === 'bookingcom' || normalized === 'booking') return true;
+      }
+      
+      return false;
     };
     
     /**
