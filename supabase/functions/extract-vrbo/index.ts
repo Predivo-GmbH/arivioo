@@ -193,7 +193,8 @@ function isCheckoutSessionUrl(url: string): boolean {
          lowerUrl.includes('/book/') ||
          lowerUrl.includes('/session/') ||
          lowerUrl.includes('tripid=') ||
-         lowerUrl.includes('checkouttoken=');
+         lowerUrl.includes('checkouttoken=') ||
+         lowerUrl.includes('hotelcheckout');  // Canadian VRBO checkout URL pattern
 }
 
 function hasCheckoutSignals(content: string): boolean {
@@ -204,6 +205,10 @@ function hasCheckoutSignals(content: string): boolean {
     /\bDue\s+now\b/i,
     /\bTaxes\b/i,
     /\bService\s+fee\b/i,
+    /\bTotal\s+cost\b/i,          // International variant
+    /\bYour\s+total\b/i,          // International variant
+    /\bPrice\s+details\b/i,       // Common on CA/international
+    /\bBooking\s+summary\b/i,     // Common on CA/international
   ];
   const hits = signals.reduce((acc, r) => acc + (r.test(content) ? 1 : 0), 0);
   return hits >= 2;
@@ -246,19 +251,33 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     labelsFound: [],
   };
 
+  // Multi-currency price parser: $, CA$, €, £, R (ZAR)
   const parsePrice = (text: string): number | null => {
-    const match = text.match(/\$?\s*([\d,]+(?:\.\d{2})?)/);
+    // Match various currency formats
+    const match = text.match(/(?:CA?\$|ZAR|R|€|£|USD|EUR|GBP)?\s*([\d,\s]+(?:[.,]\d{2})?)/i);
     if (match) {
-      const val = parseFloat(match[1].replace(/,/g, ''));
+      // Handle European format (1.234,56) vs US format (1,234.56)
+      let numStr = match[1].replace(/\s/g, '');
+      // If comma is after period, it's European format
+      if (/\.\d{3},\d{2}$/.test(numStr)) {
+        numStr = numStr.replace(/\./g, '').replace(',', '.');
+      } else {
+        numStr = numStr.replace(/,/g, '');
+      }
+      const val = parseFloat(numStr);
       return isNaN(val) ? null : val;
     }
     return null;
   };
 
-  // Extract fee components for context
+  // Currency regex that matches multiple formats
+  const currencyRx = '(?:CA?\\$|R|ZAR|€|£|USD|EUR|GBP)?\\s*';
+
+  // Extract fee components for context - support multi-currency
   const nightlyPatterns = [
-    /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:\/?\s*)?(?:per\s*)?night\b/i,
-    /\$\s*([\d,]+(?:\.\d{2})?)\s*avg(?:\/|\s*per)?\s*night/i,
+    new RegExp(`${currencyRx}([\\d,\\s]+(?:[.,]\\d{2})?)\\s*(?:\\/\\s*)?(?:per\\s*)?night\\b`, 'i'),
+    new RegExp(`${currencyRx}([\\d,\\s]+(?:[.,]\\d{2})?)\\s*avg(?:\\/|\\s*per)?\\s*night`, 'i'),
+    /per\s*night[:\s]*(?:CA?\$|R|€|£)?\s*([\d,\s]+(?:[.,]\d{2})?)/i,
   ];
   for (const np of nightlyPatterns) {
     const match = content.match(np);
@@ -271,19 +290,19 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     }
   }
 
-  const cleaningMatch = content.match(/cleaning\s*fee[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  const cleaningMatch = content.match(new RegExp(`cleaning\\s*fee[:\\s]*${currencyRx}([\\d,\\s]+(?:[.,]\\d{2})?)`, 'i'));
   if (cleaningMatch) {
     result.cleaningFee = parsePrice(cleaningMatch[0]);
     result.labelsFound.push('cleaning_fee');
   }
 
-  const serviceMatch = content.match(/service\s*fee[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  const serviceMatch = content.match(new RegExp(`service\\s*fee[:\\s]*${currencyRx}([\\d,\\s]+(?:[.,]\\d{2})?)`, 'i'));
   if (serviceMatch) {
     result.serviceFee = parsePrice(serviceMatch[0]);
     result.labelsFound.push('service_fee');
   }
 
-  const taxesMatch = content.match(/taxes?\s*(?:&\s*fees?)?[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  const taxesMatch = content.match(new RegExp(`taxes?\\s*(?:&\\s*fees?)?[:\\s]*${currencyRx}([\\d,\\s]+(?:[.,]\\d{2})?)`, 'i'));
   if (taxesMatch) {
     result.taxesAmount = parsePrice(taxesMatch[0]);
     if (result.taxesAmount && result.taxesAmount > 10) {
@@ -291,43 +310,57 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     }
   }
 
-  const subtotalMatch = content.match(/\$\s*([\d,]+(?:\.\d{2})?)\s+for\s+\d+\s+nights?/i);
+  const subtotalMatch = content.match(new RegExp(`${currencyRx}([\\d,\\s]+(?:[.,]\\d{2})?)\\s+for\\s+\\d+\\s+nights?`, 'i'));
   if (subtotalMatch) {
     result.subtotal = parsePrice(subtotalMatch[0]);
     result.labelsFound.push('subtotal');
   }
 
-  const dueNowMatch = content.match(/(?:due\s*now|pay\s*now)[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/i);
+  const dueNowMatch = content.match(new RegExp(`(?:due\\s*now|pay\\s*now)[:\\s]*${currencyRx}([\\d,\\s]+(?:[.,]\\d{2})?)`, 'i'));
   if (dueNowMatch) {
     result.dueNow = parsePrice(dueNowMatch[0]);
     result.labelsFound.push('due_now');
   }
-
+  
+  // DIAGNOSTIC: Log sample of content to help debug pattern matching
+  const priceSnippets = content.match(/(?:R|ZAR|\$|€|£)\s*[\d,.\s]+/gi)?.slice(0, 10) || [];
+  console.log(`[VRBO] Price-like snippets found: ${priceSnippets.join(' | ')}`);
   console.log(`[VRBO] Fee components: nightly=${result.nightlyRate}, subtotal=${result.subtotal}, cleaning=${result.cleaningFee}, service=${result.serviceFee}, taxes=${result.taxesAmount}`);
 
   // Calculate minimum valid total (should be > subtotal)
   const expectedSubtotal = result.nightlyRate ? result.nightlyRate * nights : (result.subtotal || 0);
   const minValidTotal = expectedSubtotal > 0 ? expectedSubtotal * 1.05 : 100;
 
-  // Look for explicit "Total" patterns - PRIORITY ORDER
+  // Look for explicit "Total" patterns - PRIORITY ORDER (supports USD, CAD, EUR, GBP, ZAR)
+  // Currency patterns: $, CA$, C$, CAD, €, £, R (ZAR)
+  const currencyPrefix = '(?:(?:CA?|ZA)?\\$|CAD|EUR|€|GBP|£|R|USD)?\\s*';
+  
   const totalPatterns = [
     // "Trip total" is the most reliable - VRBO's final total on checkout
-    /\bTrip\s+total[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
-    // Standard explicit "Total" with $ and amount
-    /\bTotal[:\s]+\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    new RegExp(`\\bTrip\\s+total[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
+    // "Total cost" - common on international VRBO
+    new RegExp(`\\bTotal\\s+cost[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
+    // "Your total" - common on CA VRBO
+    new RegExp(`\\bYour\\s+total[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
+    // Standard explicit "Total" with currency and amount
+    new RegExp(`\\bTotal[:\\s]+${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
     // "Total price" pattern
-    /\bTotal\s+price[:\s]*\$\s*([\d,]+(?:\.\d{2})?)/gi,
+    new RegExp(`\\bTotal\\s+price[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
     // Amount followed by Total label
-    /\$\s*([\d,]+(?:\.\d{2})?)\s+Total\b/gi,
+    new RegExp(`${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)\\s+Total\\b`, 'gi'),
+    // JSON-style patterns (common in React apps) - "total": 1234.56
+    /["']?(?:trip)?[_-]?total["']?\s*[:\s]*["']?(\d+(?:\.\d{2})?)/gi,
+    // Price breakdown total pattern
+    /(?:price|booking)\s*(?:breakdown|summary)[:\s]*.*?(?:total)[:\s]*(?:CA?\$|R|€|£)?\s*([\d,]+(?:\.\d{2})?)/gi,
   ];
 
-  const foundTotals: Array<{price: number, context: string, pattern: string}> = [];
+  const foundTotals: Array<{price: number, context: string, pattern: string, currency: string}> = [];
 
   for (const pattern of totalPatterns) {
     const matches = [...content.matchAll(pattern)];
     for (const match of matches) {
-      const startIdx = Math.max(0, match.index! - 60);
-      const endIdx = Math.min(content.length, match.index! + match[0].length + 40);
+      const startIdx = Math.max(0, match.index! - 80);
+      const endIdx = Math.min(content.length, match.index! + match[0].length + 60);
       const context = content.slice(startIdx, endIdx);
       
       // Exclusions: Skip if context indicates NOT the final total
@@ -335,7 +368,7 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
       
       let isExcluded = false;
       for (const exclusion of exclusions) {
-        if (exclusion.test(context) && !/trip\s+total/i.test(match[0])) {
+        if (exclusion.test(context) && !/trip\s+total|your\s+total|total\s+cost/i.test(match[0])) {
           isExcluded = true;
           break;
         }
@@ -344,9 +377,27 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
       if (isExcluded) continue;
       
       const price = parseFloat(match[1].replace(/,/g, ''));
-      if (!isNaN(price) && price > 100) {
-        foundTotals.push({ price, context: context.trim(), pattern: pattern.source });
+      
+      // Detect currency from context
+      let currency = 'USD';
+      if (/CA\$|C\$|CAD/i.test(context)) currency = 'CAD';
+      else if (/€|EUR/i.test(context)) currency = 'EUR';
+      else if (/£|GBP/i.test(context)) currency = 'GBP';
+      else if (/\bR\s*\d|ZAR/i.test(context)) currency = 'ZAR';
+      
+      if (!isNaN(price) && price > 50) {  // Lower threshold for international currencies
+        foundTotals.push({ price, context: context.trim(), pattern: pattern.source, currency });
       }
+    }
+  }
+  
+  // Also look for large amounts in structured data (JSON)
+  const jsonPricePattern = /"(?:totalPrice|grandTotal|tripTotal|bookingTotal)":\s*(\d+(?:\.\d{2})?)/gi;
+  const jsonMatches = [...content.matchAll(jsonPricePattern)];
+  for (const match of jsonMatches) {
+    const price = parseFloat(match[1]);
+    if (!isNaN(price) && price > 50) {
+      foundTotals.push({ price, context: match[0], pattern: 'json_total', currency: 'USD' });
     }
   }
 
@@ -356,26 +407,33 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     // Sort by price descending - true total should be highest
     foundTotals.sort((a, b) => b.price - a.price);
     
+    console.log(`[VRBO] Evaluating ${foundTotals.length} candidates: ${foundTotals.map(t => `${t.currency}${t.price}`).join(', ')}`);
+    
     for (const candidate of foundTotals) {
       // Validate: Total must be > subtotal
       if (result.subtotal && candidate.price <= result.subtotal) {
-        console.log(`[VRBO] Rejecting total $${candidate.price} - not greater than subtotal $${result.subtotal}`);
+        console.log(`[VRBO] Rejecting total ${candidate.currency}${candidate.price} - not greater than subtotal ${result.subtotal}`);
         continue;
       }
       
-      if (minValidTotal > 0 && candidate.price < minValidTotal) {
-        console.log(`[VRBO] Rejecting total $${candidate.price} - below minimum $${minValidTotal}`);
+      // Use lower threshold for non-USD currencies (e.g., ZAR is ~18:1 to USD)
+      const adjustedMinTotal = candidate.currency === 'ZAR' ? minValidTotal * 15 : 
+                               candidate.currency === 'CAD' ? minValidTotal * 1.3 :
+                               minValidTotal;
+      
+      if (adjustedMinTotal > 0 && candidate.price < adjustedMinTotal) {
+        console.log(`[VRBO] Rejecting total ${candidate.currency}${candidate.price} - below minimum ${adjustedMinTotal}`);
         continue;
       }
       
       result.totalFound = true;
       result.totalPrice = candidate.price;
-      result.currency = 'USD';
+      result.currency = candidate.currency;
       result.totalEvidence = candidate.context.slice(0, 150);
       result.directlyComparable = true;
       result.labelsFound.push('Total');
       
-      console.log(`[VRBO] ACCEPTED total=${candidate.price} currency=USD evidence="${result.totalEvidence}"`);
+      console.log(`[VRBO] ACCEPTED total=${candidate.price} currency=${candidate.currency} evidence="${result.totalEvidence}"`);
       return result;
     }
   }
