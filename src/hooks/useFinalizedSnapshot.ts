@@ -39,6 +39,8 @@ export interface FinalResultRow {
   result_bucket?: string | null;
   relative_position?: string | null;
   savings_computed?: number | null;
+  // Deep link with dates applied (for booking URLs)
+  deep_link?: string | null;
 }
 
 export interface FinalSnapshot {

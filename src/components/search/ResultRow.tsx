@@ -28,6 +28,8 @@ export interface ResultRowResult {
   // is_authoritative = true means PASS 2 >= 90% (high trust, "Verified")
   // is_authoritative = false/undefined means PASS 1 passed but needs review
   is_authoritative?: boolean;
+  // Deep link with dates applied (for booking URLs) - prefer over listing_url
+  deep_link?: string | null;
 }
 
 export type RowVariant = 
@@ -347,6 +349,9 @@ export function ResultRow({
 
   // Render action cell
   const renderActionCell = () => {
+    // Prefer deep_link (with dates applied) over listing_url
+    const bookingUrl = result.deep_link || result.listing_url;
+    
     const renderViewButton = () => {
       // Special case: cheapest result gets unlock button
       if (variant === 'cheaper' && isCheapest && searchId) {
@@ -361,12 +366,12 @@ export function ResultRow({
         );
       }
       
-      // Regular view button
+      // Regular view button - use bookingUrl with dates applied
       const buttonText = variant === 'cheaper' && !isCheapest ? 'View Free' : 'View';
       
       return (
         <Button variant="outline" size="sm" asChild>
-          <a href={result.listing_url} target="_blank" rel="noopener noreferrer">
+          <a href={bookingUrl} target="_blank" rel="noopener noreferrer">
             {buttonText} <ExternalLink className="w-3 h-3 ml-1" />
           </a>
         </Button>
