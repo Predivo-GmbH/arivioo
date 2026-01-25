@@ -1976,7 +1976,7 @@ async function runFirecrawlCanaryCheck(): Promise<CanaryCheckResult> {
   const VERIFIED_STATUS = 'total_price_including_taxes_and_fees';
   
   try {
-    const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY');
+    const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
     if (!firecrawlApiKey) {
       return {
         mode: 'firecrawl-canary',
