@@ -102,8 +102,122 @@ function detectBotBlock(content: string): boolean {
     lowerContent.includes('unusual traffic') ||
     lowerContent.includes('access denied') ||
     lowerContent.includes('please verify you are human') ||
-    (lowerContent.includes('verifying') && lowerContent.includes('please wait'))
+    (lowerContent.includes('verifying') && lowerContent.includes('please wait')) ||
+    (lowerContent.includes('verifying') && lowerContent.includes('booking.com'))
   );
+}
+
+// ============================================================================
+// STEP 1: AVAILABILITY CLASSIFICATION
+// ============================================================================
+interface AvailabilityResult {
+  available: 'available' | 'sold_out' | 'unknown';
+  signal: string | null;
+}
+
+function detectAvailability(content: string): AvailabilityResult {
+  const lowerContent = content.toLowerCase();
+  
+  // Sold out / unavailable signals
+  const soldOutPatterns = [
+    /sold\s*out/i,
+    /no\s*(?:longer\s*)?(?:rooms?\s*)?available/i,
+    /not\s*available\s*for\s*(?:these|your|selected)\s*dates/i,
+    /fully\s*booked/i,
+    /no\s*availability/i,
+    /unavailable\s*for\s*(?:these|your|the)\s*dates/i,
+    /we\s*(?:don'?t|do\s*not)\s*have\s*availability/i,
+    /this\s*property\s*(?:is\s*)?(?:not\s*)?available/i,
+  ];
+  
+  for (const pattern of soldOutPatterns) {
+    if (pattern.test(content)) {
+      const match = content.match(pattern);
+      console.log(`[BOOKING_DIAG] step=1 availability=sold_out signal="${match?.[0]}"`);
+      return { available: 'sold_out', signal: match?.[0] || 'sold_out_pattern' };
+    }
+  }
+  
+  // Available signals - look for price-related content
+  const availablePatterns = [
+    /(?:US\$|\$|USD\s*)[\d,]+(?:\.\d{2})?\s*(?:for|\/)\s*\d+\s*nights?/i,
+    /reserve\s*now/i,
+    /book\s*(?:now|this)/i,
+    /price\s*breakdown/i,
+    /check\s*availability/i,
+  ];
+  
+  for (const pattern of availablePatterns) {
+    if (pattern.test(content)) {
+      console.log(`[BOOKING_DIAG] step=1 availability=available`);
+      return { available: 'available', signal: null };
+    }
+  }
+  
+  console.log(`[BOOKING_DIAG] step=1 availability=unknown`);
+  return { available: 'unknown', signal: null };
+}
+
+// ============================================================================
+// STEP 2: TOKEN AUDIT - Check for price/breakdown structure
+// ============================================================================
+interface TokenAuditResult {
+  hasBreakdownTokens: boolean;
+  hasTotalTokens: boolean;
+  hasPriceTokens: boolean;
+  hasTaxesTokens: boolean;
+  hasNightsTokens: boolean;
+  tokenSummary: string;
+}
+
+function auditPriceTokens(content: string): TokenAuditResult {
+  const result: TokenAuditResult = {
+    hasBreakdownTokens: false,
+    hasTotalTokens: false,
+    hasPriceTokens: false,
+    hasTaxesTokens: false,
+    hasNightsTokens: false,
+    tokenSummary: '',
+  };
+  
+  // Breakdown tokens
+  const breakdownTokens = [
+    'price breakdown', 'price details', 'price summary', 'booking summary',
+    'cost breakdown', 'your price', 'price information',
+  ];
+  result.hasBreakdownTokens = breakdownTokens.some(t => content.toLowerCase().includes(t));
+  
+  // Total tokens
+  const totalTokens = [
+    'total price', 'grand total', 'total cost', 'total amount',
+    'amount due', 'you pay', 'total:',
+  ];
+  result.hasTotalTokens = totalTokens.some(t => content.toLowerCase().includes(t));
+  
+  // Price tokens - actual USD amounts
+  result.hasPriceTokens = /(?:US\$|\$|USD\s*)[\d,]+(?:\.\d{2})?/.test(content);
+  
+  // Tax/fee tokens
+  const taxTokens = [
+    'tax', 'taxes', 'fees', 'charges', 'vat', 'service fee',
+    'includes taxes', 'includes fees',
+  ];
+  result.hasTaxesTokens = taxTokens.some(t => content.toLowerCase().includes(t));
+  
+  // Nights tokens
+  result.hasNightsTokens = /\d+\s*nights?/.test(content);
+  
+  const found: string[] = [];
+  if (result.hasBreakdownTokens) found.push('breakdown');
+  if (result.hasTotalTokens) found.push('total');
+  if (result.hasPriceTokens) found.push('price');
+  if (result.hasTaxesTokens) found.push('taxes');
+  if (result.hasNightsTokens) found.push('nights');
+  
+  result.tokenSummary = found.length > 0 ? found.join(',') : 'none';
+  console.log(`[BOOKING_DIAG] step=2 token_audit=${result.tokenSummary}`);
+  
+  return result;
 }
 
 // ============================================================================
@@ -893,6 +1007,26 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
+
+    // ========================================
+    // STEP 1: AVAILABILITY CLASSIFICATION
+    // ========================================
+    const availability = detectAvailability(content);
+    if (availability.available === 'sold_out') {
+      result.status = 'dates_unavailable';
+      result.error = `Sold out: ${availability.signal}`;
+      result.durationMs = Date.now() - startTime;
+      console.log(`[BOOKING] SOLD OUT detected: ${availability.signal}`);
+      return new Response(JSON.stringify(result), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // ========================================
+    // STEP 2: TOKEN AUDIT
+    // ========================================
+    const tokenAudit = auditPriceTokens(content);
+    console.log(`[BOOKING_DIAG] step=3 interaction_used=false clicked=none`);
 
     // Extract prices with VRBO-style strict gate
     const priceResult = extractBookingTotal(content, nights, checkIn, checkOut);
