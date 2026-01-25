@@ -131,9 +131,7 @@ export function BaselineInfoPanel() {
   const [checkingZyteCanary, setCheckingZyteCanary] = useState(false);
   const [zyteCanaryError, setZyteCanaryError] = useState<string | null>(null);
   
-  const [firecrawlCanary, setFirecrawlCanary] = useState<CanaryCheckResult | null>(null);
-  const [checkingFirecrawlCanary, setCheckingFirecrawlCanary] = useState(false);
-  const [firecrawlCanaryError, setFirecrawlCanaryError] = useState<string | null>(null);
+  // Firecrawl removed from baseline - not used for Airbnb price discovery
   
   // Logic validation checks (deterministic)
   const [browserlessLogic, setBrowserlessLogic] = useState<CanonicalCheckResult | null>(null);
@@ -144,9 +142,7 @@ export function BaselineInfoPanel() {
   const [checkingZyteLogic, setCheckingZyteLogic] = useState(false);
   const [zyteLogicError, setZyteLogicError] = useState<string | null>(null);
   
-  const [firecrawlLogic, setFirecrawlLogic] = useState<CanonicalCheckResult | null>(null);
-  const [checkingFirecrawlLogic, setCheckingFirecrawlLogic] = useState(false);
-  const [firecrawlLogicError, setFirecrawlLogicError] = useState<string | null>(null);
+  // Firecrawl logic removed from baseline - not used for Airbnb price discovery
   
   const [chainLogic, setChainLogic] = useState<CanonicalCheckResult | null>(null);
   const [checkingChainLogic, setCheckingChainLogic] = useState(false);
@@ -209,29 +205,7 @@ export function BaselineInfoPanel() {
     }
   }, []);
   
-  // Run Firecrawl CANARY check
-  const runFirecrawlCanary = useCallback(async (signal?: AbortSignal) => {
-    if (signal?.aborted) return;
-    setCheckingFirecrawlCanary(true);
-    setFirecrawlCanaryError(null);
-    try {
-      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=firecrawl-canary', {
-        method: 'GET',
-      });
-      
-      if (signal?.aborted) return;
-      if (invokeError) throw invokeError;
-      setFirecrawlCanary(data as CanaryCheckResult);
-    } catch (err: any) {
-      if (signal?.aborted) return;
-      console.error('Firecrawl canary check failed:', err);
-      setFirecrawlCanaryError(err?.message || 'Failed to run check');
-    } finally {
-      if (!signal?.aborted) {
-        setCheckingFirecrawlCanary(false);
-      }
-    }
-  }, []);
+  // Firecrawl CANARY check removed - not used for Airbnb price discovery
 
   // Run Browserless logic validation (deterministic)
   const runBrowserlessLogic = useCallback(async (signal?: AbortSignal) => {
@@ -281,29 +255,7 @@ export function BaselineInfoPanel() {
     }
   }, []);
   
-  // Run Firecrawl logic validation
-  const runFirecrawlLogic = useCallback(async (signal?: AbortSignal) => {
-    if (signal?.aborted) return;
-    setCheckingFirecrawlLogic(true);
-    setFirecrawlLogicError(null);
-    try {
-      const { data, error: invokeError } = await supabase.functions.invoke('airbnb-selftest?mode=firecrawl-canonical-check', {
-        method: 'GET',
-      });
-      
-      if (signal?.aborted) return;
-      if (invokeError) throw invokeError;
-      setFirecrawlLogic(data as CanonicalCheckResult);
-    } catch (err: any) {
-      if (signal?.aborted) return;
-      console.error('Firecrawl logic check failed:', err);
-      setFirecrawlLogicError(err?.message || 'Failed to run check');
-    } finally {
-      if (!signal?.aborted) {
-        setCheckingFirecrawlLogic(false);
-      }
-    }
-  }, []);
+  // Firecrawl logic validation removed - not used for Airbnb price discovery
   
   // Run Chain logic validation
   const runChainLogic = useCallback(async (signal?: AbortSignal) => {
@@ -377,20 +329,18 @@ export function BaselineInfoPanel() {
     
     isRunningRef.current = true;
     
-    // Run canary + logic checks in parallel
+    // Run canary + logic checks in parallel (Firecrawl removed - not used for Airbnb)
     Promise.all([
       runBrowserlessCanary(signal),
       runZyteCanary(signal),
-      runFirecrawlCanary(signal),
       runBrowserlessLogic(signal),
       runZyteLogic(signal),
-      runFirecrawlLogic(signal),
       runChainLogic(signal),
       runFinalizationLogic(signal),
     ]).finally(() => {
       isRunningRef.current = false;
     });
-  }, [runBrowserlessCanary, runZyteCanary, runFirecrawlCanary, runBrowserlessLogic, runZyteLogic, runFirecrawlLogic, runChainLogic, runFinalizationLogic]);
+  }, [runBrowserlessCanary, runZyteCanary, runBrowserlessLogic, runZyteLogic, runChainLogic, runFinalizationLogic]);
   
   // Handler for user-initiated "Check All" button
   const handleCheckAll = useCallback(() => {
@@ -411,9 +361,7 @@ export function BaselineInfoPanel() {
     runZyteCanary();
   }, [runZyteCanary]);
   
-  const handleFirecrawlCanaryRefresh = useCallback(() => {
-    runFirecrawlCanary();
-  }, [runFirecrawlCanary]);
+  // Firecrawl refresh handler removed - not used for Airbnb price discovery
 
   // Fetch baseline data on mount (once only)
   useEffect(() => {
@@ -486,9 +434,9 @@ export function BaselineInfoPanel() {
     }
   };
   
-  // Check if any checks are running
-  const isAnyCheckRunning = checkingBrowserlessCanary || checkingZyteCanary || checkingFirecrawlCanary || 
-    checkingBrowserlessLogic || checkingZyteLogic || checkingFirecrawlLogic || checkingChainLogic || checkingFinalizationLogic;
+  // Check if any checks are running (Firecrawl removed)
+  const isAnyCheckRunning = checkingBrowserlessCanary || checkingZyteCanary || 
+    checkingBrowserlessLogic || checkingZyteLogic || checkingChainLogic || checkingFinalizationLogic;
   
   // Helper to render a provider canary indicator (compact card)
   const renderCanaryIndicator = (
@@ -800,11 +748,10 @@ export function BaselineInfoPanel() {
             </div>
           </div>
           
-          {/* Three provider canary cards */}
+          {/* Provider canary cards - Browserless and Zyte only (Firecrawl not used for Airbnb) */}
           <div className="grid grid-cols-1 gap-2">
             {renderCanaryIndicator('Browserless', browserlessCanary, checkingBrowserlessCanary, browserlessCanaryError, handleBrowserlessCanaryRefresh)}
             {renderCanaryIndicator('Zyte', zyteCanary, checkingZyteCanary, zyteCanaryError, handleZyteCanaryRefresh)}
-            {renderCanaryIndicator('Firecrawl', firecrawlCanary, checkingFirecrawlCanary, firecrawlCanaryError, handleFirecrawlCanaryRefresh)}
           </div>
           
           <div className="text-[10px] text-muted-foreground">
@@ -824,7 +771,6 @@ export function BaselineInfoPanel() {
                 <div className="flex items-center gap-0.5">
                   {renderLogicCheckIndicator('B', browserlessLogic, checkingBrowserlessLogic, browserlessLogicError)}
                   {renderLogicCheckIndicator('Z', zyteLogic, checkingZyteLogic, zyteLogicError)}
-                  {renderLogicCheckIndicator('F', firecrawlLogic, checkingFirecrawlLogic, firecrawlLogicError)}
                   {renderLogicCheckIndicator('C', chainLogic, checkingChainLogic, chainLogicError)}
                 </div>
                 {showLogicChecks ? (
@@ -837,7 +783,7 @@ export function BaselineInfoPanel() {
           </CollapsibleTrigger>
           <CollapsibleContent className="mt-2">
             <div className="text-[10px] text-muted-foreground p-2 bg-muted/30 rounded">
-              Deterministic unit tests (B=Browserless, Z=Zyte, F=Firecrawl, C=Chain) validating extraction logic with mock data.
+              Deterministic unit tests (B=Browserless, Z=Zyte, C=Chain) validating extraction logic with mock data.
             </div>
           </CollapsibleContent>
         </Collapsible>
