@@ -57,6 +57,13 @@ export interface CategorizedResult {
   non_comparable_reasons: string[];
   non_comparable_user_message: string | null;
   
+  // Foreign price fallback display (for currency mismatch cases)
+  foreign_price_display: {
+    amount: number;
+    currency: string;
+    formatted: string; // e.g., "R 39,647 ZAR"
+  } | null;
+  
   // Raw data for debugging
   price_type: PriceType | null;
   outcome_category: OutcomeCategory | null;
@@ -165,12 +172,27 @@ export const NON_COMPARABLE_REASON_LABELS: Record<string, string> = {
   // From price comparison
   baseline_not_comparable: 'Airbnb price not confirmed',
   alternative_not_comparable: 'Alternative price not confirmed',
-  currency_mismatch: 'Different currency than Airbnb',
+  currency_mismatch: 'Price shown in different currency',
   nights_count_mismatch: 'Different stay duration',
   date_range_mismatch: 'Different dates than requested',
   missing_total_price: 'Price unavailable',
   incompatible_price_types: 'Cannot compare these price types',
   no_canonical_price: 'Price data incomplete',
+  
+  // Dynamic currency-specific labels (generated at runtime)
+  currency_mismatch_CAD: 'Price shown in CAD (Canadian dollars)',
+  currency_mismatch_EUR: 'Price shown in EUR (Euros)',
+  currency_mismatch_GBP: 'Price shown in GBP (British pounds)',
+  currency_mismatch_ZAR: 'Price shown in ZAR (South African Rand)',
+  currency_mismatch_AUD: 'Price shown in AUD (Australian dollars)',
+  currency_mismatch_NZD: 'Price shown in NZD (New Zealand dollars)',
+  
+  // Checkout/extraction issues
+  checkout_not_reached: 'Checkout page could not be loaded',
+  total_price_not_found: 'Total price not visible on page',
+  nightly_only_rejected: 'Only nightly rate found, no total',
+  render_failed: 'Page failed to load properly',
+  timeout: 'Request timed out',
 };
 
 // ============================================
@@ -365,6 +387,25 @@ function createResult(
     isVerified = input.price_status === 'verified';
   }
   
+  // Build foreign price display if currency is not USD
+  let foreignPriceDisplay: CategorizedResult['foreign_price_display'] = null;
+  if (canonicalPrice && canonicalPrice.currency && canonicalPrice.currency !== 'USD' && canonicalPrice.total_price) {
+    const currency = canonicalPrice.currency;
+    const amount = canonicalPrice.total_price;
+    const symbol = currency === 'EUR' ? '€' : 
+                   currency === 'GBP' ? '£' : 
+                   currency === 'ZAR' ? 'R' :
+                   currency === 'CAD' ? 'CA$' :
+                   currency === 'AUD' ? 'A$' :
+                   currency === 'NZD' ? 'NZ$' :
+                   `${currency} `;
+    foreignPriceDisplay = {
+      amount,
+      currency,
+      formatted: `${symbol}${amount.toLocaleString()} ${currency}`,
+    };
+  }
+  
   return {
     bucket,
     bucket_label: display.label,
@@ -380,6 +421,9 @@ function createResult(
     
     non_comparable_reasons: [],
     non_comparable_user_message: null,
+    
+    // Foreign price display for currency mismatch cases
+    foreign_price_display: foreignPriceDisplay,
     
     price_type: canonicalPrice?.price_type ?? null,
     outcome_category: input.outcome_category,
