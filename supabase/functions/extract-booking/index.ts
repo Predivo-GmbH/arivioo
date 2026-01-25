@@ -19,6 +19,7 @@ const corsHeaders = {
 type TerminalStatus = 
   | 'success_total_stay'
   | 'success_partial'
+  | 'unverified'
   | 'dates_unavailable'
   | 'blocked_captcha_or_bot'
   | 'blocked_rate_limit'
@@ -50,6 +51,12 @@ interface ExtractionRequest {
   adults?: number;
 }
 
+interface StructuralProofResult {
+  breakdown_found: boolean;
+  total_label_found: boolean;
+  extracted_from_breakdown_total: boolean;
+}
+
 interface ExtractionResult {
   success: boolean;
   status: TerminalStatus;
@@ -61,6 +68,12 @@ interface ExtractionResult {
   providerAttemptTrace: ProviderAttemptTrace[];
   allPricesFound: string[];
   nightsMatched: boolean;
+  datesValidated: boolean;
+  totalProven: boolean;
+  structuralProof: StructuralProofResult | null;
+  failedChecks: string[];
+  detectedCheckIn: string | null;
+  detectedCheckOut: string | null;
   durationMs: number;
   error: string | null;
 }
@@ -94,8 +107,14 @@ function detectBotBlock(content: string): boolean {
 }
 
 // ============================================================================
-// BOOKING.COM PRICE EXTRACTION - Based on successful Jan 10 pattern
+// BOOKING.COM PRICE EXTRACTION - VRBO-style strict gate pattern
 // ============================================================================
+
+interface StructuralProof {
+  breakdown_found: boolean;
+  total_label_found: boolean;
+  extracted_from_breakdown_total: boolean;
+}
 
 interface BookingPriceResult {
   totalFound: boolean;
@@ -104,9 +123,16 @@ interface BookingPriceResult {
   totalEvidence: string | null;
   allPrices: Array<{ amount: number; context: string }>;
   nightsMatched: boolean;
+  structuralProof: StructuralProof;
+  detectedCheckIn: string | null;
+  detectedCheckOut: string | null;
+  datesValidated: boolean;
+  includesTaxesFees: boolean;
+  totalProven: boolean;
+  failedChecks: string[];
 }
 
-function extractBookingTotal(content: string, nights: number): BookingPriceResult {
+function extractBookingTotal(content: string, nights: number, requestedCheckIn: string, requestedCheckOut: string): BookingPriceResult {
   const result: BookingPriceResult = {
     totalFound: false,
     totalPrice: null,
@@ -114,93 +140,309 @@ function extractBookingTotal(content: string, nights: number): BookingPriceResul
     totalEvidence: null,
     allPrices: [],
     nightsMatched: false,
+    structuralProof: {
+      breakdown_found: false,
+      total_label_found: false,
+      extracted_from_breakdown_total: false,
+    },
+    detectedCheckIn: null,
+    detectedCheckOut: null,
+    datesValidated: false,
+    includesTaxesFees: false,
+    totalProven: false,
+    failedChecks: [],
   };
 
-  // Pattern from successful extraction: "$1,012 for 3 nights"
-  const patterns = [
-    // Exact nights match - highest priority
-    new RegExp(`(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:for|\\/)\\s*${nights}\\s*nights?`, 'gi'),
-    new RegExp(`([\\d,]+(?:\\.\\d{2})?)\\s*(?:US\\$|USD|\\$)\\s*(?:for|\\/)\\s*${nights}\\s*nights?`, 'gi'),
-    // Generic "for X nights" pattern
-    /(?:US\$|\$|USD\s*)([\d,]+(?:\.\d{2})?)\s*(?:for|\/)\s*(\d+)\s*nights?/gi,
-    // "Total" patterns
-    /(?:total|price)[:\s]*(?:US\$|\$|USD\s*)([\d,]+(?:\.\d{2})?)/gi,
+  // ========================================
+  // STEP 1: Detect structural proof - breakdown container
+  // ========================================
+  const breakdownPatterns = [
+    /price\s*breakdown/i,
+    /your\s*price\s*summary/i,
+    /price\s*details/i,
+    /booking\s*summary/i,
+    /price\s*summary/i,
+    /cost\s*breakdown/i,
+    /total\s*cost/i,
+  ];
+  
+  for (const pattern of breakdownPatterns) {
+    if (pattern.test(content)) {
+      result.structuralProof.breakdown_found = true;
+      break;
+    }
+  }
+
+  // ========================================
+  // STEP 2: Detect total label
+  // ========================================
+  const totalLabelPatterns = [
+    /(?:grand\s*)?total(?:\s*:|\s*\(|\s*for)/i,
+    /total\s*price/i,
+    /total\s*amount/i,
+    /total\s*cost/i,
+    /amount\s*due/i,
+    /you\s*pay/i,
+    /price\s*for\s*\d+\s*nights?/i,
+  ];
+  
+  for (const pattern of totalLabelPatterns) {
+    if (pattern.test(content)) {
+      result.structuralProof.total_label_found = true;
+      break;
+    }
+  }
+
+  // ========================================
+  // STEP 3: Detect taxes/fees inclusion
+  // ========================================
+  const taxesIncludedPatterns = [
+    /includes?\s*(?:all\s*)?taxes/i,
+    /tax(?:es)?\s*(?:&|and)\s*fees?\s*included/i,
+    /includes?\s*(?:all\s*)?fees/i,
+    /total\s*(?:includes?|incl\.?)\s*(?:taxes|fees)/i,
+    /(?:taxes|fees)\s*included/i,
+    /no\s*hidden\s*(?:fees|charges)/i,
+    /all\s*(?:taxes|charges)\s*included/i,
+    /\+\s*(?:US\$|\$|USD\s*)[\d,]+(?:\.\d{2})?\s*(?:taxes|fees)/i,
+    /taxes\s*(?:&|and)\s*(?:charges|fees)/i,
   ];
 
-  const foundPrices: Array<{ amount: number; context: string; nightsMatch: boolean; priority: number }> = [];
+  for (const pattern of taxesIncludedPatterns) {
+    if (pattern.test(content)) {
+      result.includesTaxesFees = true;
+      break;
+    }
+  }
+
+  // ========================================
+  // STEP 4: Detect dates on page
+  // ========================================
+  // Look for date patterns like "Jan 15, 2025" or "2025-01-15" or "15 Jan 2025"
+  const datePatterns = [
+    // ISO format: 2025-01-15
+    /(\d{4}-\d{2}-\d{2})/g,
+    // US format: Jan 15, 2025 or January 15, 2025
+    /((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})/gi,
+    // EU format: 15 Jan 2025
+    /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})/gi,
+  ];
+
+  const foundDates: string[] = [];
+  for (const pattern of datePatterns) {
+    const matches = content.match(pattern);
+    if (matches) {
+      foundDates.push(...matches);
+    }
+  }
+
+  // Try to match requested dates
+  const checkInDate = new Date(requestedCheckIn);
+  const checkOutDate = new Date(requestedCheckOut);
+  
+  const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const checkInMonth = monthNames[checkInDate.getMonth()];
+  const checkOutMonth = monthNames[checkOutDate.getMonth()];
+  const checkInDay = checkInDate.getDate();
+  const checkOutDay = checkOutDate.getDate();
+  const checkInYear = checkInDate.getFullYear();
+  const checkOutYear = checkOutDate.getFullYear();
+
+  // Check if requested dates appear on page
+  const checkInPatterns = [
+    new RegExp(`${checkInMonth}[a-z]*\\.?\\s*${checkInDay}`, 'i'),
+    new RegExp(`${checkInDay}\\s*${checkInMonth}`, 'i'),
+    new RegExp(`${requestedCheckIn}`, 'i'),
+  ];
+  
+  const checkOutPatterns = [
+    new RegExp(`${checkOutMonth}[a-z]*\\.?\\s*${checkOutDay}`, 'i'),
+    new RegExp(`${checkOutDay}\\s*${checkOutMonth}`, 'i'),
+    new RegExp(`${requestedCheckOut}`, 'i'),
+  ];
+
+  let checkInFound = false;
+  let checkOutFound = false;
+
+  for (const pattern of checkInPatterns) {
+    if (pattern.test(content)) {
+      checkInFound = true;
+      result.detectedCheckIn = requestedCheckIn;
+      break;
+    }
+  }
+
+  for (const pattern of checkOutPatterns) {
+    if (pattern.test(content)) {
+      checkOutFound = true;
+      result.detectedCheckOut = requestedCheckOut;
+      break;
+    }
+  }
+
+  result.datesValidated = checkInFound && checkOutFound;
+
+  // ========================================
+  // STEP 5: Extract prices with structural context
+  // ========================================
+  const foundPrices: Array<{ 
+    amount: number; 
+    context: string; 
+    nightsMatch: boolean; 
+    priority: number;
+    fromBreakdownTotal: boolean;
+  }> = [];
   const seen = new Set<number>();
 
-  // Pass 1: Exact nights match
-  for (let i = 0; i < 2; i++) {
+  // Pattern 1: Total with exact nights match (highest priority, from breakdown)
+  const exactNightsPatterns = [
+    new RegExp(`(?:total|price)[:\\s]*(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:for|\\/)?\\s*${nights}\\s*nights?`, 'gi'),
+    new RegExp(`(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:for|\\/)?\\s*${nights}\\s*nights?`, 'gi'),
+  ];
+
+  for (const pattern of exactNightsPatterns) {
     let match;
-    while ((match = patterns[i].exec(content)) !== null) {
+    while ((match = pattern.exec(content)) !== null) {
       const amountStr = match[1].replace(/,/g, '');
       const amount = parseFloat(amountStr);
       
       if (amount > 50 && !seen.has(amount)) {
         seen.add(amount);
-        const start = Math.max(0, match.index - 50);
-        const end = Math.min(content.length, match.index + match[0].length + 50);
+        const start = Math.max(0, match.index - 80);
+        const end = Math.min(content.length, match.index + match[0].length + 80);
         const context = content.slice(start, end).replace(/\n/g, ' ').trim();
-        foundPrices.push({ amount, context, nightsMatch: true, priority: 1 });
+        
+        // Check if this is from a breakdown/total context
+        const isFromBreakdown = /(?:total|price\s*breakdown|summary|amount\s*due)/i.test(context);
+        
+        foundPrices.push({ 
+          amount, 
+          context, 
+          nightsMatch: true, 
+          priority: 1,
+          fromBreakdownTotal: isFromBreakdown,
+        });
       }
     }
   }
 
-  // Pass 2: Generic nights pattern
+  // Pattern 2: Generic "for X nights" (may not match requested nights)
+  const genericNightsPattern = /(?:US\$|\$|USD\s*)([\d,]+(?:\.\d{2})?)\s*(?:for|\/)\s*(\d+)\s*nights?/gi;
   let match;
-  while ((match = patterns[2].exec(content)) !== null) {
+  while ((match = genericNightsPattern.exec(content)) !== null) {
     const amountStr = match[1].replace(/,/g, '');
     const amount = parseFloat(amountStr);
     const matchedNights = parseInt(match[2]);
     
     if (amount > 50 && !seen.has(amount)) {
       seen.add(amount);
-      const start = Math.max(0, match.index - 50);
-      const end = Math.min(content.length, match.index + match[0].length + 50);
+      const start = Math.max(0, match.index - 80);
+      const end = Math.min(content.length, match.index + match[0].length + 80);
       const context = content.slice(start, end).replace(/\n/g, ' ').trim();
+      
+      const isFromBreakdown = /(?:total|price\s*breakdown|summary|amount\s*due)/i.test(context);
+      
       foundPrices.push({ 
         amount, 
         context, 
         nightsMatch: matchedNights === nights,
-        priority: matchedNights === nights ? 1 : 2
+        priority: matchedNights === nights ? 1 : 2,
+        fromBreakdownTotal: isFromBreakdown,
       });
     }
   }
 
-  // Pass 3: Total patterns
-  while ((match = patterns[3].exec(content)) !== null) {
-    const amountStr = match[1].replace(/,/g, '');
-    const amount = parseFloat(amountStr);
-    
-    if (amount > 50 && !seen.has(amount)) {
-      seen.add(amount);
-      const start = Math.max(0, match.index - 50);
-      const end = Math.min(content.length, match.index + match[0].length + 50);
-      const context = content.slice(start, end).replace(/\n/g, ' ').trim();
-      foundPrices.push({ amount, context, nightsMatch: false, priority: 3 });
+  // Pattern 3: Total label patterns (explicit total)
+  const totalPatterns = [
+    /(?:grand\s*)?total[:\s]*(?:US\$|\$|USD\s*)([\d,]+(?:\.\d{2})?)/gi,
+    /(?:amount\s*due|you\s*pay)[:\s]*(?:US\$|\$|USD\s*)([\d,]+(?:\.\d{2})?)/gi,
+    /(?:US\$|\$|USD\s*)([\d,]+(?:\.\d{2})?)\s*(?:grand\s*)?total/gi,
+  ];
+
+  for (const pattern of totalPatterns) {
+    while ((match = pattern.exec(content)) !== null) {
+      const amountStr = match[1].replace(/,/g, '');
+      const amount = parseFloat(amountStr);
+      
+      if (amount > 50 && !seen.has(amount)) {
+        seen.add(amount);
+        const start = Math.max(0, match.index - 80);
+        const end = Math.min(content.length, match.index + match[0].length + 80);
+        const context = content.slice(start, end).replace(/\n/g, ' ').trim();
+        
+        foundPrices.push({ 
+          amount, 
+          context, 
+          nightsMatch: false, // Can't confirm nights from this pattern alone
+          priority: 3,
+          fromBreakdownTotal: true, // It's explicitly labeled as total
+        });
+      }
     }
   }
 
-  // Sort: prioritize exact nights match, then by lowest price
+  // Sort: prioritize exact nights match from breakdown, then by priority
   foundPrices.sort((a, b) => {
+    // Prefer breakdown totals with nights match
+    if (a.fromBreakdownTotal && a.nightsMatch && !(b.fromBreakdownTotal && b.nightsMatch)) return -1;
+    if (b.fromBreakdownTotal && b.nightsMatch && !(a.fromBreakdownTotal && a.nightsMatch)) return 1;
     if (a.priority !== b.priority) return a.priority - b.priority;
     return a.amount - b.amount;
   });
 
   result.allPrices = foundPrices.map(p => ({ amount: p.amount, context: p.context }));
 
-  console.log(`[BOOKING] Found ${foundPrices.length} prices: ${foundPrices.map(p => `$${p.amount}${p.nightsMatch ? '*' : ''}`).join(', ')}`);
+  console.log(`[BOOKING] Found ${foundPrices.length} prices: ${foundPrices.map(p => `$${p.amount}${p.nightsMatch ? '*' : ''}${p.fromBreakdownTotal ? '†' : ''}`).join(', ')}`);
 
+  // ========================================
+  // STEP 6: Select best price and validate TOTAL_PROVEN
+  // ========================================
   if (foundPrices.length > 0) {
     const best = foundPrices[0];
     result.totalFound = true;
     result.totalPrice = best.amount;
     result.currency = 'USD';
-    result.totalEvidence = best.context.slice(0, 200);
+    result.totalEvidence = best.context.slice(0, 300);
     result.nightsMatched = best.nightsMatch;
+    result.structuralProof.extracted_from_breakdown_total = best.fromBreakdownTotal;
 
-    console.log(`[BOOKING] ACCEPTED: $${best.amount}, nights_matched=${best.nightsMatch}`);
+    // ========================================
+    // STEP 7: Compute TOTAL_PROVEN
+    // ========================================
+    const failedChecks: string[] = [];
+
+    if (!result.structuralProof.breakdown_found) {
+      failedChecks.push('breakdown_not_found');
+    }
+    if (!result.structuralProof.total_label_found) {
+      failedChecks.push('total_label_not_found');
+    }
+    if (!result.structuralProof.extracted_from_breakdown_total) {
+      failedChecks.push('not_extracted_from_breakdown_total');
+    }
+    if (!result.datesValidated) {
+      failedChecks.push('dates_not_validated');
+    }
+    if (!result.nightsMatched) {
+      failedChecks.push('nights_not_matched');
+    }
+    if (!result.includesTaxesFees) {
+      failedChecks.push('taxes_fees_not_confirmed');
+    }
+
+    result.failedChecks = failedChecks;
+    result.totalProven = failedChecks.length === 0;
+
+    // Logging per requirements
+    console.log(`[BOOKING] total_proven=${result.totalProven}`);
+    console.log(`[BOOKING] breakdown_found=${result.structuralProof.breakdown_found} total_label_found=${result.structuralProof.total_label_found} extracted_from_breakdown_total=${result.structuralProof.extracted_from_breakdown_total}`);
+    console.log(`[BOOKING] dates_validated=${result.datesValidated} nightsMatched=${result.nightsMatched} includes_taxes_fees=${result.includesTaxesFees}`);
+    
+    if (!result.totalProven) {
+      console.log(`[BOOKING] REJECTED: failed_checks=[${failedChecks.join(', ')}]`);
+    } else {
+      console.log(`[BOOKING] ACCEPTED: $${best.amount} TOTAL_PROVEN=true`);
+    }
   }
 
   return result;
@@ -463,6 +705,12 @@ Deno.serve(async (req) => {
     providerAttemptTrace: [],
     allPricesFound: [],
     nightsMatched: false,
+    datesValidated: false,
+    totalProven: false,
+    structuralProof: null,
+    failedChecks: [],
+    detectedCheckIn: null,
+    detectedCheckOut: null,
     durationMs: 0,
     error: null,
   };
@@ -644,20 +892,40 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Extract prices
-    const priceResult = extractBookingTotal(content, nights);
+    // Extract prices with VRBO-style strict gate
+    const priceResult = extractBookingTotal(content, nights, checkIn, checkOut);
+    
+    // Populate result fields from price extraction
     result.allPricesFound = priceResult.allPrices.map(p => `$${p.amount}`);
     result.nightsMatched = priceResult.nightsMatched;
+    result.datesValidated = priceResult.datesValidated;
+    result.totalProven = priceResult.totalProven;
+    result.structuralProof = priceResult.structuralProof;
+    result.failedChecks = priceResult.failedChecks;
+    result.detectedCheckIn = priceResult.detectedCheckIn;
+    result.detectedCheckOut = priceResult.detectedCheckOut;
+    result.includesTaxesFees = priceResult.includesTaxesFees;
 
+    // ========================================
+    // VRBO-STYLE STRICT GATE: Only success_total_stay when TOTAL_PROVEN
+    // ========================================
     if (priceResult.totalFound && priceResult.totalPrice) {
-      result.success = true;
-      result.status = 'success_total_stay';
       result.extractedPrice = priceResult.totalPrice;
       result.currency = priceResult.currency;
-      result.includesTaxesFees = true;
       result.evidenceSnippet = priceResult.totalEvidence;
       
-      console.log(`[BOOKING] SUCCESS: $${priceResult.totalPrice} via ${providerUsed}`);
+      if (priceResult.totalProven) {
+        // ALL checks passed - legitimate comparable total
+        result.success = true;
+        result.status = 'success_total_stay';
+        console.log(`[BOOKING] SUCCESS: $${priceResult.totalPrice} via ${providerUsed} - TOTAL_PROVEN=true`);
+      } else {
+        // Price found but not proven - downgrade to unverified (maps to not_comparable bucket)
+        result.success = false;
+        result.status = 'unverified';
+        result.error = `Price found but not TOTAL_PROVEN: failed_checks=[${priceResult.failedChecks.join(', ')}]`;
+        console.log(`[BOOKING] UNVERIFIED: $${priceResult.totalPrice} - TOTAL_PROVEN=false, failed_checks=[${priceResult.failedChecks.join(', ')}]`);
+      }
     } else {
       result.status = 'price_not_found';
       result.error = `No total price found for ${nights} nights`;
@@ -666,7 +934,9 @@ Deno.serve(async (req) => {
     result.durationMs = Date.now() - startTime;
 
     // Update DB if extractionId provided
-    if (extractionId && supabase && result.success) {
+    if (extractionId && supabase) {
+      const priceType = priceResult.totalProven ? 'TOTAL_STAY' : 'UNKNOWN';
+      
       await supabase
         .from('price_extractions')
         .update({
@@ -676,14 +946,21 @@ Deno.serve(async (req) => {
           includes_taxes_fees: result.includesTaxesFees,
           provider_used: result.providerUsed,
           evidence_snippets: result.evidenceSnippet ? [result.evidenceSnippet] : null,
+          dates_validated: result.datesValidated,
+          detected_checkin: result.detectedCheckIn,
+          detected_checkout: result.detectedCheckOut,
           extraction_metadata: {
             providerAttemptTrace: result.providerAttemptTrace,
             allPricesFound: result.allPricesFound,
             nightsMatched: result.nightsMatched,
+            datesValidated: result.datesValidated,
+            totalProven: result.totalProven,
+            structuralProof: result.structuralProof,
+            failedChecks: result.failedChecks,
             durationMs: result.durationMs,
           },
           extraction_error: result.error,
-          price_type: 'TOTAL_STAY',
+          price_type: priceType,
           updated_at: new Date().toISOString(),
         })
         .eq('id', extractionId);

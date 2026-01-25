@@ -282,6 +282,16 @@ export function classifyOutcome(
     }
   }
 
+  // 2b. Unverified status - price found but not TOTAL_PROVEN (Booking.com gate)
+  // Maps to price_unverified which renders in not_comparable bucket
+  if (status === 'unverified') {
+    return {
+      category: 'price_unverified',
+      reasonCode: 'total_not_proven',
+      isTerminal: true,
+    };
+  }
+
   // 3. Dates unavailable / sold out (NOT an error)
   if (UNAVAILABLE_STATUSES.has(status) || (unavailabilityMarker && unavailabilityMarker.toLowerCase().includes('sold out'))) {
     return {
