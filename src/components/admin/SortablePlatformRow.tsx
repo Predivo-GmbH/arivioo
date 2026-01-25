@@ -44,6 +44,15 @@ interface SortablePlatformRowProps {
   onClearNew?: (platformId: string) => void;
 }
 
+function VariantTierBadge() {
+  // Variants inherit tier from parent - shown as a muted dash indicator
+  return (
+    <Badge variant="outline" className="text-xs bg-muted/50 text-muted-foreground border-muted">
+      —
+    </Badge>
+  );
+}
+
 function VariantStatusBadge({ status }: { status: string }) {
   const config: Record<string, { className: string; label: string }> = {
     needs_coverage: { className: 'bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30', label: 'Needs Coverage' },
@@ -135,9 +144,7 @@ export function SortablePlatformRow({ platform, variants = [], TierBadge, Status
         </TableCell>
         <TableCell className="text-sm">
           <span className="text-green-600">{platform.total_successes || 0}</span>
-          {(platform.total_failures || 0) > 0 && (
-            <span className="text-red-500 ml-1">/ {platform.total_failures}</span>
-          )}
+          <span className="text-red-500 ml-1">/ {platform.total_failures || 0}</span>
         </TableCell>
         <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
           {platform.tier_reason || platform.coverage_reason || '-'}
@@ -165,41 +172,46 @@ export function SortablePlatformRow({ platform, variants = [], TierBadge, Status
         </TableCell>
       </TableRow>
       {/* Render variants as sub-rows */}
-      {variants.map((variant) => (
-        <TableRow key={variant.id} className="bg-muted/30">
-          <TableCell className="w-8"></TableCell>
-          <TableCell className="font-medium pl-8">
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">└</span>
-              {displayName} ({getCountryDisplayName(variant.detected_country)})
-              <AlertTriangle className="h-3 w-3 text-amber-500" />
-            </div>
-          </TableCell>
-          <TableCell className="text-muted-foreground text-xs">
-            {variant.coverage_variant_key}
-          </TableCell>
-          <TableCell>
-            <Badge variant="outline" className="text-xs bg-muted">Inherited</Badge>
-          </TableCell>
-          <TableCell>
-            <VariantStatusBadge status={variant.variant_status} />
-          </TableCell>
-          <TableCell className="text-sm">
-            {variant.total_attempts || 0}
-          </TableCell>
-          <TableCell className="text-sm">
-            <span className="text-red-500">{variant.structural_failures || 0}</span>
-            <span className="text-muted-foreground text-xs ml-1">struct</span>
-          </TableCell>
-          <TableCell className="text-xs text-muted-foreground" colSpan={2}>
-            Different regional extraction logic detected
-          </TableCell>
-          <TableCell className="text-xs text-muted-foreground">
-            {new Date(variant.last_seen_at).toLocaleDateString()}
-          </TableCell>
-          <TableCell></TableCell>
-        </TableRow>
-      ))}
+      {variants.map((variant) => {
+        const variantSuccesses = (variant.total_attempts || 0) - (variant.structural_failures || 0) - (variant.transient_failures || 0);
+        const variantFailures = (variant.structural_failures || 0) + (variant.transient_failures || 0);
+        
+        return (
+          <TableRow key={variant.id} className="bg-muted/30">
+            <TableCell className="w-8"></TableCell>
+            <TableCell className="font-medium pl-8">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground">└</span>
+                {displayName} ({getCountryDisplayName(variant.detected_country)})
+                <AlertTriangle className="h-3 w-3 text-amber-500" />
+              </div>
+            </TableCell>
+            <TableCell className="text-muted-foreground text-xs">
+              {variant.coverage_variant_key}
+            </TableCell>
+            <TableCell>
+              <VariantTierBadge />
+            </TableCell>
+            <TableCell>
+              <VariantStatusBadge status={variant.variant_status} />
+            </TableCell>
+            <TableCell className="text-sm">
+              {variant.total_attempts || 0}
+            </TableCell>
+            <TableCell className="text-sm">
+              <span className="text-green-600">{variantSuccesses}</span>
+              <span className="text-red-500 ml-1">/ {variantFailures}</span>
+            </TableCell>
+            <TableCell className="text-xs text-muted-foreground" colSpan={2}>
+              Different regional extraction logic detected
+            </TableCell>
+            <TableCell className="text-xs text-muted-foreground">
+              {new Date(variant.last_seen_at).toLocaleDateString()}
+            </TableCell>
+            <TableCell></TableCell>
+          </TableRow>
+        );
+      })}
     </>
   );
 }
