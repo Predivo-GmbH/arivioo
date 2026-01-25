@@ -1138,6 +1138,83 @@ export type Database = {
         }
         Relationships: []
       }
+      platform_coverage_variants: {
+        Row: {
+          coverage_variant_key: string
+          created_at: string
+          detected_country: string | null
+          detected_locale: string | null
+          detected_tld: string | null
+          detection_count: number
+          extraction_flow_signature: Json | null
+          first_detected_at: string
+          id: string
+          inherited_tier: string | null
+          last_seen_at: string
+          parent_adapter_id: string | null
+          parent_platform_domain: string
+          sample_urls: Json | null
+          structural_failures: number
+          total_attempts: number
+          transient_failures: number
+          updated_at: string
+          variant_reason: string | null
+          variant_status: string
+        }
+        Insert: {
+          coverage_variant_key: string
+          created_at?: string
+          detected_country?: string | null
+          detected_locale?: string | null
+          detected_tld?: string | null
+          detection_count?: number
+          extraction_flow_signature?: Json | null
+          first_detected_at?: string
+          id?: string
+          inherited_tier?: string | null
+          last_seen_at?: string
+          parent_adapter_id?: string | null
+          parent_platform_domain: string
+          sample_urls?: Json | null
+          structural_failures?: number
+          total_attempts?: number
+          transient_failures?: number
+          updated_at?: string
+          variant_reason?: string | null
+          variant_status?: string
+        }
+        Update: {
+          coverage_variant_key?: string
+          created_at?: string
+          detected_country?: string | null
+          detected_locale?: string | null
+          detected_tld?: string | null
+          detection_count?: number
+          extraction_flow_signature?: Json | null
+          first_detected_at?: string
+          id?: string
+          inherited_tier?: string | null
+          last_seen_at?: string
+          parent_adapter_id?: string | null
+          parent_platform_domain?: string
+          sample_urls?: Json | null
+          structural_failures?: number
+          total_attempts?: number
+          transient_failures?: number
+          updated_at?: string
+          variant_reason?: string | null
+          variant_status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "platform_coverage_variants_parent_adapter_id_fkey"
+            columns: ["parent_adapter_id"]
+            isOneToOne: false
+            referencedRelation: "platform_adapters"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       price_extractions: {
         Row: {
           assumed_adults: number | null
@@ -1151,9 +1228,11 @@ export type Database = {
           deep_link: string
           detected_checkin: string | null
           detected_checkout: string | null
+          detected_variant_key: string | null
           evidence_snippets: Json | null
           extracted_price: number | null
           extraction_error: string | null
+          extraction_flow_signature: Json | null
           extraction_metadata: Json | null
           extraction_stage: string | null
           extraction_status: string
@@ -1169,6 +1248,7 @@ export type Database = {
           search_id: string | null
           search_result_id: string | null
           updated_at: string
+          variant_mismatch: boolean | null
         }
         Insert: {
           assumed_adults?: number | null
@@ -1182,9 +1262,11 @@ export type Database = {
           deep_link: string
           detected_checkin?: string | null
           detected_checkout?: string | null
+          detected_variant_key?: string | null
           evidence_snippets?: Json | null
           extracted_price?: number | null
           extraction_error?: string | null
+          extraction_flow_signature?: Json | null
           extraction_metadata?: Json | null
           extraction_stage?: string | null
           extraction_status?: string
@@ -1200,6 +1282,7 @@ export type Database = {
           search_id?: string | null
           search_result_id?: string | null
           updated_at?: string
+          variant_mismatch?: boolean | null
         }
         Update: {
           assumed_adults?: number | null
@@ -1213,9 +1296,11 @@ export type Database = {
           deep_link?: string
           detected_checkin?: string | null
           detected_checkout?: string | null
+          detected_variant_key?: string | null
           evidence_snippets?: Json | null
           extracted_price?: number | null
           extraction_error?: string | null
+          extraction_flow_signature?: Json | null
           extraction_metadata?: Json | null
           extraction_stage?: string | null
           extraction_status?: string
@@ -1231,6 +1316,7 @@ export type Database = {
           search_id?: string | null
           search_result_id?: string | null
           updated_at?: string
+          variant_mismatch?: boolean | null
         }
         Relationships: [
           {
