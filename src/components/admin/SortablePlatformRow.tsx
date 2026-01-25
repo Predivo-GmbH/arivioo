@@ -55,8 +55,8 @@ function VariantTierBadge() {
 
 function VariantStatusBadge({ status }: { status: string }) {
   const config: Record<string, { className: string; label: string }> = {
-    needs_coverage: { className: 'bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30', label: 'Needs Coverage' },
-    covered: { className: 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border-emerald-500/30', label: 'Covered' },
+    needs_coverage: { className: 'bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30', label: 'Needs Work' },
+    covered: { className: 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border-emerald-500/30', label: 'Working' },
     investigating: { className: 'bg-blue-500/20 text-blue-700 dark:text-blue-400 border-blue-500/30', label: 'Investigating' },
     wont_fix: { className: 'bg-muted text-muted-foreground border-muted', label: "Won't Fix" },
   };
