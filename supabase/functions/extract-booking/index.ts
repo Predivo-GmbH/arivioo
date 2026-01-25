@@ -96,15 +96,24 @@ function buildBookingUrl(baseUrl: string, checkIn: string, checkOut: string, adu
 
 function detectBotBlock(content: string): boolean {
   const lowerContent = content.toLowerCase();
-  // Only flag actual bot blocks, not normal "sign in" text
-  return (
-    lowerContent.includes('captcha') ||
-    lowerContent.includes('unusual traffic') ||
-    lowerContent.includes('access denied') ||
-    lowerContent.includes('please verify you are human') ||
-    (lowerContent.includes('verifying') && lowerContent.includes('please wait')) ||
-    (lowerContent.includes('verifying') && lowerContent.includes('booking.com'))
-  );
+  
+  // Check for actual bot blocking signals (not normal page content)
+  const hasUnusualTraffic = lowerContent.includes('unusual traffic');
+  const hasAccessDenied = lowerContent.includes('access denied') && !lowerContent.includes('property');
+  const hasCaptcha = lowerContent.includes('captcha');
+  const hasHumanVerify = lowerContent.includes('please verify you are human');
+  const hasVerifyingWait = lowerContent.includes('verifying') && lowerContent.includes('please wait') && lowerContent.length < 5000;
+  
+  // "verifying booking.com" only counts as block if content is very short (actual block page)
+  const hasVerifyingBooking = lowerContent.includes('verifying') && lowerContent.includes('booking.com') && lowerContent.length < 5000;
+  
+  const isBlocked = hasCaptcha || hasUnusualTraffic || hasAccessDenied || hasHumanVerify || hasVerifyingWait || hasVerifyingBooking;
+  
+  if (isBlocked) {
+    console.log(`[BOOKING] Bot block detected: captcha=${hasCaptcha}, unusual=${hasUnusualTraffic}, denied=${hasAccessDenied}, human=${hasHumanVerify}, verifyWait=${hasVerifyingWait}, verifyBooking=${hasVerifyingBooking}`);
+  }
+  
+  return isBlocked;
 }
 
 // ============================================================================
@@ -278,6 +287,11 @@ function extractBookingTotal(content: string, nights: number, requestedCheckIn: 
     /price\s*summary/i,
     /cost\s*breakdown/i,
     /total\s*cost/i,
+    // Booking.com specific
+    /\d+\s*nights?[^$]*(?:US\$|\$|USD\s?)[\d,]+/i,  // "5 nights ... $335"
+    /(?:US\$|\$|USD\s?)[\d,]+[^a-z]*\d+\s*nights?/i, // "$335 ... 5 nights"
+    /your\s*price/i,
+    /price\s*\$[\d,]+/i, // "Price $335"
   ];
   
   for (const pattern of breakdownPatterns) {
@@ -320,6 +334,10 @@ function extractBookingTotal(content: string, nights: number, requestedCheckIn: 
     /all\s*(?:taxes|charges)\s*included/i,
     /\+\s*(?:US\$|\$|USD\s*)[\d,]+(?:\.\d{2})?\s*(?:taxes|fees)/i,
     /taxes\s*(?:&|and)\s*(?:charges|fees)/i,
+    // Booking.com specific: "Included: ZAR 450 Cleaning fee"
+    /included:?\s*(?:ZAR|USD|EUR|\$|€)?[\d,.\s]*(?:cleaning|service|resort)\s*fee/i,
+    // Fee breakdown visible
+    /(?:cleaning|service|resort|booking)\s*fee\s*(?:per\s*stay)?/i,
   ];
 
   for (const pattern of taxesIncludedPatterns) {
@@ -409,9 +427,16 @@ function extractBookingTotal(content: string, nights: number, requestedCheckIn: 
   const seen = new Set<number>();
 
   // Pattern 1: Total with exact nights match (highest priority, from breakdown)
+  // Booking.com format: "$335<br>5 nights" or "$335\n5 nights" or "$335 5 nights"
   const exactNightsPatterns = [
-    new RegExp(`(?:total|price)[:\\s]*(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:for|\\/)?\\s*${nights}\\s*nights?`, 'gi'),
-    new RegExp(`(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:for|\\/)?\\s*${nights}\\s*nights?`, 'gi'),
+    // Classic: $335 for 5 nights or $335 / 5 nights
+    new RegExp(`(?:total|price)?[:\\s]*(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:for|\\/)?\\s*${nights}\\s*nights?`, 'gi'),
+    // Booking.com format: $335<br>5 nights or $335 <br> 5 nights
+    new RegExp(`(?:US\\$|\\$|USD\\s?)([\\d,]+(?:\\.\\d{2})?)(?:<br>|\\s)*${nights}\\s*nights?`, 'gi'),
+    // Newline separated: $335\n5 nights
+    new RegExp(`(?:US\\$|\\$|USD\\s?)([\\d,]+(?:\\.\\d{2})?)\\n+\\s*${nights}\\s*nights?`, 'gi'),
+    // With "Price" label: Price $335 5 nights
+    new RegExp(`Price[:\\s]*(?:US\\$|\\$|USD\\s?)([\\d,]+(?:\\.\\d{2})?)\\s*${nights}\\s*nights?`, 'gi'),
   ];
 
   for (const pattern of exactNightsPatterns) {
@@ -426,15 +451,17 @@ function extractBookingTotal(content: string, nights: number, requestedCheckIn: 
         const end = Math.min(content.length, match.index + match[0].length + 80);
         const context = content.slice(start, end).replace(/\n/g, ' ').trim();
         
-        // Check if this is from a breakdown/total context
-        const isFromBreakdown = /(?:total|price\s*breakdown|summary|amount\s*due)/i.test(context);
+        // Price matched directly with nights count = structural proof of stay total
+        // Additional breakdown context indicators strengthen the proof
+        const hasBreakdownContext = /(?:total|price|summary|amount\s*due|your\s*price|included|fee)/i.test(context);
         
         foundPrices.push({ 
           amount, 
           context, 
           nightsMatch: true, 
           priority: 1,
-          fromBreakdownTotal: isFromBreakdown,
+          // Always true for exact nights match - the nights count IS structural proof
+          fromBreakdownTotal: true,
         });
       }
     }
@@ -495,7 +522,43 @@ function extractBookingTotal(content: string, nights: number, requestedCheckIn: 
     }
   }
 
-  // Sort: prioritize exact nights match from breakdown, then by priority
+  // Pattern 4: Proximity-based matching - price and nights within 100 chars
+  // This catches Booking.com's format: "$335<br>Price<br>$335<br>5 nights"
+  if (foundPrices.length === 0) {
+    const nightsPattern = new RegExp(`${nights}\\s*nights?`, 'gi');
+    const pricePattern = /(?:US\$|\$|USD\s?)([\d,]+(?:\.\d{2})?)/g;
+    
+    let nightsMatch;
+    while ((nightsMatch = nightsPattern.exec(content)) !== null) {
+      const nightsIndex = nightsMatch.index;
+      // Look for prices within 100 chars before or after the nights mention
+      const searchStart = Math.max(0, nightsIndex - 100);
+      const searchEnd = Math.min(content.length, nightsIndex + nightsMatch[0].length + 100);
+      const searchArea = content.slice(searchStart, searchEnd);
+      
+      let priceMatch;
+      pricePattern.lastIndex = 0;
+      while ((priceMatch = pricePattern.exec(searchArea)) !== null) {
+        const amountStr = priceMatch[1].replace(/,/g, '');
+        const amount = parseFloat(amountStr);
+        
+        // Only accept reasonable total prices (not per-night amounts)
+        if (amount > 100 && amount < 50000 && !seen.has(amount)) {
+          seen.add(amount);
+          const context = searchArea.replace(/\n/g, ' ').trim().slice(0, 200);
+          
+          foundPrices.push({ 
+            amount, 
+            context, 
+            nightsMatch: true, 
+            priority: 2,
+            fromBreakdownTotal: true, // Found near nights count
+          });
+        }
+      }
+    }
+  }
+
   foundPrices.sort((a, b) => {
     // Prefer breakdown totals with nights match
     if (a.fromBreakdownTotal && a.nightsMatch && !(b.fromBreakdownTotal && b.nightsMatch)) return -1;
@@ -625,8 +688,15 @@ async function extractWithFirecrawl(url: string): Promise<{
     
     console.log(`[BOOKING] Firecrawl returned ${markdown.length} chars`);
 
+    // Validate content is meaningful (not a block page or empty shell)
+    const hasPrice = /(?:US\$|\$|USD\s*)[\d,]+(?:\.\d{2})?/.test(markdown);
+    const hasNights = /\d+\s*nights?/i.test(markdown);
+    const isContentMeaningful = markdown.length > 3000 && (hasPrice || hasNights);
+    
+    console.log(`[BOOKING] Firecrawl content check: hasPrice=${hasPrice}, hasNights=${hasNights}, meaningful=${isContentMeaningful}`);
+
     result.content = markdown;
-    result.success = markdown.length > 3000;
+    result.success = isContentMeaningful;
     result.durationMs = Date.now() - start;
 
     return result;
@@ -904,15 +974,20 @@ Deno.serve(async (req) => {
     firecrawlTrace.httpStatus = firecrawlResult.httpStatus;
     firecrawlTrace.contentLength = firecrawlResult.content.length;
 
-    if (firecrawlResult.success && firecrawlResult.content.length > 3000 && !detectBotBlock(firecrawlResult.content)) {
+    const isBotBlocked = detectBotBlock(firecrawlResult.content);
+    
+    if (firecrawlResult.success && firecrawlResult.content.length > 3000 && !isBotBlocked) {
       firecrawlTrace.outcome = 'success';
       content = firecrawlResult.content;
       providerUsed = 'firecrawl';
       console.log(`[BOOKING] Firecrawl succeeded with ${content.length} chars`);
     } else {
-      firecrawlTrace.outcome = firecrawlResult.error || 'insufficient_content';
+      const reason = !firecrawlResult.success ? 'not_successful' : 
+                     firecrawlResult.content.length <= 3000 ? 'content_too_short' :
+                     isBotBlocked ? 'bot_blocked' : 'unknown';
+      firecrawlTrace.outcome = firecrawlResult.error || reason;
       firecrawlTrace.errorMessage = firecrawlResult.error;
-      console.log(`[BOOKING] Firecrawl failed: ${firecrawlResult.error || 'insufficient content'}`);
+      console.log(`[BOOKING] Firecrawl failed: ${reason} (success=${firecrawlResult.success}, len=${firecrawlResult.content.length}, botBlocked=${isBotBlocked})`);
     }
     providerAttemptTrace.push(firecrawlTrace);
 
