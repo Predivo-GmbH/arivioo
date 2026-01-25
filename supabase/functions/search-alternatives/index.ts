@@ -2004,13 +2004,16 @@ async function compareImagesWithTwoPass(
     altUrlHash
   );
   
-  // Determine authority based on PASS 2 score
+  // Determine authority based on PASS 1 score OR PASS 2 confirmation
+  // FIX: If PASS 1 alone is >= AUTHORITY_THRESHOLD (90%), trust it regardless of PASS 2
   const pass2Score = pass2.isSame ? pass2.confidence : 0;
-  const isAuthoritative = pass2.isSame && pass2Score >= AUTHORITY_THRESHOLD;
-  const needsReview = !isAuthoritative; // 75-89% or Pass 2 disagreed
+  const pass1AloneAuthoritative = pass1.score >= AUTHORITY_THRESHOLD;
+  const pass2Authoritative = pass2.isSame && pass2Score >= AUTHORITY_THRESHOLD;
+  const isAuthoritative = pass1AloneAuthoritative || pass2Authoritative;
+  const needsReview = !isAuthoritative; // Only needs review if neither pass is >= 90%
   
-  // Use the lower of the two scores for final confidence (conservative)
-  const finalScore = pass2.isSame ? Math.min(pass1.score, pass2Score) : pass1.score;
+  // Use the best available score
+  const finalScore = pass2.isSame ? Math.max(pass1.score, pass2Score) : pass1.score;
   
   if (isAuthoritative) {
     console.log(`[TWO_PASS] AUTHORITATIVE: PASS1=${pass1.score}%, PASS2=${pass2Score}% - HIGH TRUST (${finalScore}%)`);
