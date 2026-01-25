@@ -637,13 +637,19 @@ export async function finalizeAndCompleteSearch(
       const platformKey = typeof p.platform_name === 'string' ? p.platform_name.toLowerCase() : '';
       if (!platformKey) return;
       
-      // Hotels.com bypass check: if bypass is active, Hotels.com needs extraction
+      // Hotels.com bypass check: if bypass is active AND platform is authoritative (not rejected),
+      // Hotels.com needs extraction before being considered terminal
       const normalizedKey = platformKey.replace(/[^a-z]/g, '');
-      const isHotelsComBypassed = HOTELS_COM_GLOBAL_BYPASS_ENABLED && 
-        (normalizedKey === 'hotelscom' || normalizedKey === 'hotels');
+      const isHotelsCom = normalizedKey === 'hotelscom' || normalizedKey === 'hotels';
+      const outcomeCategory = typeof p.outcome_category === 'string' ? p.outcome_category.toLowerCase() : '';
+      const isRejectedOrLowConfidence = outcomeCategory === 'rejected' || outcomeCategory === 'low_confidence';
+      
+      // BUG FIX: Only apply bypass wait logic if Hotels.com passed image verification
+      // Rejected Hotels.com results should be immediately terminal (no extraction coming)
+      const isHotelsComBypassed = HOTELS_COM_GLOBAL_BYPASS_ENABLED && isHotelsCom && !isRejectedOrLowConfidence;
       
       if (isHotelsComBypassed) {
-        // Hotels.com with bypass: only terminal if extraction exists and is terminal
+        // Hotels.com with bypass (authoritative): only terminal if extraction exists and is terminal
         const hasTerminalExtraction = terminalPlatforms.has(platformKey);
         if (hasTerminalExtraction) {
           console.log(`[finalizeAndComplete] Hotels.com bypass: extraction terminal, ready`);
