@@ -469,12 +469,14 @@ async function extractWithFirecrawl(url: string): Promise<{
   };
 
   try {
-    const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
+    // Try connector key first, then fall back to legacy key
+    const apiKey = Deno.env.get('FIRECRAWL_API_KEY_1') || Deno.env.get('FIRECRAWL_API_KEY');
     if (!apiKey) {
       result.error = 'FIRECRAWL_API_KEY not configured';
       result.durationMs = Date.now() - start;
       return result;
     }
+    console.log(`[BOOKING] Using Firecrawl key: ${apiKey.startsWith('fc-') ? 'connector (FIRECRAWL_API_KEY_1)' : 'legacy'}`);
 
     console.log(`[BOOKING] Firecrawl request: ${url}`);
 
