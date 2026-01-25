@@ -227,6 +227,12 @@ function hasCheckoutSignals(content: string): boolean {
     /\bYour\s+total\b/i,          // International variant
     /\bPrice\s+details\b/i,       // Common on CA/international
     /\bBooking\s+summary\b/i,     // Common on CA/international
+    /\bOrder\s+summary\b/i,       // Canadian checkout
+    /\bPay\s+today\b/i,           // Canadian checkout
+    /\bAmount\s+due\b/i,          // Canadian checkout
+    /\bGrand\s+total\b/i,         // Canadian checkout
+    /\bCheckout\b/i,              // Generic checkout indicator
+    /\bComplete\s+(?:your\s+)?booking\b/i, // Canadian checkout
   ];
   const hits = signals.reduce((acc, r) => acc + (r.test(content) ? 1 : 0), 0);
   return hits >= 2;
@@ -342,9 +348,20 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
   }
   
   // DIAGNOSTIC: Log sample of content to help debug pattern matching
-  const priceSnippets = content.match(/(?:R|ZAR|\$|€|£)\s*[\d,.\s]+/gi)?.slice(0, 10) || [];
+  const priceSnippets = content.match(/(?:R|ZAR|CA?\$|\$|€|£)\s*[\d,.\s]+/gi)?.slice(0, 15) || [];
   console.log(`[VRBO] Price-like snippets found: ${priceSnippets.join(' | ')}`);
   console.log(`[VRBO] Fee components: nightly=${result.nightlyRate}, subtotal=${result.subtotal}, cleaning=${result.cleaningFee}, service=${result.serviceFee}, taxes=${result.taxesAmount}`);
+  
+  // DIAGNOSTIC: Look for common total labels in content
+  const totalLabels = ['Trip total', 'Total cost', 'Your total', 'Grand total', 'Order total', 'Amount due', 'Pay today', 'Total:'];
+  const foundLabels = totalLabels.filter(label => new RegExp(label, 'i').test(content));
+  console.log(`[VRBO] Total labels found in content: ${foundLabels.join(', ') || 'NONE'}`);
+  
+  // DIAGNOSTIC: Log a sample around any "total" text
+  const totalMatch = content.match(/(.{0,50}total.{0,50})/i);
+  if (totalMatch) {
+    console.log(`[VRBO] Sample around "total": ${totalMatch[0].replace(/\s+/g, ' ').trim()}`);
+  }
 
   // Calculate minimum valid total (should be > subtotal)
   const expectedSubtotal = result.nightlyRate ? result.nightlyRate * nights : (result.subtotal || 0);
@@ -361,6 +378,14 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     new RegExp(`\\bTotal\\s+cost[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
     // "Your total" - common on CA VRBO
     new RegExp(`\\bYour\\s+total[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
+    // "Grand total" - Canadian checkout
+    new RegExp(`\\bGrand\\s+total[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
+    // "Order total" - Canadian checkout
+    new RegExp(`\\bOrder\\s+total[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
+    // "Amount due" - Canadian checkout
+    new RegExp(`\\bAmount\\s+due[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
+    // "Pay today" pattern - Canadian checkout
+    new RegExp(`\\bPay\\s+today[:\\s]*${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
     // Standard explicit "Total" with currency and amount
     new RegExp(`\\bTotal[:\\s]+${currencyPrefix}([\\d,]+(?:\\.\\d{2})?)`, 'gi'),
     // "Total price" pattern
@@ -371,6 +396,10 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     /["']?(?:trip)?[_-]?total["']?\s*[:\s]*["']?(\d+(?:\.\d{2})?)/gi,
     // Price breakdown total pattern
     /(?:price|booking)\s*(?:breakdown|summary)[:\s]*.*?(?:total)[:\s]*(?:CA?\$|R|€|£)?\s*([\d,]+(?:\.\d{2})?)/gi,
+    // Canadian dollar specific patterns
+    new RegExp(`CA\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s*(?:total|due)`, 'gi'),
+    // "$X,XXX.XX CAD" format
+    new RegExp(`\\$\\s*([\\d,]+(?:\\.\\d{2})?)\\s*CAD`, 'gi'),
   ];
 
   const foundTotals: Array<{price: number, context: string, pattern: string, currency: string}> = [];
