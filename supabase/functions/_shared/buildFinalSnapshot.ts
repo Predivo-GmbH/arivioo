@@ -629,9 +629,29 @@ export async function finalizeAndCompleteSearch(
     
     // WORKING BASELINE: Add platforms with terminal outcome_category to terminalPlatforms
     // These are rejected/low_confidence candidates that don't need extractions
+    // EXCEPTION: Hotels.com with bypass MUST wait for extraction before being terminal
     authoritativePlatforms.forEach((p: any) => {
       const platformKey = typeof p.platform_name === 'string' ? p.platform_name.toLowerCase() : '';
-      if (platformKey && isTerminalOutcomeCategory(p.outcome_category)) {
+      if (!platformKey) return;
+      
+      // Hotels.com bypass check: if bypass is active, Hotels.com needs extraction
+      const isHotelsComBypassed = HOTELS_COM_GLOBAL_BYPASS_ENABLED && 
+        (platformKey === 'hotels.com' || platformKey === 'hotelscom' || platformKey === 'hotels');
+      
+      if (isHotelsComBypassed) {
+        // Hotels.com with bypass: only terminal if extraction exists and is terminal
+        const hasTerminalExtraction = terminalPlatforms.has(platformKey);
+        if (hasTerminalExtraction) {
+          console.log(`[finalizeAndComplete] Hotels.com bypass: extraction terminal, ready`);
+        } else {
+          console.log(`[finalizeAndComplete] Hotels.com bypass: waiting for extraction...`);
+        }
+        // Don't add to terminal here - it's already handled by extraction lookup above
+        return;
+      }
+      
+      // Standard logic: rejected/low_confidence are terminal without extraction
+      if (isTerminalOutcomeCategory(p.outcome_category)) {
         terminalPlatforms.add(platformKey);
       }
     });
