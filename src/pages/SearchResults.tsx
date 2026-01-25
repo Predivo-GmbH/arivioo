@@ -2327,6 +2327,27 @@ export default function SearchResults() {
         has_low_confidence: false,
         non_comparable_reasons: [],
         non_comparable_user_message: null,
+        // Build foreign price display from canonical_price if currency is not USD
+        foreign_price_display: (() => {
+          const cp = (r as any).canonical_price;
+          if (cp && cp.currency && cp.currency !== 'USD' && cp.total_price) {
+            const currency = cp.currency;
+            const amount = cp.total_price;
+            const symbol = currency === 'EUR' ? '€' : 
+                           currency === 'GBP' ? '£' : 
+                           currency === 'ZAR' ? 'R ' :
+                           currency === 'CAD' ? 'CA$' :
+                           currency === 'AUD' ? 'A$' :
+                           currency === 'NZD' ? 'NZ$' :
+                           `${currency} `;
+            return {
+              amount,
+              currency,
+              formatted: `${symbol}${amount.toLocaleString()} ${currency}`,
+            };
+          }
+          return null;
+        })(),
         price_type: ((r as any).canonical_price?.price_type || null) as PriceType | null,
         outcome_category: ((r as any).outcome_category || null) as OutcomeCategory | null,
       };

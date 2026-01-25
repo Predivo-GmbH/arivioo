@@ -269,19 +269,28 @@ function extractVrboTotal(content: string, nights: number): VrboPriceResult {
     labelsFound: [],
   };
 
-  // USD-only price parser - we force USD currency in URL params
+  // Multi-currency price parser: $, CA$, €, £, R (ZAR), etc.
+  // We attempt USD first via URL params, but fallback to extract whatever currency is present
   const parsePrice = (text: string): number | null => {
-    const match = text.match(/\$?\s*([\d,]+(?:\.\d{2})?)/);
+    // Match various currency formats
+    const match = text.match(/(?:CA?\$|ZAR|R|€|£|USD|EUR|GBP)?\s*([\d,\s]+(?:[.,]\d{2})?)/i);
     if (match) {
-      const numStr = match[1].replace(/,/g, '');
+      // Handle European format (1.234,56) vs US format (1,234.56)
+      let numStr = match[1].replace(/\s/g, '');
+      // If comma is after period, it's European format
+      if (/\.\d{3},\d{2}$/.test(numStr)) {
+        numStr = numStr.replace(/\./g, '').replace(',', '.');
+      } else {
+        numStr = numStr.replace(/,/g, '');
+      }
       const val = parseFloat(numStr);
       return isNaN(val) ? null : val;
     }
     return null;
   };
 
-  // USD currency pattern
-  const currencyRx = '\\$?\\s*';
+  // Multi-currency regex pattern
+  const currencyRx = '(?:CA?\\$|R|ZAR|€|£|USD|EUR|GBP)?\\s*';
 
   // Extract fee components for context - support multi-currency
   const nightlyPatterns = [

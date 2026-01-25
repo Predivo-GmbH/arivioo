@@ -41,6 +41,58 @@ const BUCKET_LABELS: Record<ResultBucket, string> = {
   additional_issues: 'Additional issues detected',
 };
 
+// Dynamic label generation based on specific failure reason
+function getDynamicBucketLabel(
+  bucket: ResultBucket,
+  canonicalPrice: Record<string, unknown> | null,
+  extractionStatus: string | null
+): string {
+  // For not_comparable, generate specific reason labels
+  if (bucket === 'not_comparable' && canonicalPrice) {
+    const currency = canonicalPrice.currency as string | undefined;
+    if (currency && currency !== 'USD') {
+      // Currency mismatch - show specific currency
+      const currencyLabels: Record<string, string> = {
+        CAD: 'Price in CAD (not comparable)',
+        EUR: 'Price in EUR (not comparable)',
+        GBP: 'Price in GBP (not comparable)',
+        ZAR: 'Price in ZAR (not comparable)',
+        AUD: 'Price in AUD (not comparable)',
+        NZD: 'Price in NZD (not comparable)',
+      };
+      return currencyLabels[currency] || `Price in ${currency} (not comparable)`;
+    }
+    
+    const priceType = String(canonicalPrice.price_type || '').toLowerCase();
+    if (priceType === 'subtotal_nights_only') {
+      return 'Subtotal only (taxes not included)';
+    }
+    if (priceType === 'nightly_only') {
+      return 'Nightly rate only';
+    }
+    if (!canonicalPrice.dates_validated) {
+      return 'Dates not confirmed';
+    }
+    if (!canonicalPrice.includes_taxes_fees) {
+      return 'Taxes/fees not included';
+    }
+  }
+  
+  // For price_not_found, show specific extraction issue
+  if (bucket === 'price_not_found' && extractionStatus) {
+    const statusLabels: Record<string, string> = {
+      checkout_not_reached: 'Checkout page not accessible',
+      total_price_not_found: 'Total price not visible',
+      nightly_only_rejected: 'Only nightly rate found',
+      render_failed: 'Page failed to load',
+      timeout: 'Request timed out',
+    };
+    return statusLabels[extractionStatus] || BUCKET_LABELS[bucket];
+  }
+  
+  return BUCKET_LABELS[bucket];
+}
+
 export interface FinalResultRow {
   id: string;
   platform_name: string;
@@ -74,6 +126,9 @@ export interface FinalResultRow {
   // FROZEN BUCKET: Determined at finalization, immutable on refresh
   final_bucket: ResultBucket;
   final_bucket_label: string;
+  // Foreign currency fallback: Show non-USD price when extraction found foreign currency
+  original_currency?: string | null;
+  original_amount?: number | null;
 }
 
 export interface FinalSnapshot {
@@ -649,13 +704,22 @@ export async function finalizeAndCompleteSearch(
         if (extraction?.extraction_metadata || extraction?.extracted_price) {
           // Use the determinePriceTypeFromExtraction helper to properly classify
           const derivedPriceType = determinePriceTypeFromExtraction(extraction);
+          const extractedCurrency = extraction.currency || 'USD';
+          const isCurrencyUSD = extractedCurrency === 'USD';
+          
+          // A price is only comparable if it's a proven/derived total, includes taxes, 
+          // dates are validated, AND it's in USD (to compare with Airbnb USD baseline)
           const isComparable = (derivedPriceType === 'total_proven' || derivedPriceType === 'total_derived') &&
                                extraction.includes_taxes_fees === true &&
-                               extraction.dates_validated === true;
+                               extraction.dates_validated === true &&
+                               isCurrencyUSD;
           
           // Build comparability_failures array for frontend categorization
           const failures: string[] = [];
           if (!isComparable) {
+            if (!isCurrencyUSD) {
+              failures.push('currency_mismatch');
+            }
             if (derivedPriceType !== 'total_proven' && derivedPriceType !== 'total_derived') {
               failures.push('price_type_not_total');
             }
@@ -669,7 +733,7 @@ export async function finalizeAndCompleteSearch(
           
           canonicalPrice = {
             total_price: extraction.extracted_price || null,
-            currency: extraction.currency || 'USD',
+            currency: extractedCurrency,
             price_type: derivedPriceType,
             nights_count: nights,
             check_in_date: checkIn,
@@ -733,6 +797,12 @@ export async function finalizeAndCompleteSearch(
         const imageVerificationCategory = platform.outcome_category;
         const isAuthoritative = imageVerificationCategory === 'authoritative';
 
+        // Determine original currency/amount for foreign currency fallback display
+        const extractedCurrency = extraction?.currency || canonicalPrice?.currency || 'USD';
+        const isNonUSD = extractedCurrency && extractedCurrency !== 'USD';
+        const originalCurrency = isNonUSD ? extractedCurrency : null;
+        const originalAmount = isNonUSD ? (extraction?.extracted_price || canonicalPrice?.total_price || null) : null;
+
         return {
           id: result?.id || platform.id,
           platform_name: platform.platform_name,
@@ -759,7 +829,10 @@ export async function finalizeAndCompleteSearch(
           outcome_category: outcomeCategory,
           is_authoritative: isAuthoritative,
           final_bucket: finalBucket,
-          final_bucket_label: BUCKET_LABELS[finalBucket],
+          final_bucket_label: getDynamicBucketLabel(finalBucket, canonicalPrice, extraction?.extraction_status || platform.extraction_status_terminal || null),
+          // Foreign currency fallback display
+          original_currency: originalCurrency as string | null,
+          original_amount: originalAmount as number | null,
         };
       });
       
@@ -785,12 +858,21 @@ export async function finalizeAndCompleteSearch(
         let canonicalPrice = null;
         if (extraction?.extraction_metadata || extraction?.extracted_price) {
           const derivedPriceType = determinePriceTypeFromExtraction(extraction);
+          const extractedCurrency = extraction.currency || 'USD';
+          const isCurrencyUSD = extractedCurrency === 'USD';
+          
+          // A price is only comparable if it's a proven/derived total, includes taxes, 
+          // dates are validated, AND it's in USD (to compare with Airbnb USD baseline)
           const isComparable = (derivedPriceType === 'total_proven' || derivedPriceType === 'total_derived') &&
                                extraction.includes_taxes_fees === true &&
-                               extraction.dates_validated === true;
+                               extraction.dates_validated === true &&
+                               isCurrencyUSD;
           
           const failures: string[] = [];
           if (!isComparable) {
+            if (!isCurrencyUSD) {
+              failures.push('currency_mismatch');
+            }
             if (derivedPriceType !== 'total_proven' && derivedPriceType !== 'total_derived') {
               failures.push('price_type_not_total');
             }
@@ -804,7 +886,7 @@ export async function finalizeAndCompleteSearch(
           
           canonicalPrice = {
             total_price: extraction.extracted_price || null,
-            currency: extraction.currency || 'USD',
+            currency: extractedCurrency,
             price_type: derivedPriceType,
             nights_count: nights,
             check_in_date: checkIn,
@@ -835,6 +917,12 @@ export async function finalizeAndCompleteSearch(
         // This maintains backwards compatibility for older searches
         const isAuthoritative = (result.confidence_score && result.confidence_score >= 90);
 
+        // Determine original currency/amount for foreign currency fallback display (legacy path)
+        const extractedCurrency = extraction?.currency || canonicalPrice?.currency || 'USD';
+        const isNonUSD = extractedCurrency && extractedCurrency !== 'USD';
+        const originalCurrency = isNonUSD ? extractedCurrency : null;
+        const originalAmount = isNonUSD ? (extraction?.extracted_price || canonicalPrice?.total_price || null) : null;
+
         return {
           id: result.id,
           platform_name: result.platform_name,
@@ -861,7 +949,10 @@ export async function finalizeAndCompleteSearch(
           outcome_category: outcomeCategory,
           is_authoritative: isAuthoritative,
           final_bucket: finalBucket,
-          final_bucket_label: BUCKET_LABELS[finalBucket],
+          final_bucket_label: getDynamicBucketLabel(finalBucket, canonicalPrice, extraction?.extraction_status || null),
+          // Foreign currency fallback display
+          original_currency: originalCurrency as string | null,
+          original_amount: originalAmount as number | null,
         };
       });
       
