@@ -3018,6 +3018,82 @@ Deno.serve(async (req) => {
       );
     }
 
+    // COVERAGE VARIANTS - Get all detected coverage variants
+    if (action === 'coverage-variants' && (req.method === 'GET' || req.method === 'POST')) {
+      const { data: variants, error } = await supabase
+        .from('platform_coverage_variants')
+        .select('*')
+        .order('last_seen_at', { ascending: false });
+
+      if (error) {
+        console.error('[Admin Dashboard] Failed to fetch coverage variants:', error);
+        return new Response(
+          JSON.stringify({ error: 'Failed to fetch coverage variants' }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Group by parent platform domain
+      const groupedByDomain: Record<string, any[]> = {};
+      variants?.forEach(v => {
+        const domain = v.parent_platform_domain || 'unknown';
+        if (!groupedByDomain[domain]) groupedByDomain[domain] = [];
+        groupedByDomain[domain].push(v);
+      });
+
+      // Count by status
+      const statusCounts = {
+        needs_coverage: variants?.filter(v => v.variant_status === 'needs_coverage').length || 0,
+        in_development: variants?.filter(v => v.variant_status === 'in_development').length || 0,
+        covered: variants?.filter(v => v.variant_status === 'covered').length || 0,
+        incompatible: variants?.filter(v => v.variant_status === 'incompatible').length || 0,
+      };
+
+      return new Response(
+        JSON.stringify({ 
+          variants, 
+          groupedByDomain,
+          statusCounts,
+          total: variants?.length || 0,
+        }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // UPDATE COVERAGE VARIANT STATUS
+    if (action === 'coverage-variants' && req.method === 'PATCH') {
+      const { id, variant_status, variant_reason } = await req.json();
+
+      if (!id || !variant_status) {
+        return new Response(
+          JSON.stringify({ error: 'ID and variant_status are required' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const updates: Record<string, any> = { variant_status };
+      if (variant_reason) updates.variant_reason = variant_reason;
+
+      const { data: updated, error } = await supabase
+        .from('platform_coverage_variants')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        return new Response(
+          JSON.stringify({ error: error.message }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({ variant: updated }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(
       JSON.stringify({ error: 'Not found' }),
       { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

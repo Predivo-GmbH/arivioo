@@ -1,4 +1,12 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import {
+  detectVariant,
+  buildFlowSignature,
+  registerVariant,
+  classifyFailureForVariant,
+  type ExtractionFlowSignature,
+  type VariantDetectionResult,
+} from '../_shared/coverageVariantDetector.ts';
 
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
@@ -722,6 +730,65 @@ async function nominateSinglePromotionCandidate(supabaseClient: any): Promise<vo
   }
 }
 
+// ============= VARIANT DETECTION HELPER =============
+// Called on structural extraction failures to detect and register new coverage variants
+async function detectAndRegisterVariantOnFailure(
+  supabaseClient: any,
+  extractionId: string,
+  originalUrl: string,
+  finalResolvedUrl: string | null,
+  terminalStatus: string,
+  errorMessage: string | null,
+  extractionMetadata: Record<string, any> | null
+): Promise<void> {
+  // Classify failure type
+  const failureType = classifyFailureForVariant(terminalStatus, errorMessage, null);
+  
+  // Only register variants for structural failures
+  if (failureType !== 'structural') {
+    console.log(`[WORKER] Skipping variant detection for transient failure: ${terminalStatus}`);
+    return;
+  }
+  
+  // Build flow signature from extraction context
+  const flowContext: ExtractionFlowSignature = buildFlowSignature({
+    finalUrl: finalResolvedUrl || originalUrl,
+    hasDrawerInteraction: extractionMetadata?.hasDrawerInteraction || extractionMetadata?.drawer_clicked || false,
+    hasBreakdown: extractionMetadata?.breakdown_found || extractionMetadata?.has_breakdown || false,
+    hasTotalBeforeCheckout: extractionMetadata?.total_visible_before_checkout || false,
+    checkoutUrlPattern: extractionMetadata?.checkout_url_pattern,
+    detectedCurrency: extractionMetadata?.currency || extractionMetadata?.detected_currency,
+    bookingFlowType: extractionMetadata?.booking_flow_type,
+  });
+  
+  // Detect variant
+  const variantDetection = detectVariant(originalUrl, finalResolvedUrl, flowContext);
+  
+  console.log(`[WORKER] Detected variant: ${variantDetection.coverage_variant_key} (country=${variantDetection.detected_country})`);
+  
+  // Register variant
+  const registration = await registerVariant(
+    supabaseClient,
+    variantDetection,
+    originalUrl,
+    failureType
+  );
+  
+  if (registration.is_new) {
+    console.log(`[WORKER] NEW coverage variant registered: ${registration.variant_key}`);
+  }
+  
+  // Update extraction record with variant key
+  await supabaseClient
+    .from('price_extractions')
+    .update({
+      detected_variant_key: variantDetection.coverage_variant_key,
+      variant_mismatch: registration.is_new,
+      extraction_flow_signature: variantDetection.extraction_flow_signature,
+    })
+    .eq('id', extractionId);
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -1002,6 +1069,24 @@ Deno.serve(async (req) => {
       // Update platform evidence for Tier A (still track for monitoring)
       await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success', result.phaseA.datesValidated);
       
+      // ============= VARIANT DETECTION ON FAILURE (Tier A) =============
+      // Even Tier A platforms may have regional variants that require different logic
+      if (result.finalStatus !== 'success') {
+        try {
+          await detectAndRegisterVariantOnFailure(
+            supabaseClient,
+            extractionId,
+            deepLink,
+            extractorResult?.finalResolvedUrl || extractorResult?.final_resolved_url || null,
+            result.finalStatus,
+            result.phaseB.evidence || result.phaseA.evidence || null,
+            extractorResult?.extraction_metadata || extractorResult?.structuralProof || null
+          );
+        } catch (variantErr) {
+          console.error('[WORKER] Variant detection failed (non-blocking):', variantErr);
+        }
+      }
+      
       console.log(`[WORKER] ${dedicatedExtractor} complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
       
       return new Response(
@@ -1220,6 +1305,24 @@ Deno.serve(async (req) => {
     
     // Update platform evidence for Tier B (critical for self-triaging)
     await updatePlatformEvidence(supabaseClient, platform, result.finalStatus, result.finalStatus === 'success', result.phaseA.datesValidated);
+    
+    // ============= VARIANT DETECTION ON FAILURE =============
+    // If extraction failed structurally, detect and register coverage variant
+    if (result.finalStatus !== 'success' && result.finalStatus !== 'timeout') {
+      try {
+        await detectAndRegisterVariantOnFailure(
+          supabaseClient,
+          extractionId,
+          deepLink,
+          updatedExtraction?.final_resolved_url || null,
+          result.finalStatus,
+          result.phaseB.evidence || result.phaseA.evidence || null,
+          updatedExtraction?.extraction_metadata || null
+        );
+      } catch (variantErr) {
+        console.error('[WORKER] Variant detection failed (non-blocking):', variantErr);
+      }
+    }
     
     console.log(`[WORKER] Complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
     
