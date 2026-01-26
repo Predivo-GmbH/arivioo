@@ -35,9 +35,14 @@ export const VRBO_EXTRACTION_BASELINE_NAME = 'vrbo-price-extraction-golden-path-
 export const VRBO_EXTRACTION_BASELINE_VERSION = '1.0.0';
 export const VRBO_EXTRACTION_BASELINE_DATE = '2026-01-23';
 
+// Booking.com Price Extraction Working Baseline
+export const BOOKING_EXTRACTION_BASELINE_NAME = 'booking-price-extraction-golden-path-v1';
+export const BOOKING_EXTRACTION_BASELINE_VERSION = '1.0.0';
+export const BOOKING_EXTRACTION_BASELINE_DATE = '2026-01-26';
+
 export interface BaselineExpectation {
   id: string;
-  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization' | 'image_verification' | 'agoda_extraction' | 'vrbo_extraction';
+  category: 'search' | 'results' | 'pricing' | 'access_control' | 'admin' | 'finalization' | 'image_verification' | 'agoda_extraction' | 'vrbo_extraction' | 'booking_extraction';
   description: string;
   observable: string;
   critical: boolean;
@@ -387,6 +392,57 @@ export const BASELINE_EXPECTATIONS: BaselineExpectation[] = [
     observable: 'final_bucket is "cheaper" or "more_expensive", never "additional_issues"',
     critical: true,
   },
+
+  // Booking.com Extraction Contract (Working Baseline v1.0.0 - 2026-01-26)
+  {
+    id: 'booking_firecrawl_primary',
+    category: 'booking_extraction',
+    description: 'Firecrawl is primary provider for Booking.com',
+    observable: 'providerUsed=firecrawl in extraction metadata (with zyte/browserless fallback)',
+    critical: true,
+  },
+  {
+    id: 'booking_total_proven_gate',
+    category: 'booking_extraction',
+    description: 'TOTAL_PROVEN gate enforced with 4 core checks',
+    observable: 'breakdown_found AND total_label_found AND extracted_from_breakdown_total AND dates_validated',
+    critical: true,
+  },
+  {
+    id: 'booking_success_requires_total_proven',
+    category: 'booking_extraction',
+    description: 'success_total_stay only when TOTAL_PROVEN=true',
+    observable: 'status=success_total_stay implies totalProven=true AND includesTaxesFees=true',
+    critical: true,
+  },
+  {
+    id: 'booking_unverified_not_comparable',
+    category: 'booking_extraction',
+    description: 'Unverified prices bucketed as not_comparable',
+    observable: 'status=unverified results in final_bucket=not_comparable',
+    critical: true,
+  },
+  {
+    id: 'booking_vat_checkout_navigation',
+    category: 'booking_extraction',
+    description: 'VAT exclusion triggers checkout navigation',
+    observable: 'detectVatExcluded triggers Browserless checkout flow',
+    critical: true,
+  },
+  {
+    id: 'booking_snapshot_inclusion',
+    category: 'booking_extraction',
+    description: 'Successful extraction included in snapshot',
+    observable: 'success_total_stay Booking.com appears in final_results_snapshot',
+    critical: true,
+  },
+  {
+    id: 'booking_correct_bucket_classification',
+    category: 'booking_extraction',
+    description: 'Booking.com classified in cheaper or more_expensive bucket',
+    observable: 'final_bucket is "cheaper" or "more_expensive", never "additional_issues"',
+    critical: true,
+  },
 ];
 
 /**
@@ -420,4 +476,5 @@ export const CATEGORY_LABELS: Record<string, string> = {
   image_verification: 'Image Verification (Working Baseline v1.0.0)',
   agoda_extraction: 'Agoda Extraction (Working Baseline v1.0.0)',
   vrbo_extraction: 'VRBO Extraction (Working Baseline v1.0.0)',
+  booking_extraction: 'Booking.com Extraction (Working Baseline v1.0.0)',
 };
