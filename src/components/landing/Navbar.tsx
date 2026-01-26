@@ -1,11 +1,36 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { Menu, X } from "lucide-react";
+import { Menu, X, User, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AriviooLogo } from "@/components/AriviooLogo";
+import { supabase } from "@/integrations/supabase/client";
+import type { User as SupabaseUser } from "@supabase/supabase-js";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 export function Navbar() {
   const [isOpen, setIsOpen] = useState(false);
+  const [user, setUser] = useState<SupabaseUser | null>(null);
+
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border">
@@ -33,12 +58,42 @@ export function Navbar() {
             <Link to="/pricing" className="text-muted-foreground hover:text-foreground transition-colors">
               Pricing
             </Link>
-            <Link to="/auth" className="text-muted-foreground hover:text-foreground transition-colors">
-              Log In
-            </Link>
-            <Button asChild className="bg-gradient-primary hover:opacity-90">
-              <Link to="/auth?mode=signup">Get Started</Link>
-            </Button>
+            
+            {user ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                      <User className="w-4 h-4 text-primary" />
+                    </div>
+                    <span className="text-sm font-medium max-w-[120px] truncate">
+                      {user.email?.split('@')[0]}
+                    </span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuItem asChild>
+                    <Link to="/dashboard" className="flex items-center gap-2 cursor-pointer">
+                      <User className="w-4 h-4" />
+                      Dashboard
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleLogout} className="flex items-center gap-2 cursor-pointer text-destructive">
+                    <LogOut className="w-4 h-4" />
+                    Log out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <>
+                <Link to="/auth" className="text-muted-foreground hover:text-foreground transition-colors">
+                  Log In
+                </Link>
+                <Button asChild className="bg-gradient-primary hover:opacity-90">
+                  <Link to="/auth?mode=signup">Get Started</Link>
+                </Button>
+              </>
+            )}
           </div>
 
           {/* Mobile menu button */}
@@ -79,16 +134,42 @@ export function Navbar() {
               >
                 Pricing
               </Link>
-              <Link 
-                to="/auth" 
-                className="text-muted-foreground hover:text-foreground transition-colors"
-                onClick={() => setIsOpen(false)}
-              >
-                Log In
-              </Link>
-              <Button asChild className="bg-gradient-primary hover:opacity-90 w-full">
-                <Link to="/auth?mode=signup" onClick={() => setIsOpen(false)}>Get Started</Link>
-              </Button>
+              
+              {user ? (
+                <>
+                  <Link 
+                    to="/dashboard" 
+                    className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2"
+                    onClick={() => setIsOpen(false)}
+                  >
+                    <User className="w-4 h-4" />
+                    Dashboard
+                  </Link>
+                  <button
+                    onClick={() => {
+                      handleLogout();
+                      setIsOpen(false);
+                    }}
+                    className="text-destructive hover:text-destructive/80 transition-colors text-left flex items-center gap-2"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Log out
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Link 
+                    to="/auth" 
+                    className="text-muted-foreground hover:text-foreground transition-colors"
+                    onClick={() => setIsOpen(false)}
+                  >
+                    Log In
+                  </Link>
+                  <Button asChild className="bg-gradient-primary hover:opacity-90 w-full">
+                    <Link to="/auth?mode=signup" onClick={() => setIsOpen(false)}>Get Started</Link>
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         )}
