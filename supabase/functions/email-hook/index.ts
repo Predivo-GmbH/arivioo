@@ -46,7 +46,7 @@ serve(async (req: Request): Promise<Response> => {
     // Handle different email types
     switch (email_action_type) {
       case "recovery":
-        subject = "Reset your password - Arivioo";
+        subject = "Password Reset Request";
         html = `
           <!DOCTYPE html>
           <html>
@@ -54,38 +54,42 @@ serve(async (req: Request): Promise<Response> => {
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
           </head>
-          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="text-align: center; margin-bottom: 30px;">
-              <h1 style="color: #1a1a1a; margin: 0; font-size: 24px;">Arivioo</h1>
-            </div>
-            
-            <h2 style="color: #1a1a1a; margin-bottom: 20px;">Reset Your Password</h2>
-            
-            <p>Hi ${userName},</p>
-            
-            <p>We received a request to reset your password. Click the button below to set a new password:</p>
-            
-            <div style="text-align: center; margin: 30px 0;">
-              <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" 
-                 style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600;">
-                Reset Password
-              </a>
-            </div>
-            
-            <p style="color: #666; font-size: 14px;">Or copy and paste this link into your browser:</p>
-            <p style="word-break: break-all; color: #667eea; font-size: 14px;">
-              ${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}
-            </p>
-            
-            <p style="color: #666; font-size: 14px; margin-top: 30px;">
-              If you didn't request a password reset, you can safely ignore this email. This link will expire in 1 hour.
-            </p>
-            
-            <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-            
-            <p style="color: #999; font-size: 12px; text-align: center;">
-              © ${new Date().getFullYear()} Arivioo. All rights reserved.
-            </p>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto;">
+              <tr>
+                <td style="text-align: center; padding: 20px 0;">
+                  <span style="font-size: 24px; font-weight: bold; color: #1a1a1a;">Arivioo</span>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 20px 0;">
+                  <p style="margin: 0 0 16px 0;">Hello ${userName},</p>
+                  <p style="margin: 0 0 16px 0;">You requested a password reset for your Arivioo account. Use the link below to set a new password:</p>
+                  <p style="margin: 24px 0; text-align: center;">
+                    <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" 
+                       style="display: inline-block; background-color: #5046e5; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: 500;">
+                      Reset Password
+                    </a>
+                  </p>
+                  <p style="margin: 16px 0 0 0; font-size: 13px; color: #666;">
+                    If the button doesn't work, copy this URL into your browser:<br>
+                    <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" style="color: #5046e5; word-break: break-all;">
+                      ${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}
+                    </a>
+                  </p>
+                  <p style="margin: 24px 0 0 0; font-size: 13px; color: #888;">
+                    This link expires in 1 hour. If you did not request this, please ignore this email.
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td style="border-top: 1px solid #eee; padding-top: 20px; text-align: center;">
+                  <p style="margin: 0; font-size: 12px; color: #999;">
+                    Arivioo · Find better prices for your vacation rentals
+                  </p>
+                </td>
+              </tr>
+            </table>
           </body>
           </html>
         `;
@@ -93,7 +97,7 @@ serve(async (req: Request): Promise<Response> => {
 
       case "signup":
       case "email_confirmation":
-        subject = "Confirm your email - Arivioo";
+        subject = "Confirm Your Arivioo Account";
         html = `
           <!DOCTYPE html>
           <html>
@@ -101,41 +105,46 @@ serve(async (req: Request): Promise<Response> => {
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
           </head>
-          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="text-align: center; margin-bottom: 30px;">
-              <h1 style="color: #1a1a1a; margin: 0; font-size: 24px;">Arivioo</h1>
-            </div>
-            
-            <h2 style="color: #1a1a1a; margin-bottom: 20px;">Confirm Your Email</h2>
-            
-            <p>Hi ${userName},</p>
-            
-            <p>Welcome to Arivioo! Please confirm your email address by clicking the button below:</p>
-            
-            <div style="text-align: center; margin: 30px 0;">
-              <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" 
-                 style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600;">
-                Confirm Email
-              </a>
-            </div>
-            
-            <p style="color: #666; font-size: 14px;">Or copy and paste this link into your browser:</p>
-            <p style="word-break: break-all; color: #667eea; font-size: 14px;">
-              ${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}
-            </p>
-            
-            <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-            
-            <p style="color: #999; font-size: 12px; text-align: center;">
-              © ${new Date().getFullYear()} Arivioo. All rights reserved.
-            </p>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto;">
+              <tr>
+                <td style="text-align: center; padding: 20px 0;">
+                  <span style="font-size: 24px; font-weight: bold; color: #1a1a1a;">Arivioo</span>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 20px 0;">
+                  <p style="margin: 0 0 16px 0;">Hello ${userName},</p>
+                  <p style="margin: 0 0 16px 0;">Welcome to Arivioo! Please confirm your email address to complete your registration:</p>
+                  <p style="margin: 24px 0; text-align: center;">
+                    <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" 
+                       style="display: inline-block; background-color: #5046e5; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: 500;">
+                      Confirm Email
+                    </a>
+                  </p>
+                  <p style="margin: 16px 0 0 0; font-size: 13px; color: #666;">
+                    If the button doesn't work, copy this URL into your browser:<br>
+                    <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" style="color: #5046e5; word-break: break-all;">
+                      ${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}
+                    </a>
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td style="border-top: 1px solid #eee; padding-top: 20px; text-align: center;">
+                  <p style="margin: 0; font-size: 12px; color: #999;">
+                    Arivioo · Find better prices for your vacation rentals
+                  </p>
+                </td>
+              </tr>
+            </table>
           </body>
           </html>
         `;
         break;
 
       case "magiclink":
-        subject = "Your magic link - Arivioo";
+        subject = "Sign In to Arivioo";
         html = `
           <!DOCTYPE html>
           <html>
@@ -143,31 +152,36 @@ serve(async (req: Request): Promise<Response> => {
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
           </head>
-          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="text-align: center; margin-bottom: 30px;">
-              <h1 style="color: #1a1a1a; margin: 0; font-size: 24px;">Arivioo</h1>
-            </div>
-            
-            <h2 style="color: #1a1a1a; margin-bottom: 20px;">Sign In to Arivioo</h2>
-            
-            <p>Hi ${userName},</p>
-            
-            <p>Click the button below to sign in to your account:</p>
-            
-            <div style="text-align: center; margin: 30px 0;">
-              <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" 
-                 style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600;">
-                Sign In
-              </a>
-            </div>
-            
-            <p style="color: #666; font-size: 14px;">This link will expire in 1 hour.</p>
-            
-            <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-            
-            <p style="color: #999; font-size: 12px; text-align: center;">
-              © ${new Date().getFullYear()} Arivioo. All rights reserved.
-            </p>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto;">
+              <tr>
+                <td style="text-align: center; padding: 20px 0;">
+                  <span style="font-size: 24px; font-weight: bold; color: #1a1a1a;">Arivioo</span>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 20px 0;">
+                  <p style="margin: 0 0 16px 0;">Hello ${userName},</p>
+                  <p style="margin: 0 0 16px 0;">Use the link below to sign in to your Arivioo account:</p>
+                  <p style="margin: 24px 0; text-align: center;">
+                    <a href="${supabaseUrl}/auth/v1/verify?token=${token_hash}&type=${email_action_type}&redirect_to=${redirect_to}" 
+                       style="display: inline-block; background-color: #5046e5; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: 500;">
+                      Sign In
+                    </a>
+                  </p>
+                  <p style="margin: 24px 0 0 0; font-size: 13px; color: #888;">
+                    This link expires in 1 hour. If you did not request this, please ignore this email.
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td style="border-top: 1px solid #eee; padding-top: 20px; text-align: center;">
+                  <p style="margin: 0; font-size: 12px; color: #999;">
+                    Arivioo · Find better prices for your vacation rentals
+                  </p>
+                </td>
+              </tr>
+            </table>
           </body>
           </html>
         `;
@@ -184,10 +198,14 @@ serve(async (req: Request): Promise<Response> => {
     console.log(`Sending ${email_action_type} email to ${user.email} from noreply@updates.arivioo.com`);
 
     const { error } = await resend.emails.send({
-      from: "Arivioo <noreply@updates.arivioo.com>",
+      from: "Arivioo Account <noreply@updates.arivioo.com>",
+      replyTo: "support@arivioo.com",
       to: [user.email],
       subject,
       html,
+      headers: {
+        "X-Entity-Ref-ID": `${email_action_type}-${Date.now()}`,
+      },
     });
 
     if (error) {
