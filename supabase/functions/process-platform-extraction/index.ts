@@ -7,7 +7,7 @@ import {
   type ExtractionFlowSignature,
   type VariantDetectionResult,
 } from '../_shared/coverageVariantDetector.ts';
-
+import { normalizeToAdapterDomain } from '../_shared/platformNameNormalizer.ts';
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
   'https://lovable.dev',
@@ -586,12 +586,41 @@ async function updatePlatformEvidence(
   const now = new Date().toISOString();
   
   try {
-    // Find the platform adapter with full data for gate computation
-    const { data: adapters } = await supabaseClient
-      .from('platform_adapters')
-      .select('id, coverage_tier, total_attempts, total_successes, total_failures, gate_1_passed, gate_2_passed, gate_3_passed, last_success_at, promotion_in_progress')
-      .or(`platform_name.ilike.%${platformName}%,platform_domain.ilike.%${platformName}%`)
-      .limit(1);
+    // CRITICAL FIX: Use canonical domain matching to prevent false positives
+    // (e.g., "Ecohotels" incorrectly matching "hotels.com")
+    const canonicalDomain = normalizeToAdapterDomain(platformName);
+    
+    let adapters: any[] | null = null;
+    
+    if (canonicalDomain) {
+      // Step 1: Exact domain match (preferred - prevents false positives)
+      const { data: exactMatch } = await supabaseClient
+        .from('platform_adapters')
+        .select('id, coverage_tier, total_attempts, total_successes, total_failures, gate_1_passed, gate_2_passed, gate_3_passed, last_success_at, promotion_in_progress, platform_domain')
+        .eq('platform_domain', canonicalDomain)
+        .limit(1);
+      
+      if (exactMatch && exactMatch.length > 0) {
+        adapters = exactMatch;
+        console.log(`[WORKER] updatePlatformEvidence: EXACT domain match for ${platformName} → ${canonicalDomain}`);
+      }
+    }
+    
+    if (!adapters || adapters.length === 0) {
+      // Step 2: Fallback to ilike query for unknown platforms (legacy behavior)
+      // This ensures new/unknown platforms can still update stats
+      const platformLower = platformName.toLowerCase();
+      const { data: fuzzyMatch } = await supabaseClient
+        .from('platform_adapters')
+        .select('id, coverage_tier, total_attempts, total_successes, total_failures, gate_1_passed, gate_2_passed, gate_3_passed, last_success_at, promotion_in_progress, platform_domain')
+        .or(`platform_name.ilike.${platformLower},platform_domain.ilike.${platformLower}`)
+        .limit(1);
+      
+      adapters = fuzzyMatch;
+      if (adapters && adapters.length > 0) {
+        console.log(`[WORKER] updatePlatformEvidence: FUZZY match for ${platformName} → ${adapters[0].platform_domain}`);
+      }
+    }
     
     if (adapters && adapters.length > 0) {
       const adapter = adapters[0];
