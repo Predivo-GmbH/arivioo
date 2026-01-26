@@ -85,8 +85,8 @@ export default function ResetPassword() {
       setTimeout(() => codeInputRefs.current[0]?.focus(), 100);
 
       toast({
-        title: "Code sent",
-        description: "Check your email for the 6-digit code.",
+        title: "Check your inbox",
+        description: "If an account exists with this email, you'll receive a 6-digit code shortly.",
       });
     } catch (err: any) {
       toast({
