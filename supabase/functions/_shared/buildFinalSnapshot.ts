@@ -612,9 +612,6 @@ export async function finalizeAndCompleteSearch(
     const extractionByPlatform = new Map<string, any>();
     const extractionByUrl = new Map<string, any>();
     const terminalPlatforms = new Set<string>();
-    
-    // TESTING BYPASS CONSTANTS (used in terminal platform checks)
-    const HOTELS_COM_GLOBAL_BYPASS_ENABLED = true;
 
     extractionsData?.forEach((e: any) => {
       const platformKey = typeof e.platform_name === 'string' ? e.platform_name.toLowerCase() : '';
@@ -634,33 +631,9 @@ export async function finalizeAndCompleteSearch(
     
     // WORKING BASELINE: Add platforms with terminal outcome_category to terminalPlatforms
     // These are rejected/low_confidence candidates that don't need extractions
-    // EXCEPTION: Hotels.com with bypass MUST wait for extraction before being terminal
     authoritativePlatforms.forEach((p: any) => {
       const platformKey = typeof p.platform_name === 'string' ? p.platform_name.toLowerCase() : '';
       if (!platformKey) return;
-      
-      // Hotels.com bypass check: if bypass is active AND platform is authoritative (not rejected),
-      // Hotels.com needs extraction before being considered terminal
-      const normalizedKey = platformKey.replace(/[^a-z]/g, '');
-      const isHotelsCom = normalizedKey === 'hotelscom' || normalizedKey === 'hotels';
-      const outcomeCategory = typeof p.outcome_category === 'string' ? p.outcome_category.toLowerCase() : '';
-      const isRejectedOrLowConfidence = outcomeCategory === 'rejected' || outcomeCategory === 'low_confidence';
-      
-      // BUG FIX: Only apply bypass wait logic if Hotels.com passed image verification
-      // Rejected Hotels.com results should be immediately terminal (no extraction coming)
-      const isHotelsComBypassed = HOTELS_COM_GLOBAL_BYPASS_ENABLED && isHotelsCom && !isRejectedOrLowConfidence;
-      
-      if (isHotelsComBypassed) {
-        // Hotels.com with bypass (authoritative): only terminal if extraction exists and is terminal
-        const hasTerminalExtraction = terminalPlatforms.has(platformKey);
-        if (hasTerminalExtraction) {
-          console.log(`[finalizeAndComplete] Hotels.com bypass: extraction terminal, ready`);
-        } else {
-          console.log(`[finalizeAndComplete] Hotels.com bypass: waiting for extraction...`);
-        }
-        // Don't add to terminal here - it's already handled by extraction lookup above
-        return;
-      }
       
       // Standard logic: rejected/low_confidence are terminal without extraction
       if (isTerminalOutcomeCategory(p.outcome_category)) {
@@ -1052,20 +1025,8 @@ export async function finalizeAndCompleteSearch(
     const IMAGE_VERIFICATION_THRESHOLD = 75;
     const preFilterCount = finalResults.length;
     
-    // ============================================================================
-    // TESTING EXCEPTION: Global Bypass for Hotels.com and Booking.com
-    // When enabled, these platforms are included in the snapshot even if they
-    // fail the image verification gate. This allows testing extraction.
-    // Added: 2026-01-24 (Hotels.com), 2026-01-25 (Booking.com)
-    // Remove when: Testing complete
-    // Constants defined at top of function: HOTELS_COM_GLOBAL_BYPASS_ENABLED, BOOKING_COM_GLOBAL_BYPASS_ENABLED
-    // ============================================================================
-    
-    const shouldBypassImageGate = (platformName: string): boolean => {
-      if (!HOTELS_COM_GLOBAL_BYPASS_ENABLED) return false;
-      const normalized = platformName.toLowerCase().replace(/[^a-z]/g, '');
-      return normalized === 'hotelscom' || normalized === 'hotels';
-    };
+    // All platforms must pass the standard image verification gate (75%+ confidence)
+    // No testing exceptions are active
     
     /**
      * Helper to check if a value is a non-empty string URL
@@ -1104,11 +1065,6 @@ export async function finalizeAndCompleteSearch(
     finalResults = finalResults.filter((result) => {
       const platformName = result.platform_name || 'Unknown';
       
-      // TESTING BYPASS: Allow Hotels.com through regardless of image verification
-      if (shouldBypassImageGate(platformName)) {
-        console.log(`[ImageEvidenceGate] BYPASS ACTIVE: Hotels.com included despite low confidence - confidence=${result.confidence_score}`);
-        return true;
-      }
       
       // GATE 1: Only 'visual' match types are valid for display
       if (result.match_type !== 'visual') {

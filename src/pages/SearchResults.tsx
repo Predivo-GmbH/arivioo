@@ -19,7 +19,7 @@ import { ResultRow, type ResultRowResult, type RowVariant } from "@/components/s
 import { VerifiedMatchesLoading } from "@/components/search/VerifiedMatchesLoading";
 import { SearchPhaseBanner, type SearchPhaseType } from "@/components/search/SearchPhaseBanner";
 import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
-import { isHotelsComBypassUrl, shouldBypassPhotoRejection } from "@/lib/testingExceptions";
+// Testing exceptions removed - all platforms follow standard image verification gate
 import {
   normalizeExtraction,
   type CanonicalPrice,
@@ -479,29 +479,7 @@ export default function SearchResults() {
     source_airbnb_image: string | null;
     confidence_score: number | null;
   }>>([]);
-  // TESTING: Bypassed results that failed photo comparison but are allowed via testing exception
-  const [bypassedResults, setBypassedResults] = useState<Array<{
-    id: string;
-    platform_name: string;
-    listing_url: string;
-    listing_title: string | null;
-    images: Json;
-    source_airbnb_image: string | null;
-    confidence_score: number | null;
-    bypassed_reason: string;
-  }>>([]);
-
-  // TESTING: Hotels.com bypass extraction status (only for the specific Airbnb URL exception)
-  const [hotelsComBypassExtraction, setHotelsComBypassExtraction] = useState<{
-    status: 'idle' | 'triggering' | 'running' | 'done' | 'error';
-    extractionId?: string;
-    extractedPrice?: number | null;
-    currency?: string | null;
-    extractionStatus?: string | null;
-    error?: string;
-  }>({ status: 'idle' });
-
-  const hotelsComBypassTriggeredRef = useRef(false);
+  // (Testing bypass states removed - all platforms follow standard rules)
   const [streamDisconnected, setStreamDisconnected] = useState(false);
   const [extractingPrices, setExtractingPrices] = useState(false);
   const [priceExtractionPlatforms, setPriceExtractionPlatforms] = useState<PlatformExtractionStatus[]>([]);
@@ -2023,7 +2001,6 @@ export default function SearchResults() {
   }, [search, confirmedTotal, showConfirmationModal, subtotalInfo]);
 
   // Fetch rejected platforms (low trust score) for testing display
-  // Also check for testing exceptions that bypass photo comparison rejection
   useEffect(() => {
     if (!searchId || !isTerminalFrozen) return;
 
@@ -2041,132 +2018,14 @@ export default function SearchResults() {
       }
 
       if (data) {
-        // Check for testing exceptions - bypass photo comparison for specific URLs
-        const airbnbUrl = search?.airbnb_url;
-        const bypassed: typeof bypassedResults = [];
-        const remaining: typeof data = [];
-
-        for (const result of data) {
-          if (shouldBypassPhotoRejection(airbnbUrl, result.platform_name)) {
-            console.log(`[TestingException] Bypassing photo rejection for ${result.platform_name} on URL: ${airbnbUrl}`);
-            bypassed.push({
-              ...result,
-              bypassed_reason: 'Testing exception: Hotels.com photo comparison bypass'
-            });
-          } else {
-            remaining.push(result);
-          }
-        }
-
-        setLowTrustScoreResults(remaining);
-        setBypassedResults(bypassed);
-
-        // If we have bypassed results, add them to verified matches for price extraction
-        if (bypassed.length > 0) {
-          console.log(`[TestingException] ${bypassed.length} result(s) bypassed and promoted to valid matches`);
-        }
+        setLowTrustScoreResults(data);
       }
     };
 
     fetchRejectedPlatforms();
-  }, [searchId, isTerminalFrozen, search?.airbnb_url]);
+  }, [searchId, isTerminalFrozen]);
 
-  // TESTING: For the Hotels.com bypass case, trigger a backend extraction so we can validate the extractor.
-  useEffect(() => {
-    if (!searchId || !isTerminalFrozen) return;
-    if (!search?.airbnb_url) return;
-    if (!isHotelsComBypassUrl(search.airbnb_url)) return;
-
-    const hasHotelsComBypass = bypassedResults.some((r) => {
-      const n = r.platform_name.toLowerCase().replace(/[^a-z]/g, '');
-      return n === 'hotelscom' || n === 'hotels';
-    });
-
-    if (!hasHotelsComBypass) return;
-    if (hotelsComBypassTriggeredRef.current) return;
-
-    hotelsComBypassTriggeredRef.current = true;
-    setHotelsComBypassExtraction({ status: 'triggering' });
-
-    let cancelled = false;
-    let pollId: number | null = null;
-
-    const trigger = async () => {
-      try {
-        const { data, error } = await supabase.functions.invoke('testing-hotelscom-bypass', {
-          body: { searchId },
-        });
-
-        if (cancelled) return;
-
-        if (error || !data?.success) {
-          setHotelsComBypassExtraction({
-            status: 'error',
-            error: error?.message || data?.error || 'Failed to trigger Hotels.com extraction',
-          });
-          return;
-        }
-
-        const extractionId = data.extractionId as string | undefined;
-        setHotelsComBypassExtraction({ status: 'running', extractionId });
-
-        // Poll until we see a terminal extraction for Hotels.com
-        const startedAt = Date.now();
-        pollId = window.setInterval(async () => {
-          if (cancelled) return;
-          if (Date.now() - startedAt > 120000) {
-            window.clearInterval(pollId!);
-            pollId = null;
-            setHotelsComBypassExtraction((prev) => ({
-              ...prev,
-              status: 'error',
-              error: 'Timed out waiting for Hotels.com extraction',
-            }));
-            return;
-          }
-
-          const { data: rows } = await supabase
-            .from('price_extractions')
-            .select('id, extraction_status, extracted_price, currency, extraction_error')
-            .eq('search_id', searchId)
-            .eq('platform_name', 'Hotels.com')
-            .order('created_at', { ascending: false })
-            .limit(1);
-
-          const row = rows?.[0];
-          if (!row) return;
-
-          const status = row.extraction_status;
-          const isRunning = status === 'pending' || status === 'running';
-          if (!isRunning) {
-            window.clearInterval(pollId!);
-            pollId = null;
-            setHotelsComBypassExtraction({
-              status: 'done',
-              extractionId: row.id,
-              extractedPrice: row.extracted_price,
-              currency: row.currency,
-              extractionStatus: status,
-              error: row.extraction_error || undefined,
-            });
-          }
-        }, 4000);
-      } catch (e) {
-        if (cancelled) return;
-        setHotelsComBypassExtraction({
-          status: 'error',
-          error: e instanceof Error ? e.message : 'Unknown error',
-        });
-      }
-    };
-
-    trigger();
-
-    return () => {
-      cancelled = true;
-      if (pollId) window.clearInterval(pollId);
-    };
-  }, [searchId, isTerminalFrozen, search?.airbnb_url, bypassedResults]);
+  // (Hotels.com bypass extraction removed - all platforms follow standard rules)
 
   // Handle confirmation callbacks
   const handleTotalConfirmed = (amount: number, currency: string) => {
@@ -3053,92 +2912,7 @@ export default function SearchResults() {
                         </div>
                       )}
 
-                      {/* TESTING: Bypassed results - photo comparison bypassed via testing exception */}
-                      {bypassedResults.length > 0 && (
-                        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
-                          <div className="px-4 py-3 flex items-center gap-2">
-                            <AlertTriangle className="w-4 h-4 text-amber-500" />
-                            <span className="text-sm font-medium text-foreground">
-                              {bypassedResults.length} result{bypassedResults.length !== 1 ? 's' : ''} with photo verification bypassed
-                            </span>
-                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 text-[10px] font-medium">
-                              TESTING EXCEPTION
-                            </span>
-                          </div>
-                          <div className="border-t border-amber-500/20 p-4">
-                            <table className="w-full text-sm">
-                              <tbody>
-                                {bypassedResults.map((result) => {
-                                  const resultImages = toStringArray(result.images);
-                                  const isExpanded = expandedComparison === result.id;
-                                  return (
-                                    <React.Fragment key={result.id}>
-                                      <tr className="border-b border-border/50 last:border-0">
-                                        <td className="py-3 pr-3">
-                                          <div className="font-medium text-foreground">{result.platform_name}</div>
-                                          <div className="text-xs text-muted-foreground truncate max-w-[200px]">
-                                            {result.listing_title || 'Listing'}
-                                          </div>
-                                          <div className="text-xs text-amber-600 mt-1">
-                                            {result.bypassed_reason}
-                                          </div>
-                                        </td>
-                                        <td className="py-3 px-3 text-center">
-                                          <span className="text-xs text-muted-foreground">
-                                            Score: {result.confidence_score != null ? `${Math.round(result.confidence_score)}%` : 'N/A'}
-                                          </span>
-                                        </td>
-                                        <td className="py-3 px-3">
-                                          <span className="px-2 py-1 rounded bg-amber-500/20 text-amber-600 text-xs font-medium">
-                                            Bypassed
-                                          </span>
-                                        </td>
-                                        <td className="py-3 pl-3 text-right">
-                                          <div className="flex items-center justify-end gap-2">
-                                            <a 
-                                              href={result.listing_url} 
-                                              target="_blank" 
-                                              rel="noopener noreferrer"
-                                              className="text-xs text-primary hover:underline"
-                                            >
-                                              View
-                                            </a>
-                                            {(result.source_airbnb_image || airbnbImages[0]) && resultImages.length > 0 && (
-                                              <Button
-                                                variant="ghost"
-                                                size="sm"
-                                                onClick={() => setExpandedComparison(isExpanded ? null : result.id)}
-                                                className="text-xs h-7 px-2"
-                                              >
-                                                <Camera className="w-3 h-3 mr-1" />
-                                                {isExpanded ? 'Hide' : 'Photos'}
-                                              </Button>
-                                            )}
-                                          </div>
-                                        </td>
-                                      </tr>
-                                      {isExpanded && (result.source_airbnb_image || airbnbImages[0]) && resultImages.length > 0 && (
-                                        <tr>
-                                          <td colSpan={4} className="py-4 bg-muted/30">
-                                            <ImageComparison
-                                              airbnbImages={result.source_airbnb_image ? [result.source_airbnb_image] : airbnbImages}
-                                              alternativeImages={resultImages}
-                                              airbnbTitle={search?.airbnb_title || 'Airbnb Listing'}
-                                              alternativeTitle={result.listing_title || 'Alternative Listing'}
-                                              platformName={result.platform_name}
-                                              sourceAirbnbImage={result.source_airbnb_image}
-                                            />
-                                          </td>
-                                        </tr>
-                                      )}
-                                    </React.Fragment>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
+                      {/* (Testing bypass UI section removed - all platforms follow standard rules) */}
 
                       {/* Low trust score section (unchanged - always available) */}
                       {lowTrustScoreResults.length > 0 && (
@@ -3787,41 +3561,7 @@ export default function SearchResults() {
                           </div>
                         )}
 
-                        {/* TESTING: Bypassed results - photo comparison bypassed via testing exception */}
-                        {bypassedResults.length > 0 && (
-                          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
-                            <div className="px-4 py-3 flex items-center gap-2">
-                              <AlertTriangle className="w-4 h-4 text-amber-500" />
-                              <span className="text-sm font-medium text-foreground">
-                                {bypassedResults.length} result{bypassedResults.length !== 1 ? 's' : ''} with photo verification bypassed
-                              </span>
-                              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 text-[10px] font-medium">
-                                TESTING EXCEPTION
-                              </span>
-                            </div>
-                            <div className="border-t border-amber-500/20 p-4">
-                              <p className="text-xs text-amber-600 mb-3">
-                                These results failed photo comparison but are shown due to an active testing exception.
-                              </p>
-                              {bypassedResults.map((result) => (
-                                <div key={result.id} className="flex items-center justify-between py-2 border-b border-amber-500/10 last:border-0">
-                                  <div>
-                                    <span className="font-medium text-foreground">{result.platform_name}</span>
-                                    <span className="text-xs text-muted-foreground ml-2">Score: {result.confidence_score != null ? `${Math.round(result.confidence_score)}%` : 'N/A'}</span>
-                                  </div>
-                                  <a 
-                                    href={result.listing_url} 
-                                    target="_blank" 
-                                    rel="noopener noreferrer"
-                                    className="text-xs text-primary hover:underline"
-                                  >
-                                    View Listing
-                                  </a>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                        {/* (Testing bypass UI section removed - all platforms follow standard rules) */}
                         
                         {/* Category 6: Low Trust Score - Candidates that failed image verification (for testing) */}
                         {lowTrustScoreResults.length > 0 && (
@@ -4682,41 +4422,7 @@ export default function SearchResults() {
                           </div>
                         )}
 
-                        {/* TESTING: Bypassed results - photo comparison bypassed via testing exception */}
-                        {bypassedResults.length > 0 && (
-                          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
-                            <div className="px-4 py-3 flex items-center gap-2">
-                              <AlertTriangle className="w-4 h-4 text-amber-500" />
-                              <span className="text-sm font-medium text-foreground">
-                                {bypassedResults.length} result{bypassedResults.length !== 1 ? 's' : ''} with photo verification bypassed
-                              </span>
-                              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 text-[10px] font-medium">
-                                TESTING EXCEPTION
-                              </span>
-                            </div>
-                            <div className="border-t border-amber-500/20 p-4">
-                              <p className="text-xs text-amber-600 mb-3">
-                                These results failed photo comparison but are shown due to an active testing exception.
-                              </p>
-                              {bypassedResults.map((result) => (
-                                <div key={result.id} className="flex items-center justify-between py-2 border-b border-amber-500/10 last:border-0">
-                                  <div>
-                                    <span className="font-medium text-foreground">{result.platform_name}</span>
-                                    <span className="text-xs text-muted-foreground ml-2">Score: {result.confidence_score != null ? `${Math.round(result.confidence_score)}%` : 'N/A'}</span>
-                                  </div>
-                                  <a 
-                                    href={result.listing_url} 
-                                    target="_blank" 
-                                    rel="noopener noreferrer"
-                                    className="text-xs text-primary hover:underline"
-                                  >
-                                    View Listing
-                                  </a>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                        {/* (Testing bypass UI section removed - all platforms follow standard rules) */}
 
                         {/* Category 5: Low Trust Score - Candidates that failed image verification */}
                         {lowTrustScoreResults.length > 0 && (
