@@ -45,9 +45,30 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Check if user exists (don't reveal if they don't - always return success)
-    const { data: userData } = await supabase.auth.admin.listUsers();
-    const userExists = userData?.users?.some(u => u.email?.toLowerCase() === email.toLowerCase());
+    // Check if user exists by listing users with pagination
+    // Note: For security, we always return success even if user doesn't exist
+    let userExists = false;
+    let page = 1;
+    const perPage = 1000;
+    
+    // Search through paginated results
+    while (true) {
+      const { data: usersData, error: listError } = await supabase.auth.admin.listUsers({
+        page,
+        perPage,
+      });
+      
+      if (listError || !usersData?.users?.length) break;
+      
+      if (usersData.users.some(u => u.email?.toLowerCase() === email.toLowerCase())) {
+        userExists = true;
+        break;
+      }
+      
+      // If we got fewer than perPage, we've reached the end
+      if (usersData.users.length < perPage) break;
+      page++;
+    }
 
     if (!userExists) {
       // Don't reveal that user doesn't exist - return success anyway
