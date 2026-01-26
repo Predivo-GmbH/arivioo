@@ -88,11 +88,11 @@ export function Navbar() {
             {user ? (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+                  <Button variant="ghost" className="flex items-center gap-2 group">
+                    <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 group-hover:bg-primary/20 transition-colors">
                       <User className="w-4 h-4 text-primary" />
                     </div>
-                    <span className="text-sm font-medium max-w-[180px] truncate">
+                    <span className="text-sm font-medium max-w-[180px] truncate text-foreground">
                       {getUserDisplayText()}
                     </span>
                   </Button>
