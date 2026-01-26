@@ -105,6 +105,9 @@ const GOLDEN_PATH_PLATFORMS: Record<string, string> = {
   'agoda.com': 'extract-agoda',
   'vrbo.com': 'extract-vrbo',
   'airpaz.com': 'extract-airpaz',
+  // Booking.com golden path: Firecrawl-first with Zyte/Browserless fallback
+  // See docs/BOOKING_PRICE_EXTRACTION_WORKING_BASELINE.md
+  'booking.com': 'extract-booking',
 };
 
 // ============= CRITICAL: Apply date params to deep link =============

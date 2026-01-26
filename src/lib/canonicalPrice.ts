@@ -205,10 +205,16 @@ function mapConfidence(score: number | null, hasStructuralVerification: boolean 
 function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boolean {
   if (!metadata) return false;
   
-  // Check for verification: "VERIFIED" (case insensitive) - used by both Expedia and VRBO
+  // Check for verification: "VERIFIED" (case insensitive) - used by Expedia, VRBO, and Booking.com
   // This is the primary signal from golden path extractors
   const verification = metadata.verification || metadata.structuralProof?.verification || '';
   if (typeof verification === 'string' && verification.toUpperCase() === 'VERIFIED') {
+    return true;
+  }
+  
+  // Check top-level totalProven field (Booking.com uses this)
+  // See docs/BOOKING_PRICE_EXTRACTION_WORKING_BASELINE.md
+  if (metadata.totalProven === true) {
     return true;
   }
   
@@ -219,8 +225,16 @@ function hasVerifiedStructuralProof(metadata: Record<string, any> | null): boole
     metadata.extracted_from_breakdown_total === true;
   if (topLevel) return true;
   
-  // Check nested structuralProof object (Expedia and VRBO golden paths use this)
+  // Check nested structuralProof object (Expedia, VRBO, and Booking.com golden paths use this)
   const structuralProof = metadata.structuralProof || metadata.structural_proof || {};
+  
+  // BOOKING.COM-SPECIFIC: Booking uses 4 core checks for TOTAL_PROVEN
+  // See docs/BOOKING_PRICE_EXTRACTION_WORKING_BASELINE.md
+  const bookingProof = 
+    structuralProof.breakdown_found === true &&
+    structuralProof.total_label_found === true &&
+    structuralProof.extracted_from_breakdown_total === true;
+  if (bookingProof) return true;
   
   // VRBO-SPECIFIC: VRBO uses checkout_session_reached + total_label_found as proof
   // When VRBO reaches checkout and finds a total label, that's verified
@@ -264,20 +278,40 @@ function isExpediaPlatform(platformName: string): boolean {
 }
 
 /**
+ * Check if this is a Booking.com extraction based on platform name
+ * See docs/BOOKING_PRICE_EXTRACTION_WORKING_BASELINE.md
+ */
+function isBookingPlatform(platformName: string): boolean {
+  const lower = platformName.toLowerCase();
+  return lower.includes('booking');
+}
+
+/**
  * Determine price type from extraction metadata and flags
  * CRITICAL: This determines whether we have a comparable total or just a partial price
  * Price type must be derived from WHAT was found (total vs subtotal), NOT from confidence
  * 
  * EXPEDIA-SPECIFIC: The golden path extractor returns verification: "VERIFIED" and
  * semantic: "pass" when it successfully extracts a total with taxes and fees.
+ * 
+ * BOOKING.COM-SPECIFIC: The golden path extractor returns totalProven: true when
+ * all 4 core structural checks pass (breakdown_found, total_label_found, 
+ * extracted_from_breakdown_total, dates_validated).
+ * See docs/BOOKING_PRICE_EXTRACTION_WORKING_BASELINE.md
  */
 function determinePriceType(input: ExtractionInput): PriceType {
   const metadata = input.extraction_metadata || {};
   const isExpedia = isExpediaPlatform(input.platform_name);
+  const isBooking = isBookingPlatform(input.platform_name);
   
   // Explicit price_type from extractor takes priority
+  // Booking.com uses "TOTAL_STAY" for proven totals
   if (input.price_type) {
     const explicit = input.price_type.toLowerCase();
+    // BOOKING.COM golden path: TOTAL_STAY = total_proven
+    if (explicit === 'total_stay' || explicit === 'total-stay') {
+      return 'total_proven';
+    }
     if (explicit.includes('total') && (explicit.includes('proven') || explicit.includes('verified'))) {
       return 'total_proven';
     }
@@ -289,6 +323,15 @@ function determinePriceType(input: ExtractionInput): PriceType {
     }
     if (explicit.includes('nightly') || explicit.includes('per_night')) {
       return 'nightly_only';
+    }
+  }
+  
+  // BOOKING.COM-SPECIFIC: Check for totalProven: true
+  // This is the definitive signal from extract-booking golden path
+  // See docs/BOOKING_PRICE_EXTRACTION_WORKING_BASELINE.md
+  if (isBooking && metadata.totalProven === true) {
+    if (input.includes_taxes_fees === true && input.dates_validated === true) {
+      return 'total_proven';
     }
   }
   

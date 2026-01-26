@@ -786,15 +786,28 @@ export async function finalizeAndCompleteSearch(
         );
 
         // SAFEGUARD ASSERTION: success_total_stay MUST be classified correctly
-        // This prevents silent drops of successful VRBO/Agoda extractions
+        // This prevents silent drops of successful VRBO/Agoda/Booking.com extractions
+        // Baselines: vrbo-price-extraction-golden-path-v1, booking-price-extraction-golden-path-v1
         const extractionStatus = extraction?.extraction_status || platform.extraction_status_terminal || '';
+        const platformNameLower = (platform.platform_name || '').toLowerCase();
+        
         if (extractionStatus === 'success_total_stay') {
           const validBuckets = ['cheaper', 'more_expensive', 'not_comparable'];
           if (!validBuckets.includes(finalBucket)) {
+            // Determine which baseline is violated
+            let baselineName = 'extraction-golden-path';
+            if (platformNameLower.includes('vrbo')) {
+              baselineName = 'vrbo-price-extraction-golden-path-v1';
+            } else if (platformNameLower.includes('booking')) {
+              baselineName = 'booking-price-extraction-golden-path-v1';
+            } else if (platformNameLower.includes('agoda')) {
+              baselineName = 'agoda-price-extraction-golden-path-v1';
+            }
+            
             console.error(
               `[CRITICAL] success_total_stay extraction incorrectly bucketed as "${finalBucket}" ` +
               `for platform="${platform.platform_name}". ` +
-              `This violates baseline invariant vrbo-price-extraction-golden-path-v1. ` +
+              `This violates baseline invariant ${baselineName}. ` +
               `Price=${effectivePrice}, Airbnb=${airbnbPrice}, CanonicalPrice=${JSON.stringify(canonicalPrice)}`
             );
           }
