@@ -7,6 +7,7 @@ import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import ResetPassword from "./pages/ResetPassword";
 import Dashboard from "./pages/Dashboard";
+import Profile from "./pages/Profile";
 import SearchResults from "./pages/SearchResults";
 import Pricing from "./pages/Pricing";
 import UnlockDeal from "./pages/UnlockDeal";
@@ -42,6 +43,7 @@ const App = () => (
           <Route path="/auth" element={<Auth />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/profile" element={<Profile />} />
           <Route path="/search/:searchId" element={<SearchResults />} />
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/unlock" element={<UnlockDeal />} />

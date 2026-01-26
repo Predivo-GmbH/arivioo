@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { Menu, X, User, LogOut } from "lucide-react";
+import { Menu, X, User, LogOut, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AriviooLogo } from "@/components/AriviooLogo";
 import { supabase } from "@/integrations/supabase/client";
@@ -9,6 +9,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
@@ -103,6 +104,13 @@ export function Navbar() {
                       Dashboard
                     </Link>
                   </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <Link to="/profile" className="flex items-center gap-2 cursor-pointer">
+                      <Settings className="w-4 h-4" />
+                      Profile
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={handleLogout} className="flex items-center gap-2 cursor-pointer text-destructive">
                     <LogOut className="w-4 h-4" />
                     Log out
@@ -169,6 +177,14 @@ export function Navbar() {
                   >
                     <User className="w-4 h-4" />
                     Dashboard
+                  </Link>
+                  <Link 
+                    to="/profile" 
+                    className="text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2"
+                    onClick={() => setIsOpen(false)}
+                  >
+                    <Settings className="w-4 h-4" />
+                    Profile
                   </Link>
                   <button
                     onClick={() => {
