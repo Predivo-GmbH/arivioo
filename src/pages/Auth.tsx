@@ -29,11 +29,10 @@ export default function Auth() {
   );
   const urlParam = searchParams.get("url");
 
-  const [mode, setMode] = useState<"login" | "signup" | "forgot">("login");
+  const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [resetEmailSent, setResetEmailSent] = useState(false);
 
   const finalRedirect = useMemo(() => {
     return urlParam
@@ -58,24 +57,10 @@ export default function Auth() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return;
-    if (mode !== "forgot" && !password) return;
+    if (!password) return;
 
     setSubmitting(true);
     try {
-      if (mode === "forgot") {
-        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-          redirectTo: `${window.location.origin}/reset-password`,
-        });
-        if (error) throw error;
-
-        setResetEmailSent(true);
-        toast({
-          title: "Reset email sent",
-          description: "Check your inbox for the password reset link.",
-        });
-        return;
-      }
-
       if (mode === "login") {
         const { error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
@@ -101,7 +86,7 @@ export default function Auth() {
       navigate(finalRedirect, { replace: true });
     } catch (err: any) {
       toast({
-        title: mode === "forgot" ? "Error sending reset email" : "Authentication error",
+        title: "Authentication error",
         description: err?.message || "Please try again.",
         variant: "destructive",
       });
@@ -126,71 +111,7 @@ export default function Auth() {
             <span className="text-white font-bold text-xl">A</span>
           </div>
 
-          {mode === "forgot" ? (
-            resetEmailSent ? (
-              <div className="text-center">
-                <h1 className="text-xl font-semibold text-foreground mb-2">
-                  Check your email
-                </h1>
-                <p className="text-muted-foreground mb-6">
-                  We've sent a password reset link to <strong>{email}</strong>. Click the link in the email to set a new password.
-                </p>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => {
-                    setMode("login");
-                    setResetEmailSent(false);
-                  }}
-                >
-                  Back to Sign In
-                </Button>
-              </div>
-            ) : (
-              <>
-                <h1 className="text-xl font-semibold text-foreground text-center mb-2">
-                  Forgot your password?
-                </h1>
-                <p className="text-muted-foreground text-center mb-6">
-                  Enter your email and we'll send you a reset link.
-                </p>
-
-                <form onSubmit={onSubmit} className="space-y-3">
-                  <Input
-                    type="email"
-                    autoComplete="email"
-                    placeholder="Email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                  />
-
-                  <Button
-                    type="submit"
-                    className="w-full bg-gradient-primary hover:opacity-90"
-                    disabled={submitting}
-                  >
-                    {submitting ? (
-                      <span className="inline-flex items-center gap-2">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Sending...
-                      </span>
-                    ) : (
-                      "Send Reset Link"
-                    )}
-                  </Button>
-                </form>
-
-                <button
-                  type="button"
-                  onClick={() => setMode("login")}
-                  className="w-full text-sm text-muted-foreground hover:text-foreground mt-4 transition-colors"
-                >
-                  Back to Sign In
-                </button>
-              </>
-            )
-          ) : (
+          {(
             <>
               <h1 className="text-xl font-semibold text-foreground text-center mb-2">
                 {mode === "login" ? "Sign in" : "Create your account"}
@@ -240,13 +161,12 @@ export default function Auth() {
                     minLength={8}
                   />
                   {mode === "login" && (
-                    <button
-                      type="button"
-                      onClick={() => setMode("forgot")}
-                      className="text-sm text-primary hover:text-primary/80 mt-2 transition-colors"
+                    <Link
+                      to="/reset-password"
+                      className="text-sm text-primary hover:text-primary/80 mt-2 transition-colors inline-block"
                     >
                       Forgot password?
-                    </button>
+                    </Link>
                   )}
                 </div>
 
