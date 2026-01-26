@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { normalizeToAdapterDomain } from '../_shared/platformNameNormalizer.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -232,22 +233,37 @@ Deno.serve(async (req) => {
     for (const extraction of extractions || []) {
       const platformName = extraction.platform_name?.toLowerCase() || '';
       
-      // Find matching adapter
+      // CRITICAL FIX: Use canonical domain normalization to prevent false positives
+      // (e.g., "Ecohotels" incorrectly matching "hotels.com")
+      const canonicalDomain = normalizeToAdapterDomain(platformName);
+      
       let matchingKey: string | null = null;
-      for (const [key, stats] of platformStats) {
-        if (
-          platformName.includes(key) ||
-          key.includes(platformName) ||
-          stats.platformName.toLowerCase().includes(platformName) ||
-          platformName.includes(stats.platformName.toLowerCase())
-        ) {
-          matchingKey = key;
-          break;
+      
+      if (canonicalDomain) {
+        // Step 1: Exact canonical domain match (preferred)
+        if (platformStats.has(canonicalDomain)) {
+          matchingKey = canonicalDomain;
+        }
+      }
+      
+      if (!matchingKey) {
+        // Step 2: Try exact platform name match (case-insensitive)
+        for (const [key, stats] of platformStats) {
+          if (
+            platformName === key ||
+            platformName === stats.platformName.toLowerCase() ||
+            platformName === stats.platformDomain.toLowerCase()
+          ) {
+            matchingKey = key;
+            break;
+          }
         }
       }
       
       if (!matchingKey) {
         // Skip extractions for platforms not in our adapter registry
+        // Don't use fuzzy matching to prevent false positives
+        console.log(`[BACKFILL] Skipping extraction for unknown platform: ${extraction.platform_name} (no canonical match)`);
         continue;
       }
       
