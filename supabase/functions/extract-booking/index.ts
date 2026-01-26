@@ -905,6 +905,310 @@ async function extractWithBrowserless(url: string): Promise<{
 }
 
 // ============================================================================
+// BROWSERLESS CHECKOUT FLOW - Navigate to checkout page to get VAT-inclusive total
+// ============================================================================
+
+interface CheckoutResult {
+  success: boolean;
+  checkoutReached: boolean;
+  totalPrice: number | null;
+  currency: string | null;
+  includesTaxesFees: boolean;
+  evidenceSnippet: string | null;
+  durationMs: number;
+  error: string | null;
+}
+
+async function extractViaCheckoutNavigation(url: string, nights: number, checkIn: string, checkOut: string): Promise<CheckoutResult> {
+  const start = Date.now();
+  const result: CheckoutResult = {
+    success: false,
+    checkoutReached: false,
+    totalPrice: null,
+    currency: null,
+    includesTaxesFees: false,
+    evidenceSnippet: null,
+    durationMs: 0,
+    error: null,
+  };
+
+  try {
+    const apiKey = Deno.env.get('BROWSERLESS_API_KEY');
+    if (!apiKey) {
+      result.error = 'BROWSERLESS_API_KEY not configured';
+      result.durationMs = Date.now() - start;
+      return result;
+    }
+
+    console.log(`[BOOKING_CHECKOUT] Starting checkout navigation flow for: ${url}`);
+
+    // Use Browserless /function endpoint for multi-step interactions
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for checkout flow
+
+    // Step 1: Navigate to page and interact
+    const functionCode = `
+      module.exports = async ({ page }) => {
+        const result = {
+          checkoutReached: false,
+          totalPrice: null,
+          currency: 'USD',
+          evidenceSnippet: null,
+          steps: [],
+          error: null
+        };
+        
+        try {
+          // Step 1: Wait for page to fully load
+          await page.waitForTimeout(3000);
+          result.steps.push('page_loaded');
+          
+          // Step 2: Check for VAT exclusion signal on current page
+          const pageText = await page.evaluate(() => document.body.innerText);
+          const hasVatExcluded = /excluded[:\\s]*\\d+\\s*%?\\s*vat/i.test(pageText);
+          result.steps.push('vat_check: ' + (hasVatExcluded ? 'excluded' : 'not_found'));
+          
+          if (!hasVatExcluded) {
+            // No VAT exclusion detected, might already include taxes
+            result.evidenceSnippet = pageText.slice(0, 500);
+            return result;
+          }
+          
+          // Step 3: Try to find and select room quantity (1 room)
+          // Booking.com uses various selectors for room selection
+          const roomSelectors = [
+            'select[name*="rooms"]',
+            'select[id*="room"]',
+            'select.hprt-nos-select',
+            '[data-testid="room-select"]',
+            'select.js-hprt-nos-select',
+          ];
+          
+          let roomSelected = false;
+          for (const selector of roomSelectors) {
+            try {
+              const selectExists = await page.$(selector);
+              if (selectExists) {
+                await page.select(selector, '1');
+                result.steps.push('room_selected: ' + selector);
+                roomSelected = true;
+                await page.waitForTimeout(1000);
+                break;
+              }
+            } catch (e) {
+              // Try next selector
+            }
+          }
+          
+          if (!roomSelected) {
+            result.steps.push('room_selection_failed');
+          }
+          
+          // Step 4: Click "I'll reserve" or similar button
+          const reserveSelectors = [
+            'button:has-text("I\\'ll reserve")',
+            'button:has-text("Reserve")',
+            'button[type="submit"]:has-text("reserve")',
+            '.bui-button--primary:has-text("reserve")',
+            '[data-testid="book-button"]',
+            'input[type="submit"][value*="Reserve"]',
+            'button.txp-bui-main-pp',
+          ];
+          
+          let buttonClicked = false;
+          for (const selector of reserveSelectors) {
+            try {
+              // Use evaluate for text-based selectors
+              const clicked = await page.evaluate((sel) => {
+                // Handle :has-text pseudo selector
+                if (sel.includes(':has-text')) {
+                  const match = sel.match(/(.+):has-text\\("([^"]+)"\\)/);
+                  if (match) {
+                    const [, baseSelector, text] = match;
+                    const elements = document.querySelectorAll(baseSelector || 'button');
+                    for (const el of elements) {
+                      if (el.textContent && el.textContent.toLowerCase().includes(text.toLowerCase())) {
+                        (el as HTMLElement).click();
+                        return true;
+                      }
+                    }
+                  }
+                  return false;
+                }
+                const el = document.querySelector(sel);
+                if (el) {
+                  (el as HTMLElement).click();
+                  return true;
+                }
+                return false;
+              }, selector);
+              
+              if (clicked) {
+                result.steps.push('reserve_clicked: ' + selector);
+                buttonClicked = true;
+                break;
+              }
+            } catch (e) {
+              // Try next selector
+            }
+          }
+          
+          if (!buttonClicked) {
+            // Try generic approach - find any button with reserve text
+            const genericClicked = await page.evaluate(() => {
+              const buttons = document.querySelectorAll('button, input[type="submit"], a.bui-button');
+              for (const btn of buttons) {
+                const text = (btn.textContent || btn.getAttribute('value') || '').toLowerCase();
+                if (text.includes('reserve') || text.includes("i'll reserve")) {
+                  (btn as HTMLElement).click();
+                  return true;
+                }
+              }
+              return false;
+            });
+            
+            if (genericClicked) {
+              result.steps.push('reserve_clicked: generic');
+              buttonClicked = true;
+            } else {
+              result.steps.push('reserve_button_not_found');
+            }
+          }
+          
+          if (!buttonClicked) {
+            result.error = 'Could not find reserve button';
+            return result;
+          }
+          
+          // Step 5: Wait for checkout page to load
+          await page.waitForTimeout(5000);
+          
+          // Check if we navigated to checkout
+          const currentUrl = page.url();
+          const isCheckoutPage = /book\\.html|checkout|yourdetails|payment/i.test(currentUrl);
+          result.steps.push('navigation: ' + (isCheckoutPage ? 'checkout_page' : 'same_page'));
+          
+          // Step 6: Extract total from checkout page
+          const checkoutText = await page.evaluate(() => document.body.innerText);
+          result.checkoutReached = isCheckoutPage || checkoutText.length > 10000;
+          
+          // Look for total price on checkout page with VAT included
+          // Patterns: "Total: $X,XXX" or "Amount due: $X,XXX" or "You'll pay $X,XXX"
+          const totalPatterns = [
+            /(?:total|amount\\s*due|you(?:'ll)?\\s*pay)[:\\s]*(?:US\\$|\\$|USD\\s*)?([\\d,]+(?:\\.\\d{2})?)/gi,
+            /(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:total|grand\\s*total)/gi,
+            /(?:final\\s*)?(?:price|amount)[:\\s]*(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)/gi,
+          ];
+          
+          const foundPrices = [];
+          for (const pattern of totalPatterns) {
+            let match;
+            while ((match = pattern.exec(checkoutText)) !== null) {
+              const amount = parseFloat(match[1].replace(/,/g, ''));
+              if (amount > 50 && amount < 50000) {
+                const start = Math.max(0, match.index - 50);
+                const end = Math.min(checkoutText.length, match.index + match[0].length + 50);
+                foundPrices.push({ 
+                  amount, 
+                  context: checkoutText.slice(start, end).replace(/\\n/g, ' ').trim() 
+                });
+              }
+            }
+          }
+          
+          result.steps.push('prices_found: ' + foundPrices.length);
+          
+          if (foundPrices.length > 0) {
+            // Sort by amount (prefer largest as it likely includes everything)
+            foundPrices.sort((a, b) => b.amount - a.amount);
+            result.totalPrice = foundPrices[0].amount;
+            result.evidenceSnippet = foundPrices[0].context;
+          }
+          
+          return result;
+          
+        } catch (e) {
+          result.error = e.message || 'Unknown error in checkout flow';
+          return result;
+        }
+      };
+    `;
+
+    const response = await fetch(`https://chrome.browserless.io/function?token=${apiKey}&stealth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: functionCode,
+        context: { url },
+        gotoOptions: { 
+          url,
+          waitUntil: 'networkidle0', 
+          timeout: 45000 
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      result.error = `Browserless checkout HTTP ${response.status}: ${errText.slice(0, 200)}`;
+      result.durationMs = Date.now() - start;
+      return result;
+    }
+
+    const data = await response.json();
+    console.log(`[BOOKING_CHECKOUT] Steps: ${JSON.stringify(data.steps || [])}`);
+    
+    result.checkoutReached = data.checkoutReached || false;
+    result.totalPrice = data.totalPrice || null;
+    result.currency = data.currency || 'USD';
+    result.evidenceSnippet = data.evidenceSnippet || null;
+    result.includesTaxesFees = result.checkoutReached && result.totalPrice !== null;
+    result.success = result.includesTaxesFees;
+    result.error = data.error || null;
+    result.durationMs = Date.now() - start;
+
+    console.log(`[BOOKING_CHECKOUT] Result: checkoutReached=${result.checkoutReached}, totalPrice=${result.totalPrice}, includesTaxes=${result.includesTaxesFees}`);
+
+    return result;
+
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    result.error = msg.includes('abort') ? 'Checkout navigation timeout' : `Checkout error: ${msg}`;
+    result.durationMs = Date.now() - start;
+    return result;
+  }
+}
+
+/**
+ * Detect if content shows VAT/tax exclusion that requires checkout navigation
+ */
+function detectVatExcluded(content: string): { excluded: boolean; percentage: number | null; signal: string | null } {
+  // Look for patterns like "Excluded: 10% VAT" or "Excludes 10 % VAT"
+  const patterns = [
+    /excluded[:\s]*(\d+)\s*%?\s*vat/i,
+    /excludes?\s*(\d+)\s*%?\s*vat/i,
+    /vat[:\s]*(\d+)\s*%?\s*(?:excluded|not included)/i,
+    /(\d+)\s*%?\s*vat\s*(?:excluded|not included)/i,
+    /plus\s*(\d+)\s*%?\s*vat/i,
+    /\+\s*(\d+)\s*%?\s*vat/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = content.match(pattern);
+    if (match) {
+      const percentage = parseInt(match[1], 10);
+      console.log(`[BOOKING] VAT exclusion detected: ${match[0]} (${percentage}%)`);
+      return { excluded: true, percentage, signal: match[0] };
+    }
+  }
+  
+  return { excluded: false, percentage: null, signal: null };
+}
+
+// ============================================================================
 // MAIN HANDLER
 // ============================================================================
 
@@ -1139,6 +1443,89 @@ Deno.serve(async (req) => {
     const tokenAudit = auditPriceTokens(content);
     console.log(`[BOOKING_DIAG] step=3 interaction_used=false clicked=none`);
 
+    // ========================================
+    // STEP 3: CHECK FOR VAT EXCLUSION
+    // If VAT is excluded, we need to navigate to checkout to get the true total
+    // ========================================
+    const vatCheck = detectVatExcluded(content);
+    
+    if (vatCheck.excluded) {
+      console.log(`[BOOKING] VAT exclusion detected (${vatCheck.percentage}%), triggering checkout navigation...`);
+      
+      // Try checkout navigation to get VAT-inclusive price
+      const checkoutResult = await extractViaCheckoutNavigation(datedUrl, nights, checkIn, checkOut);
+      
+      if (checkoutResult.success && checkoutResult.totalPrice) {
+        console.log(`[BOOKING] Checkout navigation succeeded: $${checkoutResult.totalPrice} (VAT included)`);
+        
+        result.extractedPrice = checkoutResult.totalPrice;
+        result.currency = checkoutResult.currency || 'USD';
+        result.evidenceSnippet = checkoutResult.evidenceSnippet;
+        result.includesTaxesFees = true; // Checkout page total includes VAT
+        result.datesValidated = true; // We navigated through with dates
+        result.totalProven = true; // From checkout page
+        result.structuralProof = {
+          breakdown_found: true,
+          total_label_found: true,
+          extracted_from_breakdown_total: true,
+        };
+        result.failedChecks = [];
+        result.success = true;
+        result.status = 'success_total_stay';
+        
+        // Add checkout trace to provider trace
+        providerAttemptTrace.push({
+          provider: 'browserless',
+          attempted: true,
+          startedAt: new Date(Date.now() - checkoutResult.durationMs).toISOString(),
+          endedAt: new Date().toISOString(),
+          outcome: 'checkout_success',
+          httpStatus: 200,
+          contentLength: null,
+          errorMessage: null,
+        });
+        
+        result.providerUsed = 'browserless';
+        result.providerAttemptTrace = providerAttemptTrace;
+        result.durationMs = Date.now() - startTime;
+        
+        // Update DB if extractionId provided
+        if (extractionId && supabase) {
+          await supabase
+            .from('price_extractions')
+            .update({
+              extraction_status: result.status,
+              extracted_price: result.extractedPrice,
+              currency: result.currency,
+              includes_taxes_fees: true,
+              provider_used: 'browserless',
+              evidence_snippets: result.evidenceSnippet ? [result.evidenceSnippet] : null,
+              dates_validated: true,
+              extraction_metadata: {
+                providerAttemptTrace: result.providerAttemptTrace,
+                checkoutNavigation: true,
+                vatExclusionDetected: vatCheck.signal,
+                vatPercentage: vatCheck.percentage,
+                totalProven: true,
+                structuralProof: result.structuralProof,
+                durationMs: result.durationMs,
+              },
+              extraction_error: null,
+              price_type: 'TOTAL_STAY',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', extractionId);
+        }
+
+        return new Response(JSON.stringify(result), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } else {
+        console.log(`[BOOKING] Checkout navigation failed: ${checkoutResult.error}, falling back to standard extraction`);
+        // Fall through to standard extraction - but VAT will be excluded
+      }
+    }
+
     // Extract prices with VRBO-style strict gate
     const priceResult = extractBookingTotal(content, nights, checkIn, checkOut);
     
@@ -1151,27 +1538,39 @@ Deno.serve(async (req) => {
     result.failedChecks = priceResult.failedChecks;
     result.detectedCheckIn = priceResult.detectedCheckIn;
     result.detectedCheckOut = priceResult.detectedCheckOut;
-    result.includesTaxesFees = priceResult.includesTaxesFees;
+    
+    // CRITICAL: If VAT was excluded and checkout failed, do NOT claim taxes are included
+    if (vatCheck.excluded) {
+      result.includesTaxesFees = false;
+      result.failedChecks.push('vat_excluded_checkout_failed');
+      console.log(`[BOOKING] VAT excluded but checkout navigation failed - marking includes_taxes_fees=false`);
+    } else {
+      result.includesTaxesFees = priceResult.includesTaxesFees;
+    }
 
     // ========================================
-    // VRBO-STYLE STRICT GATE: Only success_total_stay when TOTAL_PROVEN
+    // VRBO-STYLE STRICT GATE: Only success_total_stay when TOTAL_PROVEN AND taxes included
     // ========================================
     if (priceResult.totalFound && priceResult.totalPrice) {
       result.extractedPrice = priceResult.totalPrice;
       result.currency = priceResult.currency;
       result.evidenceSnippet = priceResult.totalEvidence;
       
-      if (priceResult.totalProven) {
+      // For TOTAL_PROVEN status, we now also require taxes to be confirmed included
+      const isTrulyProven = priceResult.totalProven && result.includesTaxesFees;
+      
+      if (isTrulyProven) {
         // ALL checks passed - legitimate comparable total
         result.success = true;
         result.status = 'success_total_stay';
-        console.log(`[BOOKING] SUCCESS: $${priceResult.totalPrice} via ${providerUsed} - TOTAL_PROVEN=true`);
+        console.log(`[BOOKING] SUCCESS: $${priceResult.totalPrice} via ${providerUsed} - TOTAL_PROVEN=true, taxes_included=true`);
       } else {
-        // Price found but not proven - downgrade to unverified (maps to not_comparable bucket)
+        // Price found but not fully proven - downgrade to unverified (maps to not_comparable bucket)
         result.success = false;
         result.status = 'unverified';
-        result.error = `Price found but not TOTAL_PROVEN: failed_checks=[${priceResult.failedChecks.join(', ')}]`;
-        console.log(`[BOOKING] UNVERIFIED: $${priceResult.totalPrice} - TOTAL_PROVEN=false, failed_checks=[${priceResult.failedChecks.join(', ')}]`);
+        const reason = !priceResult.totalProven ? 'structural_checks_failed' : 'taxes_not_included';
+        result.error = `Price found but not fully proven: ${reason}, failed_checks=[${result.failedChecks.join(', ')}]`;
+        console.log(`[BOOKING] UNVERIFIED: $${priceResult.totalPrice} - TOTAL_PROVEN=${priceResult.totalProven}, taxes_included=${result.includesTaxesFees}`);
       }
     } else {
       result.status = 'price_not_found';

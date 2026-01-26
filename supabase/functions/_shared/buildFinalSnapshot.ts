@@ -712,27 +712,9 @@ export async function finalizeAndCompleteSearch(
           const extractedCurrency = extraction.currency || 'USD';
           const isCurrencyUSD = extractedCurrency === 'USD';
           
-          // BOOKING.COM TAX OVERRIDE: When extraction has totalProven=true 
-          // (4 core structural checks passed), assume taxes are included
-          // Booking.com breakdown totals reliably include all charges at checkout
-          const platformKey = (platform.platform_name || '').toLowerCase();
-          const isBookingCom = platformKey.includes('booking');
-          const metadata = extraction.extraction_metadata || {};
-          const hasTotalProven = metadata.totalProven === true || 
-                                 metadata.structuralProof?.totalProven === true ||
-                                 (metadata.structuralProof?.breakdown_found === true &&
-                                  metadata.structuralProof?.total_label_found === true &&
-                                  metadata.structuralProof?.extracted_from_breakdown_total === true &&
-                                  extraction.dates_validated === true);
-          
-          // For Booking.com with totalProven, override includes_taxes_fees to true
-          const effectiveIncludesTaxesFees = isBookingCom && hasTotalProven 
-            ? true 
-            : (extraction.includes_taxes_fees || false);
-          
-          if (isBookingCom && hasTotalProven && !extraction.includes_taxes_fees) {
-            console.log(`[BOOKING TAX OVERRIDE] Platform=${platform.platform_name}, overriding includes_taxes_fees=true (totalProven=${hasTotalProven})`);
-          }
+          // Use the actual includes_taxes_fees from extraction - no more overrides
+          // The extractor is now responsible for navigating to checkout to get VAT-inclusive prices
+          const effectiveIncludesTaxesFees = extraction.includes_taxes_fees || false;
           
           // A price is only comparable if it's a proven/derived total, includes taxes, 
           // dates are validated, AND it's in USD (to compare with Airbnb USD baseline)
@@ -890,25 +872,9 @@ export async function finalizeAndCompleteSearch(
           const extractedCurrency = extraction.currency || 'USD';
           const isCurrencyUSD = extractedCurrency === 'USD';
           
-          // BOOKING.COM TAX OVERRIDE (legacy path): When extraction has totalProven=true 
-          // (4 core structural checks passed), assume taxes are included
-          const platformKey = (result.platform_name || '').toLowerCase();
-          const isBookingCom = platformKey.includes('booking');
-          const metadata = extraction.extraction_metadata || {};
-          const hasTotalProven = metadata.totalProven === true || 
-                                 metadata.structuralProof?.totalProven === true ||
-                                 (metadata.structuralProof?.breakdown_found === true &&
-                                  metadata.structuralProof?.total_label_found === true &&
-                                  metadata.structuralProof?.extracted_from_breakdown_total === true &&
-                                  extraction.dates_validated === true);
-          
-          const effectiveIncludesTaxesFees = isBookingCom && hasTotalProven 
-            ? true 
-            : (extraction.includes_taxes_fees || false);
-          
-          if (isBookingCom && hasTotalProven && !extraction.includes_taxes_fees) {
-            console.log(`[BOOKING TAX OVERRIDE LEGACY] Platform=${result.platform_name}, overriding includes_taxes_fees=true`);
-          }
+          // Use the actual includes_taxes_fees from extraction - no more overrides
+          // The extractor is now responsible for navigating to checkout to get VAT-inclusive prices
+          const effectiveIncludesTaxesFees = extraction.includes_taxes_fees || false;
           
           // A price is only comparable if it's a proven/derived total, includes taxes, 
           // dates are validated, AND it's in USD (to compare with Airbnb USD baseline)
