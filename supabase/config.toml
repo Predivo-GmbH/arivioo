@@ -172,3 +172,12 @@ verify_jwt = false
 
 [functions.reset-password-with-code]
 verify_jwt = false
+
+[functions.request-signup-code]
+verify_jwt = false
+
+[functions.verify-signup-code]
+verify_jwt = false
+
+[functions.complete-signup]
+verify_jwt = false
