@@ -946,206 +946,92 @@ async function extractViaCheckoutNavigation(url: string, nights: number, checkIn
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for checkout flow
 
-    // Step 1: Navigate to page and interact
+    // ESM format function code for Browserless /function API
+    // URL is embedded directly in the code since we can't pass context
     const functionCode = `
-      module.exports = async ({ page }) => {
-        const result = {
-          checkoutReached: false,
-          totalPrice: null,
-          currency: 'USD',
-          evidenceSnippet: null,
-          steps: [],
-          error: null
-        };
-        
-        try {
-          // Step 1: Wait for page to fully load
-          await page.waitForTimeout(3000);
-          result.steps.push('page_loaded');
-          
-          // Step 2: Check for VAT exclusion signal on current page
-          const pageText = await page.evaluate(() => document.body.innerText);
-          const hasVatExcluded = /excluded[:\\s]*\\d+\\s*%?\\s*vat/i.test(pageText);
-          result.steps.push('vat_check: ' + (hasVatExcluded ? 'excluded' : 'not_found'));
-          
-          if (!hasVatExcluded) {
-            // No VAT exclusion detected, might already include taxes
-            result.evidenceSnippet = pageText.slice(0, 500);
-            return result;
-          }
-          
-          // Step 3: Try to find and select room quantity (1 room)
-          // Booking.com uses various selectors for room selection
-          const roomSelectors = [
-            'select[name*="rooms"]',
-            'select[id*="room"]',
-            'select.hprt-nos-select',
-            '[data-testid="room-select"]',
-            'select.js-hprt-nos-select',
-          ];
-          
-          let roomSelected = false;
-          for (const selector of roomSelectors) {
-            try {
-              const selectExists = await page.$(selector);
-              if (selectExists) {
-                await page.select(selector, '1');
-                result.steps.push('room_selected: ' + selector);
-                roomSelected = true;
-                await page.waitForTimeout(1000);
-                break;
-              }
-            } catch (e) {
-              // Try next selector
-            }
-          }
-          
-          if (!roomSelected) {
-            result.steps.push('room_selection_failed');
-          }
-          
-          // Step 4: Click "I'll reserve" or similar button
-          const reserveSelectors = [
-            'button:has-text("I\\'ll reserve")',
-            'button:has-text("Reserve")',
-            'button[type="submit"]:has-text("reserve")',
-            '.bui-button--primary:has-text("reserve")',
-            '[data-testid="book-button"]',
-            'input[type="submit"][value*="Reserve"]',
-            'button.txp-bui-main-pp',
-          ];
-          
-          let buttonClicked = false;
-          for (const selector of reserveSelectors) {
-            try {
-              // Use evaluate for text-based selectors
-              const clicked = await page.evaluate((sel) => {
-                // Handle :has-text pseudo selector
-                if (sel.includes(':has-text')) {
-                  const match = sel.match(/(.+):has-text\\("([^"]+)"\\)/);
-                  if (match) {
-                    const [, baseSelector, text] = match;
-                    const elements = document.querySelectorAll(baseSelector || 'button');
-                    for (const el of elements) {
-                      if (el.textContent && el.textContent.toLowerCase().includes(text.toLowerCase())) {
-                        (el as HTMLElement).click();
-                        return true;
-                      }
-                    }
-                  }
-                  return false;
-                }
-                const el = document.querySelector(sel);
-                if (el) {
-                  (el as HTMLElement).click();
-                  return true;
-                }
-                return false;
-              }, selector);
-              
-              if (clicked) {
-                result.steps.push('reserve_clicked: ' + selector);
-                buttonClicked = true;
-                break;
-              }
-            } catch (e) {
-              // Try next selector
-            }
-          }
-          
-          if (!buttonClicked) {
-            // Try generic approach - find any button with reserve text
-            const genericClicked = await page.evaluate(() => {
-              const buttons = document.querySelectorAll('button, input[type="submit"], a.bui-button');
-              for (const btn of buttons) {
-                const text = (btn.textContent || btn.getAttribute('value') || '').toLowerCase();
-                if (text.includes('reserve') || text.includes("i'll reserve")) {
-                  (btn as HTMLElement).click();
-                  return true;
-                }
-              }
-              return false;
-            });
-            
-            if (genericClicked) {
-              result.steps.push('reserve_clicked: generic');
-              buttonClicked = true;
-            } else {
-              result.steps.push('reserve_button_not_found');
-            }
-          }
-          
-          if (!buttonClicked) {
-            result.error = 'Could not find reserve button';
-            return result;
-          }
-          
-          // Step 5: Wait for checkout page to load
-          await page.waitForTimeout(5000);
-          
-          // Check if we navigated to checkout
-          const currentUrl = page.url();
-          const isCheckoutPage = /book\\.html|checkout|yourdetails|payment/i.test(currentUrl);
-          result.steps.push('navigation: ' + (isCheckoutPage ? 'checkout_page' : 'same_page'));
-          
-          // Step 6: Extract total from checkout page
-          const checkoutText = await page.evaluate(() => document.body.innerText);
-          result.checkoutReached = isCheckoutPage || checkoutText.length > 10000;
-          
-          // Look for total price on checkout page with VAT included
-          // Patterns: "Total: $X,XXX" or "Amount due: $X,XXX" or "You'll pay $X,XXX"
-          const totalPatterns = [
-            /(?:total|amount\\s*due|you(?:'ll)?\\s*pay)[:\\s]*(?:US\\$|\\$|USD\\s*)?([\\d,]+(?:\\.\\d{2})?)/gi,
-            /(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)\\s*(?:total|grand\\s*total)/gi,
-            /(?:final\\s*)?(?:price|amount)[:\\s]*(?:US\\$|\\$|USD\\s*)([\\d,]+(?:\\.\\d{2})?)/gi,
-          ];
-          
-          const foundPrices = [];
-          for (const pattern of totalPatterns) {
-            let match;
-            while ((match = pattern.exec(checkoutText)) !== null) {
-              const amount = parseFloat(match[1].replace(/,/g, ''));
-              if (amount > 50 && amount < 50000) {
-                const start = Math.max(0, match.index - 50);
-                const end = Math.min(checkoutText.length, match.index + match[0].length + 50);
-                foundPrices.push({ 
-                  amount, 
-                  context: checkoutText.slice(start, end).replace(/\\n/g, ' ').trim() 
-                });
-              }
-            }
-          }
-          
-          result.steps.push('prices_found: ' + foundPrices.length);
-          
-          if (foundPrices.length > 0) {
-            // Sort by amount (prefer largest as it likely includes everything)
-            foundPrices.sort((a, b) => b.amount - a.amount);
-            result.totalPrice = foundPrices[0].amount;
-            result.evidenceSnippet = foundPrices[0].context;
-          }
-          
-          return result;
-          
-        } catch (e) {
-          result.error = e.message || 'Unknown error in checkout flow';
-          return result;
+export default async ({ page }) => {
+  const targetUrl = ${JSON.stringify(url)};
+  const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  
+  const result = {
+    checkoutReached: false,
+    totalPrice: null,
+    currency: 'USD',
+    evidenceSnippet: null,
+    steps: [],
+    error: null
+  };
+  
+  try {
+    // Step 1: Navigate to page
+    await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 45000 });
+    await delay(3000);
+    result.steps.push('page_loaded');
+    
+    // Step 2: Try to find and select room quantity (1 room)
+    const roomSelectors = ['select[name*="nr_rooms"]', 'select.hprt-nos-select'];
+    
+    for (const selector of roomSelectors) {
+      try {
+        const selectExists = await page.$(selector);
+        if (selectExists) {
+          await page.select(selector, '1');
+          result.steps.push('room_selected');
+          await delay(1000);
+          break;
         }
-      };
-    `;
+      } catch (e) {}
+    }
+    
+    // Step 3: Click reserve button
+    const buttonClicked = await page.evaluate(() => {
+      const buttons = document.querySelectorAll('button, input[type="submit"], a.bui-button');
+      for (const btn of buttons) {
+        const text = (btn.textContent || btn.getAttribute('value') || '').toLowerCase();
+        if (text.includes('reserve') || text.includes('book')) {
+          btn.click();
+          return true;
+        }
+      }
+      return false;
+    });
+    
+    if (buttonClicked) {
+      result.steps.push('reserve_clicked');
+    } else {
+      result.error = 'Could not find reserve button';
+      return { data: result };
+    }
+    
+    // Step 4: Wait for checkout page
+    await delay(5000);
+    
+    const currentUrl = page.url();
+    result.checkoutReached = /book\\.html|checkout|yourdetails/i.test(currentUrl);
+    result.steps.push('navigation: ' + (result.checkoutReached ? 'checkout' : 'same'));
+    
+    // Step 5: Extract total price
+    const checkoutText = await page.evaluate(() => document.body.innerText);
+    const priceMatch = checkoutText.match(/(?:total|amount\\s*due)[:\\s]*(?:\\$|€)?\\s*([\\d,]+(?:\\.\\d{2})?)/i);
+    
+    if (priceMatch) {
+      result.totalPrice = parseFloat(priceMatch[1].replace(/,/g, ''));
+      result.evidenceSnippet = checkoutText.slice(0, 300);
+    }
+    
+    return { data: result };
+    
+  } catch (e) {
+    result.error = e.message || 'Unknown error';
+    return { data: result };
+  }
+};
+`;
 
     const response = await fetch(`https://chrome.browserless.io/function?token=${apiKey}&stealth`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        code: functionCode,
-        context: { url },
-        gotoOptions: { 
-          url,
-          waitUntil: 'networkidle0', 
-          timeout: 45000 
-        },
-      }),
+      headers: { 'Content-Type': 'application/javascript' },
+      body: functionCode,
       signal: controller.signal,
     });
 
@@ -1158,7 +1044,8 @@ async function extractViaCheckoutNavigation(url: string, nights: number, checkIn
       return result;
     }
 
-    const data = await response.json();
+    const responseData = await response.json();
+    const data = responseData.data || responseData;
     console.log(`[BOOKING_CHECKOUT] Steps: ${JSON.stringify(data.steps || [])}`);
     
     result.checkoutReached = data.checkoutReached || false;
@@ -1184,8 +1071,15 @@ async function extractViaCheckoutNavigation(url: string, nights: number, checkIn
 
 /**
  * Detect if content shows VAT/tax exclusion that requires checkout navigation
+ * Note: Content may have HTML tags (<br>, etc.) between words, so we normalize first
  */
 function detectVatExcluded(content: string): { excluded: boolean; percentage: number | null; signal: string | null } {
+  // Normalize content: replace HTML tags and multiple whitespace with single space
+  const normalized = content
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ');
+  
   // Look for patterns like "Excluded: 10% VAT" or "Excludes 10 % VAT"
   const patterns = [
     /excluded[:\s]*(\d+)\s*%?\s*vat/i,
@@ -1194,14 +1088,30 @@ function detectVatExcluded(content: string): { excluded: boolean; percentage: nu
     /(\d+)\s*%?\s*vat\s*(?:excluded|not included)/i,
     /plus\s*(\d+)\s*%?\s*vat/i,
     /\+\s*(\d+)\s*%?\s*vat/i,
+    // Additional patterns for Booking.com format
+    /excluded\s*:?\s*(\d+)\s*%\s*vat/i,
+    /vat\s*:?\s*excluded/i,  // No percentage, just "VAT excluded"
   ];
   
   for (const pattern of patterns) {
-    const match = content.match(pattern);
+    const match = normalized.match(pattern);
     if (match) {
-      const percentage = parseInt(match[1], 10);
-      console.log(`[BOOKING] VAT exclusion detected: ${match[0]} (${percentage}%)`);
+      const percentage = match[1] ? parseInt(match[1], 10) : 10; // Default to 10% if not specified
+      console.log(`[BOOKING] VAT exclusion detected: "${match[0]}" (${percentage}%)`);
       return { excluded: true, percentage, signal: match[0] };
+    }
+  }
+  
+  // Also check original content for "Excluded:" near "VAT" within 50 chars
+  const vatIndex = content.toLowerCase().indexOf('vat');
+  if (vatIndex !== -1) {
+    const nearbyStart = Math.max(0, vatIndex - 50);
+    const nearbyEnd = Math.min(content.length, vatIndex + 50);
+    const nearbyText = content.slice(nearbyStart, nearbyEnd).toLowerCase();
+    
+    if (nearbyText.includes('excluded') || nearbyText.includes('not included')) {
+      console.log(`[BOOKING] VAT exclusion detected via proximity: VAT near "excluded" or "not included"`);
+      return { excluded: true, percentage: 10, signal: 'VAT exclusion (proximity match)' };
     }
   }
   
