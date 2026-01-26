@@ -584,22 +584,40 @@ function extractBookingTotal(content: string, nights: number, requestedCheckIn: 
     result.structuralProof.extracted_from_breakdown_total = best.fromBreakdownTotal;
 
     // ========================================
-    // STEP 7: Compute TOTAL_PROVEN
+    // STEP 7: Compute TOTAL_PROVEN with Booking.com-specific relaxed gate
+    // ========================================
+    // Booking.com breakdown totals are known to include all charges.
+    // We use a relaxed gate requiring only 4 core structural checks:
+    // 1. breakdown_found
+    // 2. total_label_found  
+    // 3. extracted_from_breakdown_total
+    // 4. datesValidated (rendered_dates_match)
     // ========================================
     const failedChecks: string[] = [];
 
-    if (!result.structuralProof.breakdown_found) {
+    // Core structural checks (required for TOTAL_PROVEN)
+    const coreChecks = {
+      breakdown_found: result.structuralProof.breakdown_found,
+      total_label_found: result.structuralProof.total_label_found,
+      extracted_from_breakdown_total: result.structuralProof.extracted_from_breakdown_total,
+      dates_validated: result.datesValidated,
+    };
+
+    // Track all check failures for logging/debugging
+    if (!coreChecks.breakdown_found) {
       failedChecks.push('breakdown_not_found');
     }
-    if (!result.structuralProof.total_label_found) {
+    if (!coreChecks.total_label_found) {
       failedChecks.push('total_label_not_found');
     }
-    if (!result.structuralProof.extracted_from_breakdown_total) {
+    if (!coreChecks.extracted_from_breakdown_total) {
       failedChecks.push('not_extracted_from_breakdown_total');
     }
-    if (!result.datesValidated) {
+    if (!coreChecks.dates_validated) {
       failedChecks.push('dates_not_validated');
     }
+    
+    // Non-blocking checks (logged but don't block TOTAL_PROVEN for Booking.com)
     if (!result.nightsMatched) {
       failedChecks.push('nights_not_matched');
     }
@@ -608,17 +626,35 @@ function extractBookingTotal(content: string, nights: number, requestedCheckIn: 
     }
 
     result.failedChecks = failedChecks;
-    result.totalProven = failedChecks.length === 0;
+
+    // Booking.com relaxed gate: TOTAL_PROVEN if 4 core checks pass
+    // (nights_matched and taxes_fees_not_confirmed are non-blocking)
+    const coreChecksPassed = coreChecks.breakdown_found && 
+                              coreChecks.total_label_found && 
+                              coreChecks.extracted_from_breakdown_total && 
+                              coreChecks.dates_validated;
+    
+    result.totalProven = coreChecksPassed;
 
     // Logging per requirements
-    console.log(`[BOOKING] total_proven=${result.totalProven}`);
-    console.log(`[BOOKING] breakdown_found=${result.structuralProof.breakdown_found} total_label_found=${result.structuralProof.total_label_found} extracted_from_breakdown_total=${result.structuralProof.extracted_from_breakdown_total}`);
-    console.log(`[BOOKING] dates_validated=${result.datesValidated} nightsMatched=${result.nightsMatched} includes_taxes_fees=${result.includesTaxesFees}`);
+    console.log(`[BOOKING] total_proven=${result.totalProven} (relaxed_gate: 4_core_checks)`);
+    console.log(`[BOOKING] CORE: breakdown_found=${coreChecks.breakdown_found} total_label_found=${coreChecks.total_label_found} extracted_from_breakdown=${coreChecks.extracted_from_breakdown_total} dates_validated=${coreChecks.dates_validated}`);
+    console.log(`[BOOKING] EXTRA: nightsMatched=${result.nightsMatched} includes_taxes_fees=${result.includesTaxesFees}`);
     
     if (!result.totalProven) {
-      console.log(`[BOOKING] REJECTED: failed_checks=[${failedChecks.join(', ')}]`);
+      const coreFailures = failedChecks.filter(c => 
+        ['breakdown_not_found', 'total_label_not_found', 'not_extracted_from_breakdown_total', 'dates_not_validated'].includes(c)
+      );
+      console.log(`[BOOKING] REJECTED: core_failures=[${coreFailures.join(', ')}]`);
     } else {
-      console.log(`[BOOKING] ACCEPTED: $${best.amount} TOTAL_PROVEN=true`);
+      const extraFailures = failedChecks.filter(c => 
+        ['nights_not_matched', 'taxes_fees_not_confirmed'].includes(c)
+      );
+      if (extraFailures.length > 0) {
+        console.log(`[BOOKING] ACCEPTED (relaxed): $${best.amount} TOTAL_PROVEN=true, non_blocking_warnings=[${extraFailures.join(', ')}]`);
+      } else {
+        console.log(`[BOOKING] ACCEPTED (full): $${best.amount} TOTAL_PROVEN=true, all_checks_passed`);
+      }
     }
   }
 
