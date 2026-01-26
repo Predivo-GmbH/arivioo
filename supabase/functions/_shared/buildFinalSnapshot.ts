@@ -739,10 +739,32 @@ export async function finalizeAndCompleteSearch(
           const extractedCurrency = extraction.currency || 'USD';
           const isCurrencyUSD = extractedCurrency === 'USD';
           
+          // BOOKING.COM TAX OVERRIDE: When extraction has totalProven=true 
+          // (4 core structural checks passed), assume taxes are included
+          // Booking.com breakdown totals reliably include all charges at checkout
+          const platformKey = (platform.platform_name || '').toLowerCase();
+          const isBookingCom = platformKey.includes('booking');
+          const metadata = extraction.extraction_metadata || {};
+          const hasTotalProven = metadata.totalProven === true || 
+                                 metadata.structuralProof?.totalProven === true ||
+                                 (metadata.structuralProof?.breakdown_found === true &&
+                                  metadata.structuralProof?.total_label_found === true &&
+                                  metadata.structuralProof?.extracted_from_breakdown_total === true &&
+                                  extraction.dates_validated === true);
+          
+          // For Booking.com with totalProven, override includes_taxes_fees to true
+          const effectiveIncludesTaxesFees = isBookingCom && hasTotalProven 
+            ? true 
+            : (extraction.includes_taxes_fees || false);
+          
+          if (isBookingCom && hasTotalProven && !extraction.includes_taxes_fees) {
+            console.log(`[BOOKING TAX OVERRIDE] Platform=${platform.platform_name}, overriding includes_taxes_fees=true (totalProven=${hasTotalProven})`);
+          }
+          
           // A price is only comparable if it's a proven/derived total, includes taxes, 
           // dates are validated, AND it's in USD (to compare with Airbnb USD baseline)
           const isComparable = (derivedPriceType === 'total_proven' || derivedPriceType === 'total_derived') &&
-                               extraction.includes_taxes_fees === true &&
+                               effectiveIncludesTaxesFees === true &&
                                extraction.dates_validated === true &&
                                isCurrencyUSD;
           
@@ -755,7 +777,7 @@ export async function finalizeAndCompleteSearch(
             if (derivedPriceType !== 'total_proven' && derivedPriceType !== 'total_derived') {
               failures.push('price_type_not_total');
             }
-            if (!extraction.includes_taxes_fees) {
+            if (!effectiveIncludesTaxesFees) {
               failures.push('taxes_fees_not_included');
             }
             if (!extraction.dates_validated) {
@@ -770,7 +792,7 @@ export async function finalizeAndCompleteSearch(
             nights_count: nights,
             check_in_date: checkIn,
             check_out_date: checkOut,
-            includes_taxes_fees: extraction.includes_taxes_fees || false,
+            includes_taxes_fees: effectiveIncludesTaxesFees,
             dates_validated: extraction.dates_validated || false,
             is_comparable: isComparable,
             comparability_failures: failures,
@@ -856,7 +878,7 @@ export async function finalizeAndCompleteSearch(
           extraction_error: extraction?.extraction_error || platform.last_error || null,
           canonical_price: canonicalPrice,
           price_type: canonicalPrice?.price_type || 'unknown',
-          includes_taxes_fees: extraction?.includes_taxes_fees || false,
+          includes_taxes_fees: canonicalPrice?.includes_taxes_fees || extraction?.includes_taxes_fees || false,
           dates_validated: extraction?.dates_validated || false,
           outcome_category: outcomeCategory,
           is_authoritative: isAuthoritative,
@@ -895,10 +917,30 @@ export async function finalizeAndCompleteSearch(
           const extractedCurrency = extraction.currency || 'USD';
           const isCurrencyUSD = extractedCurrency === 'USD';
           
+          // BOOKING.COM TAX OVERRIDE (legacy path): When extraction has totalProven=true 
+          // (4 core structural checks passed), assume taxes are included
+          const platformKey = (result.platform_name || '').toLowerCase();
+          const isBookingCom = platformKey.includes('booking');
+          const metadata = extraction.extraction_metadata || {};
+          const hasTotalProven = metadata.totalProven === true || 
+                                 metadata.structuralProof?.totalProven === true ||
+                                 (metadata.structuralProof?.breakdown_found === true &&
+                                  metadata.structuralProof?.total_label_found === true &&
+                                  metadata.structuralProof?.extracted_from_breakdown_total === true &&
+                                  extraction.dates_validated === true);
+          
+          const effectiveIncludesTaxesFees = isBookingCom && hasTotalProven 
+            ? true 
+            : (extraction.includes_taxes_fees || false);
+          
+          if (isBookingCom && hasTotalProven && !extraction.includes_taxes_fees) {
+            console.log(`[BOOKING TAX OVERRIDE LEGACY] Platform=${result.platform_name}, overriding includes_taxes_fees=true`);
+          }
+          
           // A price is only comparable if it's a proven/derived total, includes taxes, 
           // dates are validated, AND it's in USD (to compare with Airbnb USD baseline)
           const isComparable = (derivedPriceType === 'total_proven' || derivedPriceType === 'total_derived') &&
-                               extraction.includes_taxes_fees === true &&
+                               effectiveIncludesTaxesFees === true &&
                                extraction.dates_validated === true &&
                                isCurrencyUSD;
           
@@ -910,7 +952,7 @@ export async function finalizeAndCompleteSearch(
             if (derivedPriceType !== 'total_proven' && derivedPriceType !== 'total_derived') {
               failures.push('price_type_not_total');
             }
-            if (!extraction.includes_taxes_fees) {
+            if (!effectiveIncludesTaxesFees) {
               failures.push('taxes_fees_not_included');
             }
             if (!extraction.dates_validated) {
@@ -925,7 +967,7 @@ export async function finalizeAndCompleteSearch(
             nights_count: nights,
             check_in_date: checkIn,
             check_out_date: checkOut,
-            includes_taxes_fees: extraction.includes_taxes_fees || false,
+            includes_taxes_fees: effectiveIncludesTaxesFees,
             dates_validated: extraction.dates_validated || false,
             is_comparable: isComparable,
             comparability_failures: failures,
