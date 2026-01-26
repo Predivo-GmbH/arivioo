@@ -3993,6 +3993,73 @@ function isBlockedNonBookingPlatform(url: string): boolean {
   return blockedDomains.some(d => lowercaseUrl.includes(d));
 }
 
+// ============================================================================
+// ADMIN-BLOCKED PLATFORMS CHECK
+// Checks if a URL's domain matches any platform blocked via the admin dashboard
+// ============================================================================
+function isAdminBlockedPlatform(url: string, blockedDomains: Set<string>): boolean {
+  if (blockedDomains.size === 0) return false;
+  
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname.toLowerCase().replace(/^www\./, '');
+    
+    // Check exact domain match
+    if (blockedDomains.has(hostname)) return true;
+    
+    // Check if any blocked domain is contained in hostname (for subdomains)
+    for (const blocked of blockedDomains) {
+      // Normalize blocked domain (remove protocol, www, trailing slash)
+      const normalizedBlocked = blocked
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .replace(/\/$/, '')
+        .toLowerCase();
+      
+      if (hostname === normalizedBlocked || hostname.endsWith('.' + normalizedBlocked)) {
+        return true;
+      }
+    }
+    
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// Helper to fetch blocked platforms from DB and return as a Set of normalized domains
+async function fetchBlockedPlatformDomains(supabase: any): Promise<Set<string>> {
+  try {
+    const { data: blockedPlatforms, error } = await supabase
+      .from('blocked_platforms')
+      .select('domain');
+    
+    if (error || !blockedPlatforms) {
+      console.log('[BlockedPlatforms] Failed to fetch blocked platforms:', error?.message);
+      return new Set();
+    }
+    
+    const domains = new Set<string>();
+    for (const row of blockedPlatforms) {
+      if (row.domain && typeof row.domain === 'string') {
+        // Normalize: remove protocol, www, trailing slash
+        const normalized = row.domain
+          .replace(/^https?:\/\//, '')
+          .replace(/^www\./, '')
+          .replace(/\/$/, '')
+          .toLowerCase();
+        domains.add(normalized);
+      }
+    }
+    
+    console.log(`[BlockedPlatforms] Loaded ${domains.size} blocked domains: ${[...domains].join(', ')}`);
+    return domains;
+  } catch (e) {
+    console.error('[BlockedPlatforms] Error fetching blocked platforms:', e);
+    return new Set();
+  }
+}
+
 // UUID v4 validation regex
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -5084,6 +5151,11 @@ async function runSearchWithStreaming(
     last_progress_at: new Date().toISOString() 
   }).eq("id", searchId);
   console.log(`[Pipeline] Reset skip_requested=false for fresh search run`);
+
+  // ============================================================================
+  // ADMIN-BLOCKED PLATFORMS: Fetch from DB to exclude during discovery
+  // ============================================================================
+  const adminBlockedDomains = await fetchBlockedPlatformDomains(supabase);
 
   // If user already confirmed the Airbnb total, reuse it and continue.
   try {
@@ -7046,6 +7118,7 @@ async function runSearchWithStreaming(
       filtered_airbnb: 0,
       filtered_deduped: 0,
       filtered_blocked_platform: 0,
+      filtered_admin_blocked: 0,
       filtered_non_booking_domain: 0,
       filtered_already_high_confidence: 0,
       filtered_cap_reached: 0,
@@ -7109,6 +7182,13 @@ async function runSearchWithStreaming(
       }
       if (isBlockedNonBookingPlatform(matchUrl)) {
         filterStats.filtered_blocked_platform++;
+        continue;
+      }
+      // Check admin-blocked platforms from DB
+      if (isAdminBlockedPlatform(matchUrl, adminBlockedDomains)) {
+        const platformName = getPlatformName(matchUrl);
+        console.log(`[AdminBlocked] Skipping ${platformName} - blocked via admin dashboard`);
+        filterStats.filtered_admin_blocked++;
         continue;
       }
       if (!isBookingPlatform(matchUrl) && !isRegionalHotelSite(matchUrl) && !isDirectPropertySite(matchUrl)) {
@@ -7266,6 +7346,7 @@ async function runSearchWithStreaming(
       filterStats.filtered_airbnb > 0 ? `airbnb: ${filterStats.filtered_airbnb}` : null,
       filterStats.filtered_deduped > 0 ? `deduped: ${filterStats.filtered_deduped}` : null,
       filterStats.filtered_blocked_platform > 0 ? `blocked: ${filterStats.filtered_blocked_platform}` : null,
+      filterStats.filtered_admin_blocked > 0 ? `admin_blocked: ${filterStats.filtered_admin_blocked}` : null,
       filterStats.filtered_non_booking_domain > 0 ? `non_booking: ${filterStats.filtered_non_booking_domain}` : null,
       filterStats.filtered_already_high_confidence > 0 ? `already_verified: ${filterStats.filtered_already_high_confidence}` : null,
       filterStats.filtered_budget_exhausted > 0 ? `budget_exhausted: ${filterStats.filtered_budget_exhausted}` : null,
