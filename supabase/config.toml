@@ -43,6 +43,13 @@ enable_signup = true
 double_confirm_changes = true
 enable_confirmations = true
 
+[auth.hook.send_email]
+enabled = true
+uri = "pg-functions://postgres/supabase_functions/http_request"
+
+[functions.email-hook]
+verify_jwt = false
+
 [functions.admin-auth]
 verify_jwt = false
 
