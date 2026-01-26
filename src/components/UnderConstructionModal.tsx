@@ -21,27 +21,19 @@ export const UnderConstructionModal = ({ onAccessGranted }: UnderConstructionMod
 
 
   useEffect(() => {
-    // Check server-side access grant instead of localStorage
+    // Check if user is authenticated - authenticated users get automatic access
     const checkAccessGrant = async () => {
       try {
         const { data: { user } } = await supabase.auth.getUser();
         
         if (user) {
-          // Check if user has a valid access grant in the database
-          const { data: grant, error } = await supabase
-            .from('access_grants')
-            .select('granted_until')
-            .eq('user_id', user.id)
-            .maybeSingle();
-          
-          if (!error && grant && new Date(grant.granted_until) > new Date()) {
-            console.log('Valid access grant found, granting access');
-            onAccessGranted();
-            return;
-          }
+          // Authenticated users automatically get access - no need to check access_grants
+          console.log('Authenticated user found, granting access');
+          onAccessGranted();
+          return;
         }
       } catch (error) {
-        console.error('Error checking access grant:', error);
+        console.error('Error checking auth:', error);
       } finally {
         setIsCheckingAccess(false);
       }
