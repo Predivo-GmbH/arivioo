@@ -959,7 +959,9 @@ export default async ({ page }) => {
     currency: 'USD',
     evidenceSnippet: null,
     steps: [],
-    error: null
+    error: null,
+    allPricesFound: [],
+    pageContent: ''
   };
   
   try {
@@ -1003,20 +1005,66 @@ export default async ({ page }) => {
       return { data: result };
     }
     
-    // Step 4: Wait for checkout page
-    await delay(5000);
+    // Step 4: Wait for checkout page navigation to complete
+    // Use waitForNavigation pattern to handle async navigation
+    try {
+      await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 20000 });
+    } catch (e) {
+      // Navigation might already be complete, continue anyway
+    }
+    await delay(3000);  // Extra wait for checkout page to render
     
     const currentUrl = page.url();
-    result.checkoutReached = /book\\.html|checkout|yourdetails/i.test(currentUrl);
+    result.checkoutReached = /book\\.html|checkout|yourdetails|secure/i.test(currentUrl);
     result.steps.push('navigation: ' + (result.checkoutReached ? 'checkout' : 'same'));
     
-    // Step 5: Extract total price
+    // Step 5: Extract total price from checkout page
     const checkoutText = await page.evaluate(() => document.body.innerText);
-    const priceMatch = checkoutText.match(/(?:total|amount\\s*due)[:\\s]*(?:\\$|€)?\\s*([\\d,]+(?:\\.\\d{2})?)/i);
+    result.pageContent = checkoutText.slice(0, 2000);
+    result.evidenceSnippet = checkoutText.slice(0, 500);
     
-    if (priceMatch) {
-      result.totalPrice = parseFloat(priceMatch[1].replace(/,/g, ''));
-      result.evidenceSnippet = checkoutText.slice(0, 300);
+    // Find all USD prices on the page
+    const allMatches = checkoutText.match(/(?:US\\$|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/gi) || [];
+    result.allPricesFound = allMatches.slice(0, 10);
+    
+    // Try to find a "total" or "amount to pay" followed by price
+    // Booking.com checkout format: "Total US$ 266.20" or "Amount to pay US$ 266"
+    const totalPatterns = [
+      /total[:\\s]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
+      /(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)\\s*total/i,
+      /amount\\s*to\\s*pay[:\\s]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
+      /pay\\s*now[:\\s]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
+      /you\\s*pay[:\\s]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
+      /price\\s*summary[^\\$]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
+      // Fallback: Look for largest price (likely the total)
+    ];
+    
+    for (const pattern of totalPatterns) {
+      const match = checkoutText.match(pattern);
+      if (match) {
+        const parsed = parseFloat(match[1].replace(/,/g, ''));
+        if (parsed > 50) {
+          result.totalPrice = parsed;
+          result.evidenceSnippet = match[0];
+          break;
+        }
+      }
+    }
+    
+    // If no total found, try to extract the largest reasonable price
+    if (!result.totalPrice && allMatches.length > 0) {
+      const prices = allMatches
+        .map(m => {
+          const numMatch = m.match(/([\\d,]+(?:\\.\\d{2})?)/);
+          return numMatch ? parseFloat(numMatch[1].replace(/,/g, '')) : 0;
+        })
+        .filter(p => p > 100 && p < 10000)  // Reasonable stay price range
+        .sort((a, b) => b - a);  // Descending
+      
+      if (prices.length > 0) {
+        result.totalPrice = prices[0];  // Take largest as likely total
+        result.evidenceSnippet = 'Inferred largest: ' + prices[0];
+      }
     }
     
     return { data: result };
@@ -1047,6 +1095,8 @@ export default async ({ page }) => {
     const responseData = await response.json();
     const data = responseData.data || responseData;
     console.log(`[BOOKING_CHECKOUT] Steps: ${JSON.stringify(data.steps || [])}`);
+    console.log(`[BOOKING_CHECKOUT] Prices found: ${JSON.stringify(data.allPricesFound || [])}`);
+    console.log(`[BOOKING_CHECKOUT] Page content sample: ${(data.pageContent || '').slice(0, 800)}`);
     
     result.checkoutReached = data.checkoutReached || false;
     result.totalPrice = data.totalPrice || null;
