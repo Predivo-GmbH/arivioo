@@ -200,21 +200,38 @@ export function extractPlatformDomain(url: string): string {
 
 /**
  * Generate a deterministic coverage variant key
+ * 
+ * IMPORTANT: Variant key should be stable for the same platform+country+locale combination.
+ * We only add a flow signature hash when the booking flow type differs significantly
+ * (e.g., "instant" vs "request" which require different extraction logic).
  */
 export function generateVariantKey(
   platformDomain: string,
   country: string | null,
   flowSignature: ExtractionFlowSignature
 ): string {
-  // Create a hash of the flow signature for uniqueness
-  const signatureHash = hashFlowSignature(flowSignature);
-  
-  // Format: domain:country:signature_hash
+  // Base key: domain:country (or domain:country:locale if locale differs)
   const parts = [
     platformDomain,
     country || 'unknown',
-    signatureHash,
   ];
+  
+  // Only add locale if it differs from default (e.g., en-GB instead of just GB)
+  if (flowSignature.locale_path_segment) {
+    const normalizedLocale = flowSignature.locale_path_segment.toLowerCase().replace('_', '-');
+    // Only add if it's a full locale like "en-gb" not just a country code
+    if (normalizedLocale.includes('-')) {
+      parts.push(normalizedLocale);
+    }
+  }
+  
+  // Only add booking flow type hash if it's a fundamentally different flow
+  // (e.g., "request" or "inquiry" which require different extraction strategies)
+  if (flowSignature.booking_flow_type && 
+      flowSignature.booking_flow_type !== 'unknown' && 
+      flowSignature.booking_flow_type !== 'instant') {
+    parts.push(flowSignature.booking_flow_type);
+  }
   
   return parts.join(':');
 }
