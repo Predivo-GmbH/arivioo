@@ -21,8 +21,17 @@ export default function ResetPassword() {
   const [submitting, setSubmitting] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
   const [codeExpiry, setCodeExpiry] = useState<number | null>(null);
-
   const codeInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // Clear any legacy Supabase recovery tokens from URL hash to prevent auto-login
+  useEffect(() => {
+    if (window.location.hash && window.location.hash.includes("access_token")) {
+      // Sign out any auto-logged-in session from recovery link
+      supabase.auth.signOut();
+      // Clear the hash
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, []);
 
   // Countdown timer for resend cooldown
   useEffect(() => {
