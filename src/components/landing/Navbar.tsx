@@ -15,21 +15,46 @@ import {
 export function Navbar() {
   const [isOpen, setIsOpen] = useState(false);
   const [user, setUser] = useState<SupabaseUser | null>(null);
+  const [displayName, setDisplayName] = useState<string | null>(null);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchDisplayName(session.user.id);
+      } else {
+        setDisplayName(null);
+      }
     });
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchDisplayName(session.user.id);
+      }
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
+  const fetchDisplayName = async (userId: string) => {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("full_name")
+      .eq("user_id", userId)
+      .maybeSingle();
+    
+    setDisplayName(profile?.full_name || null);
+  };
+
   const handleLogout = async () => {
     await supabase.auth.signOut();
+  };
+
+  // Get display text: prefer full_name, fallback to email
+  const getUserDisplayText = () => {
+    if (displayName) return displayName;
+    return user?.email || "Account";
   };
 
   return (
@@ -63,11 +88,11 @@ export function Navbar() {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                    <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
                       <User className="w-4 h-4 text-primary" />
                     </div>
-                    <span className="text-sm font-medium max-w-[120px] truncate">
-                      {user.email?.split('@')[0]}
+                    <span className="text-sm font-medium max-w-[180px] truncate">
+                      {getUserDisplayText()}
                     </span>
                   </Button>
                 </DropdownMenuTrigger>
