@@ -76,9 +76,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
       });
     }
 
-    // Find the user
-    const { data: userData } = await supabase.auth.admin.listUsers();
-    const user = userData?.users?.find(u => u.email?.toLowerCase() === email.toLowerCase());
+    // Find the user with pagination
+    let user = null;
+    let page = 1;
+    const perPage = 1000;
+
+    while (!user) {
+      const { data: userData, error: listError } = await supabase.auth.admin.listUsers({
+        page,
+        perPage,
+      });
+
+      if (listError || !userData?.users?.length) break;
+
+      user = userData.users.find(u => u.email?.toLowerCase() === email.toLowerCase());
+
+      if (userData.users.length < perPage) break;
+      page++;
+    }
 
     if (!user) {
       return new Response(JSON.stringify({ error: "User not found" }), {
