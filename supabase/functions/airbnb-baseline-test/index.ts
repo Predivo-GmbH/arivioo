@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { gatedBrowserlessFetch, isFetchRateLimited } from '../_shared/browserlessGate.ts';
+import { gatedBrowserlessFetch, gatedBrowserlessFunctionFetch, isFetchRateLimited, isFunctionRateLimited } from '../_shared/browserlessGate.ts';
 
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
@@ -1297,51 +1297,47 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
       context: { bookStaysUrl, roomsUrl: url, roomId },
     };
 
-    const resp = await fetchWithTimeout(
+    // Use distributed gate for /function endpoint
+    const gateResult = await gatedBrowserlessFunctionFetch(
       browserlessFnUrl,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(functionPayload),
+        timeout: 70000,
       },
-      70000
+      { platform: 'airbnb-baseline-test', operation: 'runBrowserlessExtraction' }
     );
 
     const durationMs = Date.now() - start;
+    
+    if (isFunctionRateLimited(gateResult)) {
+      console.log(`[Browserless] RATE LIMITED (429) - returned as rate_limited status`);
+      await logProviderRequest(supabase, provider, false, durationMs, url, 'HTTP 429');
+      return {
+        provider,
+        status: 'rate_limited',
+        price: null,
+        currency: null,
+        includes_taxes_fees: false,
+        evidence_snippet: `Rate limited (HTTP 429)`,
+        error: 'HTTP 429 rate_limited',
+        duration_ms: durationMs,
+        candidates_summary: [],
+        click_log: 'Rate limited before script ran',
+      };
+    }
 
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      await logProviderRequest(supabase, provider, false, durationMs, url, `HTTP ${resp.status}`);
-      
-      // Detect HTTP 429 rate limiting
-      const isRateLimited = resp.status === 429 || 
-        errText.includes('429 Too Many Requests') || 
-        (errText.includes('openresty') && errText.includes('Too Many Requests'));
-      
-      if (isRateLimited) {
-        console.log(`[Browserless] RATE LIMITED (429) - will be returned as rate_limited status`);
-        return {
-          provider,
-          status: 'rate_limited',
-          price: null,
-          currency: null,
-          includes_taxes_fees: false,
-          evidence_snippet: `Rate limited (HTTP 429): ${errText.slice(0, 200)}`,
-          error: 'HTTP 429 rate_limited',
-          duration_ms: durationMs,
-          candidates_summary: [],
-          click_log: 'Rate limited before script ran',
-        };
-      }
-      
+    if (!gateResult.success) {
+      await logProviderRequest(supabase, provider, false, durationMs, url, `HTTP ${gateResult.status}`);
       return {
         provider,
         status: 'provider_fetch_failed',
         price: null,
         currency: null,
         includes_taxes_fees: false,
-        evidence_snippet: `HTTP ${resp.status}: ${errText.slice(0, 200)}`,
-        error: `HTTP ${resp.status}`,
+        evidence_snippet: `HTTP ${gateResult.status}: ${gateResult.error?.slice(0, 200)}`,
+        error: `HTTP ${gateResult.status}`,
         duration_ms: durationMs,
         candidates_summary: [],
         click_log: 'Request failed before script ran',
@@ -1350,7 +1346,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
 
     await logProviderRequest(supabase, provider, true, durationMs, url);
 
-    const fnJson = await resp.json().catch(() => null);
+    const fnJson = gateResult.data || {};
     const html = fnJson?.html || '';
     const breakdownContainerHtml = fnJson?.breakdownContainerHtml || '';
     const totalRowFound = fnJson?.totalRowFound || false;
