@@ -147,19 +147,68 @@ All Browserless calls in the following files are routed through the gate:
 | `vrbo-live-access-check/index.ts` | `checkWithBrowserless` | /content |
 | `booking-browserless-test/index.ts` | `fetchWithBrowserless` | /content |
 
-## Regression Guard
+## Regression Guard (Strict)
 
-A CI/test script is provided to ensure no direct Browserless calls are added:
+A strict CI/test script prevents ANY direct Browserless usage outside approved modules:
 
 ```bash
+# Run from project root
+chmod +x scripts/check-browserless-gate.sh
 ./scripts/check-browserless-gate.sh
 ```
 
-This script:
-1. Searches for `chrome.browserless.io` references
-2. Excludes the shared gate module
-3. Verifies all references use `gatedBrowserlessFetch` or `gatedBrowserlessFunctionFetch`
-4. Exits with code 1 if direct calls are found
+### What It Scans
+
+- **Entire repository** (excluding node_modules, .git, dist, build)
+- **File types**: `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.py`, `.sh`, `.md`
+
+### What Causes Failure
+
+ANY occurrence of these patterns outside approved files:
+- `chrome.browserless.io`
+- `browserless.io`
+
+### Approved Files (Whitelist)
+
+Only these files may contain Browserless references:
+- `supabase/functions/_shared/browserlessGate.ts` (the gate module)
+- `docs/BROWSERLESS_GATE_IMPLEMENTATION.md` (this doc)
+- `docs/BROWSERLESS_CANONICAL_BASELINE.md` (baseline doc)
+- `scripts/check-browserless-gate.sh` (the guard itself)
+
+### Example Output (Pass)
+
+```
+🔍 BROWSERLESS GATE REGRESSION GUARD
+=====================================
+
+Scanning for ungated Browserless references...
+  Patterns: chrome\.browserless\.io browserless\.io
+  Extensions: ts,tsx,js,jsx,mjs,cjs,py,sh,md
+  Excluded dirs: node_modules,.git,dist,build,.next,coverage
+
+✅ All Browserless references are properly contained in approved modules.
+
+Approved modules:
+  ✓ supabase/functions/_shared/browserlessGate.ts
+  ✓ docs/BROWSERLESS_GATE_IMPLEMENTATION.md
+  ✓ scripts/check-browserless-gate.sh
+```
+
+### Example Output (Fail)
+
+```
+❌ REGRESSION DETECTED: 2 ungated Browserless reference(s) found!
+
+The following files contain direct Browserless references outside the gate module:
+--------------------------------------------------------------------------------
+./src/test-file.ts:15:  const url = "https://chrome.browserless.io/content";
+./supabase/functions/new-extractor/index.ts:42:  fetch(`https://browserless.io/api`...
+--------------------------------------------------------------------------------
+
+FIX: All Browserless calls MUST use the gated helpers from:
+     supabase/functions/_shared/browserlessGate.ts
+```
 
 ## Why Distributed Locking?
 
