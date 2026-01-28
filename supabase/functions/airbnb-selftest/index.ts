@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { gatedBrowserlessFunctionFetch, isFunctionRateLimited } from '../_shared/browserlessGate.ts';
 
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
@@ -599,19 +600,29 @@ async function runBrowserlessBookStays(
       context: {},
     };
 
-    const resp = await fetchWithTimeout(`https://chrome.browserless.io/function?token=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(functionPayload),
-    }, 120000);
+    // Use distributed gate for /function endpoint
+    const gateResult = await gatedBrowserlessFunctionFetch(
+      `https://chrome.browserless.io/function?token=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(functionPayload),
+        timeout: 120000,
+      },
+      { platform: 'airbnb-selftest', operation: 'runLiveCanaryCheck' }
+    );
 
     const durationMs = Date.now() - start;
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      return { status: 'provider_fetch_failed', durationMs, error: `HTTP ${resp.status}: ${errText.slice(0, 200)}` };
+    
+    if (isFunctionRateLimited(gateResult)) {
+      return { status: 'rate_limited', durationMs, error: 'Rate limited (HTTP 429)' };
+    }
+    
+    if (!gateResult.success) {
+      return { status: 'provider_fetch_failed', durationMs, error: `HTTP ${gateResult.status}: ${gateResult.error?.slice(0, 200)}` };
     }
 
-    const result = await resp.json().catch(() => ({}));
+    const result = gateResult.data || {};
     
     return {
       status: 'browser_completed',

@@ -2,7 +2,7 @@ import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { finalizeAndCompleteSearch } from "../_shared/buildFinalSnapshot.ts";
-import { gatedBrowserlessFetch, isFetchRateLimited } from "../_shared/browserlessGate.ts";
+import { gatedBrowserlessFetch, gatedBrowserlessFunctionFetch, isFetchRateLimited, isFunctionRateLimited } from "../_shared/browserlessGate.ts";
 
 // ============================================================================
 // SECURE CORS - Domain allowlist for production security
@@ -982,39 +982,34 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
       context: { bookStaysUrl, roomsUrl: url, roomId },
     };
 
-    const response = await fetchWithTimeout(
+    // Use distributed gate for /function endpoint
+    const gateResult = await gatedBrowserlessFunctionFetch(
       browserlessFnUrl,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(functionPayload),
+        timeout: 90000,
       },
-      90_000
+      { platform: 'airbnb', operation: 'scrapeWithBrowserless' }
     );
 
-    result.statusCode = response.status;
+    result.statusCode = gateResult.status;
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      
-      // Detect HTTP 429 rate limiting
-      const isRateLimited = response.status === 429 || 
-        errText.includes('429 Too Many Requests') || 
-        (errText.includes('openresty') && errText.includes('Too Many Requests'));
-      
-      if (isRateLimited) {
-        console.log(`Browserless attempt ${attemptNum} RATE LIMITED (429)`);
-        result.error = `rate_limited: ${errText.slice(0, 200)}`;
-        result.isRateLimited = true;
-        return result;
-      }
-      
-      result.error = `Browserless HTTP ${response.status}: ${errText.slice(0, 200)}`;
+    if (isFunctionRateLimited(gateResult)) {
+      console.log(`Browserless attempt ${attemptNum} RATE LIMITED (429)`);
+      result.error = `rate_limited: browserless_429`;
+      result.isRateLimited = true;
+      return result;
+    }
+    
+    if (!gateResult.success) {
+      result.error = `Browserless HTTP ${gateResult.status}: ${gateResult.error?.slice(0, 200)}`;
       console.error(`Browserless attempt ${attemptNum} failed:`, result.error);
       return result;
     }
 
-    const fnJson = await response.json().catch(() => null);
+    const fnJson = gateResult.data || {};
     
     // Debug: log all returned lengths
     console.log(`Browserless attempt ${attemptNum} response:`, {

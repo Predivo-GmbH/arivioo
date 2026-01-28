@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { gatedBrowserlessFetch, isFetchRateLimited, rateLimitedToExtractionStatus } from '../_shared/browserlessGate.ts';
+import { gatedBrowserlessFetch, gatedBrowserlessFunctionFetch, isFetchRateLimited, isFunctionRateLimited, rateLimitedToExtractionStatus } from '../_shared/browserlessGate.ts';
 
 /**
  * ============================================================================
@@ -646,6 +646,7 @@ interface FetchResult {
   error?: string;
   httpStatus?: number;
   navigatedUrl?: string;  // URL after navigation/click
+  isRateLimited?: boolean;  // True if rate limited by Browserless 429
 }
 
 async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise<FetchResult & { isRateLimited?: boolean }> {
@@ -1007,21 +1008,31 @@ export default async ({ page }) => {
 };
 `;
     
-    const response = await fetch(`https://chrome.browserless.io/function?token=${browserlessApiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/javascript' },
-      body: puppeteerCode,
-    });
+    // Use distributed gate for /function endpoint
+    const gateResult = await gatedBrowserlessFunctionFetch(
+      `https://chrome.browserless.io/function?token=${browserlessApiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/javascript' },
+        body: puppeteerCode,
+        timeout: 90000,
+      },
+      { platform: 'agoda', operation: 'clickBookingButtonWithBrowserless' }
+    );
     
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[AGODA] Browserless /function error ${response.status}: ${errorText.substring(0, 500)}`);
-      return { content: '', html: '', error: `Browserless function error: ${response.status}`, httpStatus: response.status };
+    if (isFunctionRateLimited(gateResult)) {
+      console.error(`[AGODA] Browserless /function rate limited (429)`);
+      return { content: '', html: '', error: 'rate_limited: browserless_429', isRateLimited: true };
     }
     
-    const result = await response.json();
+    if (!gateResult.success) {
+      console.error(`[AGODA] Browserless /function error ${gateResult.status}: ${gateResult.error?.substring(0, 500)}`);
+      return { content: '', html: '', error: `Browserless function error: ${gateResult.status}`, httpStatus: gateResult.status };
+    }
     
-    if (result.data) {
+    const result = gateResult.data;
+    
+    if (result?.data) {
       const { checkoutUrl, pageContent, pageHtml, error: fnError, finalUrl } = result.data;
       
       console.log(`[AGODA] Browserless /function result: checkoutUrl=${checkoutUrl?.substring(0, 80) || 'none'}, contentLength=${pageContent?.length || 0}`);
@@ -1066,39 +1077,48 @@ async function fetchWithBrowserlessAndClick(url: string): Promise<FetchResult> {
   try {
     console.log(`[AGODA] Browserless legacy scrape: ${url}`);
     
-    // Use Browserless /scrape API with waitForSelector instead of waitFor
-    const response = await fetch(`https://chrome.browserless.io/scrape?token=${browserlessApiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url,
-        gotoOptions: {
-          waitUntil: 'networkidle2',
-          timeout: 40000,
-        },
-        waitForSelector: {
-          selector: 'body',
-          timeout: 8000,
-        },
-        elements: [
-          { selector: 'body', timeout: 5000 }
-        ],
-      }),
-    });
+    // Use distributed gate for /scrape endpoint
+    const gateResult = await gatedBrowserlessFunctionFetch(
+      `https://chrome.browserless.io/scrape?token=${browserlessApiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url,
+          gotoOptions: {
+            waitUntil: 'networkidle2',
+            timeout: 40000,
+          },
+          waitForSelector: {
+            selector: 'body',
+            timeout: 8000,
+          },
+          elements: [
+            { selector: 'body', timeout: 5000 }
+          ],
+        }),
+        timeout: 60000,
+      },
+      { platform: 'agoda', operation: 'fetchWithBrowserlessAndClick' }
+    );
     
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[AGODA] Browserless scrape error ${response.status}: ${errorText.substring(0, 300)}`);
-      return { content: '', html: '', error: `Browserless scrape error: ${response.status}`, httpStatus: response.status };
+    if (isFunctionRateLimited(gateResult)) {
+      console.error(`[AGODA] Browserless scrape rate limited (429)`);
+      return { content: '', html: '', error: 'rate_limited: browserless_429', isRateLimited: true };
     }
     
-    const result = await response.json();
+    if (!gateResult.success) {
+      console.error(`[AGODA] Browserless scrape error ${gateResult.status}: ${gateResult.error?.substring(0, 300)}`);
+      return { content: '', html: '', error: `Browserless scrape error: ${gateResult.status}`, httpStatus: gateResult.status };
+    }
+    
+    const result = gateResult.data;
     
     // Get content from elements
     let html = '';
     let text = '';
     
-    if (result.data && Array.isArray(result.data)) {
+    if (result?.data && Array.isArray(result.data)) {
       for (const element of result.data) {
         if (element.results && Array.isArray(element.results)) {
           for (const r of element.results) {
@@ -1119,7 +1139,7 @@ async function fetchWithBrowserlessAndClick(url: string): Promise<FetchResult> {
     return { 
       content: text.trim(), 
       html, 
-      httpStatus: response.status,
+      httpStatus: gateResult.status,
     };
     
   } catch (error) {

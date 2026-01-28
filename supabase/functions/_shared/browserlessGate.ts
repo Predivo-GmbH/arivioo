@@ -439,6 +439,99 @@ export async function gatedBrowserlessFetch(
 }
 
 // ============================================================================
+// BROWSERLESS FUNCTION ENDPOINT WRAPPER (/function and /scrape)
+// ============================================================================
+
+export interface BrowserlessFunctionResult {
+  success: boolean;
+  status: number;
+  data: any;
+  error?: string;
+  isRateLimited: boolean;
+  rateLimitReason?: 'browserless_429';
+  attemptsMade: number;
+  lockWaitMs: number;
+}
+
+/**
+ * Gated wrapper for Browserless /function or /scrape endpoints.
+ * Routes through the distributed advisory lock and handles 429 retries.
+ * 
+ * USAGE:
+ * const result = await gatedBrowserlessFunctionFetch(
+ *   `https://chrome.browserless.io/function?token=${apiKey}`,
+ *   { method: 'POST', headers: {...}, body: puppeteerCode },
+ *   { platform: 'airbnb', searchId: 'xxx' }
+ * );
+ */
+export async function gatedBrowserlessFunctionFetch(
+  url: string,
+  options: BrowserlessFetchOptions = {},
+  context: Partial<BrowserlessGateContext> = {}
+): Promise<BrowserlessFunctionResult> {
+  const timeout = options.timeout || 90000;
+  
+  const gateResult = await withBrowserlessGate(
+    async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+      
+      try {
+        const response = await fetch(url, {
+          method: options.method || 'POST',
+          headers: options.headers,
+          body: options.body,
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
+        
+        const body = await response.text();
+        
+        return {
+          ok: response.ok,
+          status: response.status,
+          body,
+        };
+      } catch (e) {
+        clearTimeout(timeoutId);
+        const msg = e instanceof Error ? e.message : 'Unknown error';
+        return {
+          ok: false,
+          status: 0,
+          body: '',
+          error: msg.includes('abort') ? 'Timeout' : msg,
+        };
+      }
+    },
+    (raw) => raw,
+    context
+  );
+  
+  // Parse JSON response if successful
+  let data: any = null;
+  if (gateResult.success && gateResult.data?.body) {
+    try {
+      data = JSON.parse(gateResult.data.body);
+    } catch {
+      // If JSON parsing fails, return raw body in data
+      data = { rawBody: gateResult.data.body };
+    }
+  }
+  
+  return {
+    success: gateResult.success,
+    status: gateResult.httpStatus || 0,
+    data,
+    error: gateResult.error,
+    isRateLimited: gateResult.isRateLimited,
+    rateLimitReason: gateResult.rateLimitReason,
+    attemptsMade: gateResult.attemptsMade,
+    lockWaitMs: gateResult.lockWaitMs,
+  };
+}
+
+// ============================================================================
 // EXTRACTION STATUS HELPERS
 // ============================================================================
 
@@ -468,5 +561,12 @@ export function isGateRateLimited<T>(result: BrowserlessGateResult<T>): boolean 
  * Check if a BrowserlessFetchResult indicates rate limiting.
  */
 export function isFetchRateLimited(result: BrowserlessFetchResult): boolean {
+  return result.isRateLimited === true && result.rateLimitReason === 'browserless_429';
+}
+
+/**
+ * Check if a BrowserlessFunctionResult indicates rate limiting.
+ */
+export function isFunctionRateLimited(result: BrowserlessFunctionResult): boolean {
   return result.isRateLimited === true && result.rateLimitReason === 'browserless_429';
 }
