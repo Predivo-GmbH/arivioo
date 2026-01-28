@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { gatedBrowserlessFetch, isFetchRateLimited } from '../_shared/browserlessGate.ts';
 
 /**
  * ============================================================================
@@ -378,48 +379,45 @@ async function testBrowserless(url: string): Promise<ProviderResult> {
       return result;
     }
     
-    console.log(`[VRBO_LIVE_CHECK] provider=browserless starting url=${url}`);
+    console.log(`[VRBO_LIVE_CHECK] provider=browserless via gate starting url=${url}`);
     
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-    
-    // Use Browserless /content endpoint to get page HTML
-    const browserlessUrl = `https://chrome.browserless.io/content?token=${apiKey}`;
-    
-    const response = await fetch(browserlessUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const gateResult = await gatedBrowserlessFetch(
+      `https://chrome.browserless.io/content?token=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url,
+          gotoOptions: { waitUntil: 'networkidle2', timeout: 45000 },
+          waitForTimeout: 5000,
+        }),
+        timeout: 60000,
       },
-      body: JSON.stringify({
-        url,
-        gotoOptions: {
-          waitUntil: 'networkidle2',
-          timeout: 45000,
-        },
-        waitForTimeout: 5000,
-      }),
-      signal: controller.signal,
-    });
+      { platform: 'vrbo', operation: 'liveAccessCheck' }
+    );
     
-    clearTimeout(timeoutId);
-    
-    result.httpStatus = response.status;
+    result.httpStatus = gateResult.status;
     result.timeMs = Date.now() - start;
     
-    if (!response.ok) {
-      const errText = await response.text();
-      result.error = `HTTP ${response.status}: ${errText.slice(0, 200)}`;
+    if (isFetchRateLimited(gateResult)) {
+      result.error = 'Rate limited (HTTP 429)';
       result.failureReason = 'error';
-      console.log(`[VRBO_LIVE_CHECK] provider=browserless status=${response.status} error="${result.error}" timeMs=${result.timeMs}`);
+      console.log(`[VRBO_LIVE_CHECK] provider=browserless status=429 rate_limited timeMs=${result.timeMs}`);
       return result;
     }
     
-    const html = await response.text();
+    if (!gateResult.success) {
+      result.error = gateResult.error || `HTTP ${gateResult.status}`;
+      result.failureReason = 'error';
+      console.log(`[VRBO_LIVE_CHECK] provider=browserless status=${gateResult.status} error="${result.error}" timeMs=${result.timeMs}`);
+      return result;
+    }
+    
+    const html = gateResult.body;
     
     result.contentLength = html.length;
-    result.finalUrl = url; // Browserless /content doesn't return final URL
-    result.blockSignal = detectBlockSignal(html, response.status);
+    result.finalUrl = url;
+    result.blockSignal = detectBlockSignal(html, gateResult.status);
     result.bookingDomPresent = detectBookingDom(html);
     result.evidence = extractEvidence(html);
     
@@ -433,13 +431,8 @@ async function testBrowserless(url: string): Promise<ProviderResult> {
     
   } catch (e) {
     result.timeMs = Date.now() - start;
-    if (e instanceof Error && e.name === 'AbortError') {
-      result.error = 'Timeout after 60s';
-      result.failureReason = 'timeout';
-    } else {
-      result.error = e instanceof Error ? e.message : String(e);
-      result.failureReason = 'error';
-    }
+    result.error = e instanceof Error ? e.message : String(e);
+    result.failureReason = 'error';
     console.log(`[VRBO_LIVE_CHECK] provider=browserless status=error error="${result.error}" timeMs=${result.timeMs}`);
   }
   

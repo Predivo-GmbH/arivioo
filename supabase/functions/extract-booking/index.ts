@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { gatedBrowserlessFetch, isFetchRateLimited, rateLimitedToExtractionStatus } from '../_shared/browserlessGate.ts';
 
 /**
  * ============================================================================
@@ -844,22 +845,22 @@ async function extractWithBrowserless(url: string): Promise<{
     httpStatus: null as number | null,
     error: null as string | null,
     durationMs: 0,
+    isRateLimited: false,
   };
 
-  try {
-    const apiKey = Deno.env.get('BROWSERLESS_API_KEY');
-    if (!apiKey) {
-      result.error = 'BROWSERLESS_API_KEY not configured';
-      result.durationMs = Date.now() - start;
-      return result;
-    }
+  const apiKey = Deno.env.get('BROWSERLESS_API_KEY');
+  if (!apiKey) {
+    result.error = 'BROWSERLESS_API_KEY not configured';
+    result.durationMs = Date.now() - start;
+    return result;
+  }
 
-    console.log(`[BOOKING] Browserless request: ${url}`);
+  console.log(`[BOOKING] Browserless request via gate: ${url}`);
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-
-    const response = await fetch(`https://chrome.browserless.io/content?token=${apiKey}&stealth`, {
+  // Use distributed gate for rate limiting and 429 handling
+  const gateResult = await gatedBrowserlessFetch(
+    `https://chrome.browserless.io/content?token=${apiKey}&stealth`,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -867,41 +868,40 @@ async function extractWithBrowserless(url: string): Promise<{
         gotoOptions: { waitUntil: 'networkidle0', timeout: 45000 },
         waitForTimeout: 8000,
       }),
-      signal: controller.signal,
-    });
+      timeout: 60000,
+    },
+    { platform: 'booking', operation: 'fetchWithBrowserless' }
+  );
 
-    clearTimeout(timeoutId);
-    result.httpStatus = response.status;
+  result.httpStatus = gateResult.status;
+  result.durationMs = Date.now() - start;
 
-    if (!response.ok) {
-      const errText = await response.text();
-      result.error = `Browserless HTTP ${response.status}: ${errText.slice(0, 200)}`;
-      result.durationMs = Date.now() - start;
-      return result;
-    }
-
-    const html = await response.text();
-    const text = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    console.log(`[BOOKING] Browserless returned ${text.length} chars`);
-
-    result.content = text;
-    result.success = text.length > 5000;
-    result.durationMs = Date.now() - start;
-
-    return result;
-
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    result.error = msg.includes('abort') ? 'Browserless timeout' : `Browserless error: ${msg}`;
-    result.durationMs = Date.now() - start;
+  // Handle rate limiting
+  if (isFetchRateLimited(gateResult)) {
+    result.error = 'Rate limited (HTTP 429)';
+    result.isRateLimited = true;
     return result;
   }
+
+  if (!gateResult.success) {
+    result.error = gateResult.error || `Browserless HTTP ${gateResult.status}`;
+    return result;
+  }
+
+  const html = gateResult.body;
+  const text = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  console.log(`[BOOKING] Browserless returned ${text.length} chars`);
+
+  result.content = text;
+  result.success = text.length > 5000;
+
+  return result;
 }
 
 // ============================================================================
@@ -932,23 +932,18 @@ async function extractViaCheckoutNavigation(url: string, nights: number, checkIn
     error: null,
   };
 
-  try {
-    const apiKey = Deno.env.get('BROWSERLESS_API_KEY');
-    if (!apiKey) {
-      result.error = 'BROWSERLESS_API_KEY not configured';
-      result.durationMs = Date.now() - start;
-      return result;
-    }
+  const apiKey = Deno.env.get('BROWSERLESS_API_KEY');
+  if (!apiKey) {
+    result.error = 'BROWSERLESS_API_KEY not configured';
+    result.durationMs = Date.now() - start;
+    return result;
+  }
 
-    console.log(`[BOOKING_CHECKOUT] Starting checkout navigation flow for: ${url}`);
+  console.log(`[BOOKING_CHECKOUT] Starting checkout navigation flow via gate for: ${url}`);
 
-    // Use Browserless /function endpoint for multi-step interactions
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout for checkout flow
-
-    // ESM format function code for Browserless /function API
-    // URL is embedded directly in the code since we can't pass context
-    const functionCode = `
+  // ESM format function code for Browserless /function API
+  // URL is embedded directly in the code since we can't pass context
+  const functionCode = `
 export default async ({ page }) => {
   const targetUrl = ${JSON.stringify(url)};
   const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -1006,13 +1001,12 @@ export default async ({ page }) => {
     }
     
     // Step 4: Wait for checkout page navigation to complete
-    // Use waitForNavigation pattern to handle async navigation
     try {
       await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 20000 });
     } catch (e) {
       // Navigation might already be complete, continue anyway
     }
-    await delay(3000);  // Extra wait for checkout page to render
+    await delay(3000);
     
     const currentUrl = page.url();
     result.checkoutReached = /book\\.html|checkout|yourdetails|secure/i.test(currentUrl);
@@ -1023,12 +1017,9 @@ export default async ({ page }) => {
     result.pageContent = checkoutText.slice(0, 2000);
     result.evidenceSnippet = checkoutText.slice(0, 500);
     
-    // Find all USD prices on the page
     const allMatches = checkoutText.match(/(?:US\\$|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/gi) || [];
     result.allPricesFound = allMatches.slice(0, 10);
     
-    // Try to find a "total" or "amount to pay" followed by price
-    // Booking.com checkout format: "Total US$ 266.20" or "Amount to pay US$ 266"
     const totalPatterns = [
       /total[:\\s]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
       /(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)\\s*total/i,
@@ -1036,7 +1027,6 @@ export default async ({ page }) => {
       /pay\\s*now[:\\s]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
       /you\\s*pay[:\\s]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
       /price\\s*summary[^\\$]*(?:US\\$|USD|€|\\$)\\s*([\\d,]+(?:\\.\\d{2})?)/i,
-      // Fallback: Look for largest price (likely the total)
     ];
     
     for (const pattern of totalPatterns) {
@@ -1051,18 +1041,17 @@ export default async ({ page }) => {
       }
     }
     
-    // If no total found, try to extract the largest reasonable price
     if (!result.totalPrice && allMatches.length > 0) {
       const prices = allMatches
         .map(m => {
           const numMatch = m.match(/([\\d,]+(?:\\.\\d{2})?)/);
           return numMatch ? parseFloat(numMatch[1].replace(/,/g, '')) : 0;
         })
-        .filter(p => p > 100 && p < 10000)  // Reasonable stay price range
-        .sort((a, b) => b - a);  // Descending
+        .filter(p => p > 100 && p < 10000)
+        .sort((a, b) => b - a);
       
       if (prices.length > 0) {
-        result.totalPrice = prices[0];  // Take largest as likely total
+        result.totalPrice = prices[0];
         result.evidenceSnippet = 'Inferred largest: ' + prices[0];
       }
     }
@@ -1076,23 +1065,33 @@ export default async ({ page }) => {
 };
 `;
 
-    const response = await fetch(`https://chrome.browserless.io/function?token=${apiKey}&stealth`, {
+  // Use distributed gate for rate limiting
+  const gateResult = await gatedBrowserlessFetch(
+    `https://chrome.browserless.io/function?token=${apiKey}&stealth`,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/javascript' },
       body: functionCode,
-      signal: controller.signal,
-    });
+      timeout: 90000,
+    },
+    { platform: 'booking', operation: 'extractViaCheckoutNavigation' }
+  );
 
-    clearTimeout(timeoutId);
+  // Handle rate limiting
+  if (isFetchRateLimited(gateResult)) {
+    result.error = 'Rate limited (HTTP 429)';
+    result.durationMs = Date.now() - start;
+    return result;
+  }
 
-    if (!response.ok) {
-      const errText = await response.text();
-      result.error = `Browserless checkout HTTP ${response.status}: ${errText.slice(0, 200)}`;
-      result.durationMs = Date.now() - start;
-      return result;
-    }
+  if (!gateResult.success) {
+    result.error = gateResult.error || `Browserless checkout HTTP ${gateResult.status}`;
+    result.durationMs = Date.now() - start;
+    return result;
+  }
 
-    const responseData = await response.json();
+  try {
+    const responseData = JSON.parse(gateResult.body);
     const data = responseData.data || responseData;
     console.log(`[BOOKING_CHECKOUT] Steps: ${JSON.stringify(data.steps || [])}`);
     console.log(`[BOOKING_CHECKOUT] Prices found: ${JSON.stringify(data.allPricesFound || [])}`);
@@ -1108,15 +1107,12 @@ export default async ({ page }) => {
     result.durationMs = Date.now() - start;
 
     console.log(`[BOOKING_CHECKOUT] Result: checkoutReached=${result.checkoutReached}, totalPrice=${result.totalPrice}, includesTaxes=${result.includesTaxesFees}`);
-
-    return result;
-
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    result.error = msg.includes('abort') ? 'Checkout navigation timeout' : `Checkout error: ${msg}`;
+  } catch (parseError) {
+    result.error = 'Failed to parse checkout response';
     result.durationMs = Date.now() - start;
-    return result;
   }
+
+  return result;
 }
 
 /**

@@ -2,6 +2,7 @@ import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { finalizeAndCompleteSearch } from "../_shared/buildFinalSnapshot.ts";
+import { gatedBrowserlessFetch, isFetchRateLimited } from "../_shared/browserlessGate.ts";
 
 // ============================================================================
 // SECURE CORS - Domain allowlist for production security
@@ -576,7 +577,7 @@ async function scrapeAirbnbWithBrowserlessAttempt(url: string, browserlessApiKey
     console.log(`Browserless attempt ${attemptNum}: Scraping Airbnb (book/stays primary):`, url.slice(0, 100));
     console.log("Generated book/stays URL:", bookStaysUrl?.slice(0, 120) || 'none');
 
-    // Use Browserless /function endpoint - PRIMARY: book/stays page for price, but capture title/images from rooms first
+    // Use Browserless /function endpoint via gate - PRIMARY: book/stays page for price
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${browserlessApiKey}`;
 
     const functionPayload = {
