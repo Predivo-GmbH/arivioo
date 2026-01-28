@@ -147,68 +147,110 @@ All Browserless calls in the following files are routed through the gate:
 | `vrbo-live-access-check/index.ts` | `checkWithBrowserless` | /content |
 | `booking-browserless-test/index.ts` | `fetchWithBrowserless` | /content |
 
-## Regression Guard (Strict)
+## Regression Guard - Final
 
-A strict CI/test script prevents ANY direct Browserless usage outside approved modules:
+A strict CI script prevents direct Browserless HTTP calls outside the gate module.
+
+### Invariant
+
+- **URL constants**: ALLOWED anywhere
+- **Direct HTTP requests**: FORBIDDEN outside `browserlessGate.ts`
+
+### Run the Guard
 
 ```bash
-# Run from project root
 chmod +x scripts/check-browserless-gate.sh
 ./scripts/check-browserless-gate.sh
 ```
 
-### What It Scans
+### What PASSES (allowed patterns)
 
-- **Entire repository** (excluding node_modules, .git, dist, build)
-- **File types**: `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.py`, `.sh`, `.md`
+```typescript
+// ✓ URL constant definition (allowed)
+const browserlessUrl = `https://chrome.browserless.io/function?token=${token}`;
 
-### What Causes Failure
+// ✓ Passing URL to gated helper (allowed)
+const result = await gatedBrowserlessFetch(browserlessUrl, options, context);
 
-ANY occurrence of these patterns outside approved files:
-- `chrome.browserless.io`
-- `browserless.io`
+// ✓ Passing URL to gated function helper (allowed)
+const result = await gatedBrowserlessFunctionFetch(browserlessUrl, options, context);
+```
 
-### Approved Files (Whitelist)
+### What FAILS (forbidden patterns)
 
-Only these files may contain Browserless references:
-- `supabase/functions/_shared/browserlessGate.ts` (the gate module)
-- `docs/BROWSERLESS_GATE_IMPLEMENTATION.md` (this doc)
-- `docs/BROWSERLESS_CANONICAL_BASELINE.md` (baseline doc)
-- `scripts/check-browserless-gate.sh` (the guard itself)
+```typescript
+// ❌ Direct fetch with browserless URL (FORBIDDEN)
+await fetch(`https://chrome.browserless.io/content?token=${token}`, options);
 
-### Example Output (Pass)
+// ❌ Direct fetch with variable (FORBIDDEN)
+await fetch(browserlessUrl, options);
+
+// ❌ Axios call (FORBIDDEN)
+await axios.post(`https://chrome.browserless.io/function`, body);
+```
+
+### Example Output - PASS
 
 ```
 🔍 BROWSERLESS GATE REGRESSION GUARD
 =====================================
 
-Scanning for ungated Browserless references...
-  Patterns: chrome\.browserless\.io browserless\.io
-  Extensions: ts,tsx,js,jsx,mjs,cjs,py,sh,md
-  Excluded dirs: node_modules,.git,dist,build,.next,coverage
+Invariant: Direct HTTP requests to browserless.io are forbidden
+           outside supabase/functions/_shared/browserlessGate.ts
 
-✅ All Browserless references are properly contained in approved modules.
+Step 1: Scanning repository for browserless.io references...
+   Found 8 file(s) with browserless.io references
 
-Approved modules:
-  ✓ supabase/functions/_shared/browserlessGate.ts
-  ✓ docs/BROWSERLESS_GATE_IMPLEMENTATION.md
-  ✓ scripts/check-browserless-gate.sh
+Step 2: Checking for forbidden direct HTTP calls...
+   ✓ supabase/functions/_shared/browserlessGate.ts (gate module - allowed)
+   ✓ docs/BROWSERLESS_GATE_IMPLEMENTATION.md (documentation - allowed)
+   ✓ supabase/functions/extract-agoda/index.ts (URL constants only - allowed)
+   ✓ supabase/functions/airbnb-baseline-test/index.ts (URL constants only - allowed)
+
+Step 3: Verifying edge functions use gated helpers...
+   ✓ supabase/functions/extract-agoda/index.ts imports gate helpers
+
+✅ All Browserless calls are properly gated!
 ```
 
-### Example Output (Fail)
+### Example Output - FAIL
+
+If someone adds a direct call like this:
+
+```typescript
+// In supabase/functions/new-extractor/index.ts
+const html = await fetch(`https://chrome.browserless.io/content`, opts);
+```
+
+The guard will fail:
 
 ```
-❌ REGRESSION DETECTED: 2 ungated Browserless reference(s) found!
+❌ REGRESSION DETECTED: 1 violation(s) found!
 
-The following files contain direct Browserless references outside the gate module:
---------------------------------------------------------------------------------
-./src/test-file.ts:15:  const url = "https://chrome.browserless.io/content";
-./supabase/functions/new-extractor/index.ts:42:  fetch(`https://browserless.io/api`...
---------------------------------------------------------------------------------
+Violations:
+============================================================================
+❌ supabase/functions/new-extractor/index.ts:42 - Direct fetch() call
+   const html = await fetch(`https://chrome.browserless.io/content`, opts);
 
-FIX: All Browserless calls MUST use the gated helpers from:
-     supabase/functions/_shared/browserlessGate.ts
+============================================================================
+
+FIX: All direct HTTP requests to browserless.io MUST use the gated helpers:
+     - gatedBrowserlessFetch()         (for /content endpoint)
+     - gatedBrowserlessFunctionFetch() (for /function, /scrape endpoints)
+
+     Import from: supabase/functions/_shared/browserlessGate.ts
 ```
+
+### Approved Files (Whitelist)
+
+Only these files may contain browserless.io references:
+
+| File | Reason |
+|------|--------|
+| `supabase/functions/_shared/browserlessGate.ts` | Gate module (makes actual HTTP calls) |
+| `docs/BROWSERLESS_GATE_IMPLEMENTATION.md` | Documentation |
+| `docs/BROWSERLESS_CANONICAL_BASELINE.md` | Baseline documentation |
+| `scripts/check-browserless-gate.sh` | The guard script itself |
 
 ## Why Distributed Locking?
 
