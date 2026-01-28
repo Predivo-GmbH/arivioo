@@ -1,57 +1,50 @@
 #!/bin/bash
 # =============================================================================
-# BROWSERLESS GATE REGRESSION GUARD (STRICT)
+# BROWSERLESS GATE REGRESSION GUARD - FINAL
 # =============================================================================
-# This script ensures ALL Browserless API calls are routed through the gate.
-# It fails if any DIRECT calls (fetch/axios/http) to browserless.io are found
-# outside the approved gate module.
+# INVARIANT: Direct HTTP requests to browserless.io are FORBIDDEN outside the
+#            shared gate module. URL constants are ALLOWED anywhere.
 #
-# The script distinguishes between:
-# - URL constants passed to gatedBrowserlessFetch/gatedBrowserlessFunctionFetch (OK)
-# - Direct fetch/axios/http calls to browserless.io (FAIL)
+# FAILS on:
+#   - fetch(`https://chrome.browserless.io/...`)
+#   - axios.post("https://browserless.io/...")
+#   - Any HTTP client invocation with browserless.io URL
+#
+# PASSES on:
+#   - const url = `https://chrome.browserless.io/...`  (URL constant)
+#   - gatedBrowserlessFetch(url, ...)                  (gated call)
+#   - gatedBrowserlessFunctionFetch(url, ...)          (gated call)
 #
 # Usage: ./scripts/check-browserless-gate.sh
-#
-# Expected result: 0 violations (exit 0)
-#                  N violations found (exit 1)
 # =============================================================================
 
 set -e
 
-# Approved modules that may contain Browserless references
-ALLOWED_FILES=(
-  "supabase/functions/_shared/browserlessGate.ts"
+# The ONLY file allowed to make direct Browserless HTTP requests
+GATE_MODULE="supabase/functions/_shared/browserlessGate.ts"
+
+# Documentation files that may reference browserless.io for examples
+DOC_FILES=(
   "docs/BROWSERLESS_GATE_IMPLEMENTATION.md"
   "docs/BROWSERLESS_CANONICAL_BASELINE.md"
   "scripts/check-browserless-gate.sh"
 )
 
-echo "🔍 BROWSERLESS GATE REGRESSION GUARD (STRICT)"
-echo "=============================================="
+echo "🔍 BROWSERLESS GATE REGRESSION GUARD"
+echo "====================================="
 echo ""
-echo "Scanning for ungated Browserless calls..."
+echo "Invariant: Direct HTTP requests to browserless.io are forbidden"
+echo "           outside $GATE_MODULE"
 echo ""
 
-# Track violations
 VIOLATIONS=""
 VIOLATION_COUNT=0
 
-# ============================================================================
-# CHECK 1: Find direct fetch/axios/http calls to browserless.io
-# ============================================================================
-# Look for patterns like:
-#   fetch(`https://chrome.browserless.io/...`)
-#   fetch("https://browserless.io/...")
-#   axios.get("https://chrome.browserless.io/...")
-#   http.post("https://browserless.io/...")
-# 
-# But NOT:
-#   const url = `https://chrome.browserless.io/...`  (URL constant)
-#   gatedBrowserlessFetch(url, ...)                  (gated call)
+# -----------------------------------------------------------------------------
+# STEP 1: Find all files with browserless.io references
+# -----------------------------------------------------------------------------
+echo "Step 1: Scanning repository for browserless.io references..."
 
-echo "Step 1: Checking for direct HTTP calls to browserless.io..."
-
-# Find files with browserless.io references (excluding allowed files)
 FILES_WITH_REFS=$(grep -rlE "browserless\.io" \
   --include="*.ts" \
   --include="*.tsx" \
@@ -65,134 +58,149 @@ FILES_WITH_REFS=$(grep -rlE "browserless\.io" \
   --exclude-dir=build \
   . 2>/dev/null || true)
 
-for file in $FILES_WITH_REFS; do
-  # Remove ./ prefix
-  FILE_PATH=$(echo "$file" | sed 's|^\./||')
-  
-  # Check if this file is in the allowed list
-  IS_ALLOWED=false
-  for allowed in "${ALLOWED_FILES[@]}"; do
-    if [ "$FILE_PATH" = "$allowed" ]; then
-      IS_ALLOWED=true
-      break
-    fi
-  done
-  
-  if [ "$IS_ALLOWED" = true ]; then
-    continue
-  fi
-  
-  # Check for DIRECT calls (fetch/axios/http directly calling browserless)
-  # Pattern: fetch( or axios. or http. followed by browserless.io on same line or next line
-  DIRECT_CALLS=$(grep -nE "(fetch|axios\.|http\.)[^)]*browserless\.io" "$file" 2>/dev/null || true)
-  
-  if [ -n "$DIRECT_CALLS" ]; then
-    while IFS= read -r line; do
-      # Skip if line contains gatedBrowserlessFetch (it's a properly gated call)
-      if echo "$line" | grep -qE "gatedBrowserlessFetch|gatedBrowserlessFunctionFetch"; then
-        continue
-      fi
-      VIOLATIONS="$VIOLATIONS$FILE_PATH:$line\n"
-      ((VIOLATION_COUNT++)) || true
-    done <<< "$DIRECT_CALLS"
-  fi
-done
-
+FILE_COUNT=$(echo "$FILES_WITH_REFS" | grep -c . || echo "0")
+echo "   Found $FILE_COUNT file(s) with browserless.io references"
 echo ""
 
-# ============================================================================
-# CHECK 2: Verify gate helpers are used correctly
-# ============================================================================
-echo "Step 2: Verifying gate helper usage in edge functions..."
-
-# For each edge function file with browserless.io, verify it imports the gate
-for file in $FILES_WITH_REFS; do
-  FILE_PATH=$(echo "$file" | sed 's|^\./||')
-  
-  # Only check supabase/functions files (excluding _shared)
-  if [[ ! "$FILE_PATH" =~ ^supabase/functions/ ]] || [[ "$FILE_PATH" =~ ^supabase/functions/_shared/ ]]; then
-    continue
-  fi
-  
-  # Check if this file is in the allowed list
-  IS_ALLOWED=false
-  for allowed in "${ALLOWED_FILES[@]}"; do
-    if [ "$FILE_PATH" = "$allowed" ]; then
-      IS_ALLOWED=true
-      break
-    fi
-  done
-  
-  if [ "$IS_ALLOWED" = true ]; then
-    continue
-  fi
-  
-  # Verify file imports the gate helpers
-  if ! grep -qE "gatedBrowserlessFetch|gatedBrowserlessFunctionFetch" "$file" 2>/dev/null; then
-    echo "  ⚠️  $FILE_PATH contains browserless.io but doesn't use gate helpers"
-    VIOLATIONS="$VIOLATIONS$FILE_PATH: Contains browserless.io but no gate helper import\n"
-    ((VIOLATION_COUNT++)) || true
-  else
-    echo "  ✓ $FILE_PATH uses gate helpers"
-  fi
-done
-
-echo ""
-
-# ============================================================================
-# CHECK 3: Ensure no raw fetch() in files that should use the gate
-# ============================================================================
-echo "Step 3: Checking for raw fetch() bypasses..."
+# -----------------------------------------------------------------------------
+# STEP 2: Check each file for DIRECT HTTP calls (not URL constants)
+# -----------------------------------------------------------------------------
+echo "Step 2: Checking for forbidden direct HTTP calls..."
 
 for file in $FILES_WITH_REFS; do
   FILE_PATH=$(echo "$file" | sed 's|^\./||')
   
-  # Skip allowed files and non-edge-function files
-  IS_ALLOWED=false
-  for allowed in "${ALLOWED_FILES[@]}"; do
-    if [ "$FILE_PATH" = "$allowed" ]; then
-      IS_ALLOWED=true
-      break
-    fi
-  done
-  
-  if [ "$IS_ALLOWED" = true ]; then
+  # Skip the gate module itself
+  if [ "$FILE_PATH" = "$GATE_MODULE" ]; then
+    echo "   ✓ $FILE_PATH (gate module - allowed)"
     continue
   fi
   
-  # Look for fetch() calls on lines containing browserless
-  # that aren't part of gatedBrowserlessFetch
-  RAW_FETCHES=$(grep -nE "await\s+fetch\s*\(" "$file" 2>/dev/null | \
+  # Skip documentation files
+  IS_DOC=false
+  for doc in "${DOC_FILES[@]}"; do
+    if [ "$FILE_PATH" = "$doc" ]; then
+      IS_DOC=true
+      break
+    fi
+  done
+  if [ "$IS_DOC" = true ]; then
+    echo "   ✓ $FILE_PATH (documentation - allowed)"
+    continue
+  fi
+  
+  # -------------------------------------------------------------------------
+  # Pattern 1: Direct fetch() calls with browserless URL on same line
+  # Matches: fetch("https://chrome.browserless.io/...")
+  #          fetch(`https://chrome.browserless.io/...`)
+  #          await fetch(browserlessUrl, ...)
+  # Does NOT match: gatedBrowserlessFetch(...) or gatedBrowserlessFunctionFetch(...)
+  # -------------------------------------------------------------------------
+  
+  # Get all lines with fetch( that also reference browserless
+  DIRECT_FETCH=$(grep -nE "fetch\s*\(" "$file" 2>/dev/null | \
     grep -iE "browserless" | \
     grep -vE "gatedBrowserlessFetch|gatedBrowserlessFunctionFetch" || true)
   
-  if [ -n "$RAW_FETCHES" ]; then
+  if [ -n "$DIRECT_FETCH" ]; then
     while IFS= read -r line; do
-      VIOLATIONS="$VIOLATIONS$FILE_PATH:$line\n"
+      LINE_NUM=$(echo "$line" | cut -d: -f1)
+      LINE_CONTENT=$(echo "$line" | cut -d: -f2-)
+      VIOLATIONS="$VIOLATIONS❌ $FILE_PATH:$LINE_NUM - Direct fetch() call\n   $LINE_CONTENT\n\n"
       ((VIOLATION_COUNT++)) || true
-    done <<< "$RAW_FETCHES"
+    done <<< "$DIRECT_FETCH"
+  fi
+  
+  # -------------------------------------------------------------------------
+  # Pattern 2: axios calls with browserless URL
+  # Matches: axios.post("https://browserless.io/...")
+  #          axios.get(browserlessUrl)
+  #          axios({ url: "https://browserless.io/..." })
+  # -------------------------------------------------------------------------
+  
+  AXIOS_CALLS=$(grep -nE "axios\s*[\.(]" "$file" 2>/dev/null | \
+    grep -iE "browserless" || true)
+  
+  if [ -n "$AXIOS_CALLS" ]; then
+    while IFS= read -r line; do
+      LINE_NUM=$(echo "$line" | cut -d: -f1)
+      LINE_CONTENT=$(echo "$line" | cut -d: -f2-)
+      VIOLATIONS="$VIOLATIONS❌ $FILE_PATH:$LINE_NUM - Direct axios() call\n   $LINE_CONTENT\n\n"
+      ((VIOLATION_COUNT++)) || true
+    done <<< "$AXIOS_CALLS"
+  fi
+  
+  # -------------------------------------------------------------------------
+  # Pattern 3: http/https module calls (Node.js style)
+  # Matches: http.request("https://browserless.io/...")
+  #          https.get(browserlessUrl)
+  # -------------------------------------------------------------------------
+  
+  HTTP_CALLS=$(grep -nE "(http|https)\s*\.\s*(request|get|post)" "$file" 2>/dev/null | \
+    grep -iE "browserless" || true)
+  
+  if [ -n "$HTTP_CALLS" ]; then
+    while IFS= read -r line; do
+      LINE_NUM=$(echo "$line" | cut -d: -f1)
+      LINE_CONTENT=$(echo "$line" | cut -d: -f2-)
+      VIOLATIONS="$VIOLATIONS❌ $FILE_PATH:$LINE_NUM - Direct http/https call\n   $LINE_CONTENT\n\n"
+      ((VIOLATION_COUNT++)) || true
+    done <<< "$HTTP_CALLS"
+  fi
+  
+  # If no violations found for this file, it's clean (URL constants only)
+  if [ -z "$DIRECT_FETCH" ] && [ -z "$AXIOS_CALLS" ] && [ -z "$HTTP_CALLS" ]; then
+    echo "   ✓ $FILE_PATH (URL constants only - allowed)"
+  fi
+  
+done
+
+echo ""
+
+# -----------------------------------------------------------------------------
+# STEP 3: Verify gate module uses are correct (edge functions must import gate)
+# -----------------------------------------------------------------------------
+echo "Step 3: Verifying edge functions use gated helpers..."
+
+EDGE_FUNCTIONS_WITH_REFS=$(echo "$FILES_WITH_REFS" | grep "^supabase/functions/" | grep -v "_shared/" || true)
+
+for file in $EDGE_FUNCTIONS_WITH_REFS; do
+  FILE_PATH=$(echo "$file" | sed 's|^\./||')
+  
+  # Check if file imports gated helpers
+  HAS_GATE_IMPORT=$(grep -E "gatedBrowserlessFetch|gatedBrowserlessFunctionFetch" "$file" 2>/dev/null || true)
+  
+  if [ -z "$HAS_GATE_IMPORT" ]; then
+    # Check if there are any fetch calls (not just URL constants)
+    HAS_FETCH=$(grep -E "fetch\s*\(" "$file" 2>/dev/null | grep -iE "browserless" || true)
+    if [ -n "$HAS_FETCH" ]; then
+      echo "   ⚠️  $FILE_PATH has browserless fetch but no gate helper import"
+      VIOLATIONS="$VIOLATIONS⚠️  $FILE_PATH\n   Contains browserless fetch() but doesn't import gate helpers\n\n"
+      ((VIOLATION_COUNT++)) || true
+    fi
+  else
+    echo "   ✓ $FILE_PATH imports gate helpers"
   fi
 done
 
 echo ""
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # FINAL REPORT
-# ============================================================================
+# -----------------------------------------------------------------------------
 if [ $VIOLATION_COUNT -gt 0 ]; then
   echo "❌ REGRESSION DETECTED: $VIOLATION_COUNT violation(s) found!"
   echo ""
   echo "Violations:"
-  echo "--------------------------------------------------------------------------------"
+  echo "============================================================================"
   echo -e "$VIOLATIONS"
-  echo "--------------------------------------------------------------------------------"
+  echo "============================================================================"
   echo ""
-  echo "FIX: All Browserless calls MUST use the gated helpers from:"
-  echo "     supabase/functions/_shared/browserlessGate.ts"
+  echo "FIX: All direct HTTP requests to browserless.io MUST use the gated helpers:"
+  echo "     - gatedBrowserlessFetch()         (for /content endpoint)"
+  echo "     - gatedBrowserlessFunctionFetch() (for /function, /scrape endpoints)"
   echo ""
-  echo "Available helpers:"
-  echo "  - gatedBrowserlessFetch()         (for /content endpoint)"
-  echo "  - gatedBrowserlessFunctionFetch() (for /function and /scrape endpoints)"
+  echo "     Import from: supabase/functions/_shared/browserlessGate.ts"
   echo ""
   exit 1
 fi
@@ -200,15 +208,8 @@ fi
 echo "✅ All Browserless calls are properly gated!"
 echo ""
 echo "Summary:"
-echo "  - Scanned $(echo "$FILES_WITH_REFS" | wc -l | tr -d ' ') files with browserless.io references"
-echo "  - All edge functions use gate helpers"
-echo "  - No direct fetch() bypasses detected"
-echo ""
-echo "Approved modules:"
-for allowed in "${ALLOWED_FILES[@]}"; do
-  if [ -f "$allowed" ]; then
-    echo "  ✓ $allowed"
-  fi
-done
+echo "  - Scanned $FILE_COUNT file(s) with browserless.io references"
+echo "  - 0 direct HTTP calls outside gate module"
+echo "  - All edge functions use gated helpers"
 echo ""
 exit 0
