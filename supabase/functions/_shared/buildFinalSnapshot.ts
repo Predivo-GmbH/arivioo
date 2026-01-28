@@ -343,7 +343,13 @@ function categorizeResultForSnapshot(
   const successStatuses = ['success', 'price_extracted', 'completed', 'success_total_stay'];
   const isSuccessStatus = successStatuses.includes(extractionStatus);
   
-  // 4. Check extraction status for blocked
+  // 4. Check extraction status for rate limiting (service_error, not blocked)
+  const rateLimitedStatuses = ['rate_limited', 'blocked_rate_limit', 'rate_limited_abort'];
+  if (rateLimitedStatuses.includes(extractionStatus)) {
+    return 'service_error';
+  }
+  
+  // 4b. Check extraction status for blocked (bot/CAPTCHA - hard block)
   const blockedStatuses = ['blocked', 'blocked_captcha_or_bot', 'access_denied', 'bot_detected'];
   if (blockedStatuses.includes(extractionStatus)) {
     return 'blocked';

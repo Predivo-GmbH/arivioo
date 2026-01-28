@@ -133,16 +133,23 @@ const UNAVAILABLE_STATUSES = new Set([
 ]);
 
 /**
- * Status codes that indicate access was blocked (bot/CAPTCHA/rate limit)
+ * Status codes that indicate access was blocked (bot/CAPTCHA - hard block)
  */
 const BLOCKED_STATUSES = new Set([
   'blocked_captcha_or_bot',
   'blocked_captcha',
-  'blocked_rate_limit',
-  'rate_limited',
-  'rate_limited_abort',
   'bot_blocked_abort',
   'expedia_access_blocked',
+]);
+
+/**
+ * Status codes that indicate temporary rate limiting (service_error, NOT blocked)
+ * Rate limiting is transient and should be distinguished from hard bot blocks.
+ */
+const RATE_LIMITED_STATUSES = new Set([
+  'rate_limited',
+  'rate_limited_abort',
+  'blocked_rate_limit',
 ]);
 
 /**
@@ -302,7 +309,24 @@ export function classifyOutcome(
     };
   }
 
-  // 4. Access blocked (bot/CAPTCHA/rate limit)
+  // 4. Rate limited (service_error - temporary, NOT hard block)
+  if (RATE_LIMITED_STATUSES.has(status)) {
+    return {
+      category: 'service_error',
+      reasonCode: 'rate_limited',
+      isTerminal: true,
+    };
+  }
+  // Also check error message for rate limit indicators
+  if (error.includes('rate limit') || error.includes('429')) {
+    return {
+      category: 'service_error',
+      reasonCode: 'rate_limited',
+      isTerminal: true,
+    };
+  }
+
+  // 4b. Access blocked (bot/CAPTCHA - hard block)
   if (BLOCKED_STATUSES.has(status)) {
     return {
       category: 'access_blocked',
@@ -315,13 +339,6 @@ export function classifyOutcome(
     return {
       category: 'access_blocked',
       reasonCode: 'error_blocked',
-      isTerminal: true,
-    };
-  }
-  if (error.includes('rate limit') || error.includes('429')) {
-    return {
-      category: 'access_blocked',
-      reasonCode: 'rate_limited',
       isTerminal: true,
     };
   }
