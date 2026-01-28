@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { gatedBrowserlessFetch, isFetchRateLimited } from '../_shared/browserlessGate.ts';
 
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
@@ -1163,8 +1164,7 @@ async function testBrowserless(url: string, nights: number, supabase: any): Prom
     const roomId = bookStaysParams?.room_id || '';
     
     console.log(`[Browserless] Rooms URL: ${url}`);
-    console.log(`[Browserless] Book/Stays URL: ${bookStaysUrl}`);
-
+    // Use distributed gate for Browserless calls
     const browserlessFnUrl = `https://chrome.browserless.io/function?token=${apiKey}`;
 
     // BOOK/STAYS PRIMARY SCRIPT

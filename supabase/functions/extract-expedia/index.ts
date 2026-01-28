@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { gatedBrowserlessFetch, isFetchRateLimited, rateLimitedToExtractionStatus } from '../_shared/browserlessGate.ts';
 
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
@@ -1432,13 +1433,12 @@ async function fetchWithBrowserless(url: string): Promise<FetchResult> {
     return { content: '', error: 'Browserless API key not configured' };
   }
   
-  try {
-    console.log('[EXPEDIA] Fetching with Browserless...');
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), BROWSERLESS_TIMEOUT);
-    
-    const response = await fetch(`https://chrome.browserless.io/content?token=${browserlessKey}`, {
+  console.log('[EXPEDIA] Fetching with Browserless via gate...');
+  
+  // Use distributed gate for rate limiting and 429 handling
+  const result = await gatedBrowserlessFetch(
+    `https://chrome.browserless.io/content?token=${browserlessKey}`,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1446,44 +1446,38 @@ async function fetchWithBrowserless(url: string): Promise<FetchResult> {
         gotoOptions: { waitUntil: 'networkidle2', timeout: 30000 },
         waitForSelector: { selector: 'body', timeout: 10000 },
       }),
-      signal: controller.signal,
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      if (response.status === 429) {
-        return { content: '', error: 'Rate limited (HTTP 429)', isRateLimited: true };
-      }
-      if (response.status === 403 || response.status === 401) {
-        return { content: '', error: `Bot blocked (HTTP ${response.status})`, isBotBlocked: true };
-      }
-      return { content: '', error: `Browserless error: ${response.status}` };
-    }
-    
-    const html = await response.text();
-    
-    const text = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    
-    if (/please\s+verify|captcha|unusual\s+traffic/i.test(text)) {
-      return { content: text, error: 'Bot detection in content', isBotBlocked: true };
-    }
-    
-    console.log(`[EXPEDIA] Browserless returned ${text.length} chars`);
-    return { content: text };
-    
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    if (msg.includes('abort')) {
-      return { content: '', error: 'Browserless timeout' };
-    }
-    return { content: '', error: `Browserless error: ${msg}` };
+      timeout: BROWSERLESS_TIMEOUT,
+    },
+    { platform: 'expedia', operation: 'fetchWithBrowserless' }
+  );
+  
+  // Handle rate limiting
+  if (isFetchRateLimited(result)) {
+    return { content: '', error: 'Rate limited (HTTP 429)', isRateLimited: true };
   }
+  
+  if (!result.success) {
+    if (result.status === 403 || result.status === 401) {
+      return { content: '', error: `Bot blocked (HTTP ${result.status})`, isBotBlocked: true };
+    }
+    return { content: '', error: result.error || `Browserless error: ${result.status}` };
+  }
+  
+  const html = result.body;
+  
+  const text = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  if (/please\s+verify|captcha|unusual\s+traffic/i.test(text)) {
+    return { content: text, error: 'Bot detection in content', isBotBlocked: true };
+  }
+  
+  console.log(`[EXPEDIA] Browserless returned ${text.length} chars`);
+  return { content: text };
 }
 
 async function fetchWithZyte(url: string): Promise<FetchResult> {

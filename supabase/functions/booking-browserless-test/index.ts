@@ -1,3 +1,5 @@
+import { gatedBrowserlessFetch, isFetchRateLimited } from '../_shared/browserlessGate.ts';
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -89,63 +91,42 @@ async function fetchWithBrowserless(url: string): Promise<{
     return { success: false, content: '', error: 'BROWSERLESS_API_KEY not configured' };
   }
   
-  try {
-    console.log('[BOOKING-TEST] Fetching with Browserless (stealth mode):', url);
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000);
-    
-    // Use /content endpoint with stealth query parameter
-    const response = await fetch(`https://chrome.browserless.io/content?token=${browserlessKey}&stealth`, {
+  console.log('[BOOKING-TEST] Fetching with Browserless via gate (stealth mode):', url);
+  
+  const result = await gatedBrowserlessFetch(
+    `https://chrome.browserless.io/content?token=${browserlessKey}&stealth`,
+    {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url,
-        gotoOptions: { 
-          waitUntil: 'networkidle0', 
-          timeout: 60000 
-        },
-        waitForSelector: {
-          selector: 'body',
-          timeout: 20000
-        },
-        // Wait additional time for JS to render prices
+        gotoOptions: { waitUntil: 'networkidle0', timeout: 60000 },
+        waitForSelector: { selector: 'body', timeout: 20000 },
         waitForTimeout: 5000,
       }),
-      signal: controller.signal,
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      return { 
-        success: false, 
-        content: '', 
-        error: `Browserless HTTP ${response.status}: ${errorText.slice(0, 200)}` 
-      };
-    }
-    
-    const html = await response.text();
-    
-    // Convert HTML to text
-    const text = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    
-    console.log(`[BOOKING-TEST] Browserless returned ${text.length} chars`);
-    return { success: true, content: text, error: null };
-    
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    if (msg.includes('abort')) {
-      return { success: false, content: '', error: 'Browserless timeout (60s)' };
-    }
-    return { success: false, content: '', error: `Browserless error: ${msg}` };
+      timeout: 90000,
+    },
+    { platform: 'booking-test', operation: 'fetchWithBrowserless' }
+  );
+  
+  if (isFetchRateLimited(result)) {
+    return { success: false, content: '', error: 'Rate limited (HTTP 429)' };
   }
+  
+  if (!result.success) {
+    return { success: false, content: '', error: result.error || `Browserless HTTP ${result.status}` };
+  }
+  
+  const html = result.body;
+  const text = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  console.log(`[BOOKING-TEST] Browserless returned ${text.length} chars`);
+  return { success: true, content: text, error: null };
 }
 
 Deno.serve(async (req) => {
