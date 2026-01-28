@@ -647,52 +647,75 @@ interface FetchResult {
   navigatedUrl?: string;  // URL after navigation/click
 }
 
-async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise<FetchResult> {
+async function fetchWithBrowserless(url: string, waitMs: number = 6000): Promise<FetchResult & { isRateLimited?: boolean }> {
   const browserlessApiKey = Deno.env.get('BROWSERLESS_API_KEY');
   
   if (!browserlessApiKey) {
     return { content: '', html: '', error: 'Browserless API key not configured' };
   }
   
-  try {
-    console.log(`[AGODA] Browserless fetching: ${url}`);
-    
-    const response = await fetch(`https://chrome.browserless.io/content?token=${browserlessApiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url,
-        waitFor: waitMs,
-        gotoOptions: {
-          waitUntil: 'networkidle2',
-          timeout: 35000,
-        },
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[AGODA] Browserless error ${response.status}: ${errorText.substring(0, 200)}`);
-      return { content: '', html: '', error: `Browserless error: ${response.status}`, httpStatus: response.status };
+  // Rate limiting configuration
+  const MAX_RETRIES = 3;
+  const BACKOFF_INITIAL_MS = 2000;
+  
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    try {
+      console.log(`[BROWSERLESS] attempt=${attempt} platform=agoda`);
+      console.log(`[AGODA] Browserless fetching: ${url}`);
+      
+      const response = await fetch(`https://chrome.browserless.io/content?token=${browserlessApiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url,
+          waitFor: waitMs,
+          gotoOptions: {
+            waitUntil: 'networkidle2',
+            timeout: 35000,
+          },
+        }),
+      });
+      
+      // Handle 429 rate limiting with backoff
+      if (response.status === 429) {
+        if (attempt <= MAX_RETRIES) {
+          const backoffMs = BACKOFF_INITIAL_MS * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 600 + 200);
+          console.log(`[BROWSERLESS] rate_limited attempt=${attempt} backoffMs=${backoffMs}`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          continue;
+        } else {
+          console.error(`[BROWSERLESS] terminal rate_limited reason=browserless_429 attempts=${attempt}`);
+          return { content: '', html: '', error: 'rate_limited', httpStatus: 429, isRateLimited: true };
+        }
+      }
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[AGODA] Browserless error ${response.status}: ${errorText.substring(0, 200)}`);
+        return { content: '', html: '', error: `Browserless error: ${response.status}`, httpStatus: response.status };
+      }
+      
+      const html = await response.text();
+      
+      // Convert HTML to text
+      const text = html
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      
+      console.log(`[BROWSERLESS] attempt=${attempt} status=${response.status} success=true`);
+      console.log(`[AGODA] Browserless fetched contentLength: ${html.length} (text: ${text.length})`);
+      return { content: text, html, httpStatus: response.status };
+      
+    } catch (error) {
+      console.error('[AGODA] Browserless fetch error:', error);
+      return { content: '', html: '', error: error instanceof Error ? error.message : 'Browserless fetch failed' };
     }
-    
-    const html = await response.text();
-    
-    // Convert HTML to text
-    const text = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    
-    console.log(`[AGODA] Browserless fetched contentLength: ${html.length} (text: ${text.length})`);
-    return { content: text, html, httpStatus: response.status };
-    
-  } catch (error) {
-    console.error('[AGODA] Browserless fetch error:', error);
-    return { content: '', html: '', error: error instanceof Error ? error.message : 'Browserless fetch failed' };
   }
+  
+  return { content: '', html: '', error: 'Max retries exceeded' };
 }
 
 /**
