@@ -488,15 +488,25 @@ export default function SearchResults() {
   const [priceExtractionTotal, setPriceExtractionTotal] = useState(0);
   const [priceExtractionCompleted, setPriceExtractionCompleted] = useState(0);
   
-  // Track if search is finalized (finalised_at is set in DB)
+  // Track if search is finalized.
+  // IMPORTANT INVARIANT: “finalized” means the backend has set finalised_at.
+  // Do NOT infer finalization from status alone, because `status='completed'`
+  // can temporarily exist before `finalised_at` is visible client-side.
   const [isFinalized, setIsFinalized] = useState(false);
+  const isFinalizedByDb = Boolean((search as any)?.finalised_at);
+
+  // Keep legacy state in sync with the true invariant.
+  useEffect(() => {
+    setIsFinalized(isFinalizedByDb);
+  }, [isFinalizedByDb]);
   
   // ============================================================================
   // REALTIME EXTRACTION PROGRESS
   // This hook provides live updates for price extraction status, ensuring
   // the UI never gets stuck at "0/N" by using realtime + polling fallback.
   // ============================================================================
-  const shouldEnableRealtime = !isFinalized && !isTestingPublicView && Boolean(searchId);
+  // Live progress MUST stay enabled until finalised_at exists.
+  const shouldEnableRealtime = !isFinalizedByDb && !isTestingPublicView && Boolean(searchId);
   
   const handleProgressUpdate = useCallback((extractions: any[]) => {
     // Update price extraction platforms for backward compatibility
@@ -2239,7 +2249,7 @@ export default function SearchResults() {
   // ============================================================================
   
   // Compute the actual phase based on finalization state
-  const computedResultsPhase: SearchPhaseType = isFinalized ? "complete" : "discovery_pricing";
+  const computedResultsPhase: SearchPhaseType = isFinalizedByDb ? "complete" : "discovery_pricing";
   
   // Results that are still awaiting prices (Phase 1 display)
   // These are results without a frozen bucket that would be price-dependent
@@ -2432,7 +2442,7 @@ export default function SearchResults() {
   const computeResultState = (): ResultState => {
     // TWO-PHASE UX: If not finalized, we're in Phase 1 (pricing in progress)
     // Only show this state if we have matches but finalization not complete
-    if (!isFinalized && finalCandidates.length > 0) {
+    if (!isFinalizedByDb && finalCandidates.length > 0) {
       return 'pricing_in_progress';
     }
     
@@ -3047,7 +3057,7 @@ export default function SearchResults() {
                   </>
                 )}
                 {/* PHASE 2 ONLY: Show when finalized and no cheaper alternatives found */}
-                {(search?.status === "completed" && isFinalized && displayResults.length === 0 && (resultState === 'no_cheaper_found' || resultState === 'prices_unavailable') && (search?.airbnb_price || confirmedTotal)) && (
+                {(search?.status === "completed" && isFinalizedByDb && displayResults.length === 0 && (resultState === 'no_cheaper_found' || resultState === 'prices_unavailable') && (search?.airbnb_price || confirmedTotal)) && (
                   /* Alternatives exist but none are cheaper than Airbnb - use same table layout */
                   <>
                     {/* Phase 2 Banner: Final results ready */}
@@ -3823,7 +3833,7 @@ export default function SearchResults() {
 
                 {/* Main results with cheaper alternatives */}
                 {/* PHASE 2 ONLY: Only show price-dependent results after finalization */}
-                {(search?.status === "completed" && isFinalized && displayResults.length > 0 && (search?.airbnb_price || confirmedTotal)) && (
+                {(search?.status === "completed" && isFinalizedByDb && displayResults.length > 0 && (search?.airbnb_price || confirmedTotal)) && (
                   <>
                     {/* Phase 2 Banner: Final results ready */}
                     <SearchPhaseBanner 
