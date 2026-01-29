@@ -152,7 +152,37 @@ export function classifyTierAFailure(
   const normalizedStatus = (status || '').toLowerCase().trim();
   const normalizedError = (errorMessage || '').toLowerCase();
   
-  // SUCCESS: Valid price extracted with success status
+  // CRITICAL: Check for TRANSIENT first before SUCCESS to handle cases like:
+  // - status="unverified" with price - VAT/structural checks failed
+  // - status has failed_checks indicating retryable issues
+  
+  // TRANSIENT: Known transient status takes priority (even if price exists)
+  // This ensures "unverified" with price is still retried for proper verification
+  if (TRANSIENT_STATUSES.has(normalizedStatus)) {
+    return 'TRANSIENT';
+  }
+  
+  // Check error message for transient VAT/checkout failures
+  // These indicate the price was found but not properly verified
+  const transientVatPatterns = [
+    /vat.*checkout.*fail/i,
+    /taxes.*fees.*not.*confirm/i,
+    /taxes_fees_not_confirmed/i,
+    /vat_excluded_checkout_failed/i,
+    /checkout.*proof.*fail/i,
+    /structural.*check.*fail/i,
+    /failed_checks.*vat/i,
+    /failed_checks.*taxes/i,
+  ];
+  
+  for (const pattern of transientVatPatterns) {
+    if (pattern.test(normalizedError)) {
+      console.log(`[TIER_A_CLASSIFY] TRANSIENT due to VAT/checkout failure pattern in error: "${normalizedError.slice(0, 100)}"`);
+      return 'TRANSIENT';
+    }
+  }
+  
+  // SUCCESS: Valid price extracted with explicit success status
   if (SUCCESS_STATUSES.has(normalizedStatus) && extractedPrice && extractedPrice > 0) {
     return 'SUCCESS';
   }
@@ -173,11 +203,6 @@ export function classifyTierAFailure(
     }
   }
   
-  // TRANSIENT: Known transient status
-  if (TRANSIENT_STATUSES.has(normalizedStatus)) {
-    return 'TRANSIENT';
-  }
-  
   // Check error patterns for TRANSIENT
   for (const pattern of TRANSIENT_ERROR_PATTERNS) {
     if (pattern.test(normalizedError)) {
@@ -190,8 +215,11 @@ export function classifyTierAFailure(
     return 'TRANSIENT';
   }
   
-  // Has price but unknown status - treat as success
-  return 'SUCCESS';
+  // Has price but unknown status - still treat as TRANSIENT for Tier-A
+  // because unknown status means we couldn't verify the price is truly comparable
+  // (e.g., missing structural proof, VAT not confirmed)
+  console.log(`[TIER_A_CLASSIFY] Unknown status "${normalizedStatus}" with price ${extractedPrice} - treating as TRANSIENT for verification`);
+  return 'TRANSIENT';
 }
 
 /**
