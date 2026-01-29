@@ -7466,7 +7466,35 @@ async function runSearchWithStreaming(
     if (AGODA_ONLY_TEST_MODE) {
       console.log(`[TEST_MODE] No Agoda candidates found - search will complete with empty results`);
     }
-    await supabase.from("searches").update({ status: "completed", airbnb_title: airbnbTitle, airbnb_price: airbnbPrice }).eq("id", searchId);
+    console.log(`[search-alternatives] No candidates found - invoking proper finalization`);
+    
+    // Prepare image data for finalization
+    const airbnbImageUrlForFinalize = imageUrls.length > 0 ? imageUrls[0] : null;
+    const airbnbImagesForFinalize = imageUrls.slice(0, 5);
+    
+    // CRITICAL FIX: Use finalizeAndCompleteSearch to maintain invariant
+    // status='completed' should ONLY be set when snapshot is successfully persisted
+    const finalizationResult = await finalizeAndCompleteSearch({
+      supabase,
+      searchId,
+      airbnbTitle,
+      airbnbPrice,
+      airbnbCurrency: airbnbCurrency || 'USD',
+      airbnbImageUrl: airbnbImageUrlForFinalize,
+      airbnbImages: airbnbImagesForFinalize,
+      checkIn,
+      checkOut,
+      nights: calculateNights(checkIn, checkOut),
+    });
+    
+    if (!finalizationResult.success && !finalizationResult.alreadyFinalized) {
+      console.error(`[search-alternatives] Empty results finalization failed: ${finalizationResult.error}`);
+      // Mark as finalization_failed instead of completed
+      sendSSE(controller, "error", { error: `Finalization failed: ${finalizationResult.error}` });
+      return;
+    }
+    
+    console.log(`[search-alternatives] Empty results finalized successfully`);
     sendSSE(controller, "complete", { success: true, results: [], airbnb: { title: airbnbTitle, price: airbnbPrice, images: imageUrls } });
     return;
   }

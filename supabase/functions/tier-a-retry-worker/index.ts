@@ -403,7 +403,7 @@ async function processPendingExtraction(
 }
 
 /**
- * Clean up stale 'running' jobs that may have been orphaned.
+ * Clean up stale 'running' jobs that may have been orphaned (Tier-A only).
  */
 async function cleanupStaleRunningJobs(supabase: any): Promise<number> {
   const staleThreshold = new Date(Date.now() - STALE_RUNNING_TIMEOUT_MS).toISOString();
@@ -443,6 +443,53 @@ async function cleanupStaleRunningJobs(supabase: any): Promise<number> {
   return staleJobs.length;
 }
 
+/**
+ * GENERAL WATCHDOG: Clean up ALL stuck extractions (not just Tier-A).
+ * 
+ * This handles extractions that are stuck in 'pending' or 'running' for > 3 minutes
+ * without any updates, preventing infinite "0/10" progress states.
+ */
+const GENERAL_STALE_TIMEOUT_MS = 180000; // 3 minutes
+
+async function cleanupGeneralStuckExtractions(supabase: any): Promise<number> {
+  const staleThreshold = new Date(Date.now() - GENERAL_STALE_TIMEOUT_MS).toISOString();
+  
+  // Find extractions that are stuck in non-terminal states for too long
+  const { data: stuckExtractions, error } = await supabase
+    .from('price_extractions')
+    .select('id, platform_name, extraction_status, updated_at')
+    .in('extraction_status', ['pending', 'running', 'in_progress', 'queued', 'started'])
+    .lt('updated_at', staleThreshold)
+    .limit(20);
+  
+  if (error || !stuckExtractions || stuckExtractions.length === 0) {
+    return 0;
+  }
+  
+  console.log(`[GENERAL_WATCHDOG] Found ${stuckExtractions.length} stuck extractions to recover`);
+  
+  for (const extraction of stuckExtractions) {
+    const now = new Date().toISOString();
+    
+    // Transition to 'timeout' status - this is terminal
+    const { error: updateError } = await supabase
+      .from('price_extractions')
+      .update({
+        extraction_status: 'timeout',
+        extraction_error: `Extraction stuck in ${extraction.extraction_status} state for > 3 minutes. Auto-recovered by watchdog.`,
+        updated_at: now,
+      })
+      .eq('id', extraction.id)
+      .in('extraction_status', ['pending', 'running', 'in_progress', 'queued', 'started']); // Atomic guard
+    
+    if (!updateError) {
+      console.log(`[GENERAL_WATCHDOG] Recovered stuck extraction: ${extraction.id} (${extraction.platform_name}) - was ${extraction.extraction_status}`);
+    }
+  }
+  
+  return stuckExtractions.length;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -457,8 +504,11 @@ Deno.serve(async (req) => {
     
     console.log('[TIER_A_WORKER] Starting worker invocation');
     
-    // Step 1: Clean up stale running jobs
+    // Step 1: Clean up stale running jobs (Tier-A)
     const recoveredCount = await cleanupStaleRunningJobs(supabase);
+    
+    // Step 1b: GENERAL WATCHDOG - recover ALL stuck extractions (not just Tier-A)
+    const generalRecoveredCount = await cleanupGeneralStuckExtractions(supabase);
     
     // Step 2: Find pending retries that are ready
     const now = new Date().toISOString();
