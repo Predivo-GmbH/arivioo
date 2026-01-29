@@ -1902,8 +1902,18 @@ export default function SearchResults() {
   useEffect(() => {
     const pipelineHidden = !loading && !extractingPrices;
     
-    // FAST PATH: If all extractions are terminal AND we have finalized results, unlock immediately
-    // This prevents the UI from getting stuck on the progress grid when finalization is complete
+    // FAST PATH #1: If search is already finalized by DB, skip the progress grid entirely
+    // This catches page loads/refreshes where the search was already completed
+    // No need to wait for realtime to report "all terminal" since realtime is disabled when finalized
+    if (!resultsViewUnlocked && isFinalizedByDb && results.length > 0) {
+      console.log('[ResultsUnlock] Fast path: already finalized, unlocking results view');
+      setResultsViewUnlocked(true);
+      setResultsPageRendered(true);
+      return; // Early return - no need for other checks
+    }
+    
+    // FAST PATH #2: If all extractions are terminal AND we have finalized results, unlock immediately
+    // This prevents the UI from getting stuck on the progress grid when finalization just completed
     if (!resultsViewUnlocked && realtimeIsAllTerminal && isFinalizedByDb && results.length > 0) {
       console.log('[ResultsUnlock] Fast path: all terminal + finalized, unlocking results view');
       setResultsViewUnlocked(true);
