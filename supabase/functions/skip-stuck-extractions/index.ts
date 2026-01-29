@@ -323,10 +323,7 @@ async function findStuckExtractions(supabase: any): Promise<StuckExtraction[]> {
       updated_at,
       created_at
     `)
-    .or(`
-      extraction_status.in.(pending,queued,running,in_progress,started),
-      tier_a_state.in.(running,pending_retry)
-    `)
+    .or('extraction_status.in.(pending,queued,running,in_progress,started),tier_a_state.in.(running,pending_retry)')
     .lte('updated_at', oldestThreshold)
     .limit(BATCH_SIZE * 2);  // Fetch extra since we'll filter by tier
   
