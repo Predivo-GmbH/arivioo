@@ -611,13 +611,11 @@ export async function finalizeAndCompleteSearch(
     // -----------------------------
     // FINALIZATION GATE (CRITICAL)
     // -----------------------------
-    // We must NOT finalize until every VERIFIED matched platform has reached a terminal extraction state.
-    // Otherwise the snapshot will capture "pending" and the UI will appear to "miss" platforms
-    // (e.g. Expedia), or show incorrect bucket counts.
+    // TIER-BASED FINALIZATION:
+    // - Tier A: Must reach terminal state (success/hard_terminal/exhausted) before finalizing
+    // - Tier B/C: Can be auto-skipped if stuck (lower tiers don't block finalization)
     //
-    // IMPORTANT: Rejected/low_confidence candidates from Working Baseline are considered terminal
-    // by definition - they don't need price extractions since they failed image verification.
-    // Only 'verified' outcome_category platforms need extraction completion.
+    // This ensures Tier A reliability while not letting slow lower-tier platforms hang the UI.
     const NON_TERMINAL_EXTRACTION_STATUSES = new Set([
       'pending',
       'queued',
@@ -641,22 +639,23 @@ export async function finalizeAndCompleteSearch(
       if (!category || typeof category !== 'string') return false;
       return TERMINAL_OUTCOME_CATEGORIES.has(category);
     };
+    
+    // Tier A blocking states - must wait for these to resolve
+    const TIER_A_BLOCKING_STATES = new Set(['pending_retry', 'running']);
+    
+    // Determine platform tier from name (fallback) or DB
+    const isTierAPlatformName = (name: string): boolean => {
+      const lower = name.toLowerCase();
+      return lower.includes('agoda') || lower.includes('booking');
+    };
 
     // Create lookup maps for enrichment
     const extractionByResultId = new Map<string, any>();
     const extractionByPlatform = new Map<string, any>();
     const extractionByUrl = new Map<string, any>();
     const terminalPlatforms = new Set<string>();
-
-    // TIER-A RETRY GATE: Check for any Tier-A platforms still in retry loop
-    // Finalization is BLOCKED while any Tier-A extraction is pending_retry or running
-    const TIER_A_BLOCKING_STATES = new Set(['pending_retry', 'running']);
     const tierABlockingExtractions: string[] = [];
-    
-    const isTierAPlatformName = (name: string): boolean => {
-      const lower = name.toLowerCase();
-      return lower.includes('agoda') || lower.includes('booking');
-    };
+    const nonTerminalLowerTierPlatforms: string[] = [];
 
     extractionsData?.forEach((e: any) => {
       const platformKey = typeof e.platform_name === 'string' ? e.platform_name.toLowerCase() : '';
@@ -666,13 +665,20 @@ export async function finalizeAndCompleteSearch(
       if (platformKey) {
         extractionByPlatform.set(platformKey, e);
         
-        // TIER-A GATE: Block finalization if Tier-A is still retrying
-        if (isTierAPlatformName(platformKey) && e.tier_a_state && TIER_A_BLOCKING_STATES.has(e.tier_a_state)) {
+        const isTierA = isTierAPlatformName(platformKey);
+        const isTerminal = isTerminalExtractionStatus(e.extraction_status);
+        
+        // TIER-A GATE: Block finalization if Tier-A is still retrying or running
+        if (isTierA && e.tier_a_state && TIER_A_BLOCKING_STATES.has(e.tier_a_state)) {
           tierABlockingExtractions.push(`${platformKey}:${e.tier_a_state}`);
         }
         
-        if (isTerminalExtractionStatus(e.extraction_status)) {
+        // Track terminal vs non-terminal by tier
+        if (isTerminal) {
           terminalPlatforms.add(platformKey);
+        } else if (!isTierA) {
+          // Track non-terminal lower-tier platforms (will be auto-skipped)
+          nonTerminalLowerTierPlatforms.push(platformKey);
         }
       }
       if (e.deep_link) {
@@ -709,29 +715,48 @@ export async function finalizeAndCompleteSearch(
       }
     });
 
-    if (authoritativePlatforms.length > 0) {
-      const expected = authoritativePlatforms.length;
-      const terminal = terminalPlatforms.size;
-      if (terminal < expected) {
-        const msg = `Not ready to finalize: ${terminal}/${expected} platforms terminal`;
-        console.log(`[finalizeAndComplete] ${msg}`);
-        
-        // ACTIVITY LOG DE-DUPLICATION: Only log if terminal count increased since last check
-        const lastLogged = lastLoggedTerminalCount.get(searchId) ?? -1;
-        if (terminal > lastLogged) {
-          lastLoggedTerminalCount.set(searchId, terminal);
-          await logActivity(supabase, searchId, 'Finalizing results', msg);
+    // TIER-BASED FINALIZATION LOGIC:
+    // Count Tier A platforms that must be terminal
+    const tierAPlatforms: string[] = [];
+    const tierATerminal: string[] = [];
+    
+    authoritativePlatforms.forEach((p: any) => {
+      const platformKey = typeof p.platform_name === 'string' ? p.platform_name.toLowerCase() : '';
+      if (!platformKey) return;
+      
+      if (isTierAPlatformName(platformKey)) {
+        tierAPlatforms.push(platformKey);
+        if (terminalPlatforms.has(platformKey)) {
+          tierATerminal.push(platformKey);
         }
-        // (If terminal count unchanged, skip log to prevent spam)
-        
-        return {
-          success: false,
-          alreadyFinalized: false,
-          finalisedAt: null,
-          resultCount: 0,
-          error: msg,
-        };
       }
+    });
+    
+    // Gate ONLY on Tier A platforms
+    if (tierAPlatforms.length > 0 && tierATerminal.length < tierAPlatforms.length) {
+      const msg = `Waiting for Tier-A: ${tierATerminal.length}/${tierAPlatforms.length} terminal`;
+      console.log(`[finalizeAndComplete] ${msg}`);
+      
+      // ACTIVITY LOG DE-DUPLICATION: Only log if terminal count increased since last check
+      const lastLogged = lastLoggedTerminalCount.get(searchId) ?? -1;
+      if (tierATerminal.length > lastLogged) {
+        lastLoggedTerminalCount.set(searchId, tierATerminal.length);
+        await logActivity(supabase, searchId, 'Awaiting Tier-A platforms', msg);
+      }
+      
+      return {
+        success: false,
+        alreadyFinalized: false,
+        finalisedAt: null,
+        resultCount: 0,
+        error: msg,
+      };
+    }
+    
+    // Log if we're finalizing with non-terminal lower-tier platforms (they'll be auto-skipped)
+    if (nonTerminalLowerTierPlatforms.length > 0) {
+      console.log(`[finalizeAndComplete] Proceeding with ${nonTerminalLowerTierPlatforms.length} non-terminal lower-tier platforms (auto-skipped): ${nonTerminalLowerTierPlatforms.join(', ')}`);
+      await logActivity(supabase, searchId, 'Auto-skipping slow platforms', `${nonTerminalLowerTierPlatforms.length} lower-tier platforms skipped`);
     }
     
     // Finalization succeeded path - clean up the de-duplication tracker

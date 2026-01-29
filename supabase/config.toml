@@ -184,3 +184,6 @@ verify_jwt = false
 
 [functions.tier-a-retry-worker]
 verify_jwt = false
+
+[functions.skip-stuck-extractions]
+verify_jwt = false
