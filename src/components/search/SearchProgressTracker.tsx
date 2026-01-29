@@ -1,6 +1,6 @@
 import React from "react";
-import { Loader2, CheckCircle, Clock, AlertTriangle, RefreshCw } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
+import { Loader2, CheckCircle, Clock, AlertTriangle, RefreshCw, Wifi, WifiOff } from "lucide-react";
+import { formatDistanceToNow, format } from "date-fns";
 
 /**
  * Search Progress Tracker
@@ -10,8 +10,9 @@ import { formatDistanceToNow } from "date-fns";
  * - Running Y
  * - Retrying Z
  * - Skipped S
- * - Last update timestamp
+ * - Last update timestamp (HH:MM:SS format)
  * - "Still working" message when stalled
+ * - Connection status indicator
  */
 
 interface ProgressCounts {
@@ -30,6 +31,10 @@ interface SearchProgressTrackerProps {
   noProgressThresholdMs?: number;
   /** Whether the search is finalized */
   isFinalized?: boolean;
+  /** Whether realtime is connected */
+  isConnected?: boolean;
+  /** Connection error message */
+  connectionError?: string | null;
 }
 
 export function SearchProgressTracker({
@@ -37,8 +42,17 @@ export function SearchProgressTracker({
   lastProgressAt,
   noProgressThresholdMs = 90000, // 90 seconds
   isFinalized = false,
+  isConnected = true,
+  connectionError = null,
 }: SearchProgressTrackerProps) {
-  const now = new Date();
+  const [now, setNow] = React.useState(new Date());
+  
+  // Update "now" every second to keep relative times fresh
+  React.useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+  
   const timeSinceProgress = lastProgressAt 
     ? now.getTime() - lastProgressAt.getTime()
     : 0;
@@ -46,10 +60,14 @@ export function SearchProgressTracker({
   const isStalled = !isFinalized && timeSinceProgress > noProgressThresholdMs;
   const allComplete = counts.completed + counts.skipped + counts.failed >= counts.total;
   
-  // Format last update time
-  const lastUpdateText = lastProgressAt
+  // Format last update time - show both relative and absolute
+  const lastUpdateRelative = lastProgressAt
     ? formatDistanceToNow(lastProgressAt, { addSuffix: true, includeSeconds: true })
     : 'Unknown';
+  
+  const lastUpdateTime = lastProgressAt
+    ? format(lastProgressAt, 'HH:mm:ss')
+    : '--:--:--';
   
   // If finalized or all complete, show success state
   if (isFinalized || allComplete) {
@@ -66,12 +84,26 @@ export function SearchProgressTracker({
             ({counts.skipped} skipped)
           </span>
         )}
+        {counts.failed > 0 && (
+          <span className="text-xs text-red-500">
+            ({counts.failed} failed)
+          </span>
+        )}
       </div>
     );
   }
   
   return (
     <div className="space-y-2">
+      {/* Connection status indicator */}
+      {!isConnected && (
+        <div className="flex items-center gap-2 px-2 py-1 rounded bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400">
+          <WifiOff className="w-3 h-3" />
+          <span>Live updates paused - using polling fallback</span>
+          {connectionError && <span className="text-amber-500/70">({connectionError})</span>}
+        </div>
+      )}
+      
       {/* Main progress row */}
       <div className="flex flex-wrap items-center gap-3 text-sm">
         {/* Completed */}
@@ -114,10 +146,11 @@ export function SearchProgressTracker({
           </div>
         )}
         
-        {/* Last update */}
-        <span className="text-xs text-muted-foreground ml-auto">
-          Last update: {lastUpdateText}
-        </span>
+        {/* Last update - show absolute time */}
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground ml-auto">
+          {isConnected && <Wifi className="w-3 h-3 text-green-500" />}
+          <span>Last update: {lastUpdateTime}</span>
+        </div>
       </div>
       
       {/* Stalled message */}
@@ -138,6 +171,7 @@ export function SearchProgressTracker({
 
 /**
  * Calculate progress counts from extraction statuses
+ * @deprecated Use calculateProgressCounts from useExtractionProgressRealtime instead
  */
 export function calculateProgressCounts(
   extractions: Array<{
@@ -183,7 +217,7 @@ export function calculateProgressCounts(
     }
     
     // Skipped states
-    const skippedStatuses = ['service_error', 'timeout', 'stalled_timeout'];
+    const skippedStatuses = ['service_error', 'timeout', 'stalled_timeout', 'platform_unsupported'];
     if (skippedStatuses.includes(status) && tierState !== 'exhausted') {
       counts.skipped++;
       continue;
