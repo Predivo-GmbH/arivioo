@@ -7895,6 +7895,12 @@ async function runSearchWithStreaming(
       return false;
     }
     
+    // DEFENSE-IN-DEPTH: Final blocklist check to catch any platforms that slipped through discovery
+    if (isAdminBlockedPlatform(alt.listing_url, adminBlockedDomains)) {
+      console.log(`[ImageGate] REJECTED admin-blocked platform: ${alt.platform_name} - ${alt.listing_url.slice(0, 80)}`);
+      return false;
+    }
+    
     return true;
   });
   

@@ -1901,6 +1901,13 @@ export default function SearchResults() {
   // Detect when results page becomes visible (pipeline hidden)
   useEffect(() => {
     const pipelineHidden = !loading && !extractingPrices;
+    
+    // FAST PATH: If all extractions are terminal AND we have finalized results, unlock immediately
+    // This prevents the UI from getting stuck on the progress grid when finalization is complete
+    if (!resultsViewUnlocked && realtimeIsAllTerminal && isFinalizedByDb && results.length > 0) {
+      console.log('[ResultsUnlock] Fast path: all terminal + finalized, unlocking results view');
+      setResultsViewUnlocked(true);
+    }
 
     // Unlock results view as soon as we have anything to render.
     // From this point on, we keep showing results even if extractingPrices flips true later.
@@ -1915,7 +1922,7 @@ export default function SearchResults() {
     }
 
     setResultsPageRendered(false);
-  }, [loading, extractingPrices, searchPhase, results.length, resultsViewUnlocked]);
+  }, [loading, extractingPrices, searchPhase, results.length, resultsViewUnlocked, realtimeIsAllTerminal, isFinalizedByDb]);
   
   // Add "Search complete" activity and confetti ONLY when results page is actually rendered
   useEffect(() => {
@@ -1930,7 +1937,51 @@ export default function SearchResults() {
     }
   }, [resultsPageRendered, hasCelebrated, results]);
 
-  // Poll for price extraction status - runs when extractingPrices is true OR after search completes
+  // AUTO-FINALIZATION: When all extractions are terminal but search isn't finalized,
+  // trigger forced finalization to prevent UI getting stuck on "Finalizing results"
+  useEffect(() => {
+    if (!searchId || !realtimeIsAllTerminal || isFinalizedByDb || isTerminalFrozen) return;
+    if (realtimeProgressCounts.total === 0) return; // No extractions yet
+    
+    console.log('[AutoFinalize] All extractions terminal, triggering forced finalization');
+    
+    const triggerFinalization = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) return;
+        
+        const response = await fetch(
+          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/finalize-search-snapshot`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({ searchId, force: true }),
+          }
+        );
+        
+        if (response.ok) {
+          console.log('[AutoFinalize] Finalization triggered successfully');
+          // Refresh search data to pick up finalised_at
+          const { data: refreshed } = await supabase
+            .from('searches')
+            .select('*')
+            .eq('id', searchId)
+            .single();
+          if (refreshed) {
+            setSearch(refreshed as SearchData);
+          }
+        }
+      } catch (e) {
+        console.error('[AutoFinalize] Failed to trigger finalization:', e);
+      }
+    };
+    
+    triggerFinalization();
+  }, [searchId, realtimeIsAllTerminal, isFinalizedByDb, isTerminalFrozen, realtimeProgressCounts.total]);
+
   // IMPORTANT: Once terminal freeze is active, stop polling and don't mutate results
   useEffect(() => {
     if (!searchId) return;
@@ -3008,7 +3059,8 @@ export default function SearchResults() {
                           outcome_category: r.outcome_category,
                         }))}
                         pricingProgress={{
-                          completed: realtimeProgressCounts.completed,
+                          // Count ALL terminal states: success + skipped + failed
+                          completed: realtimeProgressCounts.completed + realtimeProgressCounts.skipped + realtimeProgressCounts.failed,
                           total: realtimeProgressCounts.total || priceExtractionTotal || finalCandidates.length,
                         }}
                         extractionStatuses={realtimeExtractions.map(e => ({
