@@ -8685,6 +8685,11 @@ serve(async (req) => {
     let firecrawlHtml = "";
     let directHtml = "";
 
+    // ============================================================================
+    // ADMIN-BLOCKED PLATFORMS: Fetch from DB for legacy path (matches SSE path)
+    // ============================================================================
+    const adminBlockedDomains = await fetchBlockedPlatformDomains(supabase);
+
 
     // Step 1: Fetch Airbnb page and extract property data using Firecrawl for JS rendering
     console.log("Step 1: Extracting property data from Airbnb...");
@@ -9241,6 +9246,11 @@ serve(async (req) => {
 
             // Quick filter: only check booking platforms and direct sites, exclude blocked platforms
             if (isBlockedNonBookingPlatform(url)) continue;
+            // Check admin-blocked platforms from DB (dynamic blocking)
+            if (isAdminBlockedPlatform(url, adminBlockedDomains)) {
+              console.log(`[AdminBlocked/Legacy] Skipping ${getPlatformName(url)} - blocked via admin dashboard`);
+              continue;
+            }
             if (!isBookingPlatform(url) && !isRegionalHotelSite(url) && !isDirectPropertySite(url)) {
               continue;
             }
@@ -9327,6 +9337,11 @@ serve(async (req) => {
 
             // Check if it's a known booking platform OR regional hotel site (skip blocked platforms)
             if (isBlockedNonBookingPlatform(url)) continue;
+            // Check admin-blocked platforms from DB (dynamic blocking)
+            if (isAdminBlockedPlatform(url, adminBlockedDomains)) {
+              console.log(`[AdminBlocked/Legacy] Skipping ${getPlatformName(url)} - blocked via admin dashboard`);
+              continue;
+            }
             if (isBookingPlatform(url) || isRegionalHotelSite(url)) {
               foundUrls.add(url);
               const resultImages: string[] = [];
@@ -9378,7 +9393,10 @@ serve(async (req) => {
               const kgImage = lensData.knowledge_graph.thumbnail;
 
               if (!kgUrl.toLowerCase().includes("airbnb.") && !foundUrls.has(kgUrl) && kgImage) {
-                if (isBookingPlatform(kgUrl) || isDirectPropertySite(kgUrl) || isRegionalHotelSite(kgUrl)) {
+                // Check admin-blocked platforms from DB (dynamic blocking)
+                if (isAdminBlockedPlatform(kgUrl, adminBlockedDomains)) {
+                  console.log(`[AdminBlocked/Legacy] Skipping ${getPlatformName(kgUrl)} (knowledge graph) - blocked via admin dashboard`);
+                } else if (isBookingPlatform(kgUrl) || isDirectPropertySite(kgUrl) || isRegionalHotelSite(kgUrl)) {
                   // AI verify knowledge graph match too
                   console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (knowledge graph)...`);
                   aiComparisonCount++;
@@ -9459,6 +9477,12 @@ serve(async (req) => {
               const resultImage = result.thumbnail || result.original;
               if (!resultImage) continue;
 
+              if (isBlockedNonBookingPlatform(url)) continue;
+              // Check admin-blocked platforms from DB (dynamic blocking)
+              if (isAdminBlockedPlatform(url, adminBlockedDomains)) {
+                console.log(`[AdminBlocked/Legacy] Skipping ${getPlatformName(url)} (reverse) - blocked via admin dashboard`);
+                continue;
+              }
               if (isBookingPlatform(url) || isDirectPropertySite(url) || isRegionalHotelSite(url)) {
                 // AI verify reverse image match
                 console.log(`Running AI comparison ${aiComparisonCount + 1}/${MAX_AI_COMPARISONS} (reverse)...`);
