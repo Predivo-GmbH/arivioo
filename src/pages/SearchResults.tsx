@@ -2980,6 +2980,17 @@ export default function SearchResults() {
                       matchCount={finalCandidates.length}
                     />
 
+                    {/* Real-time Progress Tracker with detailed counters */}
+                    <div className="mb-4">
+                      <SearchProgressTracker
+                        counts={realtimeProgressCounts}
+                        lastProgressAt={realtimeLastUpdateAt}
+                        noProgressThresholdMs={90000}
+                        isFinalized={isFinalizedByDb}
+                        isConnected={realtimeIsConnected}
+                      />
+                    </div>
+
                     {/* Verified Matches Loading Section */}
                     <div className="space-y-6">
                       {/* Main matches awaiting prices */}

@@ -60,52 +60,88 @@ const toStringArray = (json: Json | null | undefined): string[] => {
   return [];
 };
 
-// Get display info for extraction status
+// Get display info for extraction status - detailed states for real-time updates
 function getStatusDisplay(extraction: ExtractionStatusInfo | undefined): {
   icon: React.ReactNode;
   text: string;
   color: string;
+  badge?: string;
 } {
+  // No extraction record yet = Queued (waiting to start)
   if (!extraction) {
     return {
       icon: <Clock className="w-3.5 h-3.5" />,
       text: "Queued",
       color: "text-muted-foreground",
+      badge: "queued",
     };
   }
 
   const status = (extraction.extraction_status || "").toLowerCase();
   const tierState = (extraction.tier_a_state || "").toLowerCase();
   const hasPrice = extraction.extracted_price && extraction.extracted_price > 0;
+  const attempts = extraction.tier_a_attempt_count || 0;
 
-  // Success states
+  // Success states - show actual price
   if (hasPrice || status.includes("success") || status === "completed") {
     const price = extraction.extracted_price;
     const currency = extraction.currency || "$";
-    const displayPrice = price ? `${currency}${Math.round(price)}` : "Done";
+    const displayPrice = price ? `${currency}${Math.round(price).toLocaleString()}` : "Done";
     return {
       icon: <Check className="w-3.5 h-3.5" />,
       text: displayPrice,
-      color: "text-green-600",
+      color: "text-green-600 dark:text-green-400",
+      badge: "done",
     };
   }
 
-  // Retrying states
-  if (tierState === "pending_retry" || tierState === "running") {
-    const attempts = extraction.tier_a_attempt_count || 0;
+  // Sold out / unavailable - these are terminal "done" states, not errors
+  if (["dates_unavailable", "sold_out", "unavailable_for_dates"].includes(status)) {
+    return {
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
+      text: "Sold Out",
+      color: "text-amber-600 dark:text-amber-400",
+      badge: "sold_out",
+    };
+  }
+
+  // Retrying states - show attempt counter
+  if (tierState === "pending_retry") {
+    return {
+      icon: <RefreshCw className="w-3.5 h-3.5" />,
+      text: `Retry ${attempts}/4`,
+      color: "text-amber-600 dark:text-amber-400",
+      badge: "retrying",
+    };
+  }
+
+  // Active retry in progress
+  if (tierState === "running" && attempts > 0) {
     return {
       icon: <RefreshCw className="w-3.5 h-3.5 animate-spin" />,
-      text: `Retrying (${attempts}/5)`,
-      color: "text-amber-600",
+      text: `Retrying (${attempts}/4)`,
+      color: "text-amber-600 dark:text-amber-400",
+      badge: "retrying",
     };
   }
 
-  // Running states
-  if (["pending", "queued", "running", "in_progress", "started"].includes(status)) {
+  // Currently fetching - actively running
+  if (["running", "in_progress", "started"].includes(status)) {
     return {
       icon: <Loader2 className="w-3.5 h-3.5 animate-spin" />,
       text: "Fetching…",
       color: "text-primary",
+      badge: "fetching",
+    };
+  }
+
+  // Queued but not yet started
+  if (["pending", "queued"].includes(status) || status === "") {
+    return {
+      icon: <Clock className="w-3.5 h-3.5" />,
+      text: "Queued",
+      color: "text-muted-foreground",
+      badge: "queued",
     };
   }
 
@@ -115,24 +151,17 @@ function getStatusDisplay(extraction: ExtractionStatusInfo | undefined): {
       icon: <Ban className="w-3.5 h-3.5" />,
       text: "Blocked",
       color: "text-red-500",
+      badge: "blocked",
     };
   }
 
-  // Sold out / unavailable
-  if (["dates_unavailable", "sold_out", "unavailable_for_dates"].includes(status)) {
-    return {
-      icon: <AlertTriangle className="w-3.5 h-3.5" />,
-      text: "Sold Out",
-      color: "text-amber-500",
-    };
-  }
-
-  // Skipped / service error
+  // Skipped / service error / timeout
   if (["service_error", "timeout", "stalled_timeout", "platform_unsupported"].includes(status)) {
     return {
       icon: <Clock className="w-3.5 h-3.5" />,
       text: "Skipped",
       color: "text-muted-foreground",
+      badge: "skipped",
     };
   }
 
@@ -142,14 +171,26 @@ function getStatusDisplay(extraction: ExtractionStatusInfo | undefined): {
       icon: <AlertTriangle className="w-3.5 h-3.5" />,
       text: "Failed",
       color: "text-red-500",
+      badge: "failed",
     };
   }
 
-  // Unknown but has extraction record = still fetching
+  // Unknown terminal status = treat as failed
+  if (status && !["pending", "queued", "running", "in_progress", "started", ""].includes(status)) {
+    return {
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
+      text: "Failed",
+      color: "text-red-500",
+      badge: "failed",
+    };
+  }
+
+  // Default fallback = still fetching
   return {
     icon: <Loader2 className="w-3.5 h-3.5 animate-spin" />,
     text: "Fetching…",
     color: "text-muted-foreground",
+    badge: "fetching",
   };
 }
 
