@@ -1280,6 +1280,10 @@ export type Database = {
           provider_used: string | null
           search_id: string | null
           search_result_id: string | null
+          tier_a_attempt_count: number | null
+          tier_a_last_transient_reason: string | null
+          tier_a_next_retry_at: string | null
+          tier_a_state: string | null
           updated_at: string
           variant_mismatch: boolean | null
         }
@@ -1314,6 +1318,10 @@ export type Database = {
           provider_used?: string | null
           search_id?: string | null
           search_result_id?: string | null
+          tier_a_attempt_count?: number | null
+          tier_a_last_transient_reason?: string | null
+          tier_a_next_retry_at?: string | null
+          tier_a_state?: string | null
           updated_at?: string
           variant_mismatch?: boolean | null
         }
@@ -1348,6 +1356,10 @@ export type Database = {
           provider_used?: string | null
           search_id?: string | null
           search_result_id?: string | null
+          tier_a_attempt_count?: number | null
+          tier_a_last_transient_reason?: string | null
+          tier_a_next_retry_at?: string | null
+          tier_a_state?: string | null
           updated_at?: string
           variant_mismatch?: boolean | null
         }
