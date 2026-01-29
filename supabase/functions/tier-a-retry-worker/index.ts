@@ -293,12 +293,20 @@ async function processPendingExtraction(
   }
   
   // ============= GUARD: Check if extraction already succeeded =============
-  // This prevents retrying extractions that succeeded but weren't properly marked
+  // CRITICAL: Only treat as success if BOTH:
+  // 1. extraction_status is in SUCCESS_EXTRACTION_STATUSES (success, success_total_stay, etc.)
+  // 2. A valid price exists
+  // 
+  // "unverified" status with a price is NOT success - it means structural checks failed
+  // (e.g., vat_excluded_checkout_failed, taxes_fees_not_confirmed) and MUST be retried!
   const extractionStatus = extraction.extraction_status?.toLowerCase() || '';
   const hasPrice = extraction.extracted_price && extraction.extracted_price > 0;
   
-  if (SUCCESS_EXTRACTION_STATUSES.has(extractionStatus) || hasPrice) {
-    console.log(`[TIER_A_WORKER] INVARIANT VIOLATION: extraction_id=${extraction.id} already succeeded (status=${extractionStatus}, price=${extraction.extracted_price}) but tier_a_state was pending_retry`);
+  // Only true SUCCESS if both conditions are met
+  const isTrueSuccess = SUCCESS_EXTRACTION_STATUSES.has(extractionStatus) && hasPrice;
+  
+  if (isTrueSuccess) {
+    console.log(`[TIER_A_WORKER] extraction_id=${extraction.id} already succeeded (status=${extractionStatus}, price=${extraction.extracted_price}) - fixing tier_a_state`);
     
     // Fix the state - transition to success
     await transitionToTerminal(
@@ -310,6 +318,11 @@ async function processPendingExtraction(
       extraction.extracted_price
     );
     return;
+  }
+  
+  // Log when we're retrying an extraction that has a price but failed checks
+  if (hasPrice && !SUCCESS_EXTRACTION_STATUSES.has(extractionStatus)) {
+    console.log(`[TIER_A_WORKER] extraction_id=${extraction.id} has price (${extraction.extracted_price}) but status is "${extractionStatus}" - will retry for proper verification`);
   }
   
   console.log(`[TIER_A_WORKER] attempt=${attemptCount + 1}/${MAX_TIER_A_ATTEMPTS} reason=${extraction.tier_a_last_transient_reason} extraction_id=${extraction.id}`);
