@@ -813,6 +813,42 @@ export default function SearchResults() {
             const finalisedAt = (snapshotData as any)?.finalised_at;
             const snapshot = (snapshotData as any)?.final_results_snapshot;
             
+            // RECOVERY PATH: status='completed' but no finalisedAt means edge function crashed
+            // Call finalize-search-snapshot to recover the snapshot
+            if (!finalisedAt && searchRecord.status === 'completed') {
+              console.log('[TerminalHydration] RECOVERY: status=completed but finalisedAt=null, calling finalize endpoint');
+              
+              try {
+                const { data: { session: recoverySession } } = await supabase.auth.getSession();
+                const recoveryToken = recoverySession?.access_token;
+                
+                if (recoveryToken) {
+                  const finalizeResponse = await fetch(
+                    `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/finalize-search-snapshot`,
+                    {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${recoveryToken}`,
+                      },
+                      body: JSON.stringify({ searchId, force: true }),
+                    }
+                  );
+                  
+                  if (finalizeResponse.ok) {
+                    console.log('[TerminalHydration] RECOVERY: finalize endpoint succeeded, retrying snapshot fetch');
+                    // Don't throw - let it retry the snapshot fetch on next iteration
+                  } else {
+                    console.error('[TerminalHydration] RECOVERY: finalize endpoint failed:', await finalizeResponse.text());
+                  }
+                }
+              } catch (recoveryError) {
+                console.error('[TerminalHydration] RECOVERY: failed to call finalize endpoint:', recoveryError);
+              }
+              
+              throw new Error('Search not yet finalized - recovery attempted');
+            }
+            
             // If not yet finalized by backend, wait and retry
             if (!finalisedAt) {
               console.log('[TerminalHydration] Search not yet finalized by backend, waiting...');
