@@ -257,7 +257,40 @@ async function processPendingExtraction(
   supabaseKey: string,
   extraction: PendingRetryExtraction
 ): Promise<void> {
-  const attemptCount = extraction.tier_a_attempt_count;
+  const attemptCount = extraction.tier_a_attempt_count || 0;
+  
+  // ============= INVARIANT GUARD: Hard MAX cap =============
+  // tier_a_attempt_count must NEVER exceed MAX_TIER_A_ATTEMPTS
+  // If it does, this is a bug - log error and force exhausted state
+  if (attemptCount > MAX_TIER_A_ATTEMPTS) {
+    console.error(`[TIER_A_WORKER] CRITICAL INVARIANT VIOLATION: extraction_id=${extraction.id} has tier_a_attempt_count=${attemptCount} which exceeds MAX=${MAX_TIER_A_ATTEMPTS}. Forcing exhausted state.`);
+    
+    await transitionToTerminal(
+      supabase,
+      extraction.id,
+      'exhausted',
+      getRetryExhaustedStatus(extraction.tier_a_last_transient_reason),
+      buildRetryExhaustedError(extraction.platform_name, extraction.tier_a_last_transient_reason, attemptCount),
+      null
+    );
+    return;
+  }
+  
+  // ============= GUARD: Already at MAX - do not retry, exhaust immediately =============
+  // This prevents incrementing beyond MAX during claim
+  if (attemptCount >= MAX_TIER_A_ATTEMPTS) {
+    console.log(`[TIER_A_WORKER] extraction_id=${extraction.id} already at MAX attempts (${attemptCount}/${MAX_TIER_A_ATTEMPTS}). Transitioning to exhausted.`);
+    
+    await transitionToTerminal(
+      supabase,
+      extraction.id,
+      'exhausted',
+      getRetryExhaustedStatus(extraction.tier_a_last_transient_reason),
+      buildRetryExhaustedError(extraction.platform_name, extraction.tier_a_last_transient_reason, attemptCount),
+      null
+    );
+    return;
+  }
   
   // ============= GUARD: Check if extraction already succeeded =============
   // This prevents retrying extractions that succeeded but weren't properly marked
