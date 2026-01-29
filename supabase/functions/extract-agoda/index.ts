@@ -1940,23 +1940,67 @@ async function extractFromAgoda(
       }
       
       // Fallback: Try Browserless click navigation on hotel page as last resort
+      // PHASE 2C: Hotel page click with single controlled retry for flaky checkout link discovery
       console.log('[AGODA] Phase 2C: Trying Browserless click navigation on hotel page');
       
-      const hotelClickResult = await clickBookingButtonWithBrowserless(urlData.hotelUrlWithParams);
+      const MAX_PHASE_2C_ATTEMPTS = 2;
+      let phase2cAttempt = 0;
+      let hotelClickResult: FetchResult & { checkoutUrlDiscovered?: string } = { content: '', html: '' };
       
-      const hotelClickAttemptTrace: ProviderAttemptTrace = {
-        provider: 'browserless',
-        attempted: true,
-        attemptIndex: providerAttempts.length,
-        startedAt: new Date().toISOString(),
-        endedAt: new Date().toISOString(),
-        outcome: hotelClickResult.checkoutUrlDiscovered ? 'success' : 'navigation_failed',
-        httpStatus: hotelClickResult.httpStatus || null,
-        contentLength: hotelClickResult.content?.length || null,
-        errorMessage: hotelClickResult.error || null,
-        urlUsed: urlData.hotelUrlWithParams,
-      };
-      providerAttempts.push(hotelClickAttemptTrace);
+      while (phase2cAttempt < MAX_PHASE_2C_ATTEMPTS) {
+        phase2cAttempt++;
+        
+        // Add jitter delay before retry (skip on first attempt)
+        if (phase2cAttempt > 1) {
+          const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5-2.5s jitter
+          console.log(`[AGODA] Phase 2C retry: attempt=${phase2cAttempt}/${MAX_PHASE_2C_ATTEMPTS} waiting=${jitterMs}ms reason=checkout_link_not_found`);
+          await new Promise(r => setTimeout(r, jitterMs));
+        }
+        
+        hotelClickResult = await clickBookingButtonWithBrowserless(urlData.hotelUrlWithParams);
+        
+        const hotelClickAttemptTrace: ProviderAttemptTrace = {
+          provider: 'browserless',
+          attempted: true,
+          attemptIndex: providerAttempts.length,
+          startedAt: new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+          outcome: hotelClickResult.checkoutUrlDiscovered ? 'success' : 'navigation_failed',
+          httpStatus: hotelClickResult.httpStatus || null,
+          contentLength: hotelClickResult.content?.length || null,
+          errorMessage: hotelClickResult.error || null,
+          urlUsed: urlData.hotelUrlWithParams,
+        };
+        providerAttempts.push(hotelClickAttemptTrace);
+        
+        // Check for rate limiting - do NOT retry on 429, it will just fail again
+        if (hotelClickResult.isRateLimited) {
+          console.log(`[AGODA] Phase 2C: rate_limited (429), not retrying`);
+          break;
+        }
+        
+        // If checkout URL discovered, we're done
+        if (hotelClickResult.checkoutUrlDiscovered) {
+          console.log(`[AGODA] Phase 2C success: attempt=${phase2cAttempt} checkout_url_found`);
+          break;
+        }
+        
+        // If error indicates button not found, retry once more
+        const isCheckoutLinkNotFound = !hotelClickResult.checkoutUrlDiscovered && 
+          (hotelClickResult.error?.includes('No booking button') || 
+           hotelClickResult.error?.includes('checkout link') ||
+           !hotelClickResult.checkoutUrlDiscovered);
+        
+        if (isCheckoutLinkNotFound && phase2cAttempt < MAX_PHASE_2C_ATTEMPTS) {
+          console.log(`[AGODA] Phase 2C: checkout_link_not_found, will retry`);
+          continue;
+        }
+        
+        // Other errors - don't retry
+        break;
+      }
+      
+      console.log(`[AGODA] Phase 2C completed: attempts=${phase2cAttempt} found=${!!hotelClickResult.checkoutUrlDiscovered}`);
       
       if (hotelClickResult.checkoutUrlDiscovered) {
         console.log(`[AGODA] Hotel page click discovered checkout URL: ${hotelClickResult.checkoutUrlDiscovered.substring(0, 120)}...`);
@@ -1998,9 +2042,9 @@ async function extractFromAgoda(
         
         console.log('[AGODA] Hotel page click navigated to /book/ but price extraction failed');
       } else if (hotelClickResult.error) {
-        console.log(`[AGODA] Hotel page click failed: ${hotelClickResult.error}`);
+        console.log(`[AGODA] Hotel page click failed after ${phase2cAttempt} attempts: ${hotelClickResult.error}`);
       } else {
-        console.log('[AGODA] Hotel page click did not discover checkout URL');
+        console.log(`[AGODA] Hotel page click did not discover checkout URL after ${phase2cAttempt} attempts`);
       }
       
       // No checkout link found - fall through to extract from hotel page directly

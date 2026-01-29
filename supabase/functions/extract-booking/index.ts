@@ -1402,14 +1402,61 @@ Deno.serve(async (req) => {
     // ========================================
     // STEP 3: CHECK FOR VAT EXCLUSION
     // If VAT is excluded, we need to navigate to checkout to get the true total
+    // Uses single controlled retry for flaky checkout navigation
     // ========================================
     const vatCheck = detectVatExcluded(content);
     
     if (vatCheck.excluded) {
       console.log(`[BOOKING] VAT exclusion detected (${vatCheck.percentage}%), triggering checkout navigation...`);
       
-      // Try checkout navigation to get VAT-inclusive price
-      const checkoutResult = await extractViaCheckoutNavigation(datedUrl, nights, checkIn, checkOut);
+      const MAX_VAT_CHECKOUT_ATTEMPTS = 2;
+      let vatCheckoutAttempt = 0;
+      let checkoutResult: CheckoutResult = {
+        success: false,
+        checkoutReached: false,
+        totalPrice: null,
+        currency: null,
+        includesTaxesFees: false,
+        evidenceSnippet: null,
+        durationMs: 0,
+        error: null,
+      };
+      
+      while (vatCheckoutAttempt < MAX_VAT_CHECKOUT_ATTEMPTS) {
+        vatCheckoutAttempt++;
+        
+        // Add jitter delay before retry (skip on first attempt)
+        if (vatCheckoutAttempt > 1) {
+          const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5-2.5s jitter
+          console.log(`[BOOKING] VAT checkout retry: attempt=${vatCheckoutAttempt}/${MAX_VAT_CHECKOUT_ATTEMPTS} waiting=${jitterMs}ms reason=vat_excluded_checkout_failed`);
+          await new Promise(r => setTimeout(r, jitterMs));
+        }
+        
+        checkoutResult = await extractViaCheckoutNavigation(datedUrl, nights, checkIn, checkOut);
+        
+        // If checkout succeeded, we're done
+        if (checkoutResult.success && checkoutResult.totalPrice) {
+          console.log(`[BOOKING] VAT checkout success: attempt=${vatCheckoutAttempt} price=${checkoutResult.totalPrice}`);
+          break;
+        }
+        
+        // Rate limiting - do NOT retry on 429
+        if (checkoutResult.error?.includes('Rate limited') || checkoutResult.error?.includes('429')) {
+          console.log(`[BOOKING] VAT checkout: rate_limited (429), not retrying`);
+          break;
+        }
+        
+        // If error, retry once more
+        if (vatCheckoutAttempt < MAX_VAT_CHECKOUT_ATTEMPTS) {
+          console.log(`[BOOKING] VAT checkout: failed (${checkoutResult.error}), will retry`);
+          continue;
+        }
+        
+        // Max retries reached
+        break;
+      }
+      
+      console.log(`[BOOKING] VAT checkout completed: attempts=${vatCheckoutAttempt} success=${checkoutResult.success}`);
       
       if (checkoutResult.success && checkoutResult.totalPrice) {
         console.log(`[BOOKING] Checkout navigation succeeded: $${checkoutResult.totalPrice} (VAT included)`);
@@ -1462,6 +1509,7 @@ Deno.serve(async (req) => {
                 checkoutNavigation: true,
                 vatExclusionDetected: vatCheck.signal,
                 vatPercentage: vatCheck.percentage,
+                vatCheckoutAttempts: vatCheckoutAttempt,
                 totalProven: true,
                 structuralProof: result.structuralProof,
                 durationMs: result.durationMs,
@@ -1477,7 +1525,7 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       } else {
-        console.log(`[BOOKING] Checkout navigation failed: ${checkoutResult.error}, falling back to standard extraction`);
+        console.log(`[BOOKING] Checkout navigation failed after ${vatCheckoutAttempt} attempts: ${checkoutResult.error}, falling back to standard extraction`);
         // Fall through to standard extraction - but VAT will be excluded
       }
     }
