@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { quickCelebration } from "@/lib/confetti";
 import { PriceExtractionProgress, type PlatformExtractionStatus } from "@/components/PriceExtractionProgress";
 import { PipelineProgress, type ActivityItem } from "@/components/PipelineProgress";
 import { useEnrichedSearchResults, FAILURE_CATEGORY_LABELS, type EnrichedSearchResult } from "@/hooks/useEnrichedSearchResults";
+import { useExtractionProgressRealtime } from "@/hooks/useExtractionProgressRealtime";
 import { PIPELINE_STAGES, getStageIndexFromStatus, isCompletedStatus, isTerminalStatus } from "@/lib/pipelineStages";
 import { AirbnbTotalConfirmation } from "@/components/AirbnbTotalConfirmation";
 import { AirbnbTotalConfirmationModal } from "@/components/AirbnbTotalConfirmationModal";
@@ -16,8 +17,9 @@ import { TerminalErrorPanel } from "@/components/TerminalErrorPanel";
 import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
 import { ResultBucketSection } from "@/components/search/ResultBucketSection";
 import { ResultRow, type ResultRowResult, type RowVariant } from "@/components/search/ResultRow";
-import { VerifiedMatchesLoading } from "@/components/search/VerifiedMatchesLoading";
+import { VerifiedMatchesLoading, type ExtractionStatusInfo } from "@/components/search/VerifiedMatchesLoading";
 import { SearchPhaseBanner, type SearchPhaseType } from "@/components/search/SearchPhaseBanner";
+import { SearchProgressTracker } from "@/components/search/SearchProgressTracker";
 import { formatUSDPrice, formatPrice } from "@/lib/priceFormatter";
 // Testing exceptions removed - all platforms follow standard image verification gate
 import {
@@ -488,6 +490,73 @@ export default function SearchResults() {
   
   // Track if search is finalized (finalised_at is set in DB)
   const [isFinalized, setIsFinalized] = useState(false);
+  
+  // ============================================================================
+  // REALTIME EXTRACTION PROGRESS
+  // This hook provides live updates for price extraction status, ensuring
+  // the UI never gets stuck at "0/N" by using realtime + polling fallback.
+  // ============================================================================
+  const shouldEnableRealtime = !isFinalized && !isTestingPublicView && Boolean(searchId);
+  
+  const handleProgressUpdate = useCallback((extractions: any[]) => {
+    // Update price extraction platforms for backward compatibility
+    const mapped = extractions.map((e): PlatformExtractionStatus => {
+      const status = (e.extraction_status || '').toLowerCase();
+      const hasPrice = e.extracted_price && e.extracted_price > 0;
+      
+      // Map to PlatformExtractionStatus type
+      let mappedStatus: PlatformExtractionStatus['status'] = 'pending';
+      if (hasPrice || status.includes('success')) {
+        mappedStatus = 'success';
+      } else if (['blocked', 'captcha', 'bot_detected'].includes(status)) {
+        mappedStatus = 'blocked_captcha_or_bot';
+      } else if (status === 'rate_limited') {
+        mappedStatus = 'blocked_rate_limit';
+      } else if (['running', 'pending', 'in_progress', 'started'].includes(status)) {
+        mappedStatus = 'running';
+      } else if (['service_error', 'timeout'].includes(status)) {
+        mappedStatus = 'failed_unknown';
+      } else if (['dates_unavailable', 'sold_out'].includes(status)) {
+        mappedStatus = 'failed_unknown';
+      }
+      
+      return {
+        platformName: e.platform_name,
+        status: mappedStatus,
+        price: e.extracted_price,
+        currency: e.currency,
+      };
+    });
+    
+    setPriceExtractionPlatforms(mapped);
+    
+    // Update completed count based on terminal statuses
+    const terminalCount = extractions.filter(e => {
+      const status = (e.extraction_status || '').toLowerCase();
+      return !['pending', 'queued', 'running', 'in_progress', 'started', ''].includes(status);
+    }).length;
+    
+    setPriceExtractionCompleted(terminalCount);
+    
+    // Update extractingPrices flag
+    const hasRunning = extractions.some(e => {
+      const status = (e.extraction_status || '').toLowerCase();
+      return ['pending', 'queued', 'running', 'in_progress', 'started'].includes(status);
+    });
+    setExtractingPrices(hasRunning);
+  }, []);
+  
+  const { 
+    extractions: realtimeExtractions,
+    progressCounts: realtimeProgressCounts,
+    lastUpdateAt: realtimeLastUpdateAt,
+    isConnected: realtimeIsConnected,
+    isAllTerminal: realtimeIsAllTerminal,
+  } = useExtractionProgressRealtime({
+    searchId,
+    enabled: shouldEnableRealtime,
+    onProgressUpdate: handleProgressUpdate,
+  });
   
   // TWO-PHASE UX: Track verified matches found during discovery (before pricing)
   const [verifiedMatchesPending, setVerifiedMatchesPending] = useState<Array<{
@@ -2918,9 +2987,19 @@ export default function SearchResults() {
                           outcome_category: r.outcome_category,
                         }))}
                         pricingProgress={{
-                          completed: priceExtractionCompleted,
-                          total: priceExtractionTotal || finalCandidates.length,
+                          completed: realtimeProgressCounts.completed,
+                          total: realtimeProgressCounts.total || priceExtractionTotal || finalCandidates.length,
                         }}
+                        extractionStatuses={realtimeExtractions.map(e => ({
+                          platform_name: e.platform_name,
+                          extraction_status: e.extraction_status,
+                          extracted_price: e.extracted_price,
+                          currency: e.currency,
+                          tier_a_state: e.tier_a_state,
+                          tier_a_attempt_count: e.tier_a_attempt_count,
+                        }))}
+                        lastUpdateAt={realtimeLastUpdateAt}
+                        isConnected={realtimeIsConnected}
                       />
 
                       {/* MATCH_ONLY sections can still show in Phase 1 */}

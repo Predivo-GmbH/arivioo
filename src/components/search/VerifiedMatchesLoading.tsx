@@ -1,7 +1,8 @@
 import React from "react";
-import { Shield, Loader2, ExternalLink, Info, Clock } from "lucide-react";
+import { Shield, Loader2, ExternalLink, Info, Clock, Check, AlertTriangle, RefreshCw, Ban, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Json } from "@/integrations/supabase/types";
+import { format } from "date-fns";
 
 /**
  * Phase 1 UI Component: Verified Matches (Prices Loading)
@@ -9,6 +10,9 @@ import type { Json } from "@/integrations/supabase/types";
  * Displays verified image matches while prices are still being extracted.
  * This component is shown after image verification completes but before
  * finalization (price extraction) is complete.
+ * 
+ * NOW WITH LIVE PROGRESS: Shows per-platform extraction status that updates
+ * in real-time via Supabase realtime subscriptions + polling fallback.
  */
 
 export interface VerifiedMatchLoadingItem {
@@ -25,12 +29,27 @@ export interface VerifiedMatchLoadingItem {
   outcome_category?: string | null;
 }
 
+export interface ExtractionStatusInfo {
+  platform_name: string;
+  extraction_status: string | null;
+  extracted_price: number | null;
+  currency: string | null;
+  tier_a_state: string | null;
+  tier_a_attempt_count: number | null;
+}
+
 interface VerifiedMatchesLoadingProps {
   results: VerifiedMatchLoadingItem[];
   pricingProgress?: {
     completed: number;
     total: number;
   };
+  /** Live extraction statuses from realtime hook */
+  extractionStatuses?: ExtractionStatusInfo[];
+  /** Last update timestamp */
+  lastUpdateAt?: Date | null;
+  /** Realtime connection status */
+  isConnected?: boolean;
 }
 
 const toStringArray = (json: Json | null | undefined): string[] => {
@@ -41,8 +60,119 @@ const toStringArray = (json: Json | null | undefined): string[] => {
   return [];
 };
 
-export function VerifiedMatchesLoading({ results, pricingProgress }: VerifiedMatchesLoadingProps) {
+// Get display info for extraction status
+function getStatusDisplay(extraction: ExtractionStatusInfo | undefined): {
+  icon: React.ReactNode;
+  text: string;
+  color: string;
+} {
+  if (!extraction) {
+    return {
+      icon: <Clock className="w-3.5 h-3.5" />,
+      text: "Queued",
+      color: "text-muted-foreground",
+    };
+  }
+
+  const status = (extraction.extraction_status || "").toLowerCase();
+  const tierState = (extraction.tier_a_state || "").toLowerCase();
+  const hasPrice = extraction.extracted_price && extraction.extracted_price > 0;
+
+  // Success states
+  if (hasPrice || status.includes("success") || status === "completed") {
+    const price = extraction.extracted_price;
+    const currency = extraction.currency || "$";
+    const displayPrice = price ? `${currency}${Math.round(price)}` : "Done";
+    return {
+      icon: <Check className="w-3.5 h-3.5" />,
+      text: displayPrice,
+      color: "text-green-600",
+    };
+  }
+
+  // Retrying states
+  if (tierState === "pending_retry" || tierState === "running") {
+    const attempts = extraction.tier_a_attempt_count || 0;
+    return {
+      icon: <RefreshCw className="w-3.5 h-3.5 animate-spin" />,
+      text: `Retrying (${attempts}/5)`,
+      color: "text-amber-600",
+    };
+  }
+
+  // Running states
+  if (["pending", "queued", "running", "in_progress", "started"].includes(status)) {
+    return {
+      icon: <Loader2 className="w-3.5 h-3.5 animate-spin" />,
+      text: "Fetching…",
+      color: "text-primary",
+    };
+  }
+
+  // Blocked/failed states
+  if (["blocked", "captcha", "bot_detected", "rate_limited"].includes(status)) {
+    return {
+      icon: <Ban className="w-3.5 h-3.5" />,
+      text: "Blocked",
+      color: "text-red-500",
+    };
+  }
+
+  // Sold out / unavailable
+  if (["dates_unavailable", "sold_out", "unavailable_for_dates"].includes(status)) {
+    return {
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
+      text: "Sold Out",
+      color: "text-amber-500",
+    };
+  }
+
+  // Skipped / service error
+  if (["service_error", "timeout", "stalled_timeout", "platform_unsupported"].includes(status)) {
+    return {
+      icon: <Clock className="w-3.5 h-3.5" />,
+      text: "Skipped",
+      color: "text-muted-foreground",
+    };
+  }
+
+  // Exhausted retries
+  if (tierState === "exhausted") {
+    return {
+      icon: <AlertTriangle className="w-3.5 h-3.5" />,
+      text: "Failed",
+      color: "text-red-500",
+    };
+  }
+
+  // Unknown but has extraction record = still fetching
+  return {
+    icon: <Loader2 className="w-3.5 h-3.5 animate-spin" />,
+    text: "Fetching…",
+    color: "text-muted-foreground",
+  };
+}
+
+export function VerifiedMatchesLoading({ 
+  results, 
+  pricingProgress,
+  extractionStatuses,
+  lastUpdateAt,
+  isConnected,
+}: VerifiedMatchesLoadingProps) {
   if (results.length === 0) return null;
+
+  // Build lookup map for extraction statuses by platform name
+  const statusMap = new Map<string, ExtractionStatusInfo>();
+  if (extractionStatuses) {
+    for (const es of extractionStatuses) {
+      // Use lowercase platform name for case-insensitive matching
+      statusMap.set(es.platform_name.toLowerCase(), es);
+    }
+  }
+
+  // Format last update time
+  const lastUpdateTime = lastUpdateAt ? format(lastUpdateAt, "HH:mm:ss") : "--:--:--";
 
   return (
     <div className="rounded-xl border border-primary/30 bg-primary/5 overflow-hidden">
@@ -57,13 +187,24 @@ export function VerifiedMatchesLoading({ results, pricingProgress }: VerifiedMat
               {results.length} verified match{results.length !== 1 ? "es" : ""} found
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            <Loader2 className="w-4 h-4 text-primary animate-spin" />
-            <span className="text-xs text-muted-foreground">
-              {pricingProgress
-                ? `Fetching prices (${pricingProgress.completed}/${pricingProgress.total})…`
-                : "Fetching prices…"}
-            </span>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Loader2 className="w-4 h-4 text-primary animate-spin" />
+              <span className="text-xs text-muted-foreground">
+                {pricingProgress
+                  ? `Fetching prices (${pricingProgress.completed}/${pricingProgress.total})…`
+                  : "Fetching prices…"}
+              </span>
+            </div>
+            {/* Live update indicator */}
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground border-l border-border/50 pl-3">
+              {isConnected ? (
+                <Wifi className="w-3 h-3 text-green-500" />
+              ) : (
+                <WifiOff className="w-3 h-3 text-amber-500" />
+              )}
+              <span>Updated: {lastUpdateTime}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -94,6 +235,10 @@ export function VerifiedMatchesLoading({ results, pricingProgress }: VerifiedMat
                 : null;
               const isVisualMatch = result.match_type === "visual" && score !== null;
 
+              // Get live extraction status for this platform
+              const extraction = statusMap.get(result.platform_name.toLowerCase());
+              const statusDisplay = getStatusDisplay(extraction);
+
               return (
                 <tr key={result.id} className="border-b border-border/30 hover:bg-muted/20 transition-colors">
                   {/* Platform name */}
@@ -119,11 +264,11 @@ export function VerifiedMatchesLoading({ results, pricingProgress }: VerifiedMat
                     )}
                   </td>
 
-                  {/* Price placeholder */}
+                  {/* Live price status */}
                   <td className="py-3 px-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin" />
-                      <span className="text-sm text-muted-foreground italic">Fetching price…</span>
+                    <div className={`flex items-center justify-end gap-2 ${statusDisplay.color}`}>
+                      {statusDisplay.icon}
+                      <span className="text-sm font-medium">{statusDisplay.text}</span>
                     </div>
                   </td>
 
