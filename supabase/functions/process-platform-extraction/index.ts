@@ -1137,6 +1137,28 @@ Deno.serve(async (req) => {
         rawError = extractorResponse.error || 'No result from extractor';
       }
       
+      // ============= CRITICAL FIX: Re-check DB for persisted price =============
+      // Some dedicated extractors (e.g., extract-agoda) persist the price directly to DB
+      // via extractionId but don't return it in the response. We must check DB state
+      // to ensure we don't miss successful extractions.
+      if (!rawPrice || rawPrice <= 0) {
+        const { data: dbExtraction } = await supabaseClient
+          .from('price_extractions')
+          .select('extracted_price, extraction_status')
+          .eq('id', extractionId)
+          .single();
+        
+        if (dbExtraction?.extracted_price && dbExtraction.extracted_price > 0) {
+          console.log(`[WORKER] DB has price=${dbExtraction.extracted_price} that wasn't in response - using DB state`);
+          rawPrice = dbExtraction.extracted_price;
+          // If DB shows success status, use it
+          if (dbExtraction.extraction_status && 
+              (dbExtraction.extraction_status.includes('success') || dbExtraction.extraction_status === 'success_total_stay')) {
+            rawStatus = dbExtraction.extraction_status;
+          }
+        }
+      }
+      
       // Handle Tier-A outcome - this persists state and decides if we hand off
       const tierAOutcome = await handleTierAOutcome(
         supabaseClient,

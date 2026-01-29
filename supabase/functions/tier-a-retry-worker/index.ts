@@ -45,7 +45,17 @@ interface PendingRetryExtraction {
   tier_a_state: string;
   detected_checkin: string | null;
   detected_checkout: string | null;
+  extraction_status: string | null;
+  extracted_price: number | null;
 }
+
+// Success statuses that indicate extraction already succeeded - do not retry
+const SUCCESS_EXTRACTION_STATUSES = new Set([
+  'success',
+  'success_total_stay',
+  'price_extracted',
+  'completed',
+]);
 
 /**
  * Claim a pending retry job atomically.
@@ -249,6 +259,26 @@ async function processPendingExtraction(
 ): Promise<void> {
   const attemptCount = extraction.tier_a_attempt_count;
   
+  // ============= GUARD: Check if extraction already succeeded =============
+  // This prevents retrying extractions that succeeded but weren't properly marked
+  const extractionStatus = extraction.extraction_status?.toLowerCase() || '';
+  const hasPrice = extraction.extracted_price && extraction.extracted_price > 0;
+  
+  if (SUCCESS_EXTRACTION_STATUSES.has(extractionStatus) || hasPrice) {
+    console.log(`[TIER_A_WORKER] INVARIANT VIOLATION: extraction_id=${extraction.id} already succeeded (status=${extractionStatus}, price=${extraction.extracted_price}) but tier_a_state was pending_retry`);
+    
+    // Fix the state - transition to success
+    await transitionToTerminal(
+      supabase,
+      extraction.id,
+      'success',
+      extractionStatus || 'success',
+      null,
+      extraction.extracted_price
+    );
+    return;
+  }
+  
   console.log(`[TIER_A_WORKER] attempt=${attemptCount + 1}/${MAX_TIER_A_ATTEMPTS} reason=${extraction.tier_a_last_transient_reason} extraction_id=${extraction.id}`);
   
   // Claim the job atomically
@@ -411,7 +441,9 @@ Deno.serve(async (req) => {
         tier_a_last_transient_reason,
         tier_a_state,
         detected_checkin,
-        detected_checkout
+        detected_checkout,
+        extraction_status,
+        extracted_price
       `)
       .eq('tier_a_state', 'pending_retry')
       .lte('tier_a_next_retry_at', now)
