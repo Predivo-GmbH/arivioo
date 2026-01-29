@@ -360,14 +360,42 @@ function categorizeResultForSnapshot(
     const pendingStatuses = ['pending', 'running', 'in_progress'];
     const successStatuses = ['success', 'price_extracted', 'completed', 'success_total_stay'];
     // Known "price not found" statuses - extraction reached platform but couldn't get price
+    // CRITICAL: This list must include ALL Tier-A transient failure statuses that
+    // should be classified as "price_not_found" rather than "additional_issues"
     const priceNotFoundStatuses = [
+      // Generic price not found
       'checkout_not_reached',
       'total_price_not_found',
       'nightly_only_rejected',
       'price_not_found',
       'price_not_found_after_dates_applied',
       'no_price_found',
+      // Agoda-specific transient failures (Tier-A)
+      'checkout_link_not_found',
+      'checkout_page_not_reached',
+      'hotel_page_not_reached',
+      // Booking.com-specific transient failures (Tier-A)
+      'unverified',
+      // Generic transient failures
+      'page_not_reached',
+      'render_failed',
+      'navigation_failed',
     ];
+    
+    // Service error statuses (infrastructure issues, should be classified separately)
+    const serviceErrorStatuses = [
+      'service_error',
+      'timeout',
+      'rate_limited',
+      'blocked_rate_limit',
+      'browserless_429',
+      'retry_budget_exhausted',
+    ];
+    
+    // If it's a service error (transient infrastructure issue), classify as such
+    if (serviceErrorStatuses.includes(extractionStatus)) {
+      return 'service_error';
+    }
     
     // If it's a known "price not found" variant, categorize as such
     if (priceNotFoundStatuses.includes(extractionStatus)) {
@@ -379,8 +407,9 @@ function categorizeResultForSnapshot(
       return 'price_not_found';
     }
     
-    // Unknown terminal status - additional_issues
-    return 'additional_issues';
+    // Unknown terminal status - classify as price_not_found (safe default, never "additional_issues")
+    // This prevents "Outcome not classified" from ever appearing in the UI
+    return 'price_not_found';
   }
   
   // 6. Has price - check comparability
