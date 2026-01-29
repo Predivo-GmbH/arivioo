@@ -8,6 +8,16 @@ import {
   type VariantDetectionResult,
 } from '../_shared/coverageVariantDetector.ts';
 import { normalizeToAdapterDomain } from '../_shared/platformNameNormalizer.ts';
+import {
+  isTierAPlatform,
+  classifyTierAFailure,
+  shouldRetryTierA,
+  calculateBackoffDelay,
+  logRetryEvent,
+  MAX_TIER_A_ATTEMPTS,
+  getRetryExhaustedStatus,
+  buildRetryExhaustedError,
+} from '../_shared/tierARetryPolicy.ts';
 // Secure CORS - Domain allowlist
 const ALLOWED_ORIGINS = [
   'https://lovable.dev',
@@ -943,6 +953,7 @@ Deno.serve(async (req) => {
     }
     
     // ============= TIER A: GOLDEN PATH with dedicated extractor =============
+    // Tier-A platforms (Agoda, Booking.com) get automatic retry for transient failures
     console.log(`[WORKER] Routing decision for ${platform}: tier=${tierInfo.tier}, dedicatedExtractor=${dedicatedExtractor}, willUseGoldenPath=${tierInfo.tier === 'A' && !!dedicatedExtractor}`);
     
     if (tierInfo.tier === 'A' && dedicatedExtractor) {
@@ -952,34 +963,192 @@ Deno.serve(async (req) => {
       result.phaseA.ran = true;
       result.phaseB.ran = true;
       
-      const extractorResponse = await runDedicatedExtractor(
-        supabaseUrl,
-        supabaseKey,
-        dedicatedExtractor,
-        extractionId,
-        deepLink,
-        requestedCheckIn,
-        requestedCheckOut,
-        extraction.assumed_adults || 2
-      );
+      // ============= TIER-A AUTOMATIC RETRY LOOP =============
+      // Max 4 attempts with backoff: 2s, 5s, 10s (+jitter)
+      // Only retries TRANSIENT failures (checkout_link_not_found, vat_excluded_checkout_failed, etc.)
+      // Stops on SUCCESS or HARD_TERMINAL (sold_out, blocked, captcha)
+      let attemptNumber = 0;
+      let lastExtractorResponse: { success: boolean; result: any; error?: string; timedOut?: boolean } | null = null;
+      let lastExtractorResult: any = null;
+      let shouldContinueRetrying = true;
       
-      if (extractorResponse.timedOut) {
-        result.phaseA.status = 'timeout';
-        result.phaseB.status = 'timeout';
-        result.finalStatus = 'timeout';
+      while (shouldContinueRetrying && attemptNumber < MAX_TIER_A_ATTEMPTS) {
+        attemptNumber++;
         
-        await ensureTerminalStatus(supabaseClient, extractionId, 'timeout', `${dedicatedExtractor} timeout`);
+        // Apply backoff delay for retries (not first attempt)
+        if (attemptNumber > 1) {
+          const delayMs = calculateBackoffDelay(attemptNumber);
+          logRetryEvent(
+            platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+            searchId,
+            extractionId,
+            attemptNumber,
+            null,
+            'TRANSIENT',
+            'retry_starting',
+            delayMs
+          );
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
         
-        result.elapsedMs = Date.now() - startTime;
-        console.log(`[WORKER] ${dedicatedExtractor} timeout for ${platform}`);
-        return new Response(
-          JSON.stringify({ success: false, result }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        console.log(`[WORKER] Tier-A attempt ${attemptNumber}/${MAX_TIER_A_ATTEMPTS} for ${platform}`);
+        
+        const extractorResponse = await runDedicatedExtractor(
+          supabaseUrl,
+          supabaseKey,
+          dedicatedExtractor,
+          extractionId,
+          deepLink,
+          requestedCheckIn,
+          requestedCheckOut,
+          extraction.assumed_adults || 2
         );
+        
+        lastExtractorResponse = extractorResponse;
+        lastExtractorResult = extractorResponse.result;
+        
+        // Handle timeout - classify as transient, may retry
+        if (extractorResponse.timedOut) {
+          const { shouldRetry, reason } = shouldRetryTierA('timeout', 'extractor timeout', null, attemptNumber);
+          
+          if (shouldRetry) {
+            logRetryEvent(
+              platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+              searchId,
+              extractionId,
+              attemptNumber,
+              'timeout',
+              'TRANSIENT',
+              'retry_scheduled',
+              calculateBackoffDelay(attemptNumber + 1)
+            );
+            continue;
+          }
+          
+          // No more retries - timeout is final
+          result.phaseA.status = 'timeout';
+          result.phaseB.status = 'timeout';
+          result.finalStatus = 'timeout';
+          
+          await ensureTerminalStatus(supabaseClient, extractionId, 'timeout', `${dedicatedExtractor} timeout after ${attemptNumber} attempts`);
+          
+          result.elapsedMs = Date.now() - startTime;
+          logRetryEvent(
+            platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+            searchId,
+            extractionId,
+            attemptNumber,
+            'timeout',
+            'TRANSIENT',
+            'retry_budget_exhausted'
+          );
+          console.log(`[WORKER] ${dedicatedExtractor} timeout after ${attemptNumber} attempts for ${platform}`);
+          return new Response(
+            JSON.stringify({ success: false, result, attempts: attemptNumber }),
+            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        
+        // Extractor returned a result - classify it
+        const extractorResult = extractorResponse.result;
+        if (extractorResult) {
+          const rawStatus = extractorResult?.status || extractorResult?.finalStatus || 'unknown';
+          const rawPrice = extractorResult?.price ?? extractorResult?.extractedPrice ?? extractorResult?.extracted_price ?? extractorResult?.phaseB?.extractedPrice ?? null;
+          const rawError = extractorResult?.error || extractorResponse.error || null;
+          
+          // Classify the outcome
+          const classification = classifyTierAFailure(rawStatus, rawError, rawPrice);
+          const { shouldRetry, reason } = shouldRetryTierA(rawStatus, rawError, rawPrice, attemptNumber);
+          
+          console.log(`[WORKER] Tier-A attempt ${attemptNumber} result: status=${rawStatus}, price=${rawPrice}, classification=${classification}, shouldRetry=${shouldRetry}, reason=${reason}`);
+          
+          if (!shouldRetry) {
+            // Final result - either SUCCESS or HARD_TERMINAL or budget exhausted
+            shouldContinueRetrying = false;
+            
+            if (classification === 'SUCCESS') {
+              logRetryEvent(
+                platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+                searchId,
+                extractionId,
+                attemptNumber,
+                rawStatus,
+                classification,
+                'success'
+              );
+            } else if (classification === 'HARD_TERMINAL') {
+              logRetryEvent(
+                platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+                searchId,
+                extractionId,
+                attemptNumber,
+                rawStatus,
+                classification,
+                'hard_terminal'
+              );
+            } else {
+              // TRANSIENT but budget exhausted
+              logRetryEvent(
+                platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+                searchId,
+                extractionId,
+                attemptNumber,
+                rawStatus,
+                classification,
+                'retry_budget_exhausted'
+              );
+              
+              // Update extraction status to indicate retry exhaustion
+              await supabaseClient
+                .from('price_extractions')
+                .update({
+                  extraction_status: getRetryExhaustedStatus(rawStatus),
+                  extraction_error: buildRetryExhaustedError(platform, rawStatus, attemptNumber),
+                  extraction_metadata: {
+                    ...(extractorResult?.extraction_metadata || {}),
+                    tier_a_attempts: attemptNumber,
+                    tier_a_retry_exhausted: true,
+                    last_transient_status: rawStatus,
+                  },
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', extractionId);
+            }
+          } else {
+            // Schedule retry
+            logRetryEvent(
+              platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+              searchId,
+              extractionId,
+              attemptNumber,
+              rawStatus,
+              classification,
+              'retry_scheduled',
+              calculateBackoffDelay(attemptNumber + 1)
+            );
+          }
+        } else {
+          // No result from extractor - treat as transient
+          const { shouldRetry } = shouldRetryTierA('extraction_error', extractorResponse.error, null, attemptNumber);
+          
+          if (!shouldRetry) {
+            shouldContinueRetrying = false;
+            logRetryEvent(
+              platform.toLowerCase().includes('agoda') ? 'agoda' : 'booking',
+              searchId,
+              extractionId,
+              attemptNumber,
+              'extraction_error',
+              'TRANSIENT',
+              'retry_budget_exhausted'
+            );
+          }
+        }
       }
       
-      // Parse dedicated extractor response
-      const extractorResult = extractorResponse.result;
+      // Process the final extractor result after retry loop
+      const extractorResponse = lastExtractorResponse!;
+      const extractorResult = lastExtractorResult;
 
       // Targeted return log (shape differs between Expedia and others)
       try {
@@ -1119,12 +1288,13 @@ Deno.serve(async (req) => {
         }
       }
       
-      console.log(`[WORKER] ${dedicatedExtractor} complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms)`);
+      console.log(`[WORKER] ${dedicatedExtractor} complete for ${platform}: ${result.finalStatus} (${result.elapsedMs}ms, ${attemptNumber} attempts)`);
       
       return new Response(
         JSON.stringify({ 
           success: result.finalStatus === 'success',
           result,
+          tierAAttempts: attemptNumber,
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );

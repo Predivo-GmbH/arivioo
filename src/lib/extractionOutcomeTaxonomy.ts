@@ -150,6 +150,17 @@ const RATE_LIMITED_STATUSES = new Set([
   'rate_limited',
   'rate_limited_abort',
   'blocked_rate_limit',
+  'browserless_429',
+]);
+
+/**
+ * Status codes that indicate a service/infrastructure error
+ * Includes retry budget exhaustion which maps to service_error
+ */
+const SERVICE_ERROR_STATUSES = new Set([
+  'service_error',
+  'timeout',
+  'retry_budget_exhausted',
 ]);
 
 /**
@@ -165,6 +176,9 @@ const PRICE_NOT_FOUND_STATUSES = new Set([
   'checkout_link_not_found',           // Agoda: could not find /book/ link on hotel page
   'total_price_not_found',             // Agoda: checkout page reached but no price
   'checkout_page_not_reached',         // Agoda: could not navigate to checkout page
+  'hotel_page_not_reached',            // Agoda: could not reach hotel page at all
+  'page_not_reached',                  // Generic: page navigation failed
+  'navigation_failed',                 // Generic: navigation failure
   'expedia_target_offer_not_found',
   'expedia_target_offer_mismatch',
   'expedia_target_total_not_found',
@@ -316,7 +330,16 @@ export function classifyOutcome(
     };
   }
 
-  // 4. Rate limited (service_error - temporary, NOT hard block)
+  // 4. Service errors (timeout, retry exhaustion)
+  if (SERVICE_ERROR_STATUSES.has(status)) {
+    return {
+      category: 'service_error',
+      reasonCode: status,
+      isTerminal: true,
+    };
+  }
+
+  // 4a. Rate limited (service_error - temporary, NOT hard block)
   if (RATE_LIMITED_STATUSES.has(status)) {
     return {
       category: 'service_error',
