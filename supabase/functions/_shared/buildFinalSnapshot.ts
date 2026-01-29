@@ -648,6 +648,16 @@ export async function finalizeAndCompleteSearch(
     const extractionByUrl = new Map<string, any>();
     const terminalPlatforms = new Set<string>();
 
+    // TIER-A RETRY GATE: Check for any Tier-A platforms still in retry loop
+    // Finalization is BLOCKED while any Tier-A extraction is pending_retry or running
+    const TIER_A_BLOCKING_STATES = new Set(['pending_retry', 'running']);
+    const tierABlockingExtractions: string[] = [];
+    
+    const isTierAPlatformName = (name: string): boolean => {
+      const lower = name.toLowerCase();
+      return lower.includes('agoda') || lower.includes('booking');
+    };
+
     extractionsData?.forEach((e: any) => {
       const platformKey = typeof e.platform_name === 'string' ? e.platform_name.toLowerCase() : '';
       if (e.search_result_id) {
@@ -655,6 +665,12 @@ export async function finalizeAndCompleteSearch(
       }
       if (platformKey) {
         extractionByPlatform.set(platformKey, e);
+        
+        // TIER-A GATE: Block finalization if Tier-A is still retrying
+        if (isTierAPlatformName(platformKey) && e.tier_a_state && TIER_A_BLOCKING_STATES.has(e.tier_a_state)) {
+          tierABlockingExtractions.push(`${platformKey}:${e.tier_a_state}`);
+        }
+        
         if (isTerminalExtractionStatus(e.extraction_status)) {
           terminalPlatforms.add(platformKey);
         }
@@ -663,6 +679,23 @@ export async function finalizeAndCompleteSearch(
         extractionByUrl.set(e.deep_link, e);
       }
     });
+    
+    // TIER-A FINALIZATION GATE (CRITICAL):
+    // If any Tier-A platform is in pending_retry or running, we CANNOT finalize.
+    // This ensures retries complete before the search is marked as completed.
+    if (tierABlockingExtractions.length > 0) {
+      const msg = `Tier-A retry in progress: ${tierABlockingExtractions.join(', ')}`;
+      console.log(`[finalizeAndComplete] BLOCKED - ${msg}`);
+      await logActivity(supabase, searchId, 'Awaiting Tier-A retries', msg);
+      
+      return {
+        success: false,
+        alreadyFinalized: false,
+        finalisedAt: null,
+        resultCount: 0,
+        error: msg,
+      };
+    }
     
     // WORKING BASELINE: Add platforms with terminal outcome_category to terminalPlatforms
     // These are rejected/low_confidence candidates that don't need extractions
