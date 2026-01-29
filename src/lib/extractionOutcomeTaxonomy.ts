@@ -154,10 +154,17 @@ const RATE_LIMITED_STATUSES = new Set([
 
 /**
  * Status codes that indicate price could not be found on page
+ * NOTE: checkout_link_not_found is categorized here because:
+ * - The listing WAS found (verified via image matching)
+ * - But we couldn't navigate to/find the checkout link to extract the price
+ * - This is a "price not found" scenario, not a render failure or block
  */
 const PRICE_NOT_FOUND_STATUSES = new Set([
   'price_not_found',
   'price_not_found_after_dates_applied',
+  'checkout_link_not_found',           // Agoda: could not find /book/ link on hotel page
+  'total_price_not_found',             // Agoda: checkout page reached but no price
+  'checkout_page_not_reached',         // Agoda: could not navigate to checkout page
   'expedia_target_offer_not_found',
   'expedia_target_offer_mismatch',
   'expedia_target_total_not_found',
@@ -526,4 +533,9 @@ export const FAILURE_CATEGORY_LABELS: Record<string, string> = {
   'expedia_access_blocked': 'Temporarily blocked',
   'expedia_target_offer_not_found': 'Price not visible',
   'expedia_target_total_not_found': 'Price not visible',
+  // Agoda-specific statuses (checkout discovery failures)
+  'checkout_link_not_found': 'Price not visible',
+  'total_price_not_found': 'Price not visible',
+  'checkout_page_not_reached': 'Price not visible',
+  'missing_checkout_link': 'Price not visible',
 };
