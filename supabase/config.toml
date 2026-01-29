@@ -187,3 +187,6 @@ verify_jwt = false
 
 [functions.skip-stuck-extractions]
 verify_jwt = false
+
+[functions.search-finalization-watchdog]
+verify_jwt = false
