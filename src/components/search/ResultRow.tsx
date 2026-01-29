@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ImageComparison } from "@/components/ImageComparison";
 import { ExpediaDebugReveal } from "@/components/ExpediaDebugReveal";
+import { ExtractionStatusChip, deriveChipStatus, type ExtractionChipStatus } from "@/components/search/ExtractionStatusChip";
 import type { CanonicalPrice } from "@/lib/canonicalPrice";
 import type { CategorizedResult } from "@/lib/resultCategorization";
 
@@ -30,6 +31,11 @@ export interface ResultRowResult {
   is_authoritative?: boolean;
   // Deep link with dates applied (for booking URLs) - prefer over listing_url
   deep_link?: string | null;
+  // Tier-A retry state (for status chip)
+  tier_a_state?: string | null;
+  tier_a_attempt_count?: number | null;
+  // Extracted price (for deriving done status)
+  extracted_price?: number | null;
 }
 
 export type RowVariant = 
@@ -64,6 +70,10 @@ interface ResultRowProps {
   // Columns config
   colSpan?: number;
   showKeyDifferencesColumn?: boolean;
+  // Show extraction status chip (for loading states)
+  showExtractionStatus?: boolean;
+  /** Whether the search is finalized */
+  isFinalized?: boolean;
 }
 
 // Helper to format price
@@ -97,8 +107,19 @@ export function ResultRow({
   getResultCategorization,
   colSpan = 4,
   showKeyDifferencesColumn = false,
+  showExtractionStatus = false,
+  isFinalized = true,
 }: ResultRowProps) {
   const resultImages = toStringArray(result.images);
+  
+  // Derive extraction status chip
+  const hasPrice = (result.price && result.price > 0) || (result.extracted_price && result.extracted_price > 0);
+  const chipData = deriveChipStatus(
+    result.extraction_status,
+    result.tier_a_state,
+    result.tier_a_attempt_count,
+    hasPrice
+  );
   
   // Determine accent color based on variant
   const getAccentColor = () => {
@@ -183,10 +204,20 @@ export function ResultRow({
           
           {/* Blocked badge */}
           {variant === 'blocked' && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-500/10 text-red-600 text-[10px] font-medium">
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-destructive/10 text-destructive text-[10px] font-medium">
               <Ban className="w-2.5 h-2.5" />
               Blocked
             </span>
+          )}
+          
+          {/* Extraction status chip - show during loading phase */}
+          {showExtractionStatus && !isFinalized && chipData.status !== 'done' && (
+            <ExtractionStatusChip
+              status={chipData.status}
+              attemptCount={chipData.attemptCount}
+              reason={chipData.reason}
+              platformName={result.platform_name}
+            />
           )}
         </div>
       </td>
