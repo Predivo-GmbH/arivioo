@@ -1,859 +1,525 @@
 # Arivioo System Documentation
 
-**Version**: 2.0.0  
-**Last Updated**: 2026-02-04  
-**Purpose**: Complete technical reference for AI agents (Cursor) and human developers
+**Version**: 2.1.0 (Validated)  
+**Last Validated**: 2026-02-04  
+**Authority**: This document describes observed runtime behavior, not design intent.  
+**Purpose**: Persistent context for AI coding assistants (Cursor)
 
 ---
 
-## 1. System Purpose
+## 1. System Overview
 
-### What the System Does
+### 1.1 Purpose
 
-Arivioo is an automated price comparison system for vacation rentals. Given an Airbnb listing URL with specific dates, the system:
+Arivioo is a vacation rental price comparison system. Given an Airbnb listing URL with specific dates, the system:
 
-1. Extracts the total stay price from Airbnb (including taxes and fees)
-2. Discovers the same property on alternative booking platforms via visual reverse image search
-3. Verifies matches using AI-powered image comparison
-4. Extracts verified total prices from each alternative platform
-5. Presents a comparison showing potential savings
+1. Extracts the Airbnb total stay price as the baseline
+2. Discovers the same property on alternative platforms via visual reverse image search
+3. Verifies property matches using AI-powered image comparison
+4. Extracts prices from verified platforms for the same dates
+5. Presents a ranked comparison showing potential savings
 
-The core requirement is **fully automated, reliable, and explainable price comparison** with no manual intervention. All extracted prices must be real, comparable, and grounded in actual page content.
+### 1.2 What the System Explicitly Does NOT Do
 
-### What the System Does NOT Do
-
-- Does NOT convert currencies (prices must be in USD to be comparable)
-- Does NOT use AI to extract or interpret prices (uses DOM parsing and regex only)
-- Does NOT allow manual user intervention during the search pipeline
-- Does NOT display results until the search is fully finalized
-- Does NOT re-compute result buckets after finalization (snapshot is immutable)
-- Does NOT support platforms outside of its coverage tier system
-- Does NOT use OpenAI models (exclusively uses Google Gemini)
+- **Currency conversion**: All prices compared in extracted currency (USD assumed)
+- **Real-time monitoring**: Each search is a one-time snapshot
+- **Booking facilitation**: Deep links only; no transactions
+- **Property verification beyond visual**: No address or legal entity verification
+- **Mobile app**: Web-only
+- **Manual date input**: Dates derived exclusively from Airbnb URL parameters
+- **AI-based price extraction**: All price extraction is DOM/regex-based
+- **Use of OpenAI models**: Exclusively uses Google Gemini
 
 ---
 
-## 2. Tech Stack Overview
+## 2. Technical Stack (As Implemented)
 
 ### 2.1 Frontend
 
-| Component | Technology | Notes |
-|-----------|------------|-------|
-| Framework | React 18.3 with TypeScript | Single-page application |
-| Build Tool | Vite | Development and production builds |
-| Styling | Tailwind CSS | Semantic design tokens in `index.css` |
-| UI Components | shadcn/ui (Radix primitives) | Located in `src/components/ui/` |
-| State Management | React hooks + TanStack Query | No Redux or global state store |
-| Routing | react-router-dom v6 | Client-side routing |
-| Animations | framer-motion | Used for UI transitions |
-| Icons | lucide-react | Icon library |
+| Component | Technology |
+|-----------|------------|
+| Framework | React 18.3.1 with TypeScript |
+| Build Tool | Vite |
+| Styling | Tailwind CSS + shadcn/ui |
+| State Management | TanStack Query v5 + React hooks |
+| Routing | React Router DOM v6 |
+| Animations | framer-motion |
 
-**Key Frontend Files**:
-- `src/pages/Dashboard.tsx` - Search input and history display
-- `src/pages/SearchResults.tsx` - Results display and real-time progress (4,788 lines)
-- `src/lib/pipelineStages.ts` - Pipeline stage definitions and status mapping
-- `src/lib/priceVerification.ts` - Price verification logic
-- `src/lib/resultCategorization.ts` - Result bucket assignment (frontend mirror)
-- `src/lib/canonicalPrice.ts` - Price normalization model
-- `src/lib/airbnbUrlNormalizer.ts` - URL normalization (frontend)
+**Key Files**:
+- `src/pages/SearchResults.tsx` — Results page (snapshot renderer)
+- `src/hooks/useExtractionProgressRealtime.ts` — Realtime progress
+- `src/hooks/useFinalizedSnapshot.ts` — Snapshot fetching with retry
+- `src/lib/pipelineStages.ts` — Stage definitions and terminal statuses
 
-### 2.2 Backend
+### 2.2 Backend / Edge Functions
 
-| Component | Technology | Notes |
-|-----------|------------|-------|
-| Platform | Supabase (Lovable Cloud) | Managed PostgreSQL + Edge Functions |
-| Runtime | Deno | Edge Functions execute in Deno runtime |
-| Language | TypeScript | All edge functions are TypeScript |
-| Execution Model | Request-response | 150-second timeout per function invocation |
+| Component | Technology |
+|-----------|------------|
+| Runtime | Deno (Supabase Edge Functions) |
+| Language | TypeScript |
+| Execution Model | Stateless per-request |
+| Timeout | 150 seconds per invocation |
+
+**Critical Edge Functions**:
+
+| Function | Purpose |
+|----------|---------|
+| `search-alternatives` | Main orchestrator |
+| `run-price-pipeline` | Extraction dispatcher |
+| `process-platform-extraction` | Per-platform worker (Phase A + B) |
+| `extract-expedia` | Dedicated Expedia extractor (Tier A) |
+| `extract-booking` | Dedicated Booking.com extractor (Tier A) |
+| `extract-vrbo` | Dedicated VRBO extractor (Tier A) |
+| `extract-agoda` | Dedicated Agoda extractor (Tier A) |
+| `extract-hotelscom` | Dedicated Hotels.com extractor (Tier A) |
+| `finalize-search-snapshot` | Snapshot builder |
+| `tier-a-retry-worker` | Background retry for Tier A |
+
+**Shared Modules** (`supabase/functions/_shared/`):
+- `buildFinalSnapshot.ts` — Snapshot construction
+- `browserlessGate.ts` — Concurrency control (advisory lock `8675309`)
+- `tierARetryPolicy.ts` — Retry logic for Tier A
 
 ### 2.3 Database
 
-| Component | Technology | Notes |
-|-----------|------------|-------|
-| Type | PostgreSQL | Supabase-managed |
-| ORM | None | Raw SQL via Supabase client |
-| Realtime | Supabase Realtime | postgres_changes for live updates |
-| RLS | Enabled | Row-level security on all user tables |
+| Component | Technology |
+|-----------|------------|
+| Type | PostgreSQL (Supabase) |
+| Realtime | Supabase Realtime (postgres_changes) |
+| RLS | Enabled on all user tables |
 
 **Key Tables**:
-- `searches` - Search requests, Airbnb data, status, and final snapshot
-- `search_platforms` - Verified platform matches (authoritative set)
-- `price_extractions` - Extraction attempts, statuses, and results
-- `platform_adapters` - Platform configuration and coverage tiers
-- `blocked_platforms` - Admin-managed domain blocklist
-- `search_stage_runs` - Stage timing telemetry
-- `api_request_logs` - Provider request logging for quota tracking
+- `searches` — Search metadata, Airbnb baseline, final snapshot
+- `search_platforms` — Verified platform matches
+- `price_extractions` — Per-platform extraction state and results
+- `search_stage_runs` — Stage telemetry (sparsely populated)
+- `platform_adapters` — Platform configuration and tiers
 
-### 2.4 Edge Functions
+### 2.4 External Services
 
-| Function | Purpose | Approx. Lines |
-|----------|---------|---------------|
-| `search-alternatives` | Main orchestrator - Airbnb baseline, discovery, verification, extraction triggers | ~10,153 |
-| `process-platform-extraction` | Per-platform worker (Phase A + B) | ~1,614 |
-| `finalize-search-snapshot` | Snapshot persistence endpoint (called by orchestrator) | ~115 |
-| `extract-expedia` | Expedia dedicated extractor (Tier A) | ~2,602 |
-| `extract-booking` | Booking.com dedicated extractor (Tier A) | - |
-| `extract-agoda` | Agoda dedicated extractor (Tier A) | - |
-| `extract-vrbo` | VRBO dedicated extractor (Tier A) | - |
-| `extract-airpaz` | Airpaz dedicated extractor | - |
-| `extract-hotelscom` | Hotels.com dedicated extractor | - |
-| `extract-prices` | Generic Firecrawl/Zyte extractor (Tier B) | - |
-| `validate-dates` | Phase A date validation | - |
-| `airbnb-url-normalizer` | URL normalization service | - |
-| `tier-a-retry-worker` | Background retry for Tier A platforms | - |
-| `skip-stuck-extractions` | Anti-stuck watchdog | - |
-| `search-finalization-watchdog` | Orphan search recovery | - |
+| Service | Purpose | Called From | Constraint |
+|---------|---------|-------------|------------|
+| **SerpAPI** | Google Lens visual discovery | `search-alternatives` | Rate limited |
+| **Browserless** | JS-rendered page access | Extractors, Airbnb baseline | Global limit: 1 concurrent (lock `8675309`) |
+| **Firecrawl** | Primary web scraping | Extractors | Primary provider |
+| **Zyte** | Fallback scraping with browser rendering | Fallback on 403/timeout | 60s timeout |
+| **Resend** | Transactional email | Auth flows | — |
 
-**Shared Modules** (`supabase/functions/_shared/`):
-- `buildFinalSnapshot.ts` - Snapshot construction and result categorization (~1,338 lines)
-- `browserlessGate.ts` - Distributed concurrency control for Browserless
-- `tierARetryPolicy.ts` - Retry logic for Tier A platforms
-- `coverageVariantDetector.ts` - Regional/locale variant detection
-- `platformNameNormalizer.ts` - Platform name normalization
-- `priceClassification.ts` - Price type classification
+**Browserless Retry Policy**:
+- **Max retries: 3** (not 4)
+- Backoff sequence: 2s, 4s, 8s
 
-### 2.5 Hosting / Infrastructure
+### 2.5 AI Models in Use
 
-- **Frontend**: Lovable CDN (preview and published URLs)
-- **Backend**: Supabase Edge Functions (Deno runtime)
-- **Database**: Supabase-managed PostgreSQL
+| Model | Provider | Purpose |
+|-------|----------|---------|
+| `google/gemini-2.5-flash` | Google (via Lovable AI Gateway) | Image verification |
+
+**Endpoint**: `https://ai.gateway.lovable.dev/v1/chat/completions`
+
+**Models NOT Used**:
+- OpenAI GPT (any version)
+- Anthropic Claude (any version)
+- Any other AI provider
 
 ---
 
-## 3. External APIs & Services
+## 3. Search Lifecycle (Reality-Based)
 
-### 3.1 SerpAPI (Google Lens)
+### 3.1 Logical Stages (As Designed)
 
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Visual reverse image search to discover property listings on other platforms |
-| **Called From** | `search-alternatives/index.ts` |
-| **Data In** | Airbnb property image URL |
-| **Data Out** | `visual_matches` array with candidate URLs, titles, thumbnails |
-| **Constraints** | Rate limited (429 responses possible); used only for discovery phase |
-| **Secret** | `SERPAPI_API_KEY` |
+The system was designed with 6 logical stages:
 
-**Usage Pattern**:
+1. `analyze_listing` — Parse Airbnb URL, extract baseline price
+2. `collect_photos` — Download Airbnb property images
+3. `find_matches` — Visual search via Google Lens + AI verification
+4. `validate_dates` — Apply dates to platform deep links (Phase A)
+5. `collect_prices` — Extract prices from platforms (Phase B)
+6. `finalize_results` — Build and persist immutable snapshot
+
+### 3.2 Observable Stages (As Actually Visible)
+
+**Only ONE stage is currently observable in telemetry: `analyze_listing`**
+
+The `search_stage_runs` table contains rows only for `analyze_listing`. All other stages execute but do not write telemetry records.
+
+**Implication**: Stage progress cannot be reliably determined from `search_stage_runs` alone. This is the current state, not a bug.
+
+### 3.3 Actual Execution Flow
+
 ```
-GET https://serpapi.com/search.json?engine=google_lens&url=<airbnb_image_url>&api_key=<key>
+1. User submits Airbnb URL
+   └─> search-alternatives edge function invoked
+
+2. URL Validation
+   ├─> Normalize URL (airbnb-url-normalizer)
+   ├─> Extract dates from query params (check_in, check_out)
+   └─> FAIL if dates missing or invalid
+
+3. Airbnb Baseline Extraction (GATING)
+   ├─> Firecrawl scrape → Zyte fallback on 403
+   ├─> AI extracts total stay price
+   ├─> FAIL ENTIRE SEARCH if baseline cannot be extracted
+   └─> Store in searches.airbnb_price
+
+4. Image Collection
+   └─> Download and store Airbnb images (searches.airbnb_images)
+
+5. Visual Discovery
+   ├─> SerpAPI Google Lens call with primary image
+   ├─> Filter results to known platform domains
+   └─> Create search_platforms rows for candidates
+
+6. AI Image Verification
+   ├─> For each candidate: compare images via Gemini 2.5 Flash
+   ├─> Threshold: 75% confidence to pass
+   ├─> 90%+ confidence = "authoritative" match
+   └─> Candidates below 75% are excluded
+
+7. Price Extraction Pipeline
+   ├─> run-price-pipeline creates price_extractions rows
+   ├─> process-platform-extraction invoked per platform
+   ├─> Phase A: Apply dates, validate they took effect
+   ├─> Phase B: Extract price if Phase A passed
+   └─> Tier A platforms get retry logic (max 3 retries)
+
+8. Finalization
+   ├─> All platforms reach terminal state OR timeout
+   ├─> finalize-search-snapshot builds snapshot
+   ├─> Atomic write: final_results_snapshot + finalised_at
+   └─> Search status set to 'completed'
 ```
-
-### 3.2 Browserless
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Headless Chrome browser for JavaScript-rendered pages |
-| **Called From** | `search-alternatives/index.ts` (Airbnb baseline), dedicated extractors |
-| **Data In** | Target URL, custom JavaScript function code |
-| **Data Out** | HTML content, screenshots, extracted data via `page.evaluate()` |
-| **Constraints** | **Global concurrency limit of 1** (Postgres advisory lock `8675309`); 429 triggers exponential backoff (2s, 4s, 8s, 20s); HTML limit 350k chars; screenshot quality 75% JPEG |
-| **Secret** | `BROWSERLESS_API_KEY` |
-
-**Endpoints Used**:
-- `https://chrome.browserless.io/function` - Custom function execution
-- `https://chrome.browserless.io/content` - Page content retrieval
-
-**Content Validity Gate**: Requires 400+ characters of innerText within 25 seconds.
-
-### 3.3 Firecrawl
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Web scraping with automatic JavaScript rendering |
-| **Called From** | `extract-prices/index.ts`, `process-platform-extraction/index.ts`, `scrapePriceFromListing()` |
-| **Data In** | Target URL, format options (markdown, html, screenshot), wait time |
-| **Data Out** | Rendered markdown, HTML, optional screenshot |
-| **Constraints** | `waitFor` must be ≤ `timeout/2`; used as primary scraper with Zyte as fallback |
-| **Secret** | `FIRECRAWL_API_KEY` / `FIRECRAWL_API_KEY_1` |
-
-### 3.4 Zyte
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Browser-based scraping with anti-bot capabilities |
-| **Called From** | `search-alternatives/index.ts` (Airbnb fallback), extractors as fallback |
-| **Data In** | Target URL with `browserHtml: true`, `javascript: true`, `screenshot: true` |
-| **Data Out** | Browser-rendered HTML, screenshot |
-| **Constraints** | 60-second timeout; used when Firecrawl fails with 403/timeout/500 |
-| **Secret** | `ZYTE_API_KEY` |
-
-**Usage Pattern**:
-```json
-POST https://api.zyte.com/v1/extract
-{
-  "url": "...",
-  "browserHtml": true,
-  "javascript": true,
-  "screenshot": true
-}
-```
-
-### 3.5 Lovable AI Gateway
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | AI-powered image verification (property matching) |
-| **Model Used** | `google/gemini-2.5-flash` (exclusively) |
-| **Endpoint** | `https://ai.gateway.lovable.dev/v1/chat/completions` |
-| **Called From** | `search-alternatives/index.ts` (verification passes) |
-| **Data In** | Two image URLs (Airbnb source + candidate), verification prompt |
-| **Data Out** | JSON with confidence score (0-100) and justification |
-| **Secret** | `LOVABLE_API_KEY` (auto-provisioned) |
-
-### 3.6 Resend
-
-| Aspect | Detail |
-|--------|--------|
-| **Purpose** | Transactional email (notifications, password reset) |
-| **Called From** | `send-notify-me-email`, `email-hook`, auth functions |
-| **Secret** | `RESEND_API_KEY` |
 
 ---
 
-## 4. AI Usage Overview
+## 4. Current Stage Determination (CRITICAL SECTION)
 
-### 4.1 Exact Models Used
+### 4.1 Why "Current Stage" Is Not a First-Class Concept
 
-| Model | Provider | Location |
-|-------|----------|----------|
-| `google/gemini-2.5-flash` | Google (via Lovable AI Gateway) | `search-alternatives/index.ts` |
+There is **no canonical `current_stage` field** anywhere in the system.
 
-**No other AI models are used.** OpenAI models are NOT used anywhere in the system. Legacy code comments referencing "GPT" are outdated.
+The `searches.status` field contains pipeline status values but these do not map 1:1 to the 6 logical stages.
 
-### 4.2 Where AI IS Used
+Stage telemetry (`search_stage_runs`) is sparsely populated. **Only `analyze_listing` is reliably written.**
 
-| Use Case | Function | Prompt Strategy |
-|----------|----------|-----------------|
-| **Image Verification PASS 1** | `compareImagesWithAI()` | "Balanced Identity Verification" - focuses on fixed structural elements (geometry, patterns) while tolerating camera angles and lighting |
-| **Image Verification PASS 2** | `adversarialImageCheck()` | Adversarial check for high-confidence matches (≥90%) |
-| **OCR Visual Reference** (limited) | `extractOcrVisualReference()` | Screenshot OCR for Airbnb checkout totals |
+### 4.2 Available Signals for Stage Inference
 
-**Verification Logic**:
-- PASS 1: Returns confidence score 0-100
-- Threshold: ≥75% to proceed to extraction
-- If PASS 1 ≥90%: Marked as `is_authoritative: true`
-- PASS 2: Adversarial check only runs if PASS 1 ≥90%
+| Signal | Location | What It Indicates |
+|--------|----------|-------------------|
+| `searches.status` | `searches` table | High-level pipeline phase |
+| `searches.airbnb_price` | `searches` table | Baseline extraction complete if > 0 |
+| `searches.airbnb_images` | `searches` table | Image collection complete if populated |
+| `search_platforms` count | `search_platforms` table | Discovery complete if > 0 rows exist |
+| `price_extractions` statuses | `price_extractions` table | Extraction progress per platform |
+| `searches.finalised_at` | `searches` table | Finalization complete if non-null |
+| `search_stage_runs` | `search_stage_runs` table | **Only `analyze_listing` is observable** |
 
-**Budget Allocation**:
-- `MAX_AI = 50` calls per search
-- Hard minimum of 6 calls reserved for late images
-- Image 1 can use up to 70% of spendable calls
-- Verification skipped for platforms already matched at ≥75%
+### 4.3 Deterministic Stage Inference Table
 
-### 4.3 Where AI is Explicitly NOT Used
+| Evidence | Inferred Stage | Confidence | Meaning |
+|----------|----------------|------------|---------|
+| `status = 'pending'` AND no `airbnb_price` | `analyze_listing` | High | Search just started |
+| `airbnb_price > 0` AND `airbnb_images` empty | `collect_photos` | Medium | Baseline done, collecting images |
+| `airbnb_images` populated AND no `search_platforms` rows | `find_matches` | Medium | Images ready, discovery in progress |
+| `search_platforms` rows exist AND all `price_extractions` pending | `validate_dates` | Medium | Discovery done, extraction starting |
+| Some `price_extractions` have non-pending status | `collect_prices` | High | Extraction in progress |
+| All `price_extractions` terminal AND `finalised_at` null | `finalize_results` | High | Awaiting finalization |
+| `finalised_at` non-null | Complete | High | Search fully finished |
 
-| Task | Method Used Instead |
-|------|---------------------|
-| **Price Extraction** | DOM parsing, regex patterns, structured CSS selectors |
-| **Date Validation** | URL parameter inspection, rendered text matching |
-| **URL Normalization** | Deterministic string manipulation |
-| **Result Categorization** | Rule-based bucket assignment (numeric thresholds) |
-| **Platform Matching Decisions** | Numeric confidence thresholds (75%, 90%) |
-| **Currency Detection** | Regex pattern matching |
+### 4.4 Status Values → Pipeline Phases
 
-### 4.4 AI Decision Boundaries
-
-**AI IS ALLOWED to**:
-- Output a confidence score (0-100) for image similarity
-- Provide a brief textual justification for the score
-
-**AI is EXPLICITLY NOT ALLOWED to**:
-- Make final match/reject decisions (threshold logic is deterministic)
-- Extract or interpret prices
-- Validate dates
-- Override blocklist rules
-- Determine result bucket categorization
-- Make any decision that affects the final snapshot
+| `searches.status` Value | Logical Phase |
+|-------------------------|---------------|
+| `pending` | Pre-start or early `analyze_listing` |
+| `searching` | Discovery phase |
+| `extracting_price`, `extracting_photos` | Active extraction |
+| `searching_platforms`, `searching_platforms_lens_*` | Visual discovery |
+| `ai_verifying_*` | AI image verification |
+| `phase_a`, `phase_b` | Price extraction phases |
+| `collecting_prices`, `comparing_prices` | Late extraction |
+| `finalizing` | Building snapshot |
+| `completed`, `done` | Terminal success |
+| `error`, `failed`, `cancelled` | Terminal failure |
+| `price_unavailable`, `dates_unavailable` | Terminal (no results) |
+| `finalization_failed` | Terminal (snapshot failed) |
 
 ---
 
-## 5. Core System Invariants
+## 5. Terminal States
 
-These rules MUST NEVER be violated:
+### 5.1 Search-Level Terminal Statuses
 
-### 5.1 Airbnb Baseline Gate
+Defined in `src/lib/pipelineStages.ts`:
 
-The Airbnb total stay price extraction is the **mandatory gatekeeper**. If extraction fails, the entire search terminates immediately with an explicit error code. No subsequent pipeline stages execute.
-
-**Valid Airbnb Price Statuses**:
-- `total_price_including_taxes_and_fees` → Proceed
-- `needs_user_confirmation` → Requires user input (currently blocks)
-- All other statuses → Search terminates
-
-### 5.2 No Results Until Final
-
-- Search `status = 'completed'` is ONLY set when `final_results_snapshot` persistence succeeds in the same transaction
-- Frontend never renders results until `finalised_at` is non-null
-- Once finalized, the snapshot is **immutable** - never re-derived, never modified
-- If snapshot persistence fails, status becomes `finalization_failed`, NOT `completed`
-
-### 5.3 No Silent Suppression
-
-Every extraction outcome MUST be explicitly surfaced in the UI:
-- A platform cannot silently disappear from results
-- Terminal states have explicit error panels
-- No collapsing distinct failure modes into generic "No Price" labels
-
-### 5.4 Structural Verification Required (Tier A)
-
-A price can ONLY be marked "Verified" (bucket: `cheaper` or `more_expensive`) if:
-- `breakdown_found: true`
-- `total_label_found: true`
-- `rendered_dates_match: true`
-- `extracted_from_breakdown_total: true`
-- `includes_taxes_fees: true`
-- `dates_validated: true`
-
-### 5.5 USD-First Strategy
-
-All Tier A extractors attempt to force USD pricing via URL parameters and locale settings. If extraction returns a foreign currency, the result is categorized as `not_comparable` with explicit currency labeling.
-
-### 5.6 75% ImageGate Threshold
-
-A listing is only considered a valid match if it passes the 75% AI confidence threshold. Matches ≥90% are marked `is_authoritative: true`.
-
-### 5.7 Terminal Status Contract
-
-Every `price_extractions` row MUST end in a terminal status:
-```
-'success', 'success_total_stay', 'dates_not_applied', 'no_availability_for_dates', 
-'blocked_captcha_or_bot', 'blocked_rate_limit', 'render_failed',
-'listing_unavailable', 'price_not_found_after_dates_applied',
-'total_not_available_pre_checkout', 'validation_error',
-'extraction_error', 'timeout', 'platform_unsupported'
-```
-
-### 5.8 Authoritative Platform Set
-
-The `search_platforms` table is the authoritative source for matched platforms. Every candidate passing the 75% ImageGate threshold is inserted here. The final snapshot includes ALL platforms from this set, even if price extraction failed.
-
----
-
-## 6. SEARCH WORKFLOW (Critical Section)
-
-### 6.1 User Submits Airbnb URL
-
-**Location**: `src/pages/Dashboard.tsx`
-
-**Trigger**: User clicks "Compare Prices" button
-
-**Validation Performed** (client-side):
-1. URL format validation (URL constructor)
-2. Protocol check (http/https only)
-3. Domain allowlist check (40+ Airbnb domains)
-4. Room ID extraction (`/rooms/<id>` or `/book/stays/<id>`)
-5. Date presence check (`check_in` and `check_out` params required)
-6. Date format validation (YYYY-MM-DD)
-7. Date logic check (checkout > checkin)
-8. URL length limit (2048 chars, SSRF protection)
-
-**Failure Handling**: Toast error displayed, search not created
-
-**Success**: Insert row to `searches` table:
-```sql
-INSERT INTO searches (user_id, airbnb_url, status)
-VALUES ($user_id, $url, 'searching')
-```
-
-**Navigation**: Redirect to `/search/{searchId}`
-
-### 6.2 Search Orchestration Initialization
-
-**Location**: `supabase/functions/search-alternatives/index.ts`
-
-**Trigger**: Frontend calls edge function with `searchId`
-
-**Data Read**: None (receives searchId from request)
-
-**Data Written**:
-```sql
-UPDATE searches SET status = 'searching', updated_at = now() WHERE id = $searchId
-```
-
-**Stage Telemetry**: Inserts row to `search_stage_runs` with `stage_name = 'analyze_listing'`
-
-### 6.3 Stage 1: Analyze Listing (Airbnb Baseline)
-
-**Trigger**: Immediately after initialization
-
-**Backend Status Progression**: `scraping_airbnb` → `extracting_price`
-
-**Code Execution**:
-1. `buildBookStaysUrl()` - Normalizes URL to canonical `/book/stays/<id>` format
-2. Provider fallback chain: Firecrawl → Zyte → Browserless
-
-**Browserless Extraction Logic** (primary for Airbnb):
-1. Navigate to rooms page first (extract title, images)
-2. Navigate to `/book/stays/<id>` page (extract total price)
-3. Execute `page.evaluate()` with custom JavaScript:
-   - Pattern 1: "Pay $X now" (primary - direct text search)
-   - Pattern 2: "Total (USD) $X" (secondary)
-   - Subtotal fallback: "$X for N nights"
-
-**Bot Detection**: Checks for captcha indicators, rate limiting patterns in HTML
-
-**Data Extracted**:
-- `airbnb_price`: Total stay price (including taxes/fees)
-- `airbnb_title`: Property title
-- `airbnb_images`: Array of image URLs (up to 5)
-- `airbnb_image_url`: Primary image
-- `check_in_date`, `check_out_date`, `nights_count`
-
-**Data Written**:
-```sql
-UPDATE searches SET 
-  airbnb_price = $price,
-  airbnb_title = $title,
-  airbnb_images = $images,
-  airbnb_image_url = $primaryImage,
-  check_in_date = $checkIn,
-  check_out_date = $checkOut,
-  nights_count = $nights,
-  status = 'extracting_photos'
-WHERE id = $searchId
-```
-
-**Failure Modes**:
-| Status | Meaning | Effect |
-|--------|---------|--------|
-| `airbnb_blocked_or_captcha` | Bot wall detected | Search terminates |
-| `airbnb_total_not_visible` | Price not extractable | Search terminates |
-| `dates_unavailable` | Listing unavailable for dates | Search terminates |
-| `needs_user_confirmation` | Only subtotal found | Search terminates (currently) |
-
-### 6.4 Stage 2: Collect Photos
-
-**Trigger**: Successful Airbnb baseline extraction
-
-**Backend Status**: `extracting_photos` → `collecting_photos`
-
-**Code Execution**:
-- Parse `airbnb_images` from Airbnb page scrape
-- Select up to 5 high-quality images (filter by size, type)
-- Download/validate image URLs
-
-**Data Written**: Image URLs stored in `searches.airbnb_images` (already done in Stage 1)
-
-**Stage Telemetry**: Updates `search_stage_runs` with duration
-
-### 6.5 Stage 3: Find Matches (Discovery + Verification)
-
-**Trigger**: Photos collected
-
-**Backend Status**: `searching_platforms` → `ai_verifying_*`
-
-#### 6.5.1 Discovery Methods
-
-**SerpAPI Google Lens** (per image, up to 5 images):
-```
-GET https://serpapi.com/search?engine=google_lens&url=<image_url>
-```
-
-- Process `visual_matches` from response
-- Extract candidates with: URL, title, thumbnail
-- Also extract from `knowledge_graph` section
-
-**Candidate Filtering**:
-1. URL validation (must be valid HTTP/HTTPS)
-2. Domain extraction and normalization
-3. Blocklist check against `blocked_platforms` table
-4. Deduplication by domain
-
-#### 6.5.2 AI Image Verification
-
-**For Each Candidate** (subject to budget limits):
-
-**PASS 1 - Balanced Identity Verification**:
 ```typescript
-const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-  body: JSON.stringify({
-    model: "google/gemini-2.5-flash",
-    messages: [{ role: "user", content: verificationPrompt }],
-    max_tokens: 150,
-  }),
-});
+const TERMINAL_STATUSES = [
+  'completed',
+  'done',
+  'error',
+  'failed',
+  'cancelled',
+  'price_unavailable',
+  'dates_unavailable',
+  'finalization_failed',
+];
 ```
 
-- Prompt focuses on fixed structural elements (geometry, patterns)
-- Tolerates camera angles and lighting differences
-- Returns confidence score 0-100
+### 5.2 Extraction-Level Terminal Statuses
 
-**Threshold Logic**:
-- `score < 75`: Candidate rejected, not inserted
-- `score >= 75 AND score < 90`: Inserted as verified match
-- `score >= 90`: PASS 2 triggered
+Each `price_extractions` row reaches one of these terminal states:
 
-**PASS 2 - Adversarial Check** (only if PASS 1 ≥ 90%):
-- Looks for reasons candidates might NOT be the same property
-- If still ≥90%, mark `is_authoritative: true`
-
-**Data Written** (for each verified match):
-```sql
-INSERT INTO search_platforms (
-  search_id, platform_name, listing_url, listing_title,
-  images, confidence_score, match_type, matched_at
-) VALUES ($searchId, $platform, $url, $title, $images, $score, 'visual', now())
-```
-
-**Budget Exhaustion Handling**: If AI budget exhausted, remaining candidates are not verified.
-
-### 6.6 Stage 4: Validate Dates (Phase A)
-
-**Trigger**: Platform inserted into `search_platforms` with confidence ≥75%
-
-**Location**: `process-platform-extraction/index.ts` → calls `validate-dates`
-
-**Backend Status**: `validating_dates` / `phase_a`
-
-**Code Execution**:
-1. Insert or reset `price_extractions` row for this platform
-2. Apply date parameters to platform URL (`applyDatesToDeepLink()`)
-3. Scrape page with Firecrawl (primary) or Zyte (fallback)
-4. Parse rendered dates from page content
-5. Compare against requested dates
-
-**Data Written**:
-```sql
-UPDATE price_extractions SET
-  dates_validated = $validated,
-  detected_checkin = $detectedCheckIn,
-  detected_checkout = $detectedCheckOut,
-  extraction_stage = 'phase_a_complete'
-WHERE id = $extractionId
-```
-
-**Failure Modes**:
 | Status | Meaning |
 |--------|---------|
-| `dates_not_applied` | Dates not found in rendered page |
-| `no_availability_for_dates` | Platform shows "sold out" |
+| `success` | Price extracted and verified |
+| `success_total_stay` | Total stay price found |
+| `price_extracted` | Price found (legacy) |
+| `dates_unavailable` | Platform shows sold out |
+| `sold_out` | Alias for dates unavailable |
+| `service_error` | Provider timeout or failure |
+| `timeout` | Extraction exceeded time limit |
+| `stalled_timeout` | Marked stale by cleanup |
+| `platform_unsupported` | Platform not extractable |
+| `render_failed` | Browserless could not render |
+| `access_blocked` | Bot detection triggered |
 
-### 6.7 Stage 5: Collect Prices (Phase B)
+### 5.3 Dominant Outcome: `platform_unsupported`
 
-**Trigger**: Phase A complete with `dates_validated = true`
+**~32% of extractions terminate as `platform_unsupported`.**
 
-**Backend Status**: `collecting_prices` / `phase_b`
+This is the single most common non-success outcome. It occurs when:
+- Platform has no dedicated extractor
+- Platform adapter is inactive or misconfigured
+- Platform domain variant is not recognized
 
-**Routing Logic**:
+### 5.4 Tier A Platform Reliability (Observed Reality)
+
+Despite being classified as Tier A (highest priority), these platforms show high failure rates:
+
+| Platform | Observed Behavior |
+|----------|-------------------|
+| **Expedia** | Frequently returns `service_error` after exhausting retries |
+| **Hotels.com** | Often returns `platform_unsupported` |
+| **Booking.com** | Most reliable of Tier A |
+| **VRBO** | Variable success rate |
+| **Agoda** | Moderate reliability |
+
+---
+
+## 6. AI Usage & Decision Boundaries
+
+### 6.1 Where AI Is Used
+
+| Location | AI Task |
+|----------|---------|
+| Image verification | Compare Airbnb image to platform image |
+| Price extraction assist | Extract price from HTML when selectors fail |
+| Airbnb baseline | Extract total stay price from page content |
+
+### 6.2 What AI Decides
+
+- Whether two property images show the same physical property (confidence score)
+- The total price value when structured parsing fails
+- Whether a price represents a total stay or per-night rate
+
+### 6.3 What AI Explicitly Does NOT Decide
+
+- Platform routing or selection
+- Retry logic
+- Search termination conditions
+- Result ordering (deterministic by price)
+- Whether to trust a price (verification rules are code-based)
+- Final match/reject decisions (threshold logic is deterministic)
+
+### 6.4 AI Confidence Value Characteristics
+
+**AI confidence values are DISCRETE, not continuous 0-100.**
+
+Observed clustering:
+- `0` — No match / unable to compare
+- `30` — Low confidence / uncertain
+- `95-98` — High confidence match
+
+The system does NOT produce evenly distributed values. Thresholds must account for this bucketing behavior.
+
+**Thresholds**:
+- `< 75%` — Candidate excluded
+- `≥ 75%` — Candidate included in results
+- `≥ 90%` — Marked as "authoritative" match
+
+---
+
+## 7. Known Limitations & Unknowns
+
+### 7.1 Telemetry Gaps
+
+- **Only `analyze_listing` stage writes to `search_stage_runs`**
+- No telemetry for: `collect_photos`, `find_matches`, `validate_dates`, `collect_prices`, `finalize_results`
+- Stage timing estimates use hardcoded fallbacks, not real telemetry
+- This is incomplete by design today
+
+### 7.2 Snapshot Version
+
+The current `final_results_snapshot` schema is **version 2** (not 4 as some code comments suggest).
+
+### 7.3 Browserless Constraints
+
+| Constraint | Value |
+|------------|-------|
+| Global concurrency limit | 1 concurrent session |
+| Advisory lock key | `8675309` |
+| Retry count | **3** (not 4) |
+| Backoff sequence | 2s, 4s, 8s |
+
+### 7.4 Platform Extraction Reality
+
+- Tier A classification does NOT guarantee extraction success
+- Dedicated extractors exist but may fail due to site changes
+- Hotels.com extractor is effectively non-functional
+- `platform_adapters.is_active` may not reflect actual extractability
+
+### 7.5 Price Verification Constraints
+
+A price is only marked "verified" if ALL conditions are met:
+- `extraction_status` is success variant
+- `price_type` is `TOTAL_STAY` or `NIGHTLY_BREAKDOWN`
+- `includes_taxes_fees` is true OR `breakdown_found` metadata is true
+- `dates_validated` is true OR detected dates match requested dates
+
+If any condition fails, the price is "unverified" and marked for manual check.
+
+### 7.6 Currency Assumptions
+
+- All prices assumed USD unless explicitly tagged
+- No currency conversion performed
+- Cross-currency comparisons may be inaccurate
+
+### 7.7 Date Handling
+
+- Dates ONLY derived from Airbnb URL query parameters
+- Manual date input is not supported
+- If Airbnb URL lacks `check_in`/`check_out` params, search fails
+
+### 7.8 Finalization Atomicity
+
+`finalised_at` and `final_results_snapshot` are written atomically.
+
+If `finalised_at` is non-null, the snapshot is guaranteed to exist and be immutable.
+
+If snapshot building fails, search status becomes `finalization_failed` with error details in `searches.finalization_error`.
+
+### 7.9 No Canonical Current Stage Field
+
+There is no `current_stage` column. Stage must be inferred from multiple signals as described in Section 4.
+
+---
+
+## Appendix A: Quick Reference Code
+
+### Terminal Status Check
+
 ```typescript
-const GOLDEN_PATH_PLATFORMS = {
-  'hotels.com': 'extract-hotelscom',
-  'expedia': 'extract-expedia',
-  'agoda.com': 'extract-agoda',
-  'vrbo.com': 'extract-vrbo',
-  'airpaz.com': 'extract-airpaz',
-  'booking.com': 'extract-booking',
-};
-```
+import { isTerminalStatus } from '@/lib/pipelineStages';
 
-**Tier Definitions**:
-| Tier | Behavior |
-|------|----------|
-| **A** | Dedicated extractor, high patience, 4 retry attempts, gates finalization |
-| **B** | Generic extractor (Firecrawl/Zyte), best effort |
-| **C** | Blocked/unsupported, skipped immediately |
-
-**Dedicated Extractor Pattern** (e.g., Expedia):
-1. Parse property ID from URL
-2. Build Hotel-Search offers page URL with dates
-3. Navigate via Browserless (gated concurrency)
-4. Extract "total includes taxes & fees" price from DOM
-5. Detect and handle currency if non-USD
-
-**Data Written**:
-```sql
-UPDATE price_extractions SET
-  extracted_price = $price,
-  currency = $currency,
-  includes_taxes_fees = $includesTaxesFees,
-  extraction_status = $status,
-  extraction_metadata = $metadata,
-  confidence_score = $confidence,
-  provider_used = $provider
-WHERE id = $extractionId
-```
-
-**Tier A Retry Policy**:
-- Max 4 attempts (`tier_a_attempt_count`)
-- Exponential backoff
-- Persisted state: `tier_a_state`, `tier_a_next_retry_at`
-- Retries for: navigation failures, timeouts
-- Hard terminal on: bot detection, date unavailability
-
-### 6.8 Stage 6: Finalize Results
-
-**Trigger**: All platforms reach terminal status (Tier A gates finalization)
-
-**Backend Status**: `finalizing` → `completed`
-
-**Location**: `_shared/buildFinalSnapshot.ts` → `finalizeAndCompleteSearch()`
-
-**Steps**:
-
-1. **Gather Authoritative Platform Set**:
-```sql
-SELECT * FROM search_platforms WHERE search_id = $searchId
-```
-
-2. **Join Extraction Data**:
-```sql
-SELECT * FROM price_extractions 
-WHERE search_id = $searchId 
-ORDER BY updated_at DESC
-```
-
-3. **Categorize Each Result** (immutable bucket assignment):
-```typescript
-function categorizeResultForSnapshot(result, airbnbPrice): ResultBucket {
-  // Tier C → 'platform_blocked'
-  // Sold out statuses → 'sold_out'
-  // Rate limited → 'service_error'
-  // Bot blocked → 'blocked'
-  // No price → 'price_not_found'
-  // Foreign currency → 'not_comparable'
-  // Price < airbnb → 'cheaper'
-  // Price ≥ airbnb → 'more_expensive'
+if (isTerminalStatus(search.status)) {
+  // Search is complete, use snapshot
 }
 ```
 
-4. **Build Snapshot Object**:
+### Stage Inference (Best Effort)
+
 ```typescript
-const snapshot: FinalSnapshot = {
-  version: 4,
-  generated_at: new Date().toISOString(),
-  search_id,
-  airbnb: { price, currency, title },
-  dates: { check_in, check_out, nights },
-  results: categorizedResults,  // Each has frozen final_bucket
-  result_count: results.length,
-  expected_platform_count,
-  finalized_platform_count,
-  render_debug: { ... },
-};
+function inferCurrentStage(search, platforms, extractions) {
+  if (!search.airbnb_price) return 'analyze_listing';
+  if (!search.airbnb_images?.length) return 'collect_photos';
+  if (!platforms.length) return 'find_matches';
+  if (extractions.every(e => e.extraction_status === 'pending')) return 'validate_dates';
+  if (extractions.some(e => !isTerminalExtractionStatus(e.extraction_status))) return 'collect_prices';
+  if (!search.finalised_at) return 'finalize_results';
+  return 'complete';
+}
 ```
 
-5. **Atomic Persistence**:
-```sql
-UPDATE searches SET
-  status = 'completed',
-  finalised_at = now(),
-  final_results_snapshot = $snapshot
-WHERE id = $searchId
+### Extraction Terminal Check
+
+```typescript
+const TERMINAL_EXTRACTION_STATUSES = [
+  'success', 'success_total_stay', 'price_extracted',
+  'dates_unavailable', 'sold_out', 'unavailable_for_dates',
+  'service_error', 'timeout', 'stalled_timeout',
+  'platform_unsupported', 'render_failed', 'access_blocked'
+];
+
+function isTerminalExtractionStatus(status) {
+  return TERMINAL_EXTRACTION_STATUSES.includes(status);
+}
 ```
-
-**CRITICAL INVARIANT**: If snapshot persistence fails:
-```sql
-UPDATE searches SET
-  status = 'finalization_failed',
-  finalization_error = $errorPayload
-WHERE id = $searchId
-```
-
-### 6.9 Failure Handling and Degraded Modes
-
-| Failure | Behavior |
-|---------|----------|
-| Airbnb extraction fails | Search terminates immediately with explicit error |
-| SerpAPI rate limited | Search continues with 0 alternatives (not terminal if Airbnb succeeded) |
-| Single platform bot-blocked | Platform marked `blocked`, search continues |
-| All platforms fail extraction | Search completes with results showing failures |
-| Finalization fails | Status = `finalization_failed`, UI shows retry option |
-| Edge function timeout (150s) | Watchdog auto-finalizes after 15 minutes |
-
-### 6.10 Timeouts and Limits
-
-| Limit | Value |
-|-------|-------|
-| Edge function timeout | 150 seconds |
-| Finalization timeout | 180 seconds |
-| Phase A timeout | 60 seconds |
-| Phase B timeout | 60 seconds |
-| Dedicated extractor timeout | 120 seconds |
-| Browserless concurrent requests | 1 (global via advisory lock) |
-| Max AI calls per search | 50 |
-| Max images for discovery | 5 |
-| Tier A retry attempts | 4 |
-| Watchdog auto-finalize threshold | 15 minutes |
-
-### 6.11 Telemetry and Logging
-
-**Activity Log** (`searches.activity_log` - JSONB array):
-```json
-[
-  { "ts": 1706900000000, "message": "Starting search", "detail": "..." },
-  { "ts": 1706900005000, "message": "Airbnb price extracted", "detail": "$2,214" },
-  { "ts": 1706900020000, "message": "Found 3 verified matches" },
-  { "ts": 1706900060000, "message": "Finalization complete" }
-]
-```
-
-**API Request Logs** (`api_request_logs` table):
-- Provider name, endpoint type, URL
-- Success/failure, HTTP status, duration
-- Cost units (for quota tracking)
-- Correlation ID for request tracing
-
-**Stage Runs** (`search_stage_runs` table):
-- Stage name, started_at, finished_at
-- Duration in ms, outcome_status
-- Used for progress bar timing estimates
 
 ---
 
-## 7. Search Results Page Behavior
+## Appendix B: File Reference
 
-### 7.1 Data Flow
+### Edge Functions (Critical Path)
 
-**Location**: `src/pages/SearchResults.tsx`
-
-**Two-Phase UX Model**:
-
-| Phase | Name | Condition | Behavior |
-|-------|------|-----------|----------|
-| 1 | `discovery_pricing` | `finalised_at` is null | Shows progress, live status chips, "Fetching prices (X/N)" |
-| 2 | `complete` | `finalised_at` is set | Read-only render of `final_results_snapshot` |
-
-**Phase 1 (Progress View)**:
-1. Subscribe to `price_extractions` via Supabase Realtime (`postgres_changes`)
-2. Show live status chips for each platform (Queued, Fetching, Retrying, Done, etc.)
-3. Display "Fetching prices (X / N)" counter
-4. Poll every 3 seconds as fallback
-5. Show "Last update" timestamp and "Prioritizing high-priority platforms" if stalled
-
-**Phase 2 (Results View)**:
-1. Triggered when `finalised_at` is non-null
-2. Read-only render of `final_results_snapshot.results`
-3. **No re-computation or live enrichment**
-4. Each result's `final_bucket` and `final_bucket_label` are frozen
-
-### 7.2 Result Buckets
-
-| Bucket | Display | Meaning |
-|--------|---------|---------|
-| `cheaper` | ✓ Green badge | Verified lower price |
-| `more_expensive` | Red badge | Verified higher price |
-| `not_comparable` | Gray | Currency/type mismatch, dates not validated |
-| `sold_out` | Orange | Dates unavailable on platform |
-| `price_not_found` | Gray | Extraction ran but no price found |
-| `blocked` | Red | Bot/CAPTCHA blocked |
-| `service_error` | Gray | Rate limit, timeout, infrastructure error |
-| `platform_blocked` | Gray | Tier C skipped |
-| `requires_action` | Yellow | User action needed |
-
-### 7.3 Guarantees
-
-1. **Determinism**: Refresh shows identical results (snapshot is immutable)
-2. **Completeness**: Every matched platform appears (even if price failed)
-3. **Correctness**: Bucket labels frozen at finalization, never re-derived
-4. **Transparency**: Terminal error panels explain every failure
-
-### 7.4 Auto-Recovery
-
-If UI detects `status: completed` but `finalised_at` is null:
-- Automatically triggers forced finalization request to backend
-- Prevents infinite loading states
-- Logged as recovery event
-
----
-
-## 8. Known Limitations
-
-### 8.1 Current Constraints (Factual)
-
-1. **Single Currency Comparison**: Only USD prices are fully comparable. Foreign currencies (CAD, EUR, GBP, ZAR, etc.) are labeled but NOT converted for comparison. Result is categorized as `not_comparable`.
-
-2. **Browserless Concurrency**: Global limit of 1 concurrent request creates bottleneck during high traffic. Enforced via Postgres advisory lock.
-
-3. **Rate Limits**: SerpAPI, Firecrawl, Zyte, and Browserless can rate-limit, causing reduced discovery coverage or extraction failures.
-
-4. **Tier C Platforms**: Many platforms are blocked/unsupported and appear as "Platform not supported". No extraction is attempted.
-
-5. **Date Validation Imprecision**: Some platforms apply dates correctly but render them differently (format, locale), causing false "dates not validated" states.
-
-6. **Multi-Room Listings**: Airbnb listings with multiple room options require additional click handling. Partially implemented.
-
-7. **Regional Variants**: International domains (e.g., `expedia.co.jp`, `booking.de`) may have different page structures than US versions.
-
-8. **Point-in-Time Prices**: Prices are snapshots at extraction time; actual booking prices may differ.
-
-9. **No AI for Price Extraction**: All price extraction is regex/DOM-based. This is intentional for reliability but may miss dynamically-rendered prices.
-
-10. **Edge Function Timeout**: 150-second limit may be insufficient for complex searches with many platforms.
-
-### 8.2 Implicit/Uncertain Behaviors
-
-- Searches without dates in the Airbnb URL are rejected at input validation
-- Searches with past dates are not explicitly blocked (may show "unavailable")
-- Platform adapter configuration is static; no runtime learning or adaptation
-- The system assumes all Airbnb URLs use `check_in`/`check_out` parameter names
-
----
-
-## Appendix A: File Reference
-
-| Path | Purpose |
+| File | Purpose |
 |------|---------|
-| `src/pages/Dashboard.tsx` | Search input page |
-| `src/pages/SearchResults.tsx` | Results display and progress |
-| `src/lib/pipelineStages.ts` | Stage definitions and status mapping |
-| `src/lib/priceVerification.ts` | Price verification logic |
-| `src/lib/resultCategorization.ts` | Bucket assignment (frontend mirror) |
-| `src/lib/canonicalPrice.ts` | Canonical price model |
-| `src/lib/airbnbUrlNormalizer.ts` | URL normalization |
 | `supabase/functions/search-alternatives/index.ts` | Main orchestrator |
-| `supabase/functions/process-platform-extraction/index.ts` | Platform worker |
-| `supabase/functions/_shared/buildFinalSnapshot.ts` | Snapshot builder |
-| `supabase/functions/extract-expedia/index.ts` | Expedia extractor |
-| `supabase/functions/extract-booking/index.ts` | Booking.com extractor |
+| `supabase/functions/run-price-pipeline/index.ts` | Extraction dispatcher |
+| `supabase/functions/process-platform-extraction/index.ts` | Per-platform worker |
+| `supabase/functions/finalize-search-snapshot/index.ts` | Snapshot builder |
+| `supabase/functions/_shared/buildFinalSnapshot.ts` | Snapshot assembly |
 | `supabase/functions/_shared/browserlessGate.ts` | Concurrency control |
 | `supabase/functions/_shared/tierARetryPolicy.ts` | Retry logic |
-| `docs/EXTRACTION_STATE_MACHINE.md` | State definitions |
-| `docs/CANONICAL_PRICE_MODEL.md` | Price model spec |
-| `docs/BROWSERLESS_CANONICAL_BASELINE.md` | Browserless reference |
+
+### Frontend (Critical Path)
+
+| File | Purpose |
+|------|---------|
+| `src/pages/SearchResults.tsx` | Results page (snapshot renderer) |
+| `src/hooks/useExtractionProgressRealtime.ts` | Realtime progress |
+| `src/hooks/useFinalizedSnapshot.ts` | Snapshot fetching |
+| `src/lib/pipelineStages.ts` | Stage definitions, terminal statuses |
+| `src/lib/resultCategorization.ts` | Result bucket assignment |
+| `src/lib/extractionOutcomeTaxonomy.ts` | Status-to-category mapping |
 
 ---
 
-## Appendix B: Database Schema (Key Tables)
+## Appendix C: Database Schema (Key Tables)
 
 ### searches
-```sql
+```
 id, user_id, airbnb_url, airbnb_title, airbnb_price, airbnb_currency,
-airbnb_images, airbnb_image_url, check_in_date, check_out_date, nights_count,
+airbnb_images, check_in_date, check_out_date, nights_count,
 status, finalised_at, final_results_snapshot, finalization_error,
-activity_log, api_error, api_error_code,
-ocr_booking_card_amount, ocr_breakdown_total_amount, ocr_validation_status,
-created_at, updated_at
+activity_log, created_at, updated_at
 ```
 
 ### search_platforms
-```sql
+```
 id, search_id, platform_name, listing_url, listing_title,
-images, image_url, confidence_score, match_type, source_airbnb_image,
-extraction_id_latest, extraction_status_terminal, outcome_category,
-last_error, matched_at, updated_at
+images, confidence_score, match_type, extraction_id_latest,
+extraction_status_terminal, outcome_category, matched_at, updated_at
 ```
 
 ### price_extractions
-```sql
+```
 id, search_id, platform_name, deep_link, extracted_price, currency,
 extraction_status, extraction_error, extraction_stage, extraction_metadata,
 dates_validated, detected_checkin, detected_checkout,
 includes_taxes_fees, confidence_score, price_type, provider_used,
-tier_a_state, tier_a_attempt_count, tier_a_next_retry_at, tier_a_last_transient_reason,
+tier_a_state, tier_a_attempt_count, tier_a_next_retry_at,
 created_at, updated_at
 ```
 
-### blocked_platforms
-```sql
-id, domain, reason, blocked_at
+### search_stage_runs
+```
+id, search_id, stage_name, started_at, finished_at, duration_ms,
+outcome_status, error_message, metadata, created_at
 ```
 
-### platform_adapters
-```sql
-id, platform_name, platform_domain, coverage_tier, dedicated_extractor,
-deep_link_template, date_format, requires_occupancy, reliability_score,
-is_active, tier_reason, created_at, updated_at
-```
+Note: Only `analyze_listing` is reliably populated.
 
 ---
 
-*End of System Documentation v2.0.0*
+**END OF DOCUMENT**
+
+*This document reflects observed system behavior as of 2026-02-04. It does not represent design intent, future plans, or recommendations.*
