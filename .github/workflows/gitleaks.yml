@@ -35,3 +35,13 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TMPDIR is the RUNNER'S OWN temp folder, never the machine's /tmp. The action downloads to
+          # os.tmpdir()/gitleaks.tmp and REFUSES if that file already exists; the predivo-wsl runners
+          # share one /tmp and nobody cleans it, so a leftover file from another repo's run kills this
+          # scan with "could not install gitleaks" having read zero files. Observed here 2026-09-14
+          # the moment this job moved onto those runners. runner.temp is private and wiped per job.
+          TMPDIR: ${{ runner.temp }}
+          # The SARIF upload roots itself at $HOME (/home/runner) while the checkout lives under
+          # /opt/gh-runners, so it throws AFTER "no leaks found" and turns a clean scan red. Nothing
+          # reads that artifact; findings stay in the log and the job summary.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
