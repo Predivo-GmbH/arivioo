@@ -20,6 +20,12 @@ permissions:
 
 jobs:
   gitleaks:
+    # arivioo is the ONE repo in the fleet with NO self-hosted runner and NO RUNNER_LABEL
+    # variable (the API answers 404 for both, checked 2026-09-14). So this line changes
+    # nothing today: the fallback keeps the scan on ubuntu-latest, which is correct -
+    # pointing it at a label nothing answers would queue the scan for ever, and a scan
+    # that never runs is worse than one that costs a cent. What it does buy is that the
+    # day a runner is registered here, setting the variable moves the scan for free.
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
